@@ -2279,10 +2279,10 @@ def cmd_chat(args):
     if not _has_any_provider_configured():
         print()
         print(
-            "It looks like Hermes isn't configured yet -- no API keys or providers found."
+            "It looks like Hades isn't configured yet -- no API keys or providers found."
         )
         print()
-        print("  Run:  hermes setup")
+        print("  Run:  hades setup")
         print()
 
         from hermes_cli.setup import (
@@ -2304,7 +2304,7 @@ def cmd_chat(args):
             cmd_setup(args)
             return
         print()
-        print("You can run 'hermes setup' at any time to configure.")
+        print("You can run 'hades setup' at any time to configure.")
         sys.exit(1)
 
     # Start update check in background (runs while other init happens).

@@ -408,3 +408,123 @@ ancora risolvono nomi upstream.
   variabili env storiche `HERMES_*` e in integrazioni provider/upstream.
 - Serve un follow-up dedicato per installer script, Docker/CI e test suite
   completa dopo setup locale delle dipendenze.
+
+### 2026-06-29 18:12 - Correzione prompt first-run Hades
+
+**Richiesta**: correggere il prompt mostrato al primo avvio di `hades`, che
+usava ancora "Hermes" e suggeriva `hermes setup`.
+
+**Contesto consultato**:
+- Screenshot utente del prompt first-run.
+- `hermes_cli/main.py`
+- `hermes_cli/setup.py`
+
+**Lavoro eseguito**:
+- Aggiornato il first-run guard per usare "Hades" e `hades setup`.
+- Aggiornata la guidance non-interattiva dello stesso flusso per usare
+  "Hades Setup" e comandi `hades config set`.
+- Aggiunto un test sorgente mirato per bloccare regressioni di branding in
+  questi messaggi.
+
+**Verifiche**:
+- Controllo Python diretto sui literal first-run e setup non-interattivo -> ok.
+- `HADES_HOME=$(mktemp -d) .venv/bin/hades </dev/null` -> output Hades,
+  uscita 1 attesa per stdin non interattivo.
+- Avvio interattivo PTY con `HADES_HOME` temporaneo -> prompt mostra Hades e
+  `hades setup`; risposta `n` stampa `hades setup`.
+- `python3 -m py_compile hermes_cli/main.py hermes_cli/setup.py` -> ok.
+- `git diff --check` -> ok.
+
+**Note / rischi residui**:
+- `scripts/run_tests.sh tests/hermes_cli/test_first_run_branding.py -q` richiede
+  `pytest`, non presente nella venv installata con solo `pip install -e .`.
+
+### 2026-06-29 18:22 - Correzione setup wizard iniziale
+
+**Richiesta**: correggere lo wizard `hades setup`, che mostrava ancora
+"Hermes Agent Setup Wizard", "How would you like to set up Hermes?" e
+raccomandava "Quick Setup (Nous Portal)".
+
+**Contesto consultato**:
+- Output utente dello wizard.
+- `hermes_cli/setup.py`
+- `tests/hermes_cli/test_first_run_branding.py`
+
+**Lavoro eseguito**:
+- Aggiornato il banner dello wizard a "Hades Agent Setup Wizard".
+- Aggiornata la domanda iniziale a "How would you like to set up Hades?".
+- Rimosso il quick setup Nous dal menu first-time e reso "Full setup"
+  l'opzione predefinita/raccomandata.
+- Aggiornato il prompt OpenClaw che precede il menu per usare Hades e comandi
+  `hades claw migrate`.
+- Esteso il test sorgente di branding first-run/setup.
+
+**Verifiche**:
+- Controllo Python diretto sui literal dello wizard e OpenClaw -> ok.
+- Smoke PTY con `HADES_HOME` temporaneo: banner Hades, prompt OpenClaw Hades,
+  menu Hades con Full setup predefinito -> ok.
+- `python3 -m py_compile hermes_cli/setup.py
+  tests/hermes_cli/test_first_run_branding.py` -> ok.
+- `python3 scripts/docs_audit.py` -> ok.
+- `git diff --check` -> ok.
+
+### 2026-06-29 18:29 - Correzione riepilogo setup Hades
+
+**Richiesta**: correggere il riepilogo finale di `hades setup`, che mostrava
+ancora comandi `hermes`, e chiarire perché un nuovo `hades` poteva chiedere
+di rifare il setup.
+
+**Contesto consultato**:
+- Screenshot utente del riepilogo setup e del successivo prompt first-run.
+- `hermes_cli/setup.py`
+- `tests/hermes_cli/test_first_run_branding.py`
+
+**Lavoro eseguito**:
+- Aggiornato il riepilogo finale dello setup per suggerire `hades setup`,
+  `hades config`, `hades gateway` e `hades doctor`.
+- Aggiornati i messaggi utente dei percorsi gateway, Blank Slate e portal
+  ancora legati a comandi `hermes`.
+- Aggiornato il warning del client ausiliario Nous che poteva comparire
+  durante il riepilogo con `run: hermes auth`.
+- Il riepilogo non mostra più "Ready to go!" quando non esiste ancora un
+  provider/modello configurato; suggerisce invece `hades setup model`.
+- Esteso il test sorgente per bloccare regressioni nel riepilogo setup.
+
+**Verifiche**:
+- Controllo Python diretto su `tests/hermes_cli/test_first_run_branding.py`
+  -> ok.
+- `.venv/bin/python -m py_compile hermes_cli/setup.py hermes_cli/main.py
+  tests/hermes_cli/test_first_run_branding.py` -> ok.
+- `.venv/bin/python -m pytest tests/hermes_cli/test_first_run_branding.py`
+  -> non eseguito: `pytest` non è installato nella venv.
+
+**Note / rischi residui**:
+- I link al sito docs storico `hermes-agent.nousresearch.com` restano invariati
+  finché non esiste una destinazione Hades equivalente.
+
+### 2026-06-29 19:02 - Rebranding segnato come completato nel piano
+
+**Richiesta**: segnare il rebranding come fatto nell'implementation plan e
+controllare con ricerca locale altri riferimenti a Hermes.
+
+**Contesto consultato**:
+- `docs/implementation_plan.md`
+- Ricerca locale con `rg` dei riferimenti `Hermes`, `hermes` e `HERMES_`.
+
+**Lavoro eseguito**:
+- Aggiornato lo stato del piano: rebranding principale Hades completato, con
+  residui Hermes/Nous da trattare in passaggi mirati.
+- Spuntate le voci di identita/naming e audit rebranding iniziale.
+- Aggiunto il risultato della ricerca locale: 3034 file / 39275 righe ancora
+  contengono riferimenti Hermes, soprattutto in `tests`, `website`, `apps`,
+  `hermes_cli`, `plugins`, `optional-skills`, `skills` e `agent`.
+- Aggiunti follow-up non spuntati per bonifica superfici utente residue,
+  policy legacy (`hermes`, `HERMES_*`, `~/.hermes`, `hermes://`) e docs
+  upstream/localizzate.
+
+**Verifiche**:
+- `rg -n "\bHermes\b|\bhermes\b|HERMES_" --glob '!hades_agent.egg-info/**'
+  --glob '!*.pyc' --glob '!__pycache__/**' .` -> eseguito; output troppo
+  ampio, sintetizzato in conteggi e directory principali.
+- `python3 scripts/docs_audit.py` -> ok.
+- `git diff --check` -> ok.

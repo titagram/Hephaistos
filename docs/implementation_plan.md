@@ -8,10 +8,12 @@ qui come voci non spuntate.
 
 ## Stato Attuale
 
-Fase corrente: implementazione iniziale del rebranding Hades.
+Fase corrente: rebranding principale Hades completato; follow-up residui
+Hermes/Nous da classificare e bonificare in passaggi mirati.
 
 L'utente ha confermato il passaggio all'implementazione per il primo step di
-rebranding.
+rebranding, poi ha validato il comando `hades`, il setup wizard, il banner e il
+riepilogo setup.
 
 ## Priorita Immediate
 
@@ -28,6 +30,16 @@ rebranding.
   rebrandizzato.
   Decisione: `hades`, `hades-agent` e `hades-acp` sono primari; `hermes`,
   `hermes-agent` e `hermes-acp` restano alias legacy per compatibilita'.
+- [x] Segnare il rebranding principale come fatto dopo verifica locale dei
+  riferimenti rimasti a Hermes.
+  Nota: ricerca eseguita con
+  `rg -n "\bHermes\b|\bhermes\b|HERMES_" --glob '!hades_agent.egg-info/**'`.
+  Risultato: restano 3034 file / 39275 righe con riferimenti Hermes, concentrati
+  soprattutto in `tests`, `website`, `apps`, `hermes_cli`, `plugins`,
+  `optional-skills`, `skills` e `agent`. Questi residui includono compatibilita'
+  legacy (`hermes` alias, `HERMES_*`, `~/.hermes`), test, commenti, docs
+  upstream/localizzate e plugin non ancora ripuliti. Non bloccano il primo
+  rebranding utente validato, ma vanno trattati come backlog esplicito.
 
 ## Decisioni Emesse Dal Brainstorming
 
@@ -95,10 +107,23 @@ rebranding.
 
 ## Personalizzazioni Da Valutare
 
-- [ ] Identita e naming della fork.
-- [ ] Audit rebranding: mappare e sostituire riferimenti Hermes/Nous nelle
+- [x] Identita e naming della fork.
+  Decisione: Hades e' il brand primario; il simbolo Pluto/Hades e' il riferimento
+  visuale per ASCII art/banner.
+- [x] Audit rebranding: mappare e sostituire riferimenti Hermes/Nous nelle
   superfici utente, mantenendo separati i file che restano deliberatamente
   vicini a upstream per facilita' di rebase.
+  Nota: audit iniziale completato con `rg`; il primo rebranding utente e'
+  applicato, mentre i residui sono stati classificati come follow-up.
+- [ ] Bonifica residui Hermes nelle superfici utente ancora non coperte:
+  `hermes_cli/status.py`, `hermes_cli/config.py`, `hermes_cli/claw.py`,
+  `hermes_cli/inventory.py`, dashboard/web, TUI setup copy e plugin gateway.
+- [ ] Decidere policy definitiva per compatibilita' legacy: alias `hermes`,
+  env var `HERMES_*`, path `~/.hermes`, deep link `hermes://` e nomi tecnici
+  interni `hermes_*`.
+- [ ] Decidere se aggiornare o archiviare docs upstream/localizzate
+  (`README.es.md`, `CONTRIBUTING.es.md`, `SECURITY.es.md`, `website/`) invece
+  di lasciarle vicine a upstream.
 - [ ] Config default e profili.
 - [ ] Installazione quasi plug-and-play per Hades: one-liner o installer
   desktop che installa runtime, clona la fork corretta e avvia setup guidato.
