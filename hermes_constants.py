@@ -1,4 +1,4 @@
-"""Shared constants for Hermes Agent.
+"""Shared constants for Hades Agent.
 
 Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
@@ -44,27 +44,28 @@ def get_hermes_home_override() -> str | None:
 
 
 def _get_platform_default_hermes_home() -> Path:
-    """Return the platform-native default Hermes home path."""
+    """Return the platform-native default Hades home path."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hermes"
-    return Path.home() / ".hermes"
+        return base / "hades"
+    return Path.home() / ".hades"
 
 
 def get_hermes_home() -> Path:
-    """Return the Hermes home directory (default: platform-native path).
+    """Return the Hades home directory (default: platform-native path).
 
-    Reads HERMES_HOME env var, falls back to the platform-native default.
+    Reads HADES_HOME env var, accepts HERMES_HOME as a legacy alias, and falls
+    back to the platform-native default.
     This is the single source of truth — all other copies should import this.
 
-    When ``HERMES_HOME`` is unset but an ``active_profile`` file indicates
+    When both home env vars are unset but an ``active_profile`` file indicates
     a non-default profile is active, logs a loud one-shot warning to
     ``errors.log`` so cross-profile data corruption is diagnosable instead
     of silent.  Behavior is unchanged otherwise — we still return
     the platform-native default — because raising here would brick 30+ module-level
     callers that import this at load time.  Subprocess spawners are
-    expected to propagate ``HERMES_HOME`` explicitly (see the systemd
+    expected to propagate ``HADES_HOME`` or ``HERMES_HOME`` explicitly (see the systemd
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
@@ -72,7 +73,7 @@ def get_hermes_home() -> Path:
     if override:
         return Path(override)
 
-    val = os.environ.get("HERMES_HOME", "").strip()
+    val = os.environ.get("HADES_HOME", "").strip() or os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
 
@@ -94,11 +95,11 @@ def get_hermes_home() -> Path:
             # configured, and (b) root-logger propagation would double-emit
             # on consoles where a StreamHandler is already attached.
             msg = (
-                f"[HERMES_HOME fallback] HERMES_HOME is unset but active "
+                f"[HADES_HOME fallback] HADES_HOME/HERMES_HOME are unset but active "
                 f"profile is {active!r}. Falling back to {fallback_home}, which "
                 f"is the DEFAULT profile — not {active!r}. Any data this "
                 f"process writes will land in the wrong profile. The "
-                f"subprocess spawner should pass HERMES_HOME explicitly "
+                f"subprocess spawner should pass HADES_HOME explicitly "
                 f"(see issue #18594)."
             )
             try:
@@ -111,24 +112,24 @@ def get_hermes_home() -> Path:
 
 
 def get_default_hermes_root() -> Path:
-    """Return the root Hermes directory for profile-level operations.
+    """Return the root Hades directory for profile-level operations.
 
-    In standard deployments this is the platform-native Hermes home
-    (``~/.hermes`` on POSIX, ``%LOCALAPPDATA%\\hermes`` on native Windows).
+    In standard deployments this is the platform-native Hades home
+    (``~/.hades`` on POSIX, ``%LOCALAPPDATA%\\hades`` on native Windows).
 
-    In Docker or custom deployments where ``HERMES_HOME`` points outside
-    ``~/.hermes`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
+    In Docker or custom deployments where ``HADES_HOME`` points outside
+    ``~/.hades`` (e.g. ``/opt/data``), returns ``HADES_HOME`` directly
     — that IS the root.
 
-    In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``,
+    In profile mode where ``HADES_HOME`` is ``<root>/profiles/<name>``,
     returns ``<root>`` so that ``profile list`` can see all profiles.
-    Works both for standard (``~/.hermes/profiles/coder``) and Docker
+    Works both for standard (``~/.hades/profiles/coder``) and Docker
     (``/opt/data/profiles/coder``) layouts.
 
     Import-safe — no dependencies beyond stdlib.
     """
     native_home = _get_platform_default_hermes_home()
-    env_home = os.environ.get("HERMES_HOME", "")
+    env_home = os.environ.get("HADES_HOME", "") or os.environ.get("HERMES_HOME", "")
     if not env_home:
         return native_home
     env_path = Path(env_home)
@@ -437,7 +438,11 @@ def heal_hermes_managed_node() -> bool:
                 "-c",
                 f'source "{_NODE_BOOTSTRAP_SCRIPT}" && heal_managed_node',
             ],
-            env={**os.environ, "HERMES_HOME": str(get_hermes_home())},
+            env={
+                **os.environ,
+                "HADES_HOME": str(get_hermes_home()),
+                "HERMES_HOME": str(get_hermes_home()),
+            },
             capture_output=True,
             timeout=300,
             check=False,
@@ -681,7 +686,14 @@ def _norm_home_path(path: str | None) -> str:
 
 def _profile_home_path(env: dict[str, str] | None = None) -> str | None:
     """Return ``{HERMES_HOME}/home`` when the profile-home directory exists."""
-    hermes_home = get_hermes_home_override() or (env or {}).get("HERMES_HOME") or os.getenv("HERMES_HOME")
+    env = env or {}
+    hermes_home = (
+        get_hermes_home_override()
+        or env.get("HADES_HOME")
+        or env.get("HERMES_HOME")
+        or os.getenv("HADES_HOME")
+        or os.getenv("HERMES_HOME")
+    )
     if not hermes_home:
         return None
     profile_home = os.path.join(hermes_home, "home")

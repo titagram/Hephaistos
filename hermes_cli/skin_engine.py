@@ -65,10 +65,10 @@ All fields are optional. Missing values inherit from the ``default`` skin.
 
     # Branding: text strings used throughout the CLI
     branding:
-      agent_name: "Hermes Agent"          # Banner title, status display
+      agent_name: "Hades Agent"          # Banner title, status display
       welcome: "Welcome message"          # Shown at CLI startup
       goodbye: "Goodbye! ⚕"              # Shown on exit
-      response_label: " ⚕ Hermes "       # Response box header label
+      response_label: " ♇ Hades "       # Response box header label
       prompt_symbol: "❯"                 # Input prompt symbol (bare token; renderers add trailing space)
       help_header: "(^_^)? Commands"      # /help header text
 
@@ -90,7 +90,7 @@ USAGE
 
     skin = get_active_skin()
     print(skin.colors["banner_title"])    # "#FFD700"
-    print(skin.get_branding("agent_name"))  # "Hermes Agent"
+    print(skin.get_branding("agent_name"))  # "Hades Agent"
 
     set_active_skin("ares")               # Switch to built-in ares skin
     set_active_skin("mytheme")            # Switch to user skin from ~/.hermes/skins/
@@ -136,8 +136,8 @@ class SkinConfig:
     branding: Dict[str, str] = field(default_factory=dict)
     tool_prefix: str = "┊"
     tool_emojis: Dict[str, str] = field(default_factory=dict)  # per-tool emoji overrides
-    banner_logo: str = ""    # Rich-markup ASCII art logo (replaces HERMES_AGENT_LOGO)
-    banner_hero: str = ""    # Rich-markup hero art (replaces HERMES_CADUCEUS)
+    banner_logo: str = ""    # Rich-markup ASCII art logo (replaces HADES_AGENT_LOGO)
+    banner_hero: str = ""    # Rich-markup hero art (replaces HADES_SYMBOL)
 
     def get_color(self, key: str, fallback: str = "") -> str:
         """Get a color value with fallback."""
@@ -164,35 +164,35 @@ class SkinConfig:
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
         "name": "default",
-        "description": "Classic Hermes — gold and kawaii",
+        "description": "Hades — obsidian, bronze, and ash",
         "colors": {
-            "banner_border": "#CD7F32",
-            "banner_title": "#FFD700",
-            "banner_accent": "#FFBF00",
-            "banner_dim": "#B8860B",
-            "banner_text": "#FFF8DC",
-            "ui_accent": "#FFBF00",
-            "ui_label": "#DAA520",
+            "banner_border": "#7A4E2D",
+            "banner_title": "#D7D0C8",
+            "banner_accent": "#B08D57",
+            "banner_dim": "#A06A3B",
+            "banner_text": "#E8E0D8",
+            "ui_accent": "#B08D57",
+            "ui_label": "#C2A36B",
             "ui_ok": "#4caf50",
             "ui_error": "#ef5350",
             "ui_warn": "#ffa726",
-            "prompt": "#FFF8DC",
-            "input_rule": "#CD7F32",
-            "response_border": "#FFD700",
-            "status_bar_bg": "#1a1a2e",
-            "session_label": "#DAA520",
-            "session_border": "#8B8682",
+            "prompt": "#E8E0D8",
+            "input_rule": "#7A4E2D",
+            "response_border": "#B08D57",
+            "status_bar_bg": "#15110F",
+            "session_label": "#C2A36B",
+            "session_border": "#7A4E2D",
         },
         "spinner": {
             # Empty = use hardcoded defaults in display.py
         },
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Hades Agent",
+            "welcome": "Welcome to Hades Agent! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ♇",
+            "response_label": " ♇ Hades ",
             "prompt_symbol": "❯",
-            "help_header": "(^_^)? Available Commands",
+            "help_header": "♇ Available Commands",
         },
         "tool_prefix": "┊",
     },
@@ -298,10 +298,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Hades Agent",
+            "welcome": "Welcome to Hades Agent! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ♇",
+            "response_label": " ♇ Hades ",
             "prompt_symbol": "❯",
             "help_header": "[?] Available Commands",
         },
@@ -337,10 +337,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Hades Agent",
+            "welcome": "Welcome to Hades Agent! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ♇",
+            "response_label": " ♇ Hades ",
             "prompt_symbol": "❯",
             "help_header": "(^_^)? Available Commands",
         },
@@ -374,10 +374,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Hades Agent",
+            "welcome": "Welcome to Hades Agent! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ♇",
+            "response_label": " ♇ Hades ",
             "prompt_symbol": "❯",
             "help_header": "[?] Available Commands",
         },
@@ -411,8 +411,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "agent_name": "Hades Agent",
+            "welcome": "Welcome to Hades Agent! Type your message or /help for commands.",
             "goodbye": "Goodbye! \u2695",
             "response_label": " \u2695 Hermes ",
             "prompt_symbol": "\u276f",

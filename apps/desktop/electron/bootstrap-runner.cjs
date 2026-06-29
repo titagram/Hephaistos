@@ -3,7 +3,7 @@
 /**
  * bootstrap-runner.cjs
  *
- * Drives apps/desktop's first-launch install of Hermes Agent by spawning
+ * Drives apps/desktop's first-launch install of Hades Agent by spawning
  * scripts/install.ps1 stage-by-stage and streaming progress events back to
  * the renderer.
  *
@@ -306,9 +306,10 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
           ...process.env,
-          // Pass HERMES_HOME through so install.ps1 respects the caller's
+          // Pass HADES_HOME/HERMES_HOME through so install.ps1 respects the caller's
           // choice rather than re-computing the default.
-          HERMES_HOME: hermesHome || process.env.HERMES_HOME || ''
+          HADES_HOME: hermesHome || process.env.HADES_HOME || process.env.HERMES_HOME || '',
+          HERMES_HOME: hermesHome || process.env.HERMES_HOME || process.env.HADES_HOME || ''
         }
       })
     )
@@ -382,7 +383,8 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        HERMES_HOME: hermesHome || process.env.HERMES_HOME || ''
+        HADES_HOME: hermesHome || process.env.HADES_HOME || process.env.HERMES_HOME || '',
+        HERMES_HOME: hermesHome || process.env.HERMES_HOME || process.env.HADES_HOME || ''
       }
     })
 

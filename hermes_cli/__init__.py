@@ -1,14 +1,14 @@
 """
-Hermes CLI - Unified command-line interface for Hermes Agent.
+Hades CLI - Unified command-line interface for Hades Agent.
 
 Provides subcommands for:
-- hermes chat          - Interactive chat (same as ./hermes)
-- hermes gateway       - Run gateway in foreground
-- hermes gateway start - Start gateway service
-- hermes gateway stop  - Stop gateway service
-- hermes setup         - Interactive setup wizard
-- hermes status        - Show status of all components
-- hermes cron          - Manage cron jobs
+- hades chat          - Interactive chat (same as ./hermes)
+- hades gateway       - Run gateway in foreground
+- hades gateway start - Start gateway service
+- hades gateway stop  - Stop gateway service
+- hades setup         - Interactive setup wizard
+- hades status        - Show status of all components
+- hades cron          - Manage cron jobs
 """
 
 import os
@@ -28,10 +28,10 @@ def _ensure_utf8():
     - Linux hosts with a latin-1 / C / POSIX locale (common on minimal Debian
       installs and Raspberry Pi) select latin-1 or ASCII.
 
-    The CLI prints box-drawing characters (┌│├└─) and the ⚕ glyph in the setup
+    The CLI prints box-drawing characters (┌│├└─) and the ♇ glyph in the setup
     wizard, doctor, and status banners. Encoding those under a non-UTF-8 codec
     raises an unhandled UnicodeEncodeError that crashes the command before it
-    can even start — e.g. `hermes setup` on a fresh Pi.
+    can even start — e.g. `hades setup` on a fresh Pi.
 
     This runs at import time so it protects every CLI subcommand, on any
     platform. It re-wraps stdout/stderr as UTF-8 when their encoding is not
