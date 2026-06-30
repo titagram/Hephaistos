@@ -121,11 +121,11 @@ def _config_default_interface_early() -> str:
         return _EARLY_INTERFACE_CACHE[0]
     value = "cli"
     try:
-        home = os.environ.get("HADES_HOME") or os.environ.get("HERMES_HOME")
+        home = os.environ.get("HERMES_HOME") or os.environ.get("HADES_HOME")
         if home:
             cfg_path = os.path.join(home, "config.yaml")
         else:
-            cfg_path = os.path.join(os.path.expanduser("~"), ".hades", "config.yaml")
+            cfg_path = os.path.join(os.path.expanduser("~"), ".hermes", "config.yaml")
         if os.path.exists(cfg_path):
             import yaml as _yaml_iface
 
@@ -330,11 +330,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------------------------
 # Profile override — MUST happen before any hermes module import.
 #
-# Many modules cache HADES_HOME/HERMES_HOME at import time (module-level constants).
+# Many modules cache HERMES_HOME/HADES_HOME at import time (module-level constants).
 # We intercept --profile/-p from sys.argv here and set both env vars so that
-# new code sees HADES_HOME and legacy code still resolves HERMES_HOME correctly.
+# HERMES_HOME remains primary while HADES_HOME aliases the same storage root.
 # The flag is stripped from sys.argv so argparse never sees it.
-# Falls back to ~/.hades/active_profile for sticky default.
+# Falls back to ~/.hermes/active_profile for sticky default.
 # ---------------------------------------------------------------------------
 def _apply_profile_override() -> None:
     """Pre-parse --profile/-p and set HERMES_HOME before imports."""
@@ -380,13 +380,10 @@ def _apply_profile_override() -> None:
         except Exception:
             return None
 
-        candidate = home / ".hades" / "profiles" / name
-        legacy_candidate = home / ".hermes" / "profiles" / name
+        candidate = home / ".hermes" / "profiles" / name
         try:
             if candidate.is_dir():
                 return str(candidate)
-            if legacy_candidate.is_dir():
-                return str(legacy_candidate)
         except OSError:
             return None
         return None
@@ -444,18 +441,20 @@ def _apply_profile_override() -> None:
             consume = 0
             profile_index = None
 
-    # 1.5 If HADES_HOME/HERMES_HOME is already set and no explicit flag was given, trust it
+    # 1.5 If HERMES_HOME/HADES_HOME is already set and no explicit flag was given, trust it
     # only when it already points to a specific profile directory.  The
     # distinguishing heuristic: a profile path has "profiles" as its immediate
-    # parent directory name (e.g. ~/.hades/profiles/coder or
+    # parent directory name (e.g. ~/.hermes/profiles/coder or
     # /opt/data/profiles/coder).  If HERMES_HOME points to the hermes root
     # instead (e.g. systemd hardcodes HERMES_HOME=/root/.hermes), we must
     # still read active_profile — the user may have switched profiles via
     # `hermes profile use` and the gateway should honour that choice.
     # See issue #22502.
-    hermes_home_env = os.environ.get("HADES_HOME", "") or os.environ.get("HERMES_HOME", "")
+    hermes_home_env = os.environ.get("HERMES_HOME", "") or os.environ.get("HADES_HOME", "")
     if profile_name is None and hermes_home_env:
         if Path(hermes_home_env).parent.name == "profiles":
+            os.environ["HERMES_HOME"] = hermes_home_env
+            os.environ["HADES_HOME"] = hermes_home_env
             return
 
     # 2. If no flag, check active_profile in the hermes root.
@@ -514,7 +513,7 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
-# Load .env from ~/.hades/.env first, then project root as dev fallback.
+# Load .env from the resolved Hermes storage .env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -1616,7 +1615,7 @@ def _ensure_tui_node() -> None:
     if not helper.is_file():
         return
 
-    hermes_home = os.environ.get("HADES_HOME") or os.environ.get("HERMES_HOME") or str(Path.home() / ".hades")
+    hermes_home = os.environ.get("HERMES_HOME") or os.environ.get("HADES_HOME") or str(Path.home() / ".hermes")
     try:
         # Helper writes logs to stderr; we ask bash to print `command -v node`
         # on stdout once ensure_node succeeds. Subshell PATH edits don't leak
@@ -4268,6 +4267,13 @@ def cmd_project(args):
     from hermes_cli.projects_cmd import projects_command
 
     return projects_command(args)
+
+
+def cmd_backend(args):
+    """Configure Hades shared backend."""
+    from hermes_cli.hades_backend_cmd import hades_backend_command
+
+    return hades_backend_command(args)
 
 
 def cmd_hooks(args):
@@ -12692,6 +12698,13 @@ def main():
 
     project_parser = _build_project_parser(subparsers)
     project_parser.set_defaults(func=cmd_project)
+
+    # =========================================================================
+    # backend command — Hades shared Laravel backend setup/status
+    # =========================================================================
+    from hermes_cli.hades_backend_cmd import build_backend_parser
+
+    build_backend_parser(subparsers, cmd_backend=cmd_backend)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

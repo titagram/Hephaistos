@@ -163,7 +163,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #   ``$EDITOR``.
 # * ``SHELL`` — what subprocess uses with ``shell=True`` (we try to
 #   avoid that, but defense in depth).
-# * ``HERMES_HOME`` / ``HERMES_PROFILE`` / ``HERMES_CONFIG`` /
+# * ``HERMES_HOME`` / ``HADES_HOME`` / ``HERMES_PROFILE`` / ``HERMES_CONFIG`` /
 #   ``HERMES_ENV`` — Hermes runtime location flags. Writing these into
 #   ``.env`` would relocate state in ways the user did not request from
 #   the dashboard. ``config.yaml`` is the supported surface for these.
@@ -195,7 +195,7 @@ _ENV_VAR_NAME_DENYLIST: frozenset[str] = frozenset({
     # Hermes runtime location — never via dashboard env writer.
     # NOT a HERMES_* blanket: integration credentials (HERMES_GEMINI_*,
     # HERMES_LANGFUSE_*, HERMES_SPOTIFY_*, ...) ARE allowed.
-    "HERMES_HOME", "HERMES_PROFILE", "HERMES_CONFIG", "HERMES_ENV",
+    "HERMES_HOME", "HADES_HOME", "HERMES_PROFILE", "HERMES_CONFIG", "HERMES_ENV",
 })
 
 
@@ -209,8 +209,8 @@ def _reject_denylisted_env_var(key: str) -> None:
         raise ValueError(
             f"Environment variable {key!r} is on the writer denylist. "
             "Names that influence subprocess execution (LD_PRELOAD, "
-            "PYTHONPATH, PATH, EDITOR, ...) or Hades runtime location "
-            "(HERMES_HOME, HERMES_PROFILE, ...) cannot be persisted via "
+            "PYTHONPATH, PATH, EDITOR, ...) or Hermes runtime location "
+            "(HERMES_HOME, HADES_HOME, HERMES_PROFILE, ...) cannot be persisted via "
             "the env writer. If you really need this, edit "
             "~/.hermes/.env directly."
         )

@@ -10365,6 +10365,56 @@ def _(rid, params, pdb, conn) -> dict:
     return _ok(rid, {"project": proj.to_dict() if proj else None, "cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
 
 
+@method("backend.status")
+def _(rid, params) -> dict:
+    try:
+        from hermes_cli import hades_backend_db as hdb
+
+        with hdb.connect_closing() as conn:
+            agent = hdb.get_default_agent(conn)
+            bindings = hdb.list_workspace_bindings(conn, status="linked") if agent else []
+            job_counts = hdb.count_jobs_by_status(conn) if agent else {}
+            proposal_counts = hdb.count_memory_proposals_by_status(conn) if agent else {}
+            last_summary = hdb.get_sync_state(conn, "last_sync_summary") if agent else None
+            last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
+    except Exception as exc:
+        return _err(rid, -32090, f"backend status failed: {exc}")
+
+    if agent is None:
+        return _ok(rid, {"configured": False, "agent": None, "bindings": []})
+
+    return _ok(
+        rid,
+        {
+            "configured": True,
+            "agent": {
+                "agent_id": agent.agent_id,
+                "project_id": agent.project_id,
+                "base_url": agent.base_url,
+                "label": agent.label,
+                "capabilities": agent.capabilities,
+            },
+            "bindings": [
+                {
+                    "workspace_fingerprint": b.workspace_fingerprint,
+                    "workspace_binding_id": b.backend_workspace_binding_id,
+                    "project_id": b.project_id,
+                    "local_project_id": b.local_project_id,
+                    "display_path": b.display_path,
+                    "status": b.status,
+                }
+                for b in bindings
+            ],
+            "job_counts": job_counts,
+            "proposal_counts": proposal_counts,
+            "sync": {
+                "last_summary": last_summary,
+                "last_error": last_error,
+            },
+        },
+    )
+
+
 def _is_repo_junk(root: str) -> bool:
     """A git root we never auto-surface as a project: the bare home dir or
     anything under HERMES_HOME (~/.hermes by default) — config/sessions/skills,

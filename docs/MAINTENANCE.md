@@ -51,6 +51,10 @@ npm run --prefix web typecheck
 npm run --prefix ui-tui test
 ```
 
+`scripts/docs_audit.py` e' verifica stabile locale/agentica per modifiche a
+documentazione operativa, indici, logbook o audit docs. Non e' ancora un gate
+CI globale.
+
 Non eseguire deploy, release, migrazioni distruttive, Docker cleanup o install
 pesanti senza conferma esplicita.
 

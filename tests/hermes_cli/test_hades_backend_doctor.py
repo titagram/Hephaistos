@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+
+def test_doctor_backend_check_reports_configured_agent(monkeypatch, tmp_path, capsys):
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.doctor as doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_BACKEND_AGENT_TOKEN_TEST", "derived-token")
+    class FakeClient:
+        def health(self):
+            return {"status": "ok"}
+
+        def capabilities(self):
+            return {"capabilities": {"memory": True, "jobs": True}}
+
+    monkeypatch.setattr(doctor, "_hades_backend_client_from_config", lambda: FakeClient())
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        db.upsert_job(
+            conn,
+            job_id="job_1",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+        db.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="memory_write",
+            summary="Remember backend contract",
+            provenance={},
+        )
+        db.record_sync_state(conn, "last_sync_summary", {"completed": 1, "waiting": 1})
+
+    issues: list[str] = []
+    doctor._check_hades_backend(issues)
+    output = capsys.readouterr().out
+
+    assert "Hades backend configured" in output
+    assert "proj_1" in output
+    assert "Hades backend health reachable" in output
+    assert "Hades backend capabilities" in output
+    assert "Backend jobs" in output
+    assert "Memory proposals" in output
+    assert "Last backend sync" in output
+    assert issues == []
+
+
+def test_doctor_backend_check_warns_when_missing(capsys):
+    import hermes_cli.doctor as doctor
+
+    issues: list[str] = []
+    doctor._check_hades_backend(issues)
+    output = capsys.readouterr().out
+
+    assert "Hades backend not configured" in output
+    assert issues

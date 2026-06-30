@@ -18,6 +18,8 @@ sviluppatori nel checkout locale.
 - `docs/MAINTENANCE.md` - flusso operativo per iniziare e chiudere un task.
 - `docs/LEGACY_COMPATIBILITY.md` - policy per alias, env var, path e nomi
   tecnici Hermes preservati dopo il rebranding Hades.
+- `docs/backend-agent-coordination.md` - domande, risposte e conclusioni per il
+  coordinamento con l'agente del backend Laravel.
 - `docs/LOGBOOK.md` - log operativo dei cambi documentali/processuali.
 
 ## Indici Tecnici
@@ -37,4 +39,6 @@ python3 scripts/docs_audit.py
 ```
 
 Lo script verifica documenti obbligatori, link Markdown locali, riferimenti
-source-of-truth e presenza di almeno una entry nel logbook.
+source-of-truth e presenza di almeno una entry nel logbook. E' parte stabile
+del flusso locale/agentico quando si modificano questi docs o lo script di
+audit; non e' ancora un gate CI globale.

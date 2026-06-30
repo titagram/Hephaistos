@@ -60,8 +60,8 @@ Tabelle osservate:
 Fonte: `cron/jobs.py`.
 
 Persistenza osservata:
-- Job JSON: `$HADES_HOME/cron/jobs.json`.
-- Output: `$HADES_HOME/cron/output/{job_id}/{timestamp}.md`.
+- Job JSON: `$HERMES_HOME/cron/jobs.json`.
+- Output: `$HERMES_HOME/cron/output/{job_id}/{timestamp}.md`.
 - Lock: `<cron dir>/.jobs.lock`.
 - Heartbeat ticker: file gestito da `cron/jobs.py` e `cron/scheduler.py`.
 
@@ -82,7 +82,7 @@ Fonti:
 - `plugins/memory/retaindb/__init__.py`: tabella `pending`.
 
 Da completare per plugin specifici: ogni plugin puo portare schema proprio o
-file state sotto `$HADES_HOME`.
+file state sotto `$HERMES_HOME`.
 
 ## Comandi Di Verifica
 

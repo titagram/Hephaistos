@@ -1,14 +1,14 @@
 ---
-title: "Hermes Agent — Configure, extend, or contribute to Hermes Agent"
-sidebar_label: "Hermes Agent"
-description: "Configure, extend, or contribute to Hermes Agent"
+title: "Hades Agent — Configure, extend, or contribute to Hades Agent"
+sidebar_label: "Hades Agent"
+description: "Configure, extend, or contribute to Hades Agent"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
-# Hermes Agent
+# Hades Agent
 
-Configure, extend, or contribute to Hermes Agent.
+Configure, extend, or contribute to Hades Agent.
 
 ## Skill metadata
 
@@ -17,7 +17,7 @@ Configure, extend, or contribute to Hermes Agent.
 | Source | Bundled (installed by default) |
 | Path | `skills/autonomous-ai-agents/hermes-agent` |
 | Version | `2.1.0` |
-| Author | Hermes Agent + Teknium |
+| Author | Hades Agent + Teknium |
 | License | MIT |
 | Platforms | linux, macos, windows |
 | Tags | `hermes`, `setup`, `configuration`, `multi-agent`, `spawning`, `cli`, `gateway`, `development` |
@@ -29,9 +29,9 @@ Configure, extend, or contribute to Hermes Agent.
 The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
-# Hermes Agent
+# Hades Agent
 
-Hermes Agent is an open-source AI agent framework by Nous Research that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
+Hades Agent is an open-source AI agent framework by Nous Research that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
 
 What makes Hermes different:
 
@@ -44,15 +44,15 @@ What makes Hermes different:
 
 People use Hermes for software development, research, system administration, data analysis, content creation, home automation, and anything else that benefits from an AI agent with persistent context and full system access.
 
-**This skill helps you work with Hermes Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
+**This skill helps you work with Hades Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
 
-**Docs:** https://hermes-agent.nousresearch.com/docs/
+**Docs:** https://hades-agent.local/docs/
 
 ## Quick Start
 
 ```bash
 # Install
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://hades-agent.local/install.sh | bash
 
 # Interactive chat (default)
 hermes
@@ -174,7 +174,7 @@ hermes gateway setup        Configure platforms
 
 Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI connects via the API Server adapter.
 
-Platform docs: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/
+Platform docs: https://hades-agent.local/docs/user-guide/messaging/
 
 ### Sessions
 
@@ -256,7 +256,7 @@ hermes uninstall            Uninstall Hermes
 
 Type these during an interactive chat session. New commands land fairly
 often; if something below looks stale, run `/help` in-session for the
-authoritative list or see the [live slash commands reference](https://hermes-agent.nousresearch.com/docs/reference/slash-commands).
+authoritative list or see the [live slash commands reference](https://hades-agent.local/docs/reference/slash-commands).
 The registry of record is `hermes_cli/commands.py` — every consumer
 (autocomplete, Telegram menu, Slack mapping, `/help`) derives from it.
 
@@ -388,7 +388,7 @@ Edit with `hermes config edit` or `hermes config set section.key value`.
 | `delegation` | `model`, `provider`, `base_url`, `api_key`, `max_iterations` (50), `reasoning_effort` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
 
-Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
+Full config reference: https://hades-agent.local/docs/user-guide/configuration
 
 ### Providers
 
@@ -418,7 +418,7 @@ Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/con
 | Custom endpoint | Config | `model.base_url` + `model.api_key` in config.yaml |
 | GitHub Copilot ACP | External | `COPILOT_CLI_PATH` or Copilot CLI |
 
-Full provider docs: https://hermes-agent.nousresearch.com/docs/integrations/providers
+Full provider docs: https://hades-agent.local/docs/integrations/providers
 
 ### Toolsets
 
@@ -677,7 +677,7 @@ the `cronjob` tool, the `hermes cron` CLI (`list`, `add`, `edit`,
   header/footer instead of being mirrored into the target gateway
   session (keeps role alternation intact).
 
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/cron
+User docs: https://hades-agent.local/docs/user-guide/features/cron
 
 ### Curator (skill lifecycle)
 
@@ -698,7 +698,7 @@ so nothing is lost.
 
 Config: `curator.*` (`enabled`, `interval_hours`, `min_idle_hours`,
 `stale_after_days`, `archive_after_days`, `backup.*`).
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/curator
+User docs: https://hades-agent.local/docs/user-guide/features/curator
 
 ### Kanban (multi-agent work queue)
 
@@ -727,7 +727,7 @@ sessions still have zero `kanban_*` schema footprint unless configured.
   `HERMES_KANBAN_BOARD` pinned in env); tenant is a soft namespace
   within a board for workspace-path + memory-key isolation.
 
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
+User docs: https://hades-agent.local/docs/user-guide/features/kanban
 
 ---
 
@@ -894,18 +894,18 @@ multi-source resolution chain (highest priority first):
 
 | Looking for... | Location |
 |----------------|----------|
-| Config options | `hermes config edit` or [Configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) |
-| Available tools | `hermes tools list` or [Tools reference](https://hermes-agent.nousresearch.com/docs/reference/tools-reference) |
-| Slash commands | `/help` in session or [Slash commands reference](https://hermes-agent.nousresearch.com/docs/reference/slash-commands) |
-| Skills catalog | `hermes skills browse` or [Skills catalog](https://hermes-agent.nousresearch.com/docs/reference/skills-catalog) |
-| Provider setup | `hermes model` or [Providers guide](https://hermes-agent.nousresearch.com/docs/integrations/providers) |
-| Platform setup | `hermes gateway setup` or [Messaging docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) |
-| MCP servers | `hermes mcp list` or [MCP guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) |
-| Profiles | `hermes profile list` or [Profiles docs](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) |
-| Cron jobs | `hermes cron list` or [Cron docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) |
-| Memory | `hermes memory status` or [Memory docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) |
-| Env variables | `hermes config env-path` or [Env vars reference](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) |
-| CLI commands | `hermes --help` or [CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) |
+| Config options | `hermes config edit` or [Configuration docs](https://hades-agent.local/docs/user-guide/configuration) |
+| Available tools | `hermes tools list` or [Tools reference](https://hades-agent.local/docs/reference/tools-reference) |
+| Slash commands | `/help` in session or [Slash commands reference](https://hades-agent.local/docs/reference/slash-commands) |
+| Skills catalog | `hermes skills browse` or [Skills catalog](https://hades-agent.local/docs/reference/skills-catalog) |
+| Provider setup | `hermes model` or [Providers guide](https://hades-agent.local/docs/integrations/providers) |
+| Platform setup | `hermes gateway setup` or [Messaging docs](https://hades-agent.local/docs/user-guide/messaging/) |
+| MCP servers | `hermes mcp list` or [MCP guide](https://hades-agent.local/docs/user-guide/features/mcp) |
+| Profiles | `hermes profile list` or [Profiles docs](https://hades-agent.local/docs/user-guide/profiles) |
+| Cron jobs | `hermes cron list` or [Cron docs](https://hades-agent.local/docs/user-guide/features/cron) |
+| Memory | `hermes memory status` or [Memory docs](https://hades-agent.local/docs/user-guide/features/memory) |
+| Env variables | `hermes config env-path` or [Env vars reference](https://hades-agent.local/docs/reference/environment-variables) |
+| CLI commands | `hermes --help` or [CLI reference](https://hades-agent.local/docs/reference/cli-commands) |
 | Gateway logs | `~/.hermes/logs/gateway.log` |
 | Session files | `hermes sessions browse` (reads state.db) |
 | Source code | `~/.hermes/hermes-agent/` |
@@ -914,7 +914,7 @@ multi-source resolution chain (highest priority first):
 
 ## Contributor Quick Reference
 
-For occasional contributors and PR authors. Full developer docs: https://hermes-agent.nousresearch.com/docs/developer-guide/
+For occasional contributors and PR authors. Full developer docs: https://hades-agent.local/docs/developer-guide/
 
 ### Project Layout
 

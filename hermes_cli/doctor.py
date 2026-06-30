@@ -482,6 +482,74 @@ def managed_scope_check() -> None:
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 
+def _hades_backend_client_from_config():
+    from hermes_cli.hades_backend_runtime import client_from_config
+
+    return client_from_config()
+
+
+def _check_hades_backend(issues: list[str]) -> None:
+    """Report local Hades Laravel backend registration state."""
+    try:
+        from agent.secret_scope import get_secret
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        check_warn("Hades backend check skipped", f"({exc})")
+        return
+
+    try:
+        with hdb.connect_closing() as conn:
+            agent = hdb.get_default_agent(conn)
+            bindings = hdb.list_workspace_bindings(conn, status="linked") if agent else []
+            job_counts = hdb.count_jobs_by_status(conn) if agent else {}
+            proposal_counts = hdb.count_memory_proposals_by_status(conn) if agent else {}
+            last_summary = hdb.get_sync_state(conn, "last_sync_summary") if agent else None
+            last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
+    except Exception as exc:
+        check_warn("Hades backend state unreadable", f"({exc})")
+        issues.append("Repair Hades backend state or rerun `hades backend setup`")
+        return
+
+    if agent is None:
+        check_warn("Hades backend not configured", "(run: hades backend setup)")
+        issues.append("Run `hades backend setup` to connect this profile to Laravel")
+        return
+
+    check_ok("Hades backend configured", f"({agent.project_id}, {agent.agent_id})")
+    token_present = bool(get_secret(agent.token_env_key, ""))
+    if token_present:
+        check_ok("Hades backend agent token present", f"({agent.token_env_key})")
+    else:
+        check_warn("Hades backend agent token missing", f"({agent.token_env_key})")
+        issues.append(f"Restore {agent.token_env_key} in .env or rerun `hades backend setup`")
+
+    if bindings:
+        check_ok("Linked backend workspaces", f"({len(bindings)})")
+    else:
+        check_warn("No linked backend workspace", "(run: hades project link <project>)")
+
+    if job_counts:
+        check_ok("Backend jobs", f"({job_counts})")
+    if proposal_counts:
+        check_ok("Memory proposals", f"({proposal_counts})")
+    if last_summary:
+        check_ok("Last backend sync", f"({last_summary})")
+    if last_error:
+        check_warn("Last backend sync error", f"({last_error.get('message', 'unknown error')})")
+
+    if not token_present:
+        return
+    try:
+        client = _hades_backend_client_from_config()
+        health = client.health()
+        check_ok("Hades backend health reachable", f"({health.get('status', 'ok')})")
+        capabilities = client.capabilities()
+        check_ok("Hades backend capabilities", f"({capabilities.get('capabilities', capabilities)})")
+    except Exception as exc:
+        check_warn("Hades backend remote check failed", f"({exc})")
+        issues.append("Check backend URL/token/network or rerun `hades backend setup`")
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
@@ -664,6 +732,8 @@ def run_doctor(args):
     _section("Configuration Files")
     # Managed scope (administrator-pinned config/env), when present.
     managed_scope_check()
+    _section("Hades Backend")
+    _check_hades_backend(issues)
     # Check ~/.hermes/.env (primary location for user config)
     env_path = HERMES_HOME / '.env'
     if env_path.exists():

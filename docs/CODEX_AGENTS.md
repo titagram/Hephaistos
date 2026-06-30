@@ -72,7 +72,7 @@ categorie, applicare tutte le regole rilevanti.
 | Tipo task | Esempi | Regole principali |
 | --- | --- | --- |
 | Brainstorming fork | priorita personali, idee prodotto, identita della fork | Non modificare codice; aggiornare `docs/implementation_plan.md` |
-| Documentazione operativa | `docs/*.md`, indici, logbook, audit docs | Usare `docs/` come source locale; verificare con `python3 scripts/docs_audit.py` se disponibile |
+| Documentazione operativa | `docs/*.md`, indici, logbook, audit docs | Usare `docs/` come source locale; verificare con `python3 scripts/docs_audit.py` |
 | Core Hades | `run_agent.py`, `model_tools.py`, `toolsets.py`, `agent/`, `tools/` | Leggere `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/SOURCE_OF_TRUTH.md`; evitare nuovi core tool non necessari |
 | CLI / Gateway / Cron | `hermes_cli/`, `gateway/`, `cron/` | Verificare entrypoint, route, side effect e comandi reali |
 | Frontend / Desktop / TUI | `apps/desktop/`, `web/`, `ui-tui/`, `tui_gateway/` | Leggere package scripts e pattern locali prima di cambiare UI |
@@ -83,12 +83,18 @@ categorie, applicare tutte le regole rilevanti.
 
 `docs/implementation_plan.md` e' la checklist viva del lavoro sulla fork.
 
-Ogni volta che una voce viene completata:
+Ogni volta che una voce viene completata, `docs/implementation_plan.md` deve
+essere aggiornato nello stesso task. SEMPRE.
 
 1. aprire `docs/implementation_plan.md`;
 2. cambiare la voce da `- [ ]` a `- [x]`;
 3. aggiungere una breve nota se serve spiegare cosa e' stato deciso o fatto;
 4. non lasciare il piano disallineato rispetto al lavoro concluso.
+
+Se viene completato solo un sotto-passaggio, una decisione stabile o una spec
+preparatoria, non spuntare la voce principale se resta lavoro operativo: aggiungi
+subito una nota sotto la voce aperta con stato, data e riferimento al documento
+o alla verifica. Non rimandare l'aggiornamento del piano a un turno successivo.
 
 Se nasce una nuova idea durante brainstorming o implementazione, aggiungerla al
 piano come voce non spuntata invece di tenerla solo in chat.
@@ -129,8 +135,9 @@ di usarlo per una modifica concreta, verifica nel codice o nei comandi reali.
 
 ## Checklist Prima Di Concludere Un Task
 
-- `docs/implementation_plan.md` e' aggiornato e le voci completate sono
-  spuntate.
+- `docs/implementation_plan.md` e' SEMPRE aggiornato nello stesso task: le voci
+  completate sono spuntate, i sotto-passaggi conclusi sono annotati, e le voci
+  ancora aperte non vengono segnate come finite.
 - Le fonti lette sono dichiarate.
 - Le decisioni sono separate da idee e punti da verificare.
 - Se sono stati modificati docs o audit, eseguire:
@@ -139,4 +146,7 @@ di usarlo per una modifica concreta, verifica nel codice o nei comandi reali.
 python3 scripts/docs_audit.py
 ```
 
+- `scripts/docs_audit.py` e' parte stabile del flusso locale/agentico per
+  modifiche a documentazione operativa o allo script stesso; non e' ancora un
+  gate CI globale.
 - Se una verifica non e' stata eseguita, indicare il motivo.

@@ -877,3 +877,218 @@ mancanti per le verifiche e policy definitiva di compatibilita' legacy Hermes.
 I due residui della voce precedente sono chiusi: le verifiche non sono piu'
 bloccate da dipendenze mancanti, e la policy Hermes legacy e' documentata come
 contratto operativo per i prossimi passaggi.
+
+### 2026-06-30 08:56 - Pulizia docs upstream/localizzate
+
+**Richiesta**: rimuovere la documentazione non inglese e aggiornare la
+documentazione inglese ad Hades, preservando i contratti legacy Hermes e senza
+toccare la i18n runtime/app.
+
+**Contesto consultato**:
+- `docs/LEGACY_COMPATIBILITY.md`
+- `README.md`
+- `website/docusaurus.config.ts`
+- `website/docs/index.mdx`
+- `website/docs/getting-started/*`
+- `website/docs/user-guide/windows-native.md`
+- `website/docs/user-guide/windows-wsl-quickstart.md`
+- `CONTRIBUTING.md`
+- `SECURITY.md`
+
+**Lavoro eseguito**:
+- Rimossi `README.es.md`, `README.zh-CN.md`, `README.ur-pk.md`,
+  `CONTRIBUTING.es.md`, `SECURITY.es.md` e la directory website i18n.
+- Aggiornato Docusaurus a sito inglese-only Hades: metadata, URL, repo,
+  navbar, footer, edit URL, immagine social e search language.
+- Aggiornata la copy visibile dei docs inglesi ad Hades e comando `hades`,
+  mantenendo `~/.hermes`, `HERMES_HOME`, `hermes_cli`, `metadata.hermes`,
+  `HermesGateway`, `-HermesHome` e altri identificatori tecnici/legacy.
+- Aggiornato `website/README.md` a comandi npm.
+- Aggiunto `tests/test_docs_hades_rebrand_guard.py` per impedire il ritorno di
+  docs localizzate, locale zh in Docusaurus e residui upstream evidenti nei
+  file ad alta visibilita'.
+- Aggiornato `docs/implementation_plan.md` marcando completata la decisione:
+  docs non inglesi rimosse; docs inglesi canoniche e Hades; i18n runtime/app
+  intatta.
+
+**Verifiche**:
+- `./scripts/run_tests.sh tests/test_docs_hades_rebrand_guard.py -q` -> red
+  iniziale atteso: 3 test falliti prima della bonifica.
+- `./scripts/run_tests.sh tests/test_docs_hades_rebrand_guard.py -q` -> 3 test
+  passati.
+- `python3 scripts/docs_audit.py` -> passato: 18 documenti richiesti
+  controllati.
+- `git diff --check` -> passato dopo rimozione di due spazi finali nei comandi
+  PowerShell.
+- `npm --prefix website run typecheck` -> fallito: dipendenze website non
+  risolte/installate nel workspace (`@docusaurus/*`, `prism-react-renderer`,
+  tipi JSX/Node e tsconfig Docusaurus mancanti).
+- `npm --prefix website run build` -> fallito: prebuild segnala `yaml`
+  mancante per gli script Python e `docusaurus` non e' disponibile nel PATH.
+
+**Conclusione e razionale**:
+La documentazione localizzata non viene mantenuta nella fork. La superficie docs
+inglese diventa la fonte utente canonica Hades, mentre i nomi Hermes rimasti
+sono trattati come compatibilita' tecnica secondo policy.
+
+**File modificati principali**:
+- `README.md` - rimossi badge localizzati e allineati storage/command docs.
+- `website/docusaurus.config.ts` - Docusaurus Hades inglese-only.
+- `website/docs/` - docs inglesi ad alta visibilita' aggiornati.
+- `website/src/` - copy visibile site chrome aggiornata.
+- `website/README.md` - comandi npm.
+- `tests/test_docs_hades_rebrand_guard.py` - guard rebranding docs.
+- `docs/implementation_plan.md` - decisione chiusa.
+- `docs/LOGBOOK.md` - traccia operativa.
+
+**Note / rischi residui**:
+- Le pagine generate/catalogo skill non sono state bonificate in massa; il
+  guard copre solo docs e chrome ad alta visibilita' per evitare rewrite ciechi
+  di identificatori tecnici.
+
+### 2026-06-30 09:30 - Website LLM docs Hades follow-up
+
+**Request**: fix review findings in the owned website docs/scripts: remove
+visible old Hermes Agent / upstream repo / old docs-host residues, update
+sidebar chrome to Hades, regenerate LLM docs when feasible, and strengthen the
+targeted docs guard without scanning generated skill catalogs globally.
+
+**Work performed**:
+- Updated `website/docs/getting-started/learning-path.md` and
+  `website/docs/getting-started/nix-setup.md` to use Hades Agent copy and the
+  `gabriele/hades-agent` repo in user-facing examples while preserving legacy
+  `hermes`, `HERMES_HOME`, `~/.hermes`, and Nix service/module identifiers.
+- Changed `website/sidebars.ts` visible chrome from `Using Hermes` to
+  `Using Hades`.
+- Updated `website/scripts/generate-llms-txt.py` and
+  `website/scripts/prebuild.mjs` for `hades-agent.local`, Hades branding, and
+  regenerated LLM outputs.
+- Regenerated `website/static/llms.txt` and `website/static/llms-full.txt`
+  with `python3 website/scripts/generate-llms-txt.py`.
+- Strengthened `tests/test_docs_hades_rebrand_guard.py` to cover the owned
+  website entrypoints, generated LLM files, old security contact, localized
+  README links, old docs host, and old core repo links. The guard allow-lists
+  intentional external Nous-owned repos such as Atropos and example plugins.
+- Corrected stale storage-path text in `hades_agent.egg-info/PKG-INFO` from
+  `HADES_HOME` / `~/.hades` / `%LOCALAPPDATA%\hades` to the compatibility
+  identifiers `HERMES_HOME`, `~/.hermes`, and `%LOCALAPPDATA%\hermes`.
+- Applied a docs-wide safe-string cleanup for full product/repo/docs-host
+  residues: `Hermes Agent` -> `Hades Agent`, core repo links to
+  `gabriele/hades-agent`, and old docs host links to `hades-agent.local`,
+  without renaming legacy command/config/storage identifiers.
+- Updated `website/scripts/generate-skill-docs.py` so regenerated skill docs
+  use Hades copy and the Hades core repo link target.
+- Fixed website typecheck drift with TypeScript 6 / React 19 by adding local
+  `website/tsconfig.json` compiler options and changing `JSX.Element` return
+  annotations to `React.JSX.Element`.
+- Fixed Docusaurus broken-link warnings introduced by the rebrand (`MCP` link
+  and Windows guide anchors).
+- Fixed final-review residues outside the first website slice: installer
+  script branding/repo URLs, model-catalog docs URLs, manual docs storage
+  paths, Docker/default prompt identity, and Hades self-help guidance in
+  `agent/prompt_builder.py`.
+- Extended the guard to cover installer scripts, model catalog artifacts,
+  manual docs indexes, Docker/default identity, and prompt-builder identity
+  strings.
+
+**Verification notes**:
+- `./scripts/run_tests.sh tests/test_docs_hades_rebrand_guard.py -q` -> red
+  after adding coverage, then 3 tests passed after fixes.
+- `python3 scripts/docs_audit.py` -> passed: 18 required docs checked.
+- `git diff --check` -> passed.
+- `npm --prefix website run typecheck` -> passed after the TypeScript config
+  and JSX return-type fixes.
+- `PATH="$PWD/.venv/bin:$PATH" npm --prefix website run build` -> passed;
+  Docusaurus generated the static site without broken-link/broken-anchor
+  warnings after the link fixes.
+- Final focused Python verification:
+  `./scripts/run_tests.sh tests/test_docs_hades_rebrand_guard.py
+  tests/agent/test_prompt_builder.py tests/run_agent/test_run_agent.py -q`
+  -> 568 tests passed.
+- Final guarded residue scan across docs, website, installer scripts,
+  model-catalog artifact, Docker SOUL, and prompt-builder identity -> no
+  forbidden current-scope matches.
+
+### 2026-06-30 10:05 - Regola piano vivo rafforzata
+
+**Richiesta**: ricordare che `docs/implementation_plan.md` va aggiornato sempre
+quando qualcosa viene completato, e scrivere la regola anche in
+`docs/CODEX_AGENTS.md`.
+
+**Lavoro eseguito**:
+- Rafforzata `docs/CODEX_AGENTS.md`: il piano va aggiornato nello stesso task,
+  sempre; i sotto-passaggi/spec completati vanno annotati anche se la voce
+  principale resta aperta.
+- Rafforzata la regola in testa a `docs/implementation_plan.md`.
+- Annotata sotto `Config default e profili` la spec approvata e la policy:
+  Hades brand, Hermes ABI/storage legacy, sorgenti skill/plugin upstream ancora
+  compatibili/community. La voce resta non spuntata perche' l'implementazione
+  non e' ancora stata fatta.
+
+### 2026-06-30 10:40 - Config default e profili
+
+**Richiesta**: implementare subagent-driven il punto "Config default e profili"
+dell'implementation plan.
+
+**Lavoro eseguito**:
+- Ripristinati i default storage Hermes-compatible: `~/.hermes` su POSIX e
+  `%LOCALAPPDATA%\hermes` su Windows nativo.
+- Reso `HERMES_HOME` il contratto primario; `HADES_HOME` resta alias/fallback,
+  viene normalizzato sullo stesso root quando serve e non puo' superare
+  `HERMES_HOME`.
+- Mantenuti i profili isolati sotto `<root>/profiles/<name>` senza inheritance
+  live dal profilo default; rimosso il fallback sudo verso `~/.hades`.
+- Aggiornati installer POSIX/Windows: leggono `HERMES_HOME`, poi `HADES_HOME`,
+  poi il default legacy; PowerShell deriva `InstallDir` dal `HermesHome`
+  finale salvo `-InstallDir` esplicito.
+- Aggiornati guard e docs per bloccare `~/.hades`, `$HOME/.hades` e
+  `%LOCALAPPDATA%\hades` come default storage e per documentare
+  `HADES_HOME` solo come alias.
+- Spuntata la voce `Config default e profili` in `docs/implementation_plan.md`.
+
+**Verifiche**:
+- Subagent spec review finale: PASS, nessun blocker.
+- Subagent quality re-review finale: APPROVED.
+- `./scripts/run_tests.sh tests/test_hermes_constants.py
+  tests/hermes_cli/test_apply_profile_override.py
+  tests/hermes_cli/test_profiles.py tests/hermes_cli/test_env_load_cache.py
+  tests/test_docs_hades_rebrand_guard.py -q` -> 265 test passed.
+- `./scripts/run_tests.sh tests/test_docs_hades_rebrand_guard.py -q` -> 6
+  test passed dopo il fix PowerShell `InstallDir`.
+- `bash -n scripts/install.sh` -> passed.
+- `pwsh`/`powershell` non disponibile nell'ambiente locale, quindi la syntax
+  validation PowerShell reale non e' stata eseguita.
+
+### 2026-06-30 11:05 - Decisione docs audit stabile locale
+
+**Richiesta**: decidere se `scripts/docs_audit.py` deve diventare parte stabile
+del flusso oppure restare solo uno strumento di supporto.
+
+**Decisione**:
+- `scripts/docs_audit.py` diventa parte stabile del flusso locale/agentico per
+  modifiche a documentazione operativa, indici, logbook o allo script di audit
+  stesso.
+- Non diventa ancora un gate CI globale; l'eventuale promozione a CI va
+  rivalutata dopo stabilizzazione della documentazione e dopo aver osservato
+  eventuali falsi positivi.
+
+**Lavoro eseguito**:
+- Spuntata la voce relativa in `docs/implementation_plan.md`.
+- Aggiornati `docs/CODEX_AGENTS.md`, `docs/MAINTENANCE.md` e `docs/README.md`
+  per rendere esplicito il ruolo stabile locale dello script.
+
+### 2026-06-30 11:20 - Canale decisionale backend Laravel
+
+**Richiesta**: segnare che le domande lato backend saranno risolte facendo
+dialogare Codex con l'agent backend.
+
+**Decisione**:
+- Per contratti Laravel, endpoint, schema dati, limiti, job, AST, memory e
+  Persephone, Codex non deve chiudere decisioni per supposizione locale.
+- Quando serve, l'utente fara' dialogare Codex con l'agent backend; quella
+  conversazione diventera' la fonte operativa per aggiornare la spec Hades.
+
+**Lavoro eseguito**:
+- Annotata la decisione sotto `Istruzioni backend Laravel` in
+  `docs/implementation_plan.md`, senza spuntare la voce perche' resta lavoro
+  operativo da completare.

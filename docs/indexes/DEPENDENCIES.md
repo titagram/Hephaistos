@@ -67,7 +67,7 @@ Fatti verificati:
 - Dockerfile usa uv image, Node 22 source image, Debian 13.4.
 - Installa `ripgrep`, `ffmpeg`, `git`, `openssh-client`, `docker-cli`,
   toolchain build e s6-overlay.
-- Compose monta `~/.hades` in `/opt/data`.
+- Compose monta `~/.hermes` in `/opt/data`.
 
 ## CI/CD
 

@@ -22,7 +22,7 @@ Attivazione venv osservata in `AGENTS.md` e `scripts/run_tests.sh`:
 source .venv/bin/activate
 ```
 
-Fallback: `venv` o `$HOME/.hades/hades-agent/venv`.
+Fallback: `venv` o `$HOME/.hermes/hades-agent/venv`.
 
 ## Setup Node
 
@@ -61,7 +61,7 @@ hades dashboard --no-open
 hades serve
 ```
 
-Da verificare localmente: credenziali, `HADES_HOME`, `.venv`, Node install e
+Da verificare localmente: credenziali, `HERMES_HOME`, `.venv`, Node install e
 porte libere.
 
 ## Docker
@@ -74,7 +74,7 @@ HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d
 
 Fatti verificati:
 - Servizi compose: `gateway`, `dashboard`.
-- Volume: `~/.hades:/opt/data`.
+- Volume: `~/.hermes:/opt/data`.
 - Dashboard command: `["dashboard", "--host", "127.0.0.1", "--no-open"]`.
 - `Dockerfile` usa uv, Node 22, Debian 13.4, s6-overlay e utente non-root
   `hades`.
@@ -84,8 +84,8 @@ richiesta esplicita e piano auth/network.
 
 ## Configurazione E Segreti
 
-- Config utente: `$HADES_HOME/config.yaml`, helper in `hermes_constants.py`.
-- Segreti: `$HADES_HOME/.env`, esempio in `.env.example`.
+- Config utente: `$HERMES_HOME/config.yaml`, helper in `hermes_constants.py`.
+- Segreti: `$HERMES_HOME/.env`, esempio in `.env.example`.
 - `SECURITY.md` e `AGENTS.md` indicano: `.env` per credenziali, `config.yaml`
   per comportamento.
 - Multiprofilo: `agent/secret_scope.py` evita leakage cross-profile.
@@ -93,8 +93,8 @@ richiesta esplicita e piano auth/network.
 ## Database/State
 
 - Sessioni: SQLite gestito da `hermes_state.py`.
-- Cron: JSON sotto `$HADES_HOME/cron/jobs.json` e output Markdown sotto
-  `$HADES_HOME/cron/output/`.
+- Cron: JSON sotto `$HERMES_HOME/cron/jobs.json` e output Markdown sotto
+  `$HERMES_HOME/cron/output/`.
 - Kanban: SQLite/schema separato in `hermes_cli/kanban_db.py`.
 - Progetti desktop/dashboard: `hermes_cli/projects_db.py`.
 

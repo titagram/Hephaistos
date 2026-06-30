@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 def _write_env(path: Path, contents: str) -> None:
     path.write_text(contents, encoding="utf-8")
@@ -143,6 +145,29 @@ def test_save_env_value_invalidates_cache(tmp_path, monkeypatch):
         assert result.get("EXISTING_KEY") == "old"
     finally:
         monkeypatch.delenv("NEW_KEY", raising=False)
+        invalidate_env_cache()
+
+
+def test_save_env_value_rejects_hades_home(tmp_path, monkeypatch):
+    """The env writer must not persist runtime root aliases."""
+    from hermes_cli import config as config_mod
+    from hermes_cli.config import invalidate_env_cache, save_env_value
+
+    invalidate_env_cache()
+
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(config_mod, "get_env_path", lambda: env_path)
+    monkeypatch.setattr(config_mod, "ensure_hermes_home", lambda: None)
+    monkeypatch.setattr(config_mod, "_secure_file", lambda _p: None)
+    monkeypatch.setattr(config_mod, "is_managed", lambda: False)
+
+    try:
+        with pytest.raises(ValueError, match="HADES_HOME"):
+            save_env_value("HADES_HOME", str(tmp_path / "hades"))
+
+        assert not env_path.exists()
+    finally:
+        monkeypatch.delenv("HADES_HOME", raising=False)
         invalidate_env_cache()
 
 

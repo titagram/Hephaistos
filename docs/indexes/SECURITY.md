@@ -19,8 +19,8 @@ Fonti:
 - `tools/code_execution_tool.py`
 
 Regole osservate:
-- Segreti in `$HADES_HOME/.env`.
-- Config comportamentale in `$HADES_HOME/config.yaml`.
+- Segreti in `$HERMES_HOME/.env`.
+- Config comportamentale in `$HERMES_HOME/config.yaml`.
 - Multiplex profile secrets passano da `agent/secret_scope.py`.
 - Subprocess env viene scrub-bato; non copiare raw `os.environ`.
 - `.env.example` contiene molte chiavi commentate; non trattarlo come config
@@ -75,5 +75,5 @@ rg -n 'inherit_credentials=True|os.environ.copy\\(|get_secret\\(' .
 ## Da Completare
 
 - Mappa completa endpoint dashboard -> auth dependency.
-- Mappa plugin esterni installati dall'utente sotto `$HADES_HOME/plugins/`
+- Mappa plugin esterni installati dall'utente sotto `$HERMES_HOME/plugins/`
   non visibile dal checkout.

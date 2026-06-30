@@ -1,12 +1,12 @@
 ---
 sidebar_position: 9
 title: "Matrix"
-description: "Set up Hermes Agent as a Matrix bot"
+description: "Set up Hades Agent as a Matrix bot"
 ---
 
 # Matrix Setup
 
-Hermes Agent integrates with Matrix, the open, federated messaging protocol. Matrix lets you run your own homeserver or use a public one like matrix.org — either way, you keep control of your communications. The bot connects via the `mautrix` Python SDK, processes messages through the Hermes Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, file attachments, images, audio, video, and optional end-to-end encryption (E2EE).
+Hades Agent integrates with Matrix, the open, federated messaging protocol. Matrix lets you run your own homeserver or use a public one like matrix.org — either way, you keep control of your communications. The bot connects via the `mautrix` Python SDK, processes messages through the Hades Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, file attachments, images, audio, video, and optional end-to-end encryption (E2EE).
 
 Hermes works with any Matrix homeserver — Synapse, Conduit, Dendrite, or matrix.org.
 
@@ -228,7 +228,7 @@ MATRIX_PASSWORD=your-password
 
 ## Step 3: Find Your Matrix User ID
 
-Hermes Agent uses your Matrix User ID to control who can interact with the bot. Matrix User IDs follow the format `@username:server`.
+Hades Agent uses your Matrix User ID to control who can interact with the bot. Matrix User IDs follow the format `@username:server`.
 
 To find yours:
 
@@ -240,7 +240,7 @@ To find yours:
 Matrix User IDs always start with `@` and contain a `:` followed by the server name. For example: `@alice:matrix.org`, `@bob:your-server.com`.
 :::
 
-## Step 4: Configure Hermes Agent
+## Step 4: Configure Hades Agent
 
 ### Option A: Interactive Setup (Recommended)
 
@@ -603,7 +603,7 @@ such as `!important` remain normal chat messages.
 
 ### Bot joins rooms but silently drops every message (clock skew)
 
-**Cause**: The host's system clock is set ahead of real time. The Matrix adapter applies a 5-second startup-grace filter (`event_ts < startup_ts - 5`) to ignore events replayed from initial sync. When the wall clock is ahead, every incoming event looks "older than startup" and is dropped before reaching the message handler — the bot appears connected but never replies. See [#12614](https://github.com/NousResearch/hermes-agent/issues/12614).
+**Cause**: The host's system clock is set ahead of real time. The Matrix adapter applies a 5-second startup-grace filter (`event_ts < startup_ts - 5`) to ignore events replayed from initial sync. When the wall clock is ahead, every incoming event looks "older than startup" and is dropped before reaching the message handler — the bot appears connected but never replies. See [#12614](https://github.com/gabriele/hades-agent/issues/12614).
 
 **Symptom**: Gateway log shows `Matrix: dropped N live events as 'too old' more than 30s after startup`.
 
@@ -689,7 +689,7 @@ changed identity keys for the same device as suspicious.
        "type": "m.login.password",
        "identifier": {"type": "m.id.user", "user": "@hermes:your-server.org"},
        "password": "***",
-       "initial_device_display_name": "Hermes Agent"
+       "initial_device_display_name": "Hades Agent"
      }'
    ```
 
@@ -927,7 +927,7 @@ the first sync and check logs for `sync event dispatch error`.
 Always set `MATRIX_ALLOWED_USERS` and, for shared/private deployments, `MATRIX_ALLOWED_ROOMS`. Without them, anyone who can message the bot in a joined room may trigger the agent. Only authorize people and rooms you trust — authorized users have full access to the agent's capabilities, including tool use and system access.
 :::
 
-For more information on securing your Hermes Agent deployment, see the [Security Guide](../security.md).
+For more information on securing your Hades Agent deployment, see the [Security Guide](../security.md).
 
 ## Notes
 

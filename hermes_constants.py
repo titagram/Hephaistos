@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 _profile_fallback_warned: bool = False
+_home_env_conflict_warned: bool = False
 _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
@@ -44,19 +45,27 @@ def get_hermes_home_override() -> str | None:
 
 
 def _get_platform_default_hermes_home() -> Path:
-    """Return the platform-native default Hades home path."""
+    """Return the platform-native default Hermes-compatible storage path."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hades"
-    return Path.home() / ".hades"
+        return base / "hermes"
+    return Path.home() / ".hermes"
+
+
+def _same_resolved_path(left: str, right: str) -> bool:
+    """Return True when two user-supplied path strings resolve to one location."""
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except Exception:
+        return left == right
 
 
 def get_hermes_home() -> Path:
-    """Return the Hades home directory (default: platform-native path).
+    """Return the Hermes storage home directory (default: platform-native path).
 
-    Reads HADES_HOME env var, accepts HERMES_HOME as a legacy alias, and falls
-    back to the platform-native default.
+    Reads HERMES_HOME env var, accepts HADES_HOME as a compatibility alias
+    only when HERMES_HOME is unset, and falls back to the platform-native default.
     This is the single source of truth — all other copies should import this.
 
     When both home env vars are unset but an ``active_profile`` file indicates
@@ -65,7 +74,7 @@ def get_hermes_home() -> Path:
     of silent.  Behavior is unchanged otherwise — we still return
     the platform-native default — because raising here would brick 30+ module-level
     callers that import this at load time.  Subprocess spawners are
-    expected to propagate ``HADES_HOME`` or ``HERMES_HOME`` explicitly (see the systemd
+    expected to propagate ``HERMES_HOME`` and ``HADES_HOME`` explicitly (see the systemd
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
@@ -73,7 +82,21 @@ def get_hermes_home() -> Path:
     if override:
         return Path(override)
 
-    val = os.environ.get("HADES_HOME", "").strip() or os.environ.get("HERMES_HOME", "").strip()
+    hermes_val = os.environ.get("HERMES_HOME", "").strip()
+    hades_val = os.environ.get("HADES_HOME", "").strip()
+    if hermes_val and hades_val and not _same_resolved_path(hermes_val, hades_val):
+        global _home_env_conflict_warned
+        if not _home_env_conflict_warned:
+            _home_env_conflict_warned = True
+            try:
+                sys.stderr.write(
+                    "[HERMES_HOME precedence] HERMES_HOME and HADES_HOME are both set "
+                    "to different paths; using HERMES_HOME.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+    val = hermes_val or hades_val
     if val:
         return Path(val)
 
@@ -95,11 +118,11 @@ def get_hermes_home() -> Path:
             # configured, and (b) root-logger propagation would double-emit
             # on consoles where a StreamHandler is already attached.
             msg = (
-                f"[HADES_HOME fallback] HADES_HOME/HERMES_HOME are unset but active "
+                f"[HERMES_HOME fallback] HERMES_HOME/HADES_HOME are unset but active "
                 f"profile is {active!r}. Falling back to {fallback_home}, which "
                 f"is the DEFAULT profile — not {active!r}. Any data this "
                 f"process writes will land in the wrong profile. The "
-                f"subprocess spawner should pass HADES_HOME explicitly "
+                f"subprocess spawner should pass HERMES_HOME explicitly "
                 f"(see issue #18594)."
             )
             try:
@@ -112,24 +135,25 @@ def get_hermes_home() -> Path:
 
 
 def get_default_hermes_root() -> Path:
-    """Return the root Hades directory for profile-level operations.
+    """Return the root Hermes storage directory for profile-level operations.
 
-    In standard deployments this is the platform-native Hades home
-    (``~/.hades`` on POSIX, ``%LOCALAPPDATA%\\hades`` on native Windows).
+    In standard deployments this is the platform-native Hermes-compatible
+    storage home (``~/.hermes`` on POSIX, ``%LOCALAPPDATA%\\hermes`` on
+    native Windows).
 
-    In Docker or custom deployments where ``HADES_HOME`` points outside
-    ``~/.hades`` (e.g. ``/opt/data``), returns ``HADES_HOME`` directly
+    In Docker or custom deployments where ``HERMES_HOME`` points outside
+    ``~/.hermes`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
     — that IS the root.
 
-    In profile mode where ``HADES_HOME`` is ``<root>/profiles/<name>``,
+    In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``,
     returns ``<root>`` so that ``profile list`` can see all profiles.
-    Works both for standard (``~/.hades/profiles/coder``) and Docker
+    Works both for standard (``~/.hermes/profiles/coder``) and Docker
     (``/opt/data/profiles/coder``) layouts.
 
     Import-safe — no dependencies beyond stdlib.
     """
     native_home = _get_platform_default_hermes_home()
-    env_home = os.environ.get("HADES_HOME", "") or os.environ.get("HERMES_HOME", "")
+    env_home = os.environ.get("HERMES_HOME", "") or os.environ.get("HADES_HOME", "")
     if not env_home:
         return native_home
     env_path = Path(env_home)
@@ -689,10 +713,10 @@ def _profile_home_path(env: dict[str, str] | None = None) -> str | None:
     env = env or {}
     hermes_home = (
         get_hermes_home_override()
-        or env.get("HADES_HOME")
         or env.get("HERMES_HOME")
-        or os.getenv("HADES_HOME")
+        or env.get("HADES_HOME")
         or os.getenv("HERMES_HOME")
+        or os.getenv("HADES_HOME")
     )
     if not hermes_home:
         return None

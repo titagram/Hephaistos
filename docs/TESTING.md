@@ -17,7 +17,7 @@ scripts/run_tests.sh tests/gateway/
 
 Evidenza: `scripts/run_tests.sh` dice di usarlo al posto di `pytest` diretto.
 Il runner:
-- attiva `.venv`, `venv` o `$HOME/.hades/hades-agent/venv`;
+- attiva `.venv`, `venv` o `$HOME/.hermes/hades-agent/venv`;
 - usa `scripts/run_tests_parallel.py`;
 - esegue un subprocess pytest per file;
 - imposta `TZ=UTC`, `LANG=C.UTF-8`, `PYTHONHASHSEED=0`;

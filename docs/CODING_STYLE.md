@@ -43,7 +43,7 @@ Questo documento descrive lo stile reale osservato, non uno stile ideale.
   `npm run --prefix web test`,
   `npm run --prefix ui-tui lint`.
 - Per regressioni su configurazione, filesystem, security boundary o remote
-  backend, evitare solo mock quando un test reale con temp `HADES_HOME` e
+  backend, evitare solo mock quando un test reale con temp `HERMES_HOME` e
   import reali e fattibile.
 
 ## Pattern Da Copiare

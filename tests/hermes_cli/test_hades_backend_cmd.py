@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+
+def test_backend_setup_registers_agent_and_persists_derived_token(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli.config import load_config
+
+    class FakeClient:
+        def __init__(self, base_url, token, **kwargs):
+            self.base_url = base_url
+            self.token = token
+
+        def verify_token(self, *, project_id):
+            assert self.token == "bootstrap-token"
+            return {"project_id": project_id, "capabilities": {"memory": True}}
+
+        def register_agent(self, **payload):
+            assert payload["project_id"] == "proj_1"
+            assert payload["label"] == "dev-box"
+            return {
+                "agent_id": payload["agent_id"],
+                "agent_token": "derived-token",
+                "capabilities": {"memory": True, "jobs": True},
+            }
+
+    monkeypatch.setattr(cmd, "HadesBackendClient", FakeClient)
+    monkeypatch.setattr(cmd, "_detect_default_capabilities", lambda: ["read_files"])
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="setup",
+            url="https://backend.example",
+            project_token="bootstrap-token",
+            project_id="proj_1",
+            label="dev-box",
+            non_interactive=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    config = load_config()
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+
+    assert rc == 0
+    assert "Backend setup complete" in output
+    assert config["backend"]["base_url"] == "https://backend.example"
+    assert config["backend"]["default_project_id"] == "proj_1"
+    assert config["memory"]["provider"] == "hades_backend"
+    assert "derived-token" in env_text
+    assert "bootstrap-token" not in env_text
+
+
+def test_project_link_uses_backend_binding_and_stores_redacted_path(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import projects_db as pdb
+    import hermes_cli.projects_cmd as projects_cmd
+
+    with pdb.connect_closing() as conn:
+        pdb.create_project(conn, name="Demo", folders=[str(tmp_path)])
+
+    class FakeClient:
+        def bind_workspace(self, **payload):
+            assert payload["project_id"] == "backend_proj"
+            assert payload["local_project_id"].startswith("p_")
+            assert payload["display_path"].startswith("~") or payload["display_path"] == str(tmp_path)
+            return {"workspace_binding_id": "wb_backend_1"}
+
+    monkeypatch.setattr(projects_cmd, "_backend_client_from_config", lambda: FakeClient())
+    monkeypatch.setattr(projects_cmd, "_default_backend_agent", lambda: SimpleNamespace(agent_id="agent_1", project_id="backend_proj"))
+
+    rc = projects_cmd.projects_command(
+        SimpleNamespace(
+            project_action="link",
+            project="demo",
+            path=str(tmp_path),
+            backend_project_id=None,
+            yes=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Linked demo" in output
+
+
+def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("hello\napi_key=secret-token-123\n", encoding="utf-8")
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.statuses = []
+            self.results = []
+
+        def pull_jobs(self, **payload):
+            assert payload["workspace_binding_id"] == "wb_1"
+            return {
+                "jobs": [
+                    {
+                        "job_id": "job_1",
+                        "capability": "read_files",
+                        "payload": {"paths": ["README.md"], "max_bytes": 200},
+                    }
+                ]
+            }
+
+        def update_job_status(self, job_id, **payload):
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+        def submit_job_result(self, job_id, **payload):
+            self.results.append((job_id, payload))
+            return {}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="sync"))
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_1")
+
+    assert rc == 0
+    assert "completed 1" in output
+    assert job is not None
+    assert job.status == "completed"
+    assert job.result is not None
+    assert "secret-token-123" not in str(job.result)
+    assert [status for _, status, _ in fake.statuses] == ["received", "started"]
+    assert fake.results[0][1]["status"] == "completed"
+
+
+def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        proposal = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="memory_write",
+            summary="Use /api/hades/v1 for backend calls",
+            provenance={"source": "test"},
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.proposals = []
+
+        def memory_snapshot(self, **payload):
+            assert payload["workspace_binding_id"] == "wb_1"
+            return {
+                "version": "mem_v2",
+                "items": [{"summary": "Shared project context", "memory_id": "m_1"}],
+            }
+
+        def create_memory_proposal(self, **payload):
+            self.proposals.append(payload)
+            assert payload["local_proposal_id"] == proposal.id
+            return {"status": "accepted", "reason": "auto_accepted"}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="sync"))
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        cache = hdb.get_memory_cache(conn, "wb_1")
+        proposals = hdb.list_memory_proposals(conn)
+        summary = hdb.get_sync_state(conn, "last_sync_summary")
+
+    assert rc == 0
+    assert "memory 1" in output
+    assert cache is not None
+    assert cache.version == "mem_v2"
+    assert cache.items[0]["summary"] == "Shared project context"
+    assert proposals[0].id == proposal.id
+    assert proposals[0].status == "accepted"
+    assert proposals[0].reason == "auto_accepted"
+    assert fake.proposals[0]["summary"] == "Use /api/hades/v1 for backend calls"
+    assert summary["memory_snapshots"] == 1
+    assert summary["proposals_synced"] == 1
+
+
+def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def pull_jobs(self, **payload):
+            raise RuntimeError("backend token=super-secret-token is unavailable")
+
+    monkeypatch.setattr(runtime, "client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="sync"))
+
+    stderr = capsys.readouterr().err
+    with hdb.connect_closing() as conn:
+        last_error = hdb.get_sync_state(conn, "last_sync_error")
+
+    assert rc == 1
+    assert "super-secret-token" not in stderr
+    assert last_error is not None
+    assert last_error["workspace_binding_id"] == "wb_1"
+    assert "super-secret-token" not in str(last_error)

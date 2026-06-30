@@ -26,6 +26,15 @@ backward-compatibility e una finestra in cui vecchio e nuovo nome convivono.
 - Home directory e storage: `~/.hermes`, chiavi DB, file marker, cache,
   sessioni e nomi di campo persistiti con prefisso `hermes` restano invariati
   finche' non esiste una migrazione idempotente.
+- Home runtime primaria: `HERMES_HOME` resta il contratto runtime e storage
+  primario. `HADES_HOME` puo' essere accettata solo come alias/fallback di
+  compatibilita' per nuove superfici Hades: it must not override `HERMES_HOME`
+  and it must not create a second root. La documentazione non deve presentare
+  `HADES_HOME` come contratto di default ne' associarla a `~/.hades` o a
+  `%LOCALAPPDATA%\hades`.
+- Default storage: su POSIX il default resta `~/.hermes`; su Windows nativo il
+  default resta `%LOCALAPPDATA%\hermes`. I profili restano isolati sotto
+  `<root>/profiles/<name>` e non ereditano live dal profilo default.
 - Wire/API/plugin contracts: header, custom id, callback id, slug, topic,
   package extra, plugin identifier e deep link esistenti con nome Hermes restano
   accettati. Esempi: `X-Hermes-Session-Key`, `hermes_approve_once`, `/hermes`,
@@ -36,6 +45,9 @@ backward-compatibility e una finestra in cui vecchio e nuovo nome convivono.
 - Integrazioni esterne gia' pubblicate o gestite da package manager possono
   mantenere nomi Hermes nelle istruzioni strettamente necessarie alla
   compatibilita' con quell'integrazione.
+- Sorgenti community/upstream di skill e plugin restano compatibili e possono
+  restare abilitate. Non vanno descritte come "ufficiali Hades" salvo quando
+  sono curate esplicitamente dalla fork.
 
 ## Regole Operative
 

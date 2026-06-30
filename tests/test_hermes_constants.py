@@ -31,41 +31,54 @@ class TestGetDefaultHermesRoot:
     """Tests for get_default_hermes_root() — Docker/custom deployment awareness."""
 
     def test_no_hermes_home_returns_native(self, tmp_path, monkeypatch):
-        """When neither HADES_HOME nor HERMES_HOME is set, returns ~/.hades."""
+        """When neither HERMES_HOME nor HADES_HOME is set, returns ~/.hermes."""
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.delenv("HADES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        assert get_default_hermes_root() == tmp_path / ".hades"
+        assert get_default_hermes_root() == tmp_path / ".hermes"
 
     def test_hermes_home_is_native(self, tmp_path, monkeypatch):
-        """When HADES_HOME = ~/.hades, returns ~/.hades."""
-        native = tmp_path / ".hades"
+        """When HERMES_HOME = ~/.hermes, returns ~/.hermes."""
+        native = tmp_path / ".hermes"
         native.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.delenv("HERMES_HOME", raising=False)
-        monkeypatch.setenv("HADES_HOME", str(native))
+        monkeypatch.delenv("HADES_HOME", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(native))
         assert get_default_hermes_root() == native
 
     def test_hermes_home_is_profile(self, tmp_path, monkeypatch):
-        """When HADES_HOME is a profile under ~/.hades, returns ~/.hades."""
-        native = tmp_path / ".hades"
+        """When HERMES_HOME is a profile under ~/.hermes, returns ~/.hermes."""
+        native = tmp_path / ".hermes"
         profile = native / "profiles" / "coder"
         profile.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.delenv("HERMES_HOME", raising=False)
-        monkeypatch.setenv("HADES_HOME", str(profile))
+        monkeypatch.delenv("HADES_HOME", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(profile))
         assert get_default_hermes_root() == native
 
-    def test_legacy_hermes_home_is_still_accepted(self, tmp_path, monkeypatch):
-        """HERMES_HOME remains a compatibility alias while HADES_HOME is primary."""
-        legacy = tmp_path / ".hermes"
-        legacy.mkdir()
+    def test_hades_home_alias_is_accepted_when_hermes_home_unset(self, tmp_path, monkeypatch):
+        """HADES_HOME remains a compatibility alias when HERMES_HOME is unset."""
+        alias = tmp_path / "alias-root"
+        alias.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.delenv("HADES_HOME", raising=False)
-        monkeypatch.setenv("HERMES_HOME", str(legacy))
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setenv("HADES_HOME", str(alias))
 
-        assert get_default_hermes_root() == legacy
+        assert get_default_hermes_root() == alias
+
+    def test_hermes_home_wins_over_hades_home(self, tmp_path, monkeypatch):
+        """HERMES_HOME is the primary runtime contract when both vars are set."""
+        primary = tmp_path / "primary"
+        alias = tmp_path / "alias"
+        primary.mkdir()
+        alias.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(primary))
+        monkeypatch.setenv("HADES_HOME", str(alias))
+
+        assert get_default_hermes_root() == primary
+        assert get_hermes_home() == primary
 
     def test_hermes_home_is_docker(self, tmp_path, monkeypatch):
         """When HERMES_HOME points outside ~/.hermes (Docker), returns HERMES_HOME."""
@@ -94,7 +107,7 @@ class TestGetDefaultHermesRoot:
         assert get_default_hermes_root() == docker_root
 
     def test_no_hermes_home_returns_localappdata_root_on_windows(self, tmp_path, monkeypatch):
-        """Native Windows falls back to %LOCALAPPDATA%\\hades, not ~/.hades."""
+        """Native Windows falls back to %LOCALAPPDATA%\\hermes."""
         local_appdata = tmp_path / "LocalAppData"
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.delenv("HADES_HOME", raising=False)
@@ -102,10 +115,10 @@ class TestGetDefaultHermesRoot:
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "Home")
         monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
 
-        assert get_default_hermes_root() == local_appdata / "hades"
+        assert get_default_hermes_root() == local_appdata / "hermes"
 
     def test_no_hermes_home_uses_windows_path_when_localappdata_missing(self, tmp_path, monkeypatch):
-        """Windows fallback still uses AppData/Local/hades without LOCALAPPDATA."""
+        """Windows fallback still uses AppData/Local/hermes without LOCALAPPDATA."""
         home = tmp_path / "Home"
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.delenv("HADES_HOME", raising=False)
@@ -113,14 +126,14 @@ class TestGetDefaultHermesRoot:
         monkeypatch.setattr(Path, "home", lambda: home)
         monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
 
-        assert get_default_hermes_root() == home / "AppData" / "Local" / "hades"
+        assert get_default_hermes_root() == home / "AppData" / "Local" / "hermes"
 
 
 class TestGetHermesHome:
     """Tests for get_hermes_home() platform-aware fallback."""
 
     def test_windows_fallback_uses_localappdata(self, tmp_path, monkeypatch):
-        """When HADES_HOME/HERMES_HOME are unset on Windows, use %LOCALAPPDATA%\\hades."""
+        """When HERMES_HOME/HADES_HOME are unset on Windows, use %LOCALAPPDATA%\\hermes."""
         local_appdata = tmp_path / "LocalAppData"
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.delenv("HADES_HOME", raising=False)
@@ -129,7 +142,36 @@ class TestGetHermesHome:
         monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
         monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", False)
 
-        assert get_hermes_home() == local_appdata / "hades"
+        assert get_hermes_home() == local_appdata / "hermes"
+
+    def test_posix_fallback_uses_dot_hermes(self, tmp_path, monkeypatch):
+        """When HERMES_HOME/HADES_HOME are unset on POSIX, use ~/.hermes."""
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(hermes_constants.sys, "platform", "darwin")
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", False)
+
+        assert get_hermes_home() == tmp_path / ".hermes"
+
+    def test_hades_home_alias_used_when_hermes_home_unset(self, tmp_path, monkeypatch):
+        alias = tmp_path / "alias-home"
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setenv("HADES_HOME", str(alias))
+
+        assert get_hermes_home() == alias
+
+    def test_equivalent_hades_home_alias_does_not_warn(self, tmp_path, monkeypatch, capsys):
+        """Equivalent HERMES_HOME/HADES_HOME paths are one root, not a conflict."""
+        primary = tmp_path / "primary"
+        (primary / "sub").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(primary))
+        monkeypatch.setenv("HADES_HOME", str(primary / "sub" / ".."))
+        monkeypatch.setattr(hermes_constants, "_home_env_conflict_warned", False)
+
+        assert get_hermes_home() == primary
+        captured = capsys.readouterr()
+        assert "using HERMES_HOME" not in captured.err
 
 
 class TestHermesManagedNode:

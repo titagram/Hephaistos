@@ -35,8 +35,8 @@ una lista non e esaustiva, e marcata come tale.
 
 6. Gateway, delivery e automazioni
    - Evidenza: `gateway/run.py`, `gateway/platforms/`, `plugins/platforms/`.
-   - Evidenza: `cron/jobs.py` salva job in `$HADES_HOME/cron/jobs.json` e
-     output in `$HADES_HOME/cron/output/...`.
+   - Evidenza: `cron/jobs.py` salva job in `$HERMES_HOME/cron/jobs.json` e
+     output in `$HERMES_HOME/cron/output/...`.
    - Evidenza: `cron/scheduler_provider.py` separa trigger provider da
      esecuzione/delivery.
 

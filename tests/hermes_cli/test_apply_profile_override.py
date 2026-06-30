@@ -16,10 +16,13 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 
 def _run_apply_profile_override(
     tmp_path, monkeypatch, *, hermes_home: str | None, active_profile: str | None,
+    hades_home: str | None = None,
     argv: list[str] | None = None,
 ):
     """Run _apply_profile_override in isolation.
@@ -37,10 +40,12 @@ def _run_apply_profile_override(
         (hermes_root / "profiles" / active_profile).mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HADES_HOME", raising=False)
     if hermes_home is not None:
         monkeypatch.setenv("HERMES_HOME", hermes_home)
-    else:
-        monkeypatch.delenv("HERMES_HOME", raising=False)
+    if hades_home is not None:
+        monkeypatch.setenv("HADES_HOME", hades_home)
 
     monkeypatch.setattr(sys, "argv", argv or ["hermes", "gateway", "start"])
 
@@ -124,6 +129,64 @@ class TestApplyProfileOverrideHermesHomeGuard:
 
         assert result is not None
         assert "coder" in result
+        assert os.environ.get("HADES_HOME") == result
+
+    def test_hades_home_alias_only_root_reads_active_profile_and_sets_both_vars(
+        self, tmp_path, monkeypatch
+    ):
+        """Alias-only HADES_HOME acts as the root and profile redirect exports both names."""
+        hermes_root = tmp_path / ".hermes"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            hades_home=str(hermes_root),
+            active_profile="coder",
+        )
+
+        expected = str(hermes_root / "profiles" / "coder")
+        assert result == expected
+        assert os.environ.get("HADES_HOME") == expected
+
+    def test_hermes_home_wins_over_conflicting_hades_home(self, tmp_path, monkeypatch):
+        """When both vars differ, HERMES_HOME is the profile root authority."""
+        primary_root = tmp_path / "primary"
+        alias_root = tmp_path / "alias"
+        profile_dir = primary_root / "profiles" / "coder"
+        profile_dir.mkdir(parents=True)
+        alias_profile = alias_root / "profiles" / "coder"
+        alias_profile.mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(primary_root))
+        monkeypatch.setenv("HADES_HOME", str(alias_root))
+        monkeypatch.setattr(sys, "argv", ["hermes", "-p", "coder", "gateway", "start"])
+
+        from hermes_cli.main import _apply_profile_override
+        _apply_profile_override()
+
+        assert os.environ.get("HERMES_HOME") == str(profile_dir)
+        assert os.environ.get("HADES_HOME") == str(profile_dir)
+
+    def test_profile_home_env_aligns_conflicting_hades_alias(self, tmp_path, monkeypatch):
+        """A trusted profile HERMES_HOME still normalizes the HADES_HOME alias."""
+        profile_dir = tmp_path / "primary" / "profiles" / "coder"
+        alias_profile_dir = tmp_path / "alias" / "profiles" / "other"
+        profile_dir.mkdir(parents=True)
+        alias_profile_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+        monkeypatch.setenv("HADES_HOME", str(alias_profile_dir))
+        monkeypatch.setattr(sys, "argv", ["hermes", "gateway", "start"])
+
+        from hermes_cli.main import _apply_profile_override
+        _apply_profile_override()
+
+        assert os.environ.get("HERMES_HOME") == str(profile_dir)
+        assert os.environ.get("HADES_HOME") == str(profile_dir)
 
     def test_sudo_explicit_profile_resolves_invoking_users_profile(self, tmp_path, monkeypatch):
         """sudo elias ... should resolve `-p elias` under SUDO_USER, not root."""
@@ -136,6 +199,7 @@ class TestApplyProfileOverrideHermesHomeGuard:
         monkeypatch.setattr(Path, "home", lambda: root_home)
         monkeypatch.setenv("SUDO_USER", "hermes")
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
         monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
         monkeypatch.setattr(sys, "argv", ["hermes", "-p", "elias", "gateway", "install", "--system"])
 
@@ -147,7 +211,39 @@ class TestApplyProfileOverrideHermesHomeGuard:
         _apply_profile_override()
 
         assert os.environ.get("HERMES_HOME") == str(profile_dir)
+        assert os.environ.get("HADES_HOME") == str(profile_dir)
         assert sys.argv == ["hermes", "gateway", "install", "--system"]
+
+    def test_sudo_explicit_profile_does_not_use_hades_profile_root(
+        self, tmp_path, monkeypatch
+    ):
+        """sudo profile lookup must not create/select a separate ~/.hades root."""
+        root_home = tmp_path / "root"
+        user_home = tmp_path / "home" / "hermes"
+        legacy_profile_dir = user_home / ".hades" / "profiles" / "elias"
+        legacy_profile_dir.mkdir(parents=True, exist_ok=True)
+        (root_home / ".hermes").mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(Path, "home", lambda: root_home)
+        monkeypatch.setenv("SUDO_USER", "hermes")
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
+        monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+        monkeypatch.setattr(sys, "argv", ["hermes", "-p", "elias", "gateway", "install", "--system"])
+
+        import pwd
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir=str(user_home)))
+
+        from hermes_cli.main import _apply_profile_override
+        with pytest.raises(SystemExit) as exc_info:
+            _apply_profile_override()
+
+        assert exc_info.value.code == 1
+        assert os.environ.get("HERMES_HOME") is None
+        assert os.environ.get("HADES_HOME") is None
+        assert sys.argv == ["hermes", "-p", "elias", "gateway", "install", "--system"]
 
     def test_hermes_home_unset_default_profile_no_redirect(self, tmp_path, monkeypatch):
         """active_profile=default must not redirect HERMES_HOME."""
@@ -156,6 +252,7 @@ class TestApplyProfileOverrideHermesHomeGuard:
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["hermes", "gateway", "start"])
         (hermes_root / "active_profile").write_text("default")
 
@@ -191,6 +288,7 @@ class TestApplyProfileOverrideHermesHomeGuard:
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", list(argv))
 
         from hermes_cli.main import _apply_profile_override
@@ -313,6 +411,7 @@ class TestSupervisedChildIgnoresStickyProfile:
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
         monkeypatch.setenv("HERMES_S6_SUPERVISED_CHILD", "1")
         monkeypatch.setattr(sys, "argv", ["hermes", "-p", "coder", "gateway", "run"])
 
@@ -322,4 +421,3 @@ class TestSupervisedChildIgnoresStickyProfile:
         result = os.environ.get("HERMES_HOME")
         assert result is not None
         assert result.endswith("coder")
-
