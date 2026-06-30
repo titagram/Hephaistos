@@ -71,8 +71,9 @@ DEFAULT_SCOPE = "openid profile email"
 DEFAULT_DASHBOARD_HOST = "https://app.photon.codes"
 DEFAULT_SPECTRUM_HOST = "https://spectrum.photon.codes"
 
-# Default name of the project Hermes provisions for the operator.
-DEFAULT_PROJECT_NAME = "Hermes Agent"
+# Default display name of the project Hades provisions for the operator.
+DEFAULT_PROJECT_NAME = "Hades Agent"
+LEGACY_PROJECT_NAME = "Hermes Agent"
 
 # Polling defaults per RFC 8628.  Photon overrides via `interval` /
 # `expires_in` in the device-code response — those win.
@@ -649,12 +650,30 @@ def list_projects(token: str) -> List[Dict[str, Any]]:
     return _unwrap_list(resp.json())
 
 
+def _normalized_project_name(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def _project_lookup_names(name: str) -> list[str]:
+    names = [name]
+    if _normalized_project_name(name) == _normalized_project_name(DEFAULT_PROJECT_NAME):
+        names.append(LEGACY_PROJECT_NAME)
+    return names
+
+
 def find_project_by_name(token: str, name: str) -> Optional[Dict[str, Any]]:
-    """Return the first project whose name matches (case-insensitive)."""
-    target = (name or "").strip().lower()
-    for proj in list_projects(token):
-        if (proj.get("name") or "").strip().lower() == target:
-            return proj
+    """Return the first project whose name matches (case-insensitive).
+
+    The default project display name changed from "Hermes Agent" to
+    "Hades Agent". Treat the legacy name as an alias for the default lookup so
+    setup reuses existing Photon projects instead of duplicating them.
+    """
+    projects = list_projects(token)
+    for candidate in _project_lookup_names(name):
+        target = _normalized_project_name(candidate)
+        for proj in projects:
+            if _normalized_project_name(proj.get("name") or "") == target:
+                return proj
     return None
 
 
@@ -986,7 +1005,7 @@ def print_credential_summary(emit: Any = print) -> None:
     labels: Dict[str, str] = {}
     labels["device_token"] = (
         "✓ stored" if load_photon_token()
-        else "✗ missing (run `hermes photon setup`)"
+        else "✗ missing (run `hades photon setup`)"
     )
     sid, sec = load_project_credentials()
     # Dashboard id and Spectrum id are the same value now (ids unified), so
@@ -995,10 +1014,10 @@ def print_credential_summary(emit: Any = print) -> None:
     labels["project_key"] = "✓ stored" if sec else "✗ missing"
     phone, assigned = load_user_numbers()
     labels["phone_number"] = (
-        phone if phone else "✗ missing (run `hermes photon setup --phone ...`)"
+        phone if phone else "✗ missing (run `hades photon setup --phone ...`)"
     )
     labels["assigned_phone_number"] = (
-        assigned if assigned else "✗ missing (run `hermes photon setup`)"
+        assigned if assigned else "✗ missing (run `hades photon setup`)"
     )
 
     rows = [
@@ -1018,7 +1037,7 @@ def credential_summary() -> Dict[str, str]:
     def _present_token() -> str:
         return (
             "✓ stored" if load_photon_token()
-            else "✗ missing (run `hermes photon setup`)"
+            else "✗ missing (run `hades photon setup`)"
         )
 
     def _present_project_id() -> str:
@@ -1031,11 +1050,11 @@ def credential_summary() -> Dict[str, str]:
 
     def _present_phone() -> str:
         phone, _assigned = load_user_numbers()
-        return phone or "✗ missing (run `hermes photon setup --phone ...`)"
+        return phone or "✗ missing (run `hades photon setup --phone ...`)"
 
     def _present_assigned_phone() -> str:
         _phone, assigned = load_user_numbers()
-        return assigned or "✗ missing (run `hermes photon setup`)"
+        return assigned or "✗ missing (run `hades photon setup`)"
 
     return {
         "device_token": _present_token(),

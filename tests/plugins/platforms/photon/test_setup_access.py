@@ -106,5 +106,58 @@ def test_setup_hint_uses_gateway_service_command(monkeypatch: pytest.MonkeyPatch
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Start the gateway:  hermes gateway start" in out
+    assert "Start the gateway:  hades gateway start" in out
     assert "--platform photon" not in out
+
+
+def test_setup_reuses_legacy_hermes_agent_project_before_creating_hades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.photon_auth, "load_photon_token", lambda: "token")
+    monkeypatch.setattr(cli.photon_auth, "load_dashboard_project_id", lambda: None)
+    monkeypatch.setattr(
+        cli.photon_auth,
+        "list_projects",
+        lambda token: [{"id": "legacy-project", "name": "Hermes Agent"}],
+    )
+
+    def fail_create(*args, **kwargs):
+        pytest.fail("setup should reuse the legacy Hermes Agent project")
+
+    stored: dict[str, str] = {}
+    monkeypatch.setattr(cli.photon_auth, "create_project", fail_create)
+    monkeypatch.setattr(
+        cli.photon_auth,
+        "regenerate_project_secret",
+        lambda token, dashboard_id: "secret_123",
+    )
+    monkeypatch.setattr(
+        cli.photon_auth,
+        "store_project_credentials",
+        lambda **kwargs: stored.update(kwargs),
+    )
+    monkeypatch.setattr(
+        cli.photon_auth,
+        "register_user_if_absent",
+        lambda *args, **kwargs: ({"id": "user_123", "phoneNumber": "+15551234567"}, True),
+    )
+    monkeypatch.setattr(cli.photon_auth, "user_assigned_line", lambda user: "+15557654321")
+    monkeypatch.setattr(cli.photon_auth, "store_user_numbers", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "_install_sidecar", lambda: 0)
+
+    rc = cli._cmd_setup(
+        argparse.Namespace(
+            project_name=None,
+            phone="+15551234567",
+            first_name=None,
+            last_name=None,
+            email=None,
+            no_browser=True,
+            skip_sidecar_install=False,
+        )
+    )
+
+    assert rc == 0
+    assert stored["dashboard_project_id"] == "legacy-project"
+    assert stored["spectrum_project_id"] == "legacy-project"
+    assert stored["name"] == "Hermes Agent"

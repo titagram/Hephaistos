@@ -353,11 +353,12 @@ def test_picker_hints_adds_warning_to_skeleton_rows():
         assert "auth_type" in row
         assert "warning" in row
         # api_key providers get "paste X to activate" / others get the
-        # hermes model fallback.
+        # hades model fallback.
         assert (
             row["warning"].startswith("paste ")
-            or row["warning"].startswith("run `hermes model`")
+            or row["warning"].startswith("run `hades model`")
         )
+        assert not row["warning"].startswith("run `hermes model`")
 
 
 def test_picker_hints_api_key_warning_format():
@@ -766,4 +767,3 @@ def test_list_authenticated_providers_refresh_busts_cache():
         assert clear.call_count == 0
         model_switch.list_authenticated_providers(refresh=True)
         assert clear.call_count == 1
-

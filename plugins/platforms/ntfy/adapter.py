@@ -1,12 +1,12 @@
-"""ntfy platform adapter (Hermes plugin).
+"""ntfy platform adapter (Hades plugin).
 
 Subscribes to a topic on ntfy.sh or any self-hosted ntfy server via
 HTTP streaming (``/json`` endpoint with ``poll=false``) and publishes
 replies via HTTP POST. No external SDK — only httpx, which is already
-a Hermes dependency.
+a Hades dependency.
 
-This adapter ships as a Hermes platform plugin under
-``plugins/platforms/ntfy/``. The Hermes plugin loader scans the
+This adapter ships as a Hades platform plugin under
+``plugins/platforms/ntfy/``. The Hades plugin loader scans the
 directory at startup, calls :func:`register`, and the platform becomes
 available to ``gateway/run.py`` and ``tools/send_message_tool`` through
 the registry — no edits to core files required.
@@ -18,8 +18,8 @@ Configuration in config.yaml::
         enabled: true
         extra:
           server: "https://ntfy.sh"       # or self-hosted URL
-          topic: "hermes-in"              # subscribe topic (incoming)
-          publish_topic: "hermes-out"     # optional — defaults to topic
+          topic: "hades-in"              # subscribe topic (incoming)
+          publish_topic: "hades-out"      # optional — defaults to topic
           token: "..."                    # optional Bearer / Basic auth token
           markdown: true                  # optional — enable markdown (default: false)
 
@@ -553,7 +553,7 @@ async def _standalone_send(
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
+    """Plugin entry point — called by the Hades plugin system at startup."""
     ctx.register_platform(
         name="ntfy",
         label="ntfy",
@@ -562,7 +562,7 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["NTFY_TOPIC"],
-        install_hint="pip install httpx   # already a Hermes dependency",
+        install_hint="pip install httpx   # already a Hades dependency",
         # Env-driven auto-configuration: seeds PlatformConfig.extra so
         # env-only setups show up in `hermes gateway status` without
         # instantiating the HTTP client.

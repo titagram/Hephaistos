@@ -4846,6 +4846,16 @@ class TestGatewayBusyReadout:
 # ---------------------------------------------------------------------------
 
 
+def test_builtin_dashboard_themes_use_hades_visible_labels():
+    from hermes_cli.web_server import _BUILTIN_DASHBOARD_THEMES
+
+    by_name = {theme["name"]: theme for theme in _BUILTIN_DASHBOARD_THEMES}
+    assert by_name["default"]["label"] == "Hades Teal"
+    assert by_name["default-large"]["label"] == "Hades Teal (Large)"
+    assert all("Hermes" not in theme["label"] for theme in _BUILTIN_DASHBOARD_THEMES)
+    assert all("Hermes" not in theme["description"] for theme in _BUILTIN_DASHBOARD_THEMES)
+
+
 class TestNormaliseThemeDefinition:
     """Tests for _normalise_theme_definition() — parses YAML theme files."""
 

@@ -59,6 +59,8 @@ class TestHandleUpdateCommand:
             result = await runner._handle_update_command(event)
 
         assert "managed by Homebrew" in result
+        assert "Cannot update Hades Agent" in result
+        assert "Hermes Agent" not in result
         assert "brew upgrade hermes-agent" in result
         mock_popen.assert_not_called()  # must return before reaching Popen
 
@@ -126,7 +128,8 @@ class TestHandleUpdateCommand:
             result = await runner._handle_update_command(event)
 
         assert "Could not locate" in result
-        assert "hermes update" in result
+        assert "`hades` or `hermes`" in result
+        assert "hades update" in result
 
     @pytest.mark.asyncio
     async def test_fallback_to_sys_executable(self, tmp_path):
@@ -153,18 +156,37 @@ class TestHandleUpdateCommand:
              patch("subprocess.Popen", mock_popen):
             result = await runner._handle_update_command(event)
 
-        assert "Starting Hermes update" in result
+        assert "Starting Hades update" in result
         call_args = mock_popen.call_args[0][0]
         # The update_cmd uses sys.executable -m hermes_cli.main
         joined = " ".join(call_args) if isinstance(call_args, list) else call_args
         assert "hermes_cli.main" in joined or "bash" in call_args[0]
 
     @pytest.mark.asyncio
-    async def test_resolve_hermes_bin_prefers_which(self, tmp_path):
-        """_resolve_hermes_bin returns argv parts from shutil.which when available."""
+    async def test_resolve_hermes_bin_prefers_hades(self, tmp_path):
+        """_resolve_hermes_bin prefers the rebranded command when available."""
         from gateway.run import _resolve_hermes_bin
 
-        with patch("shutil.which", return_value="/custom/path/hermes"):
+        def fake_which(name):
+            return {
+                "hades": "/custom/path/hades",
+                "hermes": "/custom/path/hermes",
+            }.get(name)
+
+        with patch("shutil.which", side_effect=fake_which):
+            result = _resolve_hermes_bin()
+
+        assert result == ["/custom/path/hades"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_hermes_bin_falls_back_to_legacy_hermes(self, tmp_path):
+        """_resolve_hermes_bin still accepts the legacy command as a bridge."""
+        from gateway.run import _resolve_hermes_bin
+
+        def fake_which(name):
+            return "/custom/path/hermes" if name == "hermes" else None
+
+        with patch("shutil.which", side_effect=fake_which):
             result = _resolve_hermes_bin()
 
         assert result == ["/custom/path/hermes"]
@@ -209,9 +231,16 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
+        def fake_which(name):
+            return {
+                "hades": None,
+                "hermes": "/usr/bin/hermes",
+                "setsid": "/usr/bin/setsid",
+            }.get(name)
+
         with patch("gateway.run._hermes_home", hermes_home), \
              patch("gateway.run.__file__", fake_file), \
-             patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
+             patch("shutil.which", side_effect=fake_which), \
              patch("subprocess.Popen"):
             result = await runner._handle_update_command(event)
 
@@ -245,9 +274,16 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
+        def fake_which(name):
+            return {
+                "hades": None,
+                "hermes": "/usr/bin/hermes",
+                "setsid": "/usr/bin/setsid",
+            }.get(name)
+
         with patch("gateway.run._hermes_home", hermes_home), \
              patch("gateway.run.__file__", fake_file), \
-             patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
+             patch("shutil.which", side_effect=fake_which), \
              patch("subprocess.Popen"):
             await runner._handle_update_command(event)
 
@@ -282,7 +318,7 @@ class TestHandleUpdateCommand:
         assert call_args[0] == "/usr/bin/setsid"
         assert call_args[1] == "bash"
         assert ".update_exit_code" in call_args[-1]
-        assert "Starting Hermes update" in result
+        assert "Starting Hades update" in result
 
     @pytest.mark.asyncio
     async def test_fallback_when_no_setsid(self, tmp_path):
@@ -322,7 +358,7 @@ class TestHandleUpdateCommand:
         # start_new_session=True should be in kwargs
         call_kwargs = mock_popen.call_args[1]
         assert call_kwargs.get("start_new_session") is True
-        assert "Starting Hermes update" in result
+        assert "Starting Hades update" in result
 
     @pytest.mark.asyncio
     async def test_popen_failure_cleans_up(self, tmp_path):

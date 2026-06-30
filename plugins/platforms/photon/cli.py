@@ -45,7 +45,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="First-time setup (device login + project + user + sidecar)",
     )
     p_setup.add_argument("--project-name", default=None,
-                         help="Project name (default: 'Hermes Agent')")
+                         help="Project name (default: 'Hades Agent')")
     p_setup.add_argument("--phone", default=None,
                          help="Your E.164 phone number (e.g. +15551234567)")
     p_setup.add_argument("--first-name", default=None)
@@ -141,8 +141,9 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     else:
         print("[1/5] Reusing existing Photon token")
 
-    # 2. Find or create the "Hermes Agent" project.
+    # 2. Find or create the "Hades Agent" project.
     name = args.project_name or photon_auth.DEFAULT_PROJECT_NAME
+    project_record_name = name
     dashboard_id = photon_auth.load_dashboard_project_id()
     try:
         if dashboard_id:
@@ -151,7 +152,8 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             existing = photon_auth.find_project_by_name(token, name)
             if existing and existing.get("id"):
                 dashboard_id = existing["id"]
-                print(f"[2/5] Found existing project '{name}'")
+                project_record_name = existing.get("name") or name
+                print(f"[2/5] Found existing project '{project_record_name}'")
             else:
                 print(f"[2/5] Creating Photon project '{name}'...")
                 created = photon_auth.create_project(token, name=name)
@@ -177,7 +179,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             spectrum_project_id=spectrum_id,
             project_secret=secret,
             dashboard_project_id=dashboard_id,
-            name=name,
+            name=project_record_name,
         )
         # spectrum_id is an opaque non-secret id; safe to show.
         print(f"  ✓ Spectrum ready (project id {spectrum_id}) — secret saved")
@@ -272,7 +274,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
     print()
     print("✓ Photon setup complete.")
-    print("  Start the gateway:  hermes gateway start")
+    print("  Start the gateway:  hades gateway start")
     return 0
 
 
@@ -312,8 +314,8 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     node_bin = os.getenv("PHOTON_NODE_BIN") or shutil.which("node")
     sidecar_installed = (_SIDECAR_DIR / "node_modules").exists()
     print(f"  node binary         : {node_bin or '✗ missing (install Node 18+)'}")
-    print(f"  sidecar deps        : {'✓ installed' if sidecar_installed else '✗ run `hermes photon install-sidecar`'}")
-    print(f"  telemetry           : {'on' if _telemetry_enabled() else 'off'} (`hermes photon telemetry on|off`)")
+    print(f"  sidecar deps        : {'✓ installed' if sidecar_installed else '✗ run `hades photon install-sidecar`'}")
+    print(f"  telemetry           : {'on' if _telemetry_enabled() else 'off'} (`hades photon telemetry on|off`)")
     return 0
 
 
@@ -352,7 +354,7 @@ def _cmd_telemetry(args: argparse.Namespace) -> int:
     state = getattr(args, "state", None)
     if state is None:
         print(f"Photon telemetry: {'on' if _telemetry_enabled() else 'off'}")
-        print("  Toggle with `hermes photon telemetry on` / `hermes photon telemetry off`.")
+        print("  Toggle with `hades photon telemetry on` / `hades photon telemetry off`.")
         return 0
     try:
         from hermes_cli.config import save_env_value
@@ -361,7 +363,7 @@ def _cmd_telemetry(args: argparse.Namespace) -> int:
         print(f"could not save PHOTON_TELEMETRY: {e}", file=sys.stderr)
         return 1
     print(f"✓ Spectrum telemetry turned {state} (PHOTON_TELEMETRY in ~/.hermes/.env)")
-    print("  Restart the gateway for the sidecar to pick it up:  hermes gateway restart")
+    print("  Restart the gateway for the sidecar to pick it up:  hades gateway restart")
     return 0
 
 
@@ -403,15 +405,15 @@ def _install_sidecar() -> int:
 # ---------------------------------------------------------------------------
 # Gateway-setup entry point
 #
-# `hermes gateway setup` discovers platforms via the registry and calls each
+# `hades gateway setup` discovers platforms via the registry and calls each
 # entry's zero-arg ``setup_fn``. Photon registers this function so it appears
 # in the unified setup wizard alongside every other channel — same onboarding
 # surface, no Photon-specific detour. It runs the identical device-login +
-# project + user + sidecar flow as ``hermes photon setup`` with interactive
+# project + user + sidecar flow as ``hades photon setup`` with interactive
 # defaults (phone is prompted when stdin is a TTY).
 
 def gateway_setup() -> None:
-    """Run Photon first-time setup from the `hermes gateway setup` wizard."""
+    """Run Photon first-time setup from the `hades gateway setup` wizard."""
     args = argparse.Namespace(
         photon_command="setup",
         project_name=None,

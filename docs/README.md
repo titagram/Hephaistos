@@ -16,6 +16,8 @@ sviluppatori nel checkout locale.
 - `docs/TESTING.md` - comandi reali di test, lint e typecheck.
 - `docs/SOURCE_OF_TRUTH.md` - priorita tra codice, docs, test e CI.
 - `docs/MAINTENANCE.md` - flusso operativo per iniziare e chiudere un task.
+- `docs/LEGACY_COMPATIBILITY.md` - policy per alias, env var, path e nomi
+  tecnici Hermes preservati dopo il rebranding Hades.
 - `docs/LOGBOOK.md` - log operativo dei cambi documentali/processuali.
 
 ## Indici Tecnici

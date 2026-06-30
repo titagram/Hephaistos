@@ -321,7 +321,7 @@ export const fr: Translations = {
     enableRuntime: "Activer",
     forceReinstall: "Forcer la réinstallation (supprimer d'abord le dossier existant)",
     headline:
-      "Découvrez, installez, activez et mettez à jour les plugins Hades (parité avec `hermes plugins`).",
+      "Découvrez, installez, activez et mettez à jour les plugins Hades (parité avec `hades plugins`).",
     identifierLabel: "URL Git ou owner/repo",
     inactive: "inactif",
     installBtn: "Installer",

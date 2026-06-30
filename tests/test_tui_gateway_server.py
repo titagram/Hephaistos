@@ -2993,6 +2993,7 @@ def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypa
 
     assert resp["result"]["ok"] is False
     assert resp["result"]["provider"] == "bedrock"
+    assert resp["result"]["error"] == "No Hades provider is configured."
 
 
 def test_setup_runtime_check_honors_requested_provider(monkeypatch):
@@ -6539,6 +6540,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
             ),
+            patch("platform.system", return_value="Linux"),
         ):
             resp = server.handle_request(
                 {

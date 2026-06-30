@@ -115,12 +115,25 @@ riepilogo setup.
   vicini a upstream per facilita' di rebase.
   Nota: audit iniziale completato con `rg`; il primo rebranding utente e'
   applicato, mentre i residui sono stati classificati come follow-up.
-- [ ] Bonifica residui Hermes nelle superfici utente ancora non coperte:
+- [x] Bonifica residui Hermes nelle superfici utente ancora non coperte:
   `hermes_cli/status.py`, `hermes_cli/config.py`, `hermes_cli/claw.py`,
   `hermes_cli/inventory.py`, dashboard/web, TUI setup copy e plugin gateway.
-- [ ] Decidere policy definitiva per compatibilita' legacy: alias `hermes`,
+  Nota: sotto-passaggi CLI, dashboard/web, TUI setup copy e plugin gateway
+  completati. Restano fuori da questa voce i contratti legacy deliberati
+  (`hermes`, `HERMES_*`, `~/.hermes`, deep link e nomi tecnici interni), da
+  decidere nella policy dedicata.
+  - [x] CLI: `hermes_cli/status.py`, `hermes_cli/config.py`,
+    `hermes_cli/claw.py`, `hermes_cli/inventory.py`.
+  - [x] Dashboard/web.
+  - [x] TUI setup copy.
+  - [x] Plugin gateway.
+- [x] Decidere policy definitiva per compatibilita' legacy: alias `hermes`,
   env var `HERMES_*`, path `~/.hermes`, deep link `hermes://` e nomi tecnici
   interni `hermes_*`.
+  Decisione: Hades e' il brand primario; i nomi Hermes gia' usati come
+  contratti runtime/storage/wire/API/CLI restano supportati e non si rinominano
+  durante bonifiche di copy. La policy completa e' in
+  `docs/LEGACY_COMPATIBILITY.md`.
 - [ ] Decidere se aggiornare o archiviare docs upstream/localizzate
   (`README.es.md`, `CONTRIBUTING.es.md`, `SECURITY.es.md`, `website/`) invece
   di lasciarle vicine a upstream.
@@ -189,9 +202,17 @@ riepilogo setup.
 
 - [ ] Stato reale della fork rispetto a upstream.
 - [ ] Branch corrente e strategia Git.
-- [ ] Presenza e stato di `.venv`.
-- [ ] Presenza di install Node locale.
-- [ ] Quali test sono ragionevoli da eseguire localmente senza setup pesante.
+- [x] Presenza e stato di `.venv`.
+  Nota: `.venv` usa Python 3.13.14; installato l'extra locale `.[dev]` per
+  rendere disponibili `pytest`, `pytest-asyncio` e `ruff`.
+- [x] Presenza di install Node locale.
+  Nota: Node v26.3.0 e npm 11.16.0 presenti; il workspace `ui-tui` installa
+  `vitest` e `typescript` tramite i manifest esistenti.
+- [x] Quali test sono ragionevoli da eseguire localmente senza setup pesante.
+  Nota: per la bonifica rebranding corrente hanno girato `scripts/run_tests.sh`
+  sui test TUI/gateway/plugin mirati, `npm run --prefix ui-tui test --
+  setupBranding.test.ts`, `npm run --prefix ui-tui typecheck`, `ruff check`
+  sui file Python toccati, `python3 scripts/docs_audit.py` e `git diff --check`.
 
 ## Note
 

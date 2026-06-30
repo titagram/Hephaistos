@@ -95,9 +95,6 @@ piano come voce non spuntata invece di tenerla solo in chat.
 
 ## Regole Per La Fase Attuale
 
-Per ora il lavoro e' in brainstorming:
-
-- non modificare codice applicativo;
 - non cambiare dipendenze, lockfile, Docker o CI;
 - non avviare refactor;
 - non fare commit o PR salvo richiesta;

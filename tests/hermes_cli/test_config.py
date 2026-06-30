@@ -150,7 +150,7 @@ class TestLoadConfigParseFailure:
             # stderr also got a user-visible message (with the ⚠️ marker so it
             # stands out at hermes startup before logging is configured)
             captured = capsys.readouterr()
-            assert "hermes config:" in captured.err
+            assert "hades config:" in captured.err
             assert str(tmp_path / "config.yaml") in captured.err
 
     def test_dedup_on_repeated_load_same_file(self, tmp_path, capsys):
@@ -162,7 +162,7 @@ class TestLoadConfigParseFailure:
 
             load_config()
             first = capsys.readouterr().err
-            assert "hermes config:" in first
+            assert "hades config:" in first
 
             load_config()
             second = capsys.readouterr().err
@@ -183,7 +183,7 @@ class TestLoadConfigParseFailure:
             (tmp_path / "config.yaml").write_text("\tstill broken differently:\n")
             load_config()
             after_edit = capsys.readouterr().err
-            assert "hermes config:" in after_edit, "edited file should re-warn"
+            assert "hades config:" in after_edit, "edited file should re-warn"
 
     def test_corrupt_config_is_backed_up(self, tmp_path, capsys):
         """A broken config.yaml is snapshotted to a timestamped .bak so the
@@ -248,6 +248,76 @@ class TestLoadConfigParseFailure:
             load_config()
 
             assert not list(tmp_path.glob("config.yaml.corrupt.*.bak"))
+
+
+def test_show_config_uses_hades_banner_and_command_hints(tmp_path, capsys):
+    from hermes_cli import config as cfg_mod
+
+    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+        cfg_mod.show_config()
+
+    output = capsys.readouterr().out
+    assert "Hades Configuration" in output
+    assert "hades config edit" in output
+    assert "hades config set <key> <value>" in output
+    assert "hades setup" in output
+    assert "Hermes Configuration" not in output
+    assert "hermes config edit" not in output
+
+
+def test_config_command_usage_uses_hades_command(capsys):
+    import argparse
+
+    from hermes_cli import config as cfg_mod
+
+    args = argparse.Namespace(config_command="set", key="model", value=None)
+
+    with pytest.raises(SystemExit):
+        cfg_mod.config_command(args)
+
+    output = capsys.readouterr().out
+    assert "Usage: hades config set <key> <value>" in output
+    assert "hades config set model anthropic/claude-sonnet-4" in output
+    assert "hades config set terminal.backend docker" in output
+    assert "hades config set OPENROUTER_API_KEY sk-or-..." in output
+    assert "Usage: hermes config set" not in output
+
+
+def test_config_fallback_guidance_uses_hades_command(monkeypatch, capsys):
+    from hermes_cli import config as cfg_mod
+
+    def _raise_load_error():
+        raise RuntimeError("broken")
+
+    monkeypatch.setattr(cfg_mod, "load_config", _raise_load_error)
+    issues = cfg_mod.validate_config_structure(config=None)
+
+    assert issues[0].hint == "Run 'hades setup' to create a valid config"
+
+    cfg_mod.print_config_warnings({"custom_providers": [{"name": "local"}]})
+    err = capsys.readouterr().err
+    assert "Run 'hades doctor' for fix suggestions." in err
+    assert "Run 'hermes doctor' for fix suggestions." not in err
+
+
+def test_update_and_managed_messages_use_hades_brand(monkeypatch):
+    from hermes_cli import config as cfg_mod
+
+    assert cfg_mod.recommended_update_command_for_method("git") == "hades update"
+
+    docker_msg = cfg_mod.format_docker_update_message()
+    assert "``hades update`` doesn't apply inside the Docker container." in docker_msg
+    assert "Hades Agent runs as a published image (nousresearch/hermes-agent)" in docker_msg
+    assert "``hermes update`` doesn't apply" not in docker_msg
+    assert "Hermes Agent runs as a published image" not in docker_msg
+
+    monkeypatch.setattr(cfg_mod, "get_managed_system", lambda: "Homebrew")
+    monkeypatch.setenv("HERMES_MANAGED", "homebrew")
+
+    managed_msg = cfg_mod.format_managed_message()
+    assert "Cannot modify this Hades installation" in managed_msg
+    assert "brew upgrade hermes-agent" in managed_msg
+    assert "Cannot modify this Hermes installation" not in managed_msg
 
 
 class TestSaveAndLoadRoundtrip:

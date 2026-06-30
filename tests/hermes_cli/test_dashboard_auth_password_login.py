@@ -411,6 +411,9 @@ class TestLoginPageRender:
             assert 'value="/sessions"' in html
             assert "<script>" in html
             assert "/auth/password-login" in html
+            assert "<title>Sign in — Hades Agent</title>" in html
+            assert "Hades Agent dashboard" in html
+            assert "Hermes Agent" not in html
         finally:
             clear_providers()
 
@@ -426,6 +429,8 @@ class TestLoginPageRender:
             # what must be absent is an actual rendered form + its script).
             assert '<form class="provider-form"' not in html
             assert "/auth/password-login" not in html
+            assert "<title>Sign in — Hades Agent</title>" in html
+            assert "Hermes Agent" not in html
         finally:
             clear_providers()
 
@@ -439,5 +444,14 @@ class TestLoginPageRender:
             assert "/auth/login?provider=stub" in html
             assert 'data-provider="testpw"' in html
             assert "<script>" in html
+        finally:
+            clear_providers()
+
+    def test_unavailable_page_uses_hades_title(self):
+        clear_providers()
+        try:
+            html = render_login_html()
+            assert "<title>Sign-in unavailable — Hades Agent</title>" in html
+            assert "Hermes Agent" not in html
         finally:
             clear_providers()

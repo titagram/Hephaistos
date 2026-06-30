@@ -328,7 +328,7 @@ export const ga: Translations = {
     enableRuntime: "Cumasaigh",
     forceReinstall: "Cuir iallach ar athshuiteáil (scrios an fillteán atá ann ar dtús)",
     headline:
-      "Faigh, suiteáil, cumasaigh agus nuashonraigh plugins Hades (paireacht le `hermes plugins`).",
+      "Faigh, suiteáil, cumasaigh agus nuashonraigh plugins Hades (paireacht le `hades plugins`).",
     identifierLabel: "URL Git nó owner/repo",
     inactive: "neamhghníomhach",
     installBtn: "Suiteáil",

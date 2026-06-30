@@ -186,6 +186,11 @@ class TestClawCommand:
         args = Namespace(claw_action=None)
         claw_mod.claw_command(args)
         captured = capsys.readouterr()
+        assert "Usage: hades claw <command> [options]" in captured.out
+        assert "Migrate settings from OpenClaw to Hades" in captured.out
+        assert "Run 'hades claw <command> --help' for options." in captured.out
+        assert "Usage: hermes claw" not in captured.out
+        assert "OpenClaw to Hermes" not in captured.out
         assert "migrate" in captured.out
         assert "cleanup" in captured.out
 
@@ -212,7 +217,11 @@ class TestCmdMigrate:
         )
         claw_mod._cmd_migrate(args)
         captured = capsys.readouterr()
+        assert "Hades — OpenClaw Migration" in captured.out
         assert "not found" in captured.out
+        assert "hades claw migrate --source /path/to/.openclaw" in captured.out
+        assert "Hermes — OpenClaw Migration" not in captured.out
+        assert "hermes claw migrate --source" not in captured.out
 
     def test_error_when_script_missing(self, tmp_path, capsys):
         openclaw_dir = tmp_path / ".openclaw"
@@ -269,6 +278,8 @@ class TestCmdMigrate:
         captured = capsys.readouterr()
         assert "Dry Run Results" in captured.out
         assert "5 skipped" in captured.out
+        assert "hades claw migrate --preset full" in captured.out
+        assert "hermes claw migrate --preset full" not in captured.out
 
     def test_execute_with_confirmation(self, tmp_path, capsys):
         openclaw_dir = tmp_path / ".openclaw"
@@ -381,6 +392,23 @@ class TestCmdMigrate:
 
         captured = capsys.readouterr()
         assert "Migration cancelled" in captured.out
+
+    def test_migration_secret_followup_uses_hades_commands(self, capsys):
+        report = {
+            "summary": {"migrated": 1, "skipped": 1, "conflict": 0, "error": 0},
+            "items": [
+                {"kind": "soul", "status": "migrated", "destination": "SOUL.md"},
+                {"kind": "provider-keys", "status": "skipped", "reason": "secrets disabled"},
+            ],
+        }
+
+        claw_mod._print_migration_report(report, dry_run=False)
+
+        output = capsys.readouterr().out
+        assert "hades claw migrate --migrate-secrets" in output
+        assert "hades config set OPENROUTER_API_KEY sk-or-v1-..." in output
+        assert "hermes claw migrate --migrate-secrets" not in output
+        assert "hermes config set OPENROUTER_API_KEY" not in output
 
     def test_execute_with_yes_skips_confirmation(self, tmp_path, capsys):
         openclaw_dir = tmp_path / ".openclaw"

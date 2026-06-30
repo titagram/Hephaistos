@@ -1,8 +1,8 @@
 """
-IRC Platform Adapter for Hermes Agent.
+IRC Platform Adapter for Hades Agent.
 
 A plugin-based gateway adapter that connects to an IRC server and relays
-messages to/from the Hermes agent.  Zero external dependencies — uses
+messages to/from the Hades agent.  Zero external dependencies — uses
 Python's stdlib asyncio for the IRC protocol.
 
 Configuration in config.yaml::
@@ -15,7 +15,7 @@ Configuration in config.yaml::
             server: irc.libera.chat
             port: 6697
             nickname: hermes-bot
-            channel: "#hermes"
+            channel: "#hades"
             use_tls: true
             server_password: ""       # optional server password
             nickserv_password: ""     # optional NickServ identification
@@ -193,7 +193,7 @@ class IRCAdapter(BasePlatformAdapter):
         if self.server_password:
             await self._send_raw(f"PASS {self.server_password}")
         await self._send_raw(f"NICK {self.nickname}")
-        await self._send_raw(f"USER {self.nickname} 0 * :Hermes Agent")
+        await self._send_raw(f"USER {self.nickname} 0 * :Hades Agent")
 
         # Start receive loop
         self._recv_task = asyncio.create_task(self._receive_loop())
@@ -231,7 +231,7 @@ class IRCAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         if self._writer and not self._writer.is_closing():
             try:
-                await self._send_raw("QUIT :Hermes Agent shutting down")
+                await self._send_raw("QUIT :Hades Agent shutting down")
                 await asyncio.sleep(0.5)
             except Exception:
                 pass
@@ -536,7 +536,7 @@ def validate_config(config) -> bool:
 
 
 def interactive_setup() -> None:
-    """Interactive `hermes gateway setup` flow for the IRC platform.
+    """Interactive `hades gateway setup` flow for the IRC platform.
 
     Lazy-imports ``hermes_cli.setup`` helpers so the plugin stays importable
     in non-CLI contexts (gateway runtime, tests).
@@ -559,7 +559,7 @@ def interactive_setup() -> None:
         if not prompt_yes_no("Reconfigure IRC?", False):
             return
 
-    print_info("Connect Hermes to an IRC network. Uses Python stdlib — no extra packages needed.")
+    print_info("Connect Hades to an IRC network. Uses Python stdlib — no extra packages needed.")
     print_info("   Works with Libera.Chat, OFTC, your own ZNC/InspIRCd, etc.")
     print()
 
@@ -593,7 +593,7 @@ def interactive_setup() -> None:
     save_env_value("IRC_NICKNAME", nickname.strip())
 
     channel = prompt(
-        "Channel to join (e.g. #hermes — comma-separate for multiple)",
+        "Channel to join (e.g. #hades — comma-separate for multiple)",
         default=get_env_value("IRC_CHANNEL") or "",
     )
     if not channel:
@@ -639,7 +639,7 @@ def interactive_setup() -> None:
 
     print()
     print_success("IRC configuration saved to ~/.hermes/.env")
-    print_info("Restart the gateway for changes to take effect: hermes gateway restart")
+    print_info("Restart the gateway for changes to take effect: hades gateway restart")
 
 
 def is_connected(config) -> bool:
@@ -729,7 +729,7 @@ async def _standalone_send(
 
     Used by ``tools/send_message_tool._send_via_adapter`` when the gateway
     runner is not in this process (e.g. ``hermes cron`` running as a
-    separate process from ``hermes gateway``).  Without this hook,
+    separate process from ``hades gateway``).  Without this hook,
     ``deliver=irc`` cron jobs fail with ``No live adapter for platform``.
 
     The standalone client uses a distinct nick suffix (``-cron``) so it
@@ -800,7 +800,7 @@ async def _standalone_send(
         if server_password:
             await _raw(f"PASS {_strip_irc_control_chars(server_password)}")
         await _raw(f"NICK {standalone_nick}")
-        await _raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
+        await _raw(f"USER {standalone_nick} 0 * :Hades Agent (cron)")
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 15.0

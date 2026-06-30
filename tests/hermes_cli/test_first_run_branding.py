@@ -72,3 +72,39 @@ def test_auxiliary_nous_guidance_uses_hades_auth_command():
     assert "(run: hades auth)." in source
     assert "(run: hades auth add nous)." in source
     assert "run: hermes auth" not in source
+
+
+def test_cli_slice_rebranding_guard_for_status_config_claw_inventory():
+    status = Path("hermes_cli/status.py").read_text(encoding="utf-8")
+    config = Path("hermes_cli/config.py").read_text(encoding="utf-8")
+    claw = Path("hermes_cli/claw.py").read_text(encoding="utf-8")
+    inventory = Path("hermes_cli/inventory.py").read_text(encoding="utf-8")
+
+    assert "│                 ♇ Hades Agent Status" in status
+    assert "not logged in (run: hades portal)" in status
+    assert "not logged in (run: hades model)" in status
+    assert "Run 'hades doctor' for detailed diagnostics" in status
+    assert "│                 ⚕ Hermes Agent Status" not in status
+    assert "not logged in (run: hermes portal)" not in status
+    assert "not logged in (run: hermes model)" not in status
+    assert "Run 'hermes doctor' for detailed diagnostics" not in status
+
+    assert "│              ♇ Hades Configuration" in config
+    assert "hades config edit      # Edit config file" in config
+    assert "Usage: hades config set <key> <value>" in config
+    assert "Run 'hades config migrate' to add them" in config
+    assert "│              ⚕ Hermes Configuration" not in config
+    assert "Usage: hermes config set <key> <value>" not in config
+    assert "Run 'hermes config migrate' to add them" not in config
+
+    assert "Usage: hades claw <command> [options]" in claw
+    assert "│          ♇ Hades — OpenClaw Migration" in claw
+    assert "│          ♇ Hades — OpenClaw Cleanup" in claw
+    assert "Migrate settings from OpenClaw to Hades" in claw
+    assert "Usage: hermes claw <command> [options]" not in claw
+    assert "│          ⚕ Hermes — OpenClaw Migration" not in claw
+    assert "│          ⚕ Hermes — OpenClaw Cleanup" not in claw
+    assert "Migrate settings from OpenClaw to Hermes" not in claw
+
+    assert 'f"run `hades model` to configure ({auth_type})"' in inventory
+    assert 'f"run `hermes model` to configure ({auth_type})"' not in inventory

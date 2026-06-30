@@ -528,3 +528,352 @@ controllare con ricerca locale altri riferimenti a Hermes.
   ampio, sintetizzato in conteggi e directory principali.
 - `python3 scripts/docs_audit.py` -> ok.
 - `git diff --check` -> ok.
+
+### 2026-06-29 19:39 - Bonifica CLI residui Hermes
+
+**Richiesta**: procedere con la parte successiva dell'implementation plan usando
+subagent-driven development.
+
+**Contesto consultato**:
+- `docs/CODEX_AGENTS.md`
+- `docs/implementation_plan.md`
+- `docs/README.md`
+- `docs/PROJECT_OVERVIEW.md`
+- `docs/SOURCE_OF_TRUTH.md`
+- `docs/TESTING.md`
+- `docs/CODING_STYLE.md`
+- `docs/RUNTIME.md`
+- `docs/MAINTENANCE.md`
+- `docs/indexes/ROUTES_OR_ENTRYPOINTS.md`
+- `docs/indexes/SIDE_EFFECTS.md`
+- `hermes_cli/status.py`
+- `hermes_cli/config.py`
+- `hermes_cli/claw.py`
+- `hermes_cli/inventory.py`
+- `tests/hermes_cli/test_status.py`
+- `tests/hermes_cli/test_config.py`
+- `tests/hermes_cli/test_claw.py`
+- `tests/hermes_cli/test_inventory.py`
+- `tests/hermes_cli/test_first_run_branding.py`
+
+**Lavoro eseguito**:
+- Usato subagent-driven development con audit preliminare, worker di
+  implementazione, spec review e code-quality review.
+- Aggiornati banner e suggerimenti di comando visibili in `status`, `config`,
+  `claw` e `inventory` per usare Hades/hades.
+- Mantenuti invariati i nomi di compatibilita' non ancora decisi:
+  `HERMES_*`, `~/.hermes`, `hermes_cli`, `get_hermes_home`, provider slug,
+  nomi package/image e label reali Nous Portal.
+- Aggiunta copertura mirata nei test vicini e ristretto il guard sorgente per
+  evitare falsi positivi su commenti/compatibilita'.
+- Aggiornato il piano vivo segnando completato solo il sotto-passaggio CLI
+  della bonifica residui.
+
+**Verifiche**:
+- `python3 -m py_compile hermes_cli/status.py hermes_cli/config.py
+  hermes_cli/claw.py hermes_cli/inventory.py
+  tests/hermes_cli/test_first_run_branding.py tests/hermes_cli/test_status.py
+  tests/hermes_cli/test_config.py tests/hermes_cli/test_claw.py
+  tests/hermes_cli/test_inventory.py` -> ok.
+- `git diff --check` -> ok.
+- `scripts/run_tests.sh tests/hermes_cli/test_first_run_branding.py
+  tests/hermes_cli/test_status.py tests/hermes_cli/test_status_model_provider.py
+  tests/hermes_cli/test_config.py tests/hermes_cli/test_set_config_value.py
+  tests/hermes_cli/test_claw.py tests/hermes_cli/test_inventory.py -q` ->
+  non eseguiti: `.venv/bin/python` non ha `pytest` installato.
+- `ruff check ...` -> non eseguito: `ruff` non disponibile nel PATH.
+
+**Conclusione e razionale**:
+Lo slice CLI della bonifica rebranding e' chiuso senza toccare la policy legacy.
+La voce principale resta aperta per dashboard/web, TUI setup copy e plugin
+gateway.
+
+**File modificati**:
+- `hermes_cli/status.py` - banner e command hint Hades.
+- `hermes_cli/config.py` - banner, messaggi utente e command hint Hades.
+- `hermes_cli/claw.py` - migrazione OpenClaw verso Hades e command hint Hades.
+- `hermes_cli/inventory.py` - hint picker `hades model`.
+- `tests/hermes_cli/test_first_run_branding.py` - guard sorgente mirato.
+- `tests/hermes_cli/test_status.py` - copertura output status.
+- `tests/hermes_cli/test_config.py` - copertura output/config guidance.
+- `tests/hermes_cli/test_claw.py` - copertura output migration/cleanup.
+- `tests/hermes_cli/test_inventory.py` - copertura hint picker.
+- `docs/implementation_plan.md` - stato parziale della bonifica.
+- `docs/LOGBOOK.md` - traccia operativa.
+
+**Note / rischi residui**:
+- I test pytest non sono stati eseguiti per assenza di `pytest` nella venv.
+- Restano da completare dashboard/web, TUI setup copy e plugin gateway.
+- La policy legacy su `hermes`, `HERMES_*`, `~/.hermes` e nomi tecnici interni
+  resta da decidere prima di rinomini piu' profondi.
+
+### 2026-06-29 20:35 - Bonifica dashboard/web residui Hermes
+
+**Richiesta**: proseguire con il prossimo step dell'implementation plan usando
+subagent-driven development.
+
+**Contesto consultato**:
+- `docs/CODEX_AGENTS.md`
+- `docs/implementation_plan.md`
+- `docs/README.md`
+- `docs/PROJECT_OVERVIEW.md`
+- `docs/SOURCE_OF_TRUTH.md`
+- `docs/TESTING.md`
+- `docs/CODING_STYLE.md`
+- `docs/MAINTENANCE.md`
+- `web/src/App.tsx`
+- `web/src/pages/ChannelsPage.tsx`
+- `web/src/pages/ChatPage.tsx`
+- `web/src/pages/ConfigPage.tsx`
+- `web/src/pages/McpPage.tsx`
+- `web/src/pages/SkillsPage.tsx`
+- `web/src/pages/SystemPage.tsx`
+- `web/src/lib/api.ts`
+- `web/src/lib/gatewayClient.ts`
+- `web/src/themes/presets.ts`
+- `web/src/i18n/*.ts`
+- `hermes_cli/dashboard_auth/login_page.py`
+- `hermes_cli/web_server.py`
+- `tests/hermes_cli/test_dashboard_auth_password_login.py`
+- `tests/hermes_cli/test_web_server.py`
+
+**Lavoro eseguito**:
+- Usato subagent-driven development con audit mirato dashboard/web, worker,
+  spec review, fix di re-review e code-quality review.
+- Aggiornata la copy utente dashboard/web da Hermes/Hermes Agent a Hades/Hades
+  Agent nelle superfici visibili: sidebar, login, errori dashboard, pagine
+  channels/chat/config/MCP/skills/system, temi built-in e cataloghi API che
+  alimentano la UI.
+- Aggiornati gli esempi comando visibili a `hades ...` nelle superfici
+  dashboard/web (`hades dashboard`, `hades update`, `hades gateway start`,
+  `hades skills search`, `hades plugins`, `hades auth add`, `hades memory setup`).
+- Mantenuti invariati gli identificatori di compatibilita' e wire/storage:
+  `HERMES_*`, `X-Hermes-Session-Token`, `/api/hermes/update`, `hermes-update`,
+  `hermes_home`, `hermes_version`, `canUpdateHermes`, `~/.hermes`, storage key,
+  package/module name e label reali come Nous Portal.
+- Aggiunti test statici mirati per la copy dashboard/web, piu' assert vicini su
+  login page e temi built-in.
+- Aggiornato il piano vivo segnando completato solo il sotto-passaggio
+  dashboard/web della bonifica residui.
+
+**Verifiche**:
+- Spec review subagent -> pass dopo correzione della stringa i18n ungherese.
+- Code-quality review subagent -> approved.
+- `python3 -m py_compile hermes_cli/dashboard_auth/login_page.py
+  hermes_cli/web_server.py tests/hermes_cli/test_dashboard_branding_copy.py
+  tests/hermes_cli/test_dashboard_auth_password_login.py
+  tests/hermes_cli/test_web_server.py` -> ok.
+- `git diff --check` -> ok.
+- `scripts/run_tests.sh tests/hermes_cli/test_dashboard_branding_copy.py
+  tests/hermes_cli/test_dashboard_auth_password_login.py
+  tests/hermes_cli/test_web_server.py -q` -> non eseguiti: `.venv/bin/python`
+  non ha `pytest` installato.
+- `npm run --prefix web typecheck` -> non eseguito: `tsc` non disponibile
+  per dipendenze web mancanti.
+
+**Conclusione e razionale**:
+Lo slice dashboard/web della bonifica rebranding e' chiuso senza rinominare
+contratti tecnici legacy. La voce principale resta aperta per TUI setup copy e
+plugin gateway.
+
+**File modificati**:
+- `web/src/App.tsx` - wordmark sidebar Hades.
+- `web/src/pages/ChannelsPage.tsx` - fallback command hint `hades gateway start`.
+- `web/src/pages/ChatPage.tsx` - guida apertura dashboard `hades dashboard`.
+- `web/src/pages/ConfigPage.tsx` - nome export config `hades-config.json`.
+- `web/src/pages/McpPage.tsx` - copy catalogo MCP Hades-curated.
+- `web/src/pages/SkillsPage.tsx` - copy skill learning e hint `hades skills search`.
+- `web/src/pages/SystemPage.tsx` - copy update, credentials, backup e supporto.
+- `web/src/lib/api.ts` - errore dashboard server Hades.
+- `web/src/lib/gatewayClient.ts` - errore dashboard server Hades.
+- `web/src/themes/presets.ts` - label/descrizioni Hades Teal.
+- `web/src/i18n/*.ts` - headline plugin e copy i18n Hades.
+- `hermes_cli/dashboard_auth/login_page.py` - titoli login Hades Agent.
+- `hermes_cli/web_server.py` - copy/payload UI dashboard Hades.
+- `tests/hermes_cli/test_dashboard_branding_copy.py` - guard regressione copy.
+- `tests/hermes_cli/test_dashboard_auth_password_login.py` - assert login Hades.
+- `tests/hermes_cli/test_web_server.py` - assert temi built-in Hades.
+- `docs/implementation_plan.md` - stato parziale della bonifica.
+- `docs/LOGBOOK.md` - traccia operativa.
+
+**Note / rischi residui**:
+- Pytest e typecheck web non sono stati eseguiti per dipendenze locali mancanti.
+- Restano da completare TUI setup copy e plugin gateway.
+- La policy legacy su `hermes`, `HERMES_*`, `~/.hermes` e nomi tecnici interni
+  resta da decidere prima di rinomini piu' profondi.
+
+### 2026-06-30 01:34 - Bonifica TUI setup copy e plugin gateway
+
+**Richiesta**: procedere con TUI setup copy e subito dopo Plugin gateway usando
+subagent-driven development.
+
+**Contesto consultato**:
+- `docs/CODEX_AGENTS.md`
+- `docs/implementation_plan.md`
+- `docs/README.md`
+- `docs/PROJECT_OVERVIEW.md`
+- `docs/SOURCE_OF_TRUTH.md`
+- `docs/TESTING.md`
+- `docs/CODING_STYLE.md`
+- `docs/MAINTENANCE.md`
+- `ui-tui/src/content/setup.ts`
+- `ui-tui/src/app/setupHandoff.ts`
+- `ui-tui/src/app/slash/commands/setup.ts`
+- `ui-tui/src/lib/externalCli.ts`
+- `ui-tui/src/components/modelPicker.tsx`
+- `tui_gateway/server.py`
+- `gateway/run.py`
+- `gateway/slash_commands.py`
+- `locales/en.yaml`
+- `plugins/platforms/*`
+- `tests/tui_gateway/test_protocol.py`
+- `tests/test_tui_gateway_server.py`
+- `tests/gateway/*`
+- `tests/plugins/platforms/photon/*`
+
+**Lavoro eseguito**:
+- Usato subagent-driven development con explorer, worker, spec review e code
+  review per TUI setup copy e Plugin gateway.
+- Aggiornata la copy TUI di setup/onboarding verso Hades: pannello "setup
+  required", `/setup`, handoff al processo esterno, model picker, stato
+  iniziale, fallback title e README TUI.
+- Cambiato il launcher TUI a `hades` come default, mantenendo `HERMES_BIN` come
+  override legacy di compatibilita'.
+- Aggiornata la copy del gateway TUI Python per hint `hades setup`, messaggi di
+  provider mancante e blocco comandi che richiedono terminale completo.
+- Bonificata la copy visibile nei plugin gateway/platform: manifest, setup
+  interattivi, messaggi utente, slash command/help, notifiche di update/restart,
+  home channel e istruzioni operative.
+- Preservati i contratti legacy dove sono runtime/wire compatibility: Slack
+  `/hermes`, `hermes_approve_once`, extra `hermes-agent[slack]`, header
+  `X-Hermes-Session-Key`, alias/slug Photon `hermes photon`, default IRC
+  `hermes-bot`, path/env `HERMES_*` e naming tecnico `hermes_*`.
+- Corretto il filtro storico Discord per riconoscere sia `Hermes update` legacy
+  sia `Hades update`, evitando che vecchi messaggi di stato entrino nel
+  contesto conversazionale.
+- Aggiornato Photon per usare `Hades Agent` come nuovo display name ma riusare
+  un progetto legacy `Hermes Agent` prima di crearne uno nuovo.
+- Aggiornato il resolver update gateway per provare `hades`, poi `hermes`, poi
+  `python -m hermes_cli.main`, e allineata la diagnostica utente.
+- Aggiunti guard statici e test mirati per copy Hades e confini di
+  compatibilita'.
+- Aggiornato il piano vivo segnando completati TUI setup copy, Plugin gateway e
+  la voce padre della bonifica residui utente.
+
+**Verifiche**:
+- TUI spec review subagent -> pass.
+- TUI code-quality review subagent -> approved dopo fix import-order e
+  isolamento `HERMES_BIN`.
+- Plugin gateway spec review subagent -> pass dopo esclusione esplicita dei
+  website docs fuori scope.
+- Plugin gateway code-quality review subagent -> changes requested; risolti i
+  punti su Discord history, default IRC, progetto Photon legacy, resolver
+  update e guard troppo aggressivo.
+- Review finale post-fix subagent -> approved.
+- `python3 -m py_compile gateway/run.py gateway/platforms/whatsapp_common.py
+  tui_gateway/server.py plugins/platforms/*/adapter.py
+  plugins/platforms/photon/auth.py plugins/platforms/photon/cli.py
+  gateway/slash_commands.py tests/gateway/test_plugin_gateway_branding_copy.py
+  tests/gateway/test_update_command.py tests/tui_gateway/test_protocol.py
+  tests/test_tui_gateway_server.py tests/plugins/platforms/photon/test_auth.py
+  tests/plugins/platforms/photon/test_setup_access.py` -> ok.
+- `python3 scripts/docs_audit.py` -> ok.
+- `git diff --check` -> ok.
+- Guard statico Plugin gateway importato ed eseguito direttamente -> ok.
+- Smoke statico Node per copy TUI setup -> ok dopo allineamento alle substring
+  reali.
+- `npm run --prefix ui-tui test -- setupBranding.test.ts` -> non eseguito:
+  `vitest` non disponibile.
+- `npm run --prefix ui-tui typecheck` -> non eseguito: `tsc` non disponibile.
+- `scripts/run_tests.sh ... -q` sui test TUI/gateway/plugin mirati -> non
+  eseguiti: `.venv/bin/python` non ha `pytest` installato.
+- `ruff check ...` -> non eseguito: `ruff` non disponibile nel PATH.
+
+**Conclusione e razionale**:
+La bonifica delle superfici utente residue elencate nel piano e' chiusa. I
+nomi Hermes rimasti appartengono a compatibilita', storage/wire contract,
+package/module name, upstream docs/localizzazioni fuori scope o policy legacy
+ancora da decidere.
+
+**File modificati principali**:
+- `ui-tui/src/content/setup.ts` - copy setup-required Hades.
+- `ui-tui/src/app/setupHandoff.ts` - handoff e errori setup Hades.
+- `ui-tui/src/app/slash/commands/setup.ts` - help `/setup` Hades.
+- `ui-tui/src/lib/externalCli.ts` - default launcher `hades` con override
+  `HERMES_BIN`.
+- `ui-tui/src/components/modelPicker.tsx` - hint `hades model`.
+- `tui_gateway/server.py` - copy setup/provider/CLI-blocked Hades.
+- `gateway/run.py` - copy gateway/update/restart Hades e resolver update
+  `hades` -> `hermes` -> module fallback.
+- `gateway/slash_commands.py` - copy managed-update Hades.
+- `locales/en.yaml` - messaggi gateway update Hades.
+- `plugins/platforms/*` - copy plugin/platform visibile Hades, con compatibilita'
+  legacy preservata dove necessaria.
+- `tests/gateway/test_plugin_gateway_branding_copy.py` - guard Hades/legacy.
+- `tests/gateway/test_discord_free_response.py` - copertura update history
+  legacy + corrente.
+- `tests/gateway/test_irc_adapter.py` - default IRC legacy preservato.
+- `tests/gateway/test_update_command.py` - lookup update e copy Hades.
+- `tests/plugins/platforms/photon/test_auth.py` - lookup progetto Photon legacy.
+- `tests/plugins/platforms/photon/test_setup_access.py` - setup Photon riusa il
+  progetto legacy.
+- `ui-tui/src/__tests__/setupBranding.test.ts` - guard TUI setup copy.
+- `docs/implementation_plan.md` - voce bonifica completata.
+- `docs/LOGBOOK.md` - traccia operativa.
+
+**Note / rischi residui**:
+- La suite pytest e i test Vitest/typecheck non sono stati eseguiti per
+  dipendenze locali mancanti.
+- La policy definitiva su alias `hermes`, `HERMES_*`, `~/.hermes`, deep link e
+  nomi tecnici interni resta una voce separata del piano.
+
+### 2026-06-30 01:42 - Chiusura verifiche locali e policy legacy
+
+**Richiesta**: terminare i due punti residui appena scritti: dipendenze locali
+mancanti per le verifiche e policy definitiva di compatibilita' legacy Hermes.
+
+**Lavoro eseguito**:
+- Installato nell'ambiente locale `.venv` l'extra `.[dev]`, rendendo disponibili
+  `pytest==9.0.2`, `pytest-asyncio==1.3.0` e `ruff==0.15.10`.
+- Installate le dipendenze del workspace `ui-tui` dai manifest esistenti, senza
+  modificare `package.json` o `package-lock.json`.
+- Generato il bundle ignorato `ui-tui/packages/hermes-ink/dist/` richiesto dai
+  test Vitest che importano `@hades/ink`.
+- Corretto un test non ermetico in `tests/test_tui_gateway_server.py`: il caso
+  "no supported Chromium executable" ora forza `platform.system()` a `Linux`,
+  perche' su macOS il codice produce correttamente un comando manuale
+  `open -a "Google Chrome"` anche senza candidate list.
+- Creata la policy stabile `docs/LEGACY_COMPATIBILITY.md`.
+- Aggiornati `docs/README.md` e `docs/implementation_plan.md`, marcando come
+  decisa la policy legacy e verificati `.venv`, Node e il sottoinsieme di test
+  locali ragionevole per questa bonifica.
+
+**Decisione policy legacy**:
+- Hades e' il brand primario per copy, help, wizard, dashboard, TUI, gateway e
+  documentazione operativa nuova.
+- I nomi Hermes gia' usati come contratti runtime, storage, wire protocol,
+  CLI compatibility, package/plugin identifier o integrazione esterna restano
+  supportati.
+- I contratti legacy si rinominano solo con task dedicato, dual-read o
+  dual-registration, test di backward compatibility e migrazione esplicita.
+
+**Verifiche**:
+- `npm run build --prefix ui-tui/packages/hermes-ink` -> ok.
+- `npm run --prefix ui-tui test -- setupBranding.test.ts` -> 1 file, 4 test ok.
+- `npm run --prefix ui-tui typecheck` -> ok.
+- `scripts/run_tests.sh tests/tui_gateway/test_protocol.py
+  tests/test_tui_gateway_server.py tests/gateway/test_plugin_gateway_branding_copy.py
+  tests/gateway/test_discord_free_response.py tests/gateway/test_discord_connect.py
+  tests/gateway/test_discord_slash_commands.py tests/gateway/test_email.py
+  tests/gateway/test_homeassistant.py tests/gateway/test_irc_adapter.py
+  tests/gateway/test_max_concurrent_sessions.py
+  tests/gateway/test_restart_notification.py
+  tests/gateway/test_telegram_topic_mode.py tests/gateway/test_update_command.py
+  tests/plugins/platforms/photon/test_auth.py
+  tests/plugins/platforms/photon/test_setup_access.py -q` -> 806 test ok.
+- `.venv/bin/ruff check ...` sui file Python toccati -> ok.
+
+**Conclusione e razionale**:
+I due residui della voce precedente sono chiusi: le verifiche non sono piu'
+bloccate da dipendenze mancanti, e la policy Hermes legacy e' documentata come
+contratto operativo per i prossimi passaggi.

@@ -1730,7 +1730,7 @@ class FeishuAdapter(BasePlatformAdapter):
             if not acquired:
                 owner_pid = existing.get("pid") if isinstance(existing, dict) else None
                 message = (
-                    "Another local Hermes gateway is already using this Feishu app_id"
+                    "Another local Hades gateway is already using this Feishu app_id"
                     + (f" (PID {owner_pid})." if owner_pid else ".")
                     + " Stop the other gateway before starting a second Feishu websocket client."
                 )
@@ -4953,7 +4953,7 @@ class FeishuAdapter(BasePlatformAdapter):
 #
 # Device-code flow: user scans a QR code with Feishu/Lark mobile app and the
 # platform creates a fully configured bot application automatically.
-# Called by `hermes gateway setup` via _setup_feishu() in hermes_cli/gateway.py.
+# Called by `hades gateway setup` via _setup_feishu() in hermes_cli/gateway.py.
 # =============================================================================
 
 
@@ -5491,7 +5491,7 @@ def interactive_setup() -> None:
         save_env_value("FEISHU_ALLOW_ALL_USERS", "false")
         save_env_value("FEISHU_ALLOWED_USERS", "")
         print_success("DM pairing enabled.")
-        print_info("Unknown users can request access; approve with `hermes pairing approve`.")
+        print_info("Unknown users can request access; approve with `hades pairing approve`.")
     elif access_idx == 1:
         save_env_value("FEISHU_ALLOW_ALL_USERS", "true")
         save_env_value("FEISHU_ALLOWED_USERS", "")
