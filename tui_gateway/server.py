@@ -10375,6 +10375,7 @@ def _(rid, params) -> dict:
             bindings = hdb.list_workspace_bindings(conn, status="linked") if agent else []
             job_counts = hdb.count_jobs_by_status(conn) if agent else {}
             proposal_counts = hdb.count_memory_proposals_by_status(conn) if agent else {}
+            inbox_counts = hdb.count_inbox_events(conn) if agent else {"total": 0, "unread": 0}
             last_summary = hdb.get_sync_state(conn, "last_sync_summary") if agent else None
             last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
     except Exception as exc:
@@ -10407,6 +10408,7 @@ def _(rid, params) -> dict:
             ],
             "job_counts": job_counts,
             "proposal_counts": proposal_counts,
+            "inbox_counts": inbox_counts,
             "sync": {
                 "last_summary": last_summary,
                 "last_error": last_error,

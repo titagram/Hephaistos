@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from hermes_cli import hades_backend_db as db
 from hermes_cli.hades_backend_runtime import current_agent
+from hermes_cli.hades_backend_sync import run_backend_sync
+
+
+PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
 
 
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._binding: db.WorkspaceBinding | None = None
+        self._last_sync_at: float | None = None
 
     @property
     def name(self) -> str:
@@ -57,6 +63,16 @@ class HadesBackendMemoryProvider(MemoryProvider):
         session_id: str = "",
         messages: List[Dict[str, Any]] | None = None,
     ) -> None:
+        if self._binding is None:
+            return None
+        now = time.time()
+        if (
+            self._last_sync_at is not None
+            and now - self._last_sync_at < PIGGYBACK_SYNC_INTERVAL_SECONDS
+        ):
+            return None
+        self._last_sync_at = now
+        run_backend_sync(quiet=True)
         return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:

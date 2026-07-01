@@ -600,15 +600,22 @@ riepilogo setup.
 - [ ] Policy per condividere memorie personali locali con il backend: opt-in,
   classificazione privacy, provenance, revisione/validazione server-side e
   possibilita' di revoca o non-pubblicazione.
-- [ ] Profili subagent locali: ruoli predefiniti in config locale con
+- [x] Profili subagent locali: ruoli predefiniti in config locale con
   modello/provider, budget, toolset e policy; skill dedicata per usarli senza
   esporre questa scelta al backend.
-- [ ] Skill decisionale di model-routing per software engineering: usare il
+  Nota implementazione 2026-07-01: aggiunto catalogo locale
+  `hades backend profiles` con profili planner/implementer/reviewer/
+  sync-curator/memory-steward e skill built-in `hades-coordination`; il backend
+  vede solo capabilities/job/proposte/artifact, non scelte modello/provider.
+- [x] Skill decisionale di model-routing per software engineering: usare il
   modello piu' forte per pianificazione/decisione e assegnare dinamicamente ai
   subagent profili locali piu' economici o specializzati in base a task, ruolo,
   toolset, costo, latenza e confidenza. L'agente deve scegliere autonomamente
   tra i modelli consentiti dalla configurazione locale, senza richiedere
   assegnazioni manuali per ogni delega.
+  Nota implementazione 2026-07-01: `hades-coordination` e il catalogo profili
+  usano nomi simbolici `hades.*` risolti da `config.yaml`; nessun provider o
+  modello reale viene sincronizzato verso Laravel.
 - [ ] Audit di pulizia della fork: classificare skill, plugin, toolset,
   superfici UI e gateway in keep / disable-by-default / optional /
   remove-later.

@@ -402,6 +402,15 @@ def get_binding_for_fingerprint(conn: sqlite3.Connection, workspace_fingerprint:
     )
 
 
+def get_binding_for_backend_id(conn: sqlite3.Connection, workspace_binding_id: str) -> WorkspaceBinding | None:
+    return _binding_from_row(
+        conn.execute(
+            "SELECT * FROM workspace_bindings WHERE backend_workspace_binding_id = ?",
+            (workspace_binding_id,),
+        ).fetchone()
+    )
+
+
 def mark_binding_unlinked(conn: sqlite3.Connection, workspace_fingerprint: str) -> None:
     with write_txn(conn):
         conn.execute(
@@ -475,6 +484,28 @@ def list_jobs(conn: sqlite3.Connection, *, statuses: Iterable[str] | None = None
     else:
         rows = conn.execute("SELECT * FROM backend_jobs ORDER BY created_at ASC").fetchall()
     return [_job_from_row(row) for row in rows]
+
+
+def expire_waiting_jobs(conn: sqlite3.Connection, *, now: int | None = None) -> list[BackendJob]:
+    current = int(now if now is not None else _now())
+    expired: list[str] = []
+    for job in list_jobs(conn, statuses=["waiting_confirmation"]):
+        deadline = job.payload.get("deadline_at") or job.payload.get("deadline")
+        try:
+            deadline_value = int(deadline)
+        except (TypeError, ValueError):
+            continue
+        if deadline_value <= current:
+            expired.append(job.job_id)
+    if not expired:
+        return []
+    with write_txn(conn):
+        for job_id in expired:
+            conn.execute(
+                "UPDATE backend_jobs SET status = 'expired', updated_at = ? WHERE job_id = ?",
+                (current, job_id),
+            )
+    return [job for job_id in expired if (job := get_job(conn, job_id)) is not None]
 
 
 def create_memory_proposal(
@@ -572,6 +603,43 @@ def get_sync_state(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else {}
 
 
+def cleanup_orphaned_memory_cache(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    retention_days: int = 90,
+    now: int | None = None,
+) -> dict[str, int]:
+    current = int(now if now is not None else _now())
+    rows = conn.execute(
+        """
+        SELECT mc.workspace_binding_id, mc.items, mc.updated_at
+        FROM memory_cache mc
+        LEFT JOIN workspace_bindings wb
+          ON wb.backend_workspace_binding_id = mc.workspace_binding_id
+         AND wb.status = 'linked'
+        WHERE wb.backend_workspace_binding_id IS NULL
+        ORDER BY mc.updated_at ASC
+        """
+    ).fetchall()
+    candidates = len(rows)
+    cutoff = current - (max(0, int(retention_days)) * 86400)
+    remove_ids: list[str] = []
+    total_bytes = 0
+    for row in rows:
+        if include_all or retention_days == 0 or int(row["updated_at"]) <= cutoff:
+            remove_ids.append(str(row["workspace_binding_id"]))
+            total_bytes += len(str(row["items"]).encode("utf-8"))
+    if remove_ids:
+        with write_txn(conn):
+            for workspace_binding_id in remove_ids:
+                conn.execute(
+                    "DELETE FROM memory_cache WHERE workspace_binding_id = ?",
+                    (workspace_binding_id,),
+                )
+    return {"candidates": candidates, "removed": len(remove_ids), "bytes": total_bytes}
+
+
 def replace_memory_cache(
     conn: sqlite3.Connection,
     *,
@@ -638,3 +706,10 @@ def list_inbox_events(conn: sqlite3.Connection, *, project_id: str | None = None
     else:
         rows = conn.execute("SELECT * FROM inbox_events ORDER BY received_at ASC").fetchall()
     return [_event_from_row(row) for row in rows]
+
+
+def count_inbox_events(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread FROM inbox_events"
+    ).fetchone()
+    return {"total": int(row["total"] or 0), "unread": int(row["unread"] or 0)}

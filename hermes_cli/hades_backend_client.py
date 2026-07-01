@@ -191,5 +191,11 @@ class HadesBackendClient:
     def upload_artifact(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "artifacts", json_body=payload)
 
+    def submit_doctor_report(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "doctor/reports", json_body=payload)
+
     def list_inbox(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "persephone/inbox", params=payload)
+
+    def create_inbox_message(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "persephone/messages", json_body=payload)

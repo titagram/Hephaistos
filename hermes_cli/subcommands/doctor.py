@@ -32,4 +32,14 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
             "doctor` first to see active advisories and their IDs."
         ),
     )
+    doctor_parser.add_argument(
+        "--report-backend",
+        action="store_true",
+        help="Explicitly submit a compact Hades doctor report to the configured backend",
+    )
+    doctor_sub = doctor_parser.add_subparsers(dest="doctor_action")
+    cleanup = doctor_sub.add_parser("cleanup", help="Run local Hades maintenance cleanup")
+    cleanup.add_argument("--orphaned-cache", action="store_true", help="Remove orphaned Hades shared-memory cache")
+    cleanup.add_argument("--all", action="store_true", help="Include non-expired orphaned cache")
+    cleanup.add_argument("--yes", action="store_true", help="Proceed without an interactive confirmation")
     doctor_parser.set_defaults(func=cmd_doctor)

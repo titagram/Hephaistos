@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 
@@ -252,6 +253,159 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
     assert fake.proposals[0]["summary"] == "Use /api/hades/v1 for backend calls"
     assert summary["memory_snapshots"] == 1
     assert summary["proposals_synced"] == 1
+
+
+def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import projects_db as pdb
+    from hermes_cli.config import load_config
+
+    class BootstrapClient:
+        def __init__(self, base_url, token, **kwargs):
+            assert base_url == "https://backend.example"
+            assert token == "bootstrap-token"
+
+        def verify_token(self, *, project_id):
+            assert project_id == "backend_proj"
+            return {"ok": True}
+
+        def register_agent(self, **payload):
+            assert payload["project_id"] == "backend_proj"
+            return {
+                "agent_id": payload["agent_id"],
+                "agent_token": "derived-token",
+                "capabilities": {"memory": True, "jobs": True},
+            }
+
+    class OperationalClient:
+        def __init__(self):
+            self.bound = []
+            self.pulled = []
+
+        def bind_workspace(self, **payload):
+            self.bound.append(payload)
+            assert payload["project_id"] == "backend_proj"
+            assert payload["display_path"]
+            return {"workspace_binding_id": "wb_bootstrap_1"}
+
+        def memory_snapshot(self, **payload):
+            return {"version": "v1", "items": []}
+
+        def pull_jobs(self, **payload):
+            self.pulled.append(payload)
+            return {"jobs": []}
+
+    operational = OperationalClient()
+    monkeypatch.setattr(cmd, "HadesBackendClient", BootstrapClient)
+    monkeypatch.setattr(runtime, "client_from_config", lambda: operational)
+    monkeypatch.setattr(cmd, "_detect_default_capabilities", lambda: ["read_files"])
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="bootstrap",
+            url="https://backend.example",
+            project_id="backend_proj",
+            project_token="bootstrap-token",
+            workspace=str(workspace),
+            project_name="Demo Project",
+            non_interactive=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    config = load_config()
+    env_text = (tmp_path / "home" / ".env").read_text(encoding="utf-8")
+
+    with pdb.connect_closing() as conn:
+        project = pdb.project_for_path(conn, str(workspace))
+    with hdb.connect_closing() as conn:
+        bindings = hdb.list_workspace_bindings(conn, status="linked")
+        summary = hdb.get_sync_state(conn, "last_sync_summary")
+
+    assert rc == 0
+    assert "Hades backend bootstrap complete" in output
+    assert project is not None
+    assert project.name == "Demo Project"
+    assert config["backend"]["default_project_id"] == "backend_proj"
+    assert "derived-token" in env_text
+    assert "bootstrap-token" not in env_text
+    assert bindings[0].backend_workspace_binding_id == "wb_bootstrap_1"
+    assert operational.bound
+    assert operational.pulled
+    assert summary["pulled"] == 0
+
+
+def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(tmp_path / "repo"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+        refused = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="update",
+            intent="memory_write",
+            summary="Update backend docs",
+            provenance={},
+        )
+        hdb.mark_memory_proposal_status(conn, refused.id, "refused", "policy_denied")
+        hdb.record_sync_state(conn, "last_sync_error", {"message": "backend unavailable"})
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="status", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["configured"] is True
+    assert payload["job_counts"] == {"waiting_confirmation": 1}
+    assert payload["proposal_counts"] == {"refused": 1}
+    assert payload["degraded"] is True
+    assert payload["actions"] == [
+        "Review 1 backend job(s) waiting for confirmation.",
+        "Review 1 refused/conflicted memory proposal(s).",
+        "Inspect last backend sync error and rerun `hades backend sync`.",
+    ]
 
 
 def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):

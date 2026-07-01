@@ -1,10 +1,12 @@
 import { useStore } from '@nanostores/react'
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
+import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
 import { AGENTS_ROUTE } from '@/app/routes'
 import { composerDockCard } from '@/components/chat/composer-dock'
+import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -23,12 +25,18 @@ import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
+import {
+  type HadesBackendStatusPayload,
+  type HadesBackendStatusSummary,
+  summarizeHadesBackendStatus
+} from './hades-backend-status'
 import { PreviewStatusRow } from './preview-row'
 import { StatusItemRow } from './status-row'
 
 // Slow safety-net poll for silent exits (processes without notify_on_complete
 // emit no event when they die). Only armed while a running row is on screen.
 const BACKGROUND_POLL_MS = 5_000
+const HADES_BACKEND_STATUS_POLL_MS = 15_000
 
 // A localhost/loopback preview is only meaningful while its dev server is up, so
 // we tie it to a live background process rather than persisting dismissals or
@@ -51,6 +59,70 @@ const groupLabel = (group: StatusGroup, s: Translations['statusStack']) => {
   return group.type === 'subagent' ? s.subagents(group.items.length) : s.background(group.items.length)
 }
 
+function useHadesBackendStatusSummary() {
+  const { requestGateway } = useGatewayRequest()
+  const [summary, setSummary] = useState<HadesBackendStatusSummary | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const refresh = async () => {
+      try {
+        const payload = await requestGateway<HadesBackendStatusPayload>('backend.status', {}, 5_000)
+
+        if (!cancelled) {
+          setSummary(summarizeHadesBackendStatus(payload))
+        }
+      } catch {
+        if (!cancelled) {
+          setSummary(null)
+        }
+      }
+    }
+
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), HADES_BACKEND_STATUS_POLL_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [requestGateway])
+
+  return summary
+}
+
+function HadesBackendStatusSection({ summary }: { summary: HadesBackendStatusSummary }) {
+  const danger = summary.tone === 'danger'
+
+  return (
+    <StatusSection
+      defaultCollapsed={false}
+      icon={<Codicon className={danger ? 'text-destructive/85' : 'text-amber-500/85'} name="database" size="0.8rem" />}
+      label={summary.label}
+    >
+      <StatusRow
+        leading={
+          <Codicon
+            className={danger ? 'text-destructive/85' : 'text-amber-500/85'}
+            name={danger ? 'error' : 'warning'}
+            size="0.8rem"
+          />
+        }
+      >
+        <span
+          className={cn(
+            'min-w-0 truncate text-[0.73rem] leading-4',
+            danger ? 'text-destructive/90' : 'text-foreground/92'
+          )}
+        >
+          {summary.detail}
+        </span>
+      </StatusRow>
+    </StatusSection>
+  )
+}
+
 interface ComposerStatusStackProps {
   /** The queue, built by the composer (it owns the queue's callbacks). Rendered
    *  as the last group so it stays fused to the composer like before. */
@@ -69,6 +141,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   const itemsBySession = useStore($statusItemsBySession)
   const previewsBySession = useStore($previewStatusBySession)
   const scrolledUp = useStore($threadScrolledUp)
+  const hadesBackendSummary = useHadesBackendStatusSummary()
 
   const groups = useMemo(
     () => groupStatusItems(sessionId ? (itemsBySession[sessionId] ?? []) : []),
@@ -152,6 +225,10 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
       </StatusSection>
     )
   }))
+
+  if (hadesBackendSummary) {
+    sections.push({ key: 'hades-backend', node: <HadesBackendStatusSection summary={hadesBackendSummary} /> })
+  }
 
   // No background group to host them (e.g. a standalone on-disk file preview):
   // keep the previews as their own row block so they don't disappear.

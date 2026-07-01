@@ -80,6 +80,11 @@ STAGE_NAME=""
 JSON_OUTPUT=false
 NON_INTERACTIVE=false
 INCLUDE_DESKTOP=false
+BACKEND_URL="${HADES_BACKEND_URL:-}"
+BACKEND_PROJECT_ID="${HADES_BACKEND_PROJECT_ID:-}"
+BACKEND_PROJECT_TOKEN="${HADES_BACKEND_PROJECT_TOKEN:-}"
+BACKEND_WORKSPACE="${HADES_BACKEND_WORKSPACE:-}"
+BACKEND_PROJECT_NAME="${HADES_BACKEND_PROJECT_NAME:-}"
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -137,6 +142,26 @@ while [[ $# -gt 0 ]]; do
             INCLUDE_DESKTOP=true
             shift
             ;;
+        --backend-url)
+            BACKEND_URL="$2"
+            shift 2
+            ;;
+        --backend-project-id)
+            BACKEND_PROJECT_ID="$2"
+            shift 2
+            ;;
+        --backend-project-token)
+            BACKEND_PROJECT_TOKEN="$2"
+            shift 2
+            ;;
+        --backend-workspace)
+            BACKEND_WORKSPACE="$2"
+            shift 2
+            ;;
+        --backend-project-name)
+            BACKEND_PROJECT_NAME="$2"
+            shift 2
+            ;;
         --dir)
             INSTALL_DIR="$2"
             INSTALL_DIR_EXPLICIT=true
@@ -173,6 +198,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --json         Print a JSON result frame for --stage"
             echo "  --non-interactive  Skip stages that require user input"
             echo "  --include-desktop  Also build the desktop app (apps/desktop -> Hermes.app)"
+            echo "  --backend-url URL        Hades backend URL for tokenized onboarding"
+            echo "  --backend-project-id ID  Backend project id for tokenized onboarding"
+            echo "  --backend-project-token TOKEN"
+            echo "                           Project-scoped bootstrap token for onboarding"
+            echo "  --backend-workspace PATH Workspace path to link (default: current dir)"
+            echo "  --backend-project-name NAME"
+            echo "                           Local Hades project name to create when needed"
             echo "  --dir PATH     Installation directory"
             echo "                   default (non-root):  ~/.hermes/hermes-agent"
             echo "                   default (root, Linux): /usr/local/lib/hermes-agent"
@@ -2271,6 +2303,34 @@ run_setup_wizard() {
     fi
 }
 
+run_backend_bootstrap() {
+    if [ -z "$BACKEND_URL" ] && [ -z "$BACKEND_PROJECT_ID" ] && [ -z "$BACKEND_PROJECT_TOKEN" ]; then
+        return 0
+    fi
+    if [ -z "$BACKEND_URL" ] || [ -z "$BACKEND_PROJECT_ID" ] || [ -z "$BACKEND_PROJECT_TOKEN" ]; then
+        log_error "Backend bootstrap requires --backend-url, --backend-project-id, and --backend-project-token"
+        return 1
+    fi
+
+    log_info "Configuring Hades backend project link..."
+    local hermes_cmd
+    hermes_cmd="$(get_hermes_command_path)"
+    local args=(
+        backend bootstrap
+        --url "$BACKEND_URL"
+        --project-id "$BACKEND_PROJECT_ID"
+        --project-token "$BACKEND_PROJECT_TOKEN"
+        --non-interactive
+    )
+    if [ -n "$BACKEND_WORKSPACE" ]; then
+        args+=(--workspace "$BACKEND_WORKSPACE")
+    fi
+    if [ -n "$BACKEND_PROJECT_NAME" ]; then
+        args+=(--project-name "$BACKEND_PROJECT_NAME")
+    fi
+    "$hermes_cmd" "${args[@]}"
+}
+
 maybe_start_gateway() {
     # Check if any messaging platform tokens were configured
     ENV_FILE="$HERMES_HOME/.env"
@@ -3100,6 +3160,7 @@ main() {
     setup_path
     copy_config_templates
     run_setup_wizard
+    run_backend_bootstrap
     maybe_start_gateway
 
     if [ "$INCLUDE_DESKTOP" = true ]; then

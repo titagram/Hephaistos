@@ -1,0 +1,488 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hades Backend API",
+    "version": "v1"
+  },
+  "paths": {
+    "/api/hades/v1/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Public health response"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/token/verify": {
+      "post": {
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Bootstrap token is valid"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/agents/register": {
+      "post": {
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent registered and derived token issued"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/capabilities": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated capability discovery"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/workspaces/bind": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Workspace binding"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/workspaces/{workspaceBinding}/unlink": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceBinding",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace unlinked"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/memory/snapshot": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned shared memory snapshot"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/memory/proposals": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Memory proposal accepted, pending, refused, or conflicted"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/agent/jobs": {
+      "get": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queued jobs for this agent/workspace"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/agent/jobs/{job}/status": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Job status transition recorded"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/agent/jobs/{job}/result": {
+      "post": {
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Bounded job result stored"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/artifacts": {
+      "post": {
+        "summary": "Upload a bounded Hades artifact for a linked workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactUploadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Artifact stored"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/doctor/reports": {
+      "post": {
+        "summary": "Submit an explicit Hades doctor report",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DoctorReportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Doctor report stored"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/persephone/inbox": {
+      "get": {
+        "summary": "Poll the persistent Persephone inbox",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Inbox events"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/persephone/events": {
+      "get": {
+        "summary": "Read Persephone inbox events as a bounded SSE stream",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream response"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/persephone/messages": {
+      "post": {
+        "summary": "Create a persistent Persephone inbox event",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersephoneMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Inbox event stored"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Hades API error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ArtifactUploadRequest": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "workspace_binding_id",
+          "schema",
+          "artifact"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "workspace_binding_id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string",
+            "enum": [
+              "hades.git_tree.v1",
+              "hades.symbols.v1"
+            ]
+          },
+          "artifact": {
+            "type": "object"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "redactions": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "DoctorReportRequest": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "status",
+          "payload"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "workspace_binding_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "error",
+              "failed"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          }
+        }
+      },
+      "PersephoneMessageRequest": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "event_type"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "workspace_binding_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

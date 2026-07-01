@@ -110,3 +110,35 @@ def test_get_payloads_use_query_params_for_laravel_routes():
 
     assert response == {"jobs": []}
     assert seen
+
+
+def test_client_posts_doctor_reports_and_persephone_messages():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append((request.method, request.url.path, payload))
+        return httpx.Response(201, json={"ok": True})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.submit_doctor_report(project_id="proj_1", status="warning", payload={"checks": []}) == {"ok": True}
+    assert client.create_inbox_message(project_id="proj_1", event_type="proposal.reviewed", payload={"message": "done"}) == {"ok": True}
+    assert seen == [
+        (
+            "POST",
+            "/api/hades/v1/doctor/reports",
+            {"project_id": "proj_1", "status": "warning", "payload": {"checks": []}},
+        ),
+        (
+            "POST",
+            "/api/hades/v1/persephone/messages",
+            {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
+        ),
+    ]

@@ -503,6 +503,7 @@ def _check_hades_backend(issues: list[str]) -> None:
             bindings = hdb.list_workspace_bindings(conn, status="linked") if agent else []
             job_counts = hdb.count_jobs_by_status(conn) if agent else {}
             proposal_counts = hdb.count_memory_proposals_by_status(conn) if agent else {}
+            inbox_counts = hdb.count_inbox_events(conn) if agent else {"total": 0, "unread": 0}
             last_summary = hdb.get_sync_state(conn, "last_sync_summary") if agent else None
             last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
     except Exception as exc:
@@ -532,6 +533,8 @@ def _check_hades_backend(issues: list[str]) -> None:
         check_ok("Backend jobs", f"({job_counts})")
     if proposal_counts:
         check_ok("Memory proposals", f"({proposal_counts})")
+    if inbox_counts.get("total"):
+        check_ok("Persephone inbox", f"({inbox_counts})")
     if last_summary:
         check_ok("Last backend sync", f"({last_summary})")
     if last_error:
@@ -550,8 +553,87 @@ def _check_hades_backend(issues: list[str]) -> None:
         issues.append("Check backend URL/token/network or rerun `hades backend setup`")
 
 
+def _run_hades_doctor_cleanup(args) -> None:
+    if not getattr(args, "orphaned_cache", False):
+        print("doctor cleanup: pass --orphaned-cache to remove orphaned Hades memory cache")
+        return
+    if not getattr(args, "yes", False):
+        print("doctor cleanup: refusing non-interactive cleanup without --yes")
+        return
+    try:
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        print(f"doctor cleanup: Hades backend state unavailable ({exc})")
+        return
+    with hdb.connect_closing() as conn:
+        report = hdb.cleanup_orphaned_memory_cache(conn, include_all=getattr(args, "all", False))
+    removed = report.get("removed", 0)
+    print(
+        f"Removed {removed} orphaned Hades memory cache entr"
+        f"{'y' if removed == 1 else 'ies'} "
+        f"({report.get('candidates', 0)} candidate(s), {report.get('bytes', 0)} byte(s))."
+    )
+
+
+def _submit_hades_doctor_report(issues: list[str]) -> None:
+    try:
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        check_warn("Hades backend doctor report skipped", f"({exc})")
+        return
+
+    try:
+        with hdb.connect_closing() as conn:
+            agent = hdb.get_default_agent(conn)
+            if agent is None:
+                check_warn("Hades backend doctor report skipped", "(backend not configured)")
+                return
+            bindings = hdb.list_workspace_bindings(conn, status="linked")
+            job_counts = hdb.count_jobs_by_status(conn)
+            proposal_counts = hdb.count_memory_proposals_by_status(conn)
+            inbox_counts = hdb.count_inbox_events(conn)
+            last_summary = hdb.get_sync_state(conn, "last_sync_summary")
+            last_error = hdb.get_sync_state(conn, "last_sync_error")
+    except Exception as exc:
+        check_warn("Hades backend doctor report skipped", f"({exc})")
+        return
+
+    binding = bindings[0] if bindings else None
+    status = "warning" if issues or last_error else "ok"
+    payload = {
+        "schema": "hades.doctor_report.v1",
+        "agent_id": agent.agent_id,
+        "project_id": agent.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+        "binding_count": len(bindings),
+        "job_counts": job_counts,
+        "proposal_counts": proposal_counts,
+        "inbox_counts": inbox_counts,
+        "last_sync_summary": last_summary,
+        "last_sync_error": last_error,
+        "issue_count": len(issues),
+    }
+
+    try:
+        response = _hades_backend_client_from_config().submit_doctor_report(
+            project_id=agent.project_id,
+            workspace_binding_id=binding.backend_workspace_binding_id if binding else None,
+            status=status,
+            payload=payload,
+        )
+        report = response.get("report") if isinstance(response, dict) else None
+        report_id = report.get("id") if isinstance(report, dict) else "submitted"
+        check_ok("Hades backend doctor report submitted", f"({report_id})")
+    except Exception as exc:
+        check_warn("Hades backend doctor report failed", f"({exc})")
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
+    if getattr(args, "doctor_action", None) == "cleanup":
+        _run_hades_doctor_cleanup(args)
+        return
+
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
 
@@ -2423,6 +2505,9 @@ def run_doctor(args):
         pass
     except Exception:
         pass
+
+    if getattr(args, "report_backend", False):
+        _submit_hades_doctor_report(issues + manual_issues)
 
     print()
     remaining_issues = issues + manual_issues

@@ -66,6 +66,13 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
             summary="Remember backend contract",
             provenance={},
         )
+        db.save_inbox_event(
+            conn,
+            event_id="evt_1",
+            project_id="proj_1",
+            event_type="message",
+            payload={"text": "hello"},
+        )
         db.record_sync_state(conn, "last_sync_error", {"message": "backend unavailable"})
 
     result = _call("backend.status")
@@ -75,4 +82,5 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
     assert result["bindings"][0]["workspace_binding_id"] == "wb_1"
     assert result["job_counts"] == {"waiting_confirmation": 1}
     assert result["proposal_counts"] == {"pending": 1}
+    assert result["inbox_counts"] == {"total": 1, "unread": 1}
     assert result["sync"]["last_error"]["message"] == "backend unavailable"

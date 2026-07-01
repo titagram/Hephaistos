@@ -69,3 +69,121 @@ def test_doctor_backend_check_warns_when_missing(capsys):
 
     assert "Hades backend not configured" in output
     assert issues
+
+
+def test_doctor_cleanup_orphaned_cache_reports_removed(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.doctor as doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    with db.connect_closing() as conn:
+        db.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(tmp_path / "repo"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_orphan",
+        )
+        db.mark_binding_unlinked(conn, "wf_1")
+        db.replace_memory_cache(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_orphan",
+            version="v1",
+            items=[{"summary": "stale"}],
+        )
+
+    doctor.run_doctor(
+        SimpleNamespace(
+            fix=False,
+            ack=None,
+            doctor_action="cleanup",
+            orphaned_cache=True,
+            all=True,
+            yes=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with db.connect_closing() as conn:
+        cache = db.get_memory_cache(conn, "wb_orphan")
+
+    assert "Removed 1 orphaned Hades memory cache" in output
+    assert cache is None
+
+
+def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path, capsys):
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.doctor as doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class FakeClient:
+        def __init__(self):
+            self.reports = []
+
+        def submit_doctor_report(self, **payload):
+            self.reports.append(payload)
+            return {"report": {"id": "report_1"}}
+
+    fake = FakeClient()
+    monkeypatch.setattr(doctor, "_hades_backend_client_from_config", lambda: fake)
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "persephone": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(tmp_path / "repo"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        db.upsert_job(
+            conn,
+            job_id="job_1",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+        db.save_inbox_event(
+            conn,
+            event_id="evt_1",
+            project_id="proj_1",
+            event_type="proposal.reviewed",
+            payload={"message": "done"},
+        )
+
+    doctor._submit_hades_doctor_report(["manual issue"])
+
+    output = capsys.readouterr().out
+    assert "Hades backend doctor report submitted" in output
+    assert fake.reports[0]["project_id"] == "proj_1"
+    assert fake.reports[0]["workspace_binding_id"] == "wb_1"
+    assert fake.reports[0]["status"] == "warning"
+    assert fake.reports[0]["payload"]["job_counts"] == {"waiting_confirmation": 1}
+    assert fake.reports[0]["payload"]["inbox_counts"] == {"total": 1, "unread": 1}
