@@ -405,6 +405,128 @@ Avanzamento Hades aggiunto nello stesso step:
   ultimo sync.
 - RPC TUI `backend.status` espone conteggi job/proposals e stato sync.
 
+## Esecuzione backend remoto M2-M4 - 2026-07-01
+
+Stato: completate direttamente via SSH nel backend remoto
+`/home/ubuntu/dev-sandbox/backend`, branch `fase-2`, le slice M2, M3 e M4
+necessarie al client Hades locale gia' implementato. Non e' stato necessario
+porre nuove domande bloccanti all'agente backend, ma resta valido il comando
+SSH documentato sopra per dubbi futuri.
+
+M2 implementato:
+
+- `POST /api/hades/v1/workspaces/bind` autenticato con agent token.
+- `POST /api/hades/v1/workspaces/{workspaceBinding}/unlink` autenticato con
+  agent token.
+- Nuova tabella `hades_workspace_bindings`.
+- `workspace_binding_id` generato dal backend come ULID e non accettato dal
+  client.
+- Binding idempotente su `project_id + hades_agent_id + workspace_fingerprint`.
+- Salvataggio solo di metadata redatti/hashati: `display_path`,
+  `git_remote_display`, `git_remote_hash`, `head_commit`, `platform` e
+  fingerprint. Nessun path raw richiesto dal client.
+- Conflitto stabile `workspace_project_conflict` se lo stesso fingerprint e'
+  gia' linkato a un progetto diverso.
+- `unlink` conserva storico e marca il binding `unlinked`.
+
+M3 implementato:
+
+- `GET /api/hades/v1/memory/snapshot` per snapshot versionato della shared
+  memory di progetto.
+- `POST /api/hades/v1/memory/proposals` per proposal create/update/delete.
+- Nuova tabella `hades_memory_proposals`; la source of truth resta
+  `project_memory_entries`.
+- Snapshot restituisce `version`, `snapshot_version`, `etag` e `items` con
+  payload JSON decodificato.
+- Proposal `create` low-risk auto-accepted con scrittura in
+  `project_memory_entries` come `source=hades_agent`, `kind=proposal`.
+- Idempotenza su `workspace_binding_id + local_proposal_id`.
+- Binding `unlinked` blocca snapshot/proposal con codice
+  `workspace_binding_unlinked`.
+
+M4 implementato:
+
+- `GET /api/hades/v1/agent/jobs` per pull di job `queued`, filtrati per
+  `project_id`, `agent_id`, `workspace_binding_id` e `capabilities[]`.
+- `POST /api/hades/v1/agent/jobs/{job}/status` per lifecycle
+  `received`, `waiting_confirmation`, `started`, `completed`, `failed`,
+  `expired`, `cancelled`, `unlinked`.
+- `POST /api/hades/v1/agent/jobs/{job}/result` per risultati bounded gia'
+  prodotti dal client Hades locale.
+- Nuove tabelle `hades_agent_jobs` e `hades_agent_job_events`.
+- Payload/result JSON restano strutturati; eventi status/result vengono
+  tracciati separatamente.
+- Lo spelling pubblico e' `cancelled`.
+- `workspaces/{id}/unlink` marca `unlinked` i job non terminali collegati e
+  lascia invariati quelli terminali.
+
+Capability/discovery:
+
+- `GET /api/hades/v1/capabilities` ora espone anche le route M2-M4.
+- Policy aggiornata: `workspace_binding_required=true`, `memory=true`,
+  `jobs=true`, `artifacts=false`, `persephone=false`.
+
+Verifiche remote:
+
+```bash
+docker compose -f docker-compose.devboard.yaml exec -T app sh -lc \
+  'APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php'
+```
+
+Risultato: `23 passed`, `189 assertions`.
+
+Altre verifiche:
+
+- Test rossi eseguiti prima di ogni slice:
+  - M2: endpoint workspace mancanti -> 404.
+  - M3: endpoint memory mancanti -> 404.
+  - M4: tabella `hades_agent_jobs` mancante -> errore atteso.
+- PHP lint passato su controller, service, migration, route e test Hades.
+- `./vendor/bin/pint` passato dopo formattazione dei nuovi file.
+- `git diff --check` passato.
+- `php artisan route:list --path=hades` mostra 11 route Hades.
+- `php artisan migrate --force` ha applicato:
+  - `2026_07_01_000001_create_hades_m2_workspace_bindings_table`
+  - `2026_07_01_000002_create_hades_m3_memory_proposals_table`
+  - `2026_07_01_000003_create_hades_m4_agent_jobs_tables`
+- Smoke pubblico:
+  - `https://home-sweet-home.cloud/api/hades/v1/health` -> HTTP 200.
+  - `https://home-sweet-home.cloud/api/hades/v1/capabilities` senza bearer ->
+    HTTP 401 JSON `Hades agent token is required.`
+
+Verifica end-to-end client Hades locale -> backend pubblico:
+
+- Creato un progetto Laravel temporaneo e bootstrap token a scadenza breve.
+- Eseguito con `HERMES_HOME` temporaneo locale:
+  - `hades backend setup --url https://home-sweet-home.cloud ...`
+  - `hades project create ...`
+  - `hades project link ...`
+  - `hades backend sync`
+- Seed remoto creato per una memory entry e un job `read_files` su
+  `README.md` nel workspace temporaneo.
+- Esito locale dopo sync:
+  - job locale `completed`;
+  - proposta memory locale `accepted`;
+  - cache memory aggiornata con la seed remota;
+  - `last_sync_summary`: `pulled=1`, `completed=1`,
+    `memory_snapshots=1`, `proposals_synced=1`, errori `0`.
+- Esito remoto dopo sync:
+  - job Laravel `completed`;
+  - 3 eventi job registrati;
+  - proposal Laravel `accepted`.
+- Cleanup sicurezza: revocati tutti i bootstrap token e agent token associati
+  ai progetti temporanei E2E; conteggio finale token attivi E2E `0`.
+
+Risultato operativo:
+
+- Il backend remoto ora espone il contratto necessario per provare
+  `hades backend setup`, `hades project link` e `hades backend sync` contro
+  Laravel per setup, workspace binding, memory snapshot/proposals e job
+  read-only.
+- Restano fuori da M2-M4: provisioning dashboard dei bootstrap token,
+  artifact upload M5, Persephone/inbox M6, OpenAPI definitivo, retention
+  policy e admin UI per creare job/manual review.
+
 ## Open questions residue
 
 - Nome esatto delle route e versione API (`/api/hades/v1/...` o namespace

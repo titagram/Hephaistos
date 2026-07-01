@@ -429,6 +429,16 @@ riepilogo setup.
   `memory/snapshot`, aggiorna la cache shared memory locale, invia proposal
   pending a `memory/proposals`, aggiorna stati `accepted/refused/conflicted` e
   registra `last_sync_summary` / `last_sync_error` redatti nello SQLite locale.
+  Nota implementazione backend remoto 2026-07-01: nel Laravel remoto
+  `/home/ubuntu/dev-sandbox/backend` sono state completate le slice M2-M4
+  compatibili con il client Hades locale: workspace binding/unlink,
+  shared-memory snapshot/proposals e agent jobs pull/status/result sotto
+  `/api/hades/v1`. Le migration runtime sono state applicate e la suite remota
+  Hades M1-M4 piu' auth plugin passa. Eseguita anche una prova end-to-end con
+  `HERMES_HOME` temporaneo contro `https://home-sweet-home.cloud`: setup,
+  project link, memory snapshot/proposal e job `read_files` completato con
+  risultato `completed`; dettagli e verifiche sono registrati in
+  `docs/backend-agent-coordination.md`.
 - [ ] Istruzioni backend Laravel: documentare route, variabili ambiente,
   generazione token, install command per developer, download installer,
   registrazione agent/progetto, MCP/API, WebSocket e controlli di salute.
