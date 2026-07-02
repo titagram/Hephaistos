@@ -1341,3 +1341,32 @@ Aggiornamento verifica contratto 2026-07-02:
   bundle, matrice symptom/command/evidence/recovery/escalation per bootstrap,
   token, workspace link, job/proposal, artifact, Docker, Windows PATH e
   desktop/backend mismatch.
+
+Aggiornamento verifica backend Laravel 2026-07-02:
+
+- Backend remoto: branch `fase-2` pulito su `3e7b3a7` (`Stabilize DevBoard
+  deployment and project scope workflows`), senza diff non committati.
+- Commit ispezionato: aggiunge profilo Docker prod DevBoard, route dashboard
+  project-scoped per memory/wiki/graph, update della memoria progetto e nuova
+  semantica di delete model profile assegnato con clear degli agent collegati.
+- Route smoke: `php artisan route:list --path=hades` mostra 22 route; `php
+  artisan route:list --path=api/dashboard/projects` include `PATCH
+  /projects/{project}/memory/{memory}`, project wiki page e project graph.
+- Suite remota Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php
+  artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php` passata:
+  `28 passed / 254 assertions`.
+- Suite remota dashboard toccata dal commit:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php
+  artisan test tests/Feature/Dashboard/AiAgentRegistryDashboardTest.php
+  tests/Feature/Dashboard/DashboardApiContractTest.php
+  tests/Feature/Dashboard/ProjectMemoryDashboardApiTest.php` passata:
+  `30 passed / 281 assertions`.
+- Smoke pubblico Hades: `https://home-sweet-home.cloud/api/hades/v1/health`
+  risponde `HTTP/2 200` con `status=ok`.
+- Compose prod: `docker compose -f docker-compose.devboard.prod.yaml config
+  --quiet` passato con env dummy; file prod Docker/Nginx/PHP presenti.
+- Nota di review: `PATCH /api/dashboard/projects/{project}/memory/{memory}` e'
+  implementata come sostituzione completa dei riferimenti opzionali; se il
+  frontend invia patch parziali senza `repository_id`, `task_id` o `run_id`, i
+  riferimenti esistenti vengono azzerati.
