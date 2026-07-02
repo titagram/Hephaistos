@@ -86,6 +86,19 @@ npm run --prefix apps/desktop test:desktop:platforms
 - Docker/packaging: leggere `.github/workflows/docker*.yml`, `Dockerfile` e
   `docker-compose.yml`; non buildare immagini pesanti senza conferma.
 
+## Gate Di Release
+
+La matrice completa dei gate di produzione vive in `docs/RELEASE_GATES.md`.
+Usala quando un task tocca backend MVP, PyPI, Docker, website, desktop package
+o update flow. In sintesi:
+
+- `CI / All required checks pass` e' il gate aggregato da branch protection.
+- Docker non e' nel gate aggregato oggi; per una release che pubblica immagini
+  va richiesto il workflow `.github/workflows/docker.yml` o un signoff esplicito.
+- Il backend MVP richiede anche lo smoke no-network
+  `tests/hermes_cli/test_hades_backend_mvp_smoke.py` e uno smoke staging con
+  `HERMES_HOME` usa-e-getta.
+
 ## Copertura Da Verificare
 
 - Non e stata prodotta una mappa completa della copertura per ogni plugin.

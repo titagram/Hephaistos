@@ -1312,3 +1312,7 @@ locale.
 - Repo locale: P1-2 avviato con logging strutturato e redatto su logger
   `hermes_cli.hades_backend` per sync, artifact upload, worker plugin e doctor
   report; docs Hades ora includono eventi e runbook operator.
+- Repo locale: P1-6 avviato con `docs/RELEASE_GATES.md`: matrice dei gate per
+  backend MVP, PyPI, Docker, website, desktop e update flow. Corretto anche il
+  release script locale per includere `apps/desktop/package.json` nel commit
+  automatico di bump versione.

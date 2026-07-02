@@ -97,6 +97,10 @@ hades doctor --report-backend
 Do not paste project bootstrap tokens, derived agent tokens, raw job payloads,
 or local absolute paths into logs or support tickets.
 
+Production release gate mapping is tracked in
+[`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before
+shipping backend MVP, PyPI, Docker, website, desktop, or update artifacts.
+
 ## Observability
 
 Hades backend sync and plugin worker paths emit sanitized structured log records

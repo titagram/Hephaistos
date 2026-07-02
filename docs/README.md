@@ -14,6 +14,8 @@ sviluppatori nel checkout locale.
 - `docs/ARCHITECTURE.md` - architettura osservata e flussi principali.
 - `docs/RUNTIME.md` - prerequisiti, installazione, avvio, Docker.
 - `docs/TESTING.md` - comandi reali di test, lint e typecheck.
+- `docs/RELEASE_GATES.md` - matrice dei gate per backend MVP, PyPI, Docker,
+  website, desktop e update.
 - `docs/SOURCE_OF_TRUTH.md` - priorita tra codice, docs, test e CI.
 - `docs/MAINTENANCE.md` - flusso operativo per iniziare e chiudere un task.
 - `docs/LEGACY_COMPATIBILITY.md` - policy per alias, env var, path e nomi

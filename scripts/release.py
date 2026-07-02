@@ -33,6 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = REPO_ROOT / "hermes_cli" / "__init__.py"
 PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
+DESKTOP_PACKAGE_FILE = REPO_ROOT / "apps" / "desktop" / "package.json"
 
 # ACP Registry manifest must stay version-locked with pyproject.toml.
 # tests/acp/test_registry_manifest.py enforces this lockstep so the release
@@ -1841,20 +1842,29 @@ def update_version_files(semver: str, calver_date: str):
     # Python package version. The desktop About panel reads the live Hermes
     # version at runtime, but app.getVersion()/packaging metadata still come
     # from this field, so it must track pyproject to avoid drift.
-    desktop_pkg = REPO_ROOT / "apps" / "desktop" / "package.json"
-    if desktop_pkg.exists():
-        pkg_text = desktop_pkg.read_text(encoding="utf-8")
+    if DESKTOP_PACKAGE_FILE.exists():
+        pkg_text = DESKTOP_PACKAGE_FILE.read_text(encoding="utf-8")
         pkg_text = re.sub(
             r'("version"\s*:\s*)"[^"]+"',
             rf'\g<1>"{semver}"',
             pkg_text,
             count=1,
         )
-        desktop_pkg.write_text(pkg_text, encoding="utf-8")
+        DESKTOP_PACKAGE_FILE.write_text(pkg_text, encoding="utf-8")
 
     # Update ACP Registry manifest + npm launcher (must stay version-locked
     # with pyproject — enforced by tests/acp/test_registry_manifest.py).
     _update_acp_registry_versions(semver)
+
+
+def _version_files_to_stage() -> list[Path]:
+    """Return release version files that exist in this branch."""
+    files = [VERSION_FILE, PYPROJECT_FILE]
+    if DESKTOP_PACKAGE_FILE.exists():
+        files.append(DESKTOP_PACKAGE_FILE)
+    if ACP_REGISTRY_MANIFEST.exists():
+        files.append(ACP_REGISTRY_MANIFEST)
+    return files
 
 
 def _update_acp_registry_versions(semver: str) -> None:
@@ -2254,9 +2264,7 @@ def main():
             print(f"  ✓ Updated version files to v{new_version} ({calver_date})")
 
             # Commit version bump
-            add_files = [str(VERSION_FILE), str(PYPROJECT_FILE)]
-            if ACP_REGISTRY_MANIFEST.exists():
-                add_files.append(str(ACP_REGISTRY_MANIFEST))
+            add_files = [str(path) for path in _version_files_to_stage()]
             add_result = git_result("add", *add_files)
             if add_result.returncode != 0:
                 print(f"  ✗ Failed to stage version files: {add_result.stderr.strip()}")
