@@ -53,6 +53,27 @@ piggyback run is asynchronous, quiet, and fail-open: chat continues even if the
 backend is offline. Repeated failures are recorded in local sync state and
 surface as a degraded backend action in `hades backend status --json`.
 
+## Lifecycle And Cleanup
+
+Local Hades backend state has explicit retention classes:
+
+| State | Local retention | Cleanup |
+| --- | --- | --- |
+| Waiting jobs | Kept until approved, refused, or `deadline_at` expires | `hades backend approve-job`, `hades backend refuse-job`, automatic expiry during sync |
+| Terminal jobs (`completed`, `failed`, `expired`, `cancelled`, `unlinked`) | 30 days after last update | `hades doctor cleanup --stale-jobs` |
+| Pending memory proposals | Kept until backend accepts/refuses/conflicts them | `hades backend sync` |
+| Refused/conflicted memory proposals | Kept until local review | `hades backend ack-proposal <proposal_id>` |
+| Accepted/acknowledged memory proposals | 90 days after last update | `hades doctor cleanup --stale-proposals` |
+| Orphaned shared-memory cache | 90 days after unlink | `hades doctor cleanup --orphaned-cache` |
+| Local Persephone inbox events | 30 days after receipt | `hades doctor cleanup --stale-inbox` |
+| Artifact payloads | Not retained locally after upload | Backend artifact retention policy |
+| Doctor reports | Not retained locally after explicit submit | Backend doctor-report retention policy |
+
+Cleanup is dry-run by default. Add `--yes` to remove rows and
+`--retention-days <days>` to override the selected local retention window for a
+one-off maintenance run. `--all` includes non-expired selected candidates, but
+does not delete active jobs or unreviewed refused/conflicted proposals.
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,

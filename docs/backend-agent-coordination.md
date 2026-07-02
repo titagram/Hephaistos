@@ -1302,3 +1302,7 @@ locale.
 - Repo locale: P0-6 avviato con sync piggyback asincrono nel loop agente. Lo
   stato di backoff e fallimento vive in `hades_backend.db` `sync_state`, non
   blocca la chat, e viene ripulito da un `hades backend sync` manuale riuscito.
+- Repo locale: P1-1 avviato con lifecycle locale esplicito: cleanup dry-run per
+  job terminali, memory proposal accettate/acknowledged, inbox stale e cache
+  shared-memory orfana via `hades doctor cleanup`. Refused/conflicted proposal
+  restano visibili finche' non vengono acknowledge.

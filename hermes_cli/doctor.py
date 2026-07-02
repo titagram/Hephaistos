@@ -554,25 +554,82 @@ def _check_hades_backend(issues: list[str]) -> None:
 
 
 def _run_hades_doctor_cleanup(args) -> None:
-    if not getattr(args, "orphaned_cache", False):
-        print("doctor cleanup: pass --orphaned-cache to remove orphaned Hades memory cache")
+    selected = {
+        "orphaned_cache": getattr(args, "orphaned_cache", False),
+        "stale_jobs": getattr(args, "stale_jobs", False),
+        "stale_proposals": getattr(args, "stale_proposals", False),
+        "stale_inbox": getattr(args, "stale_inbox", False),
+    }
+    if not any(selected.values()):
+        print(
+            "doctor cleanup: pass one of --orphaned-cache, --stale-jobs, "
+            "--stale-proposals, or --stale-inbox"
+        )
         return
-    if not getattr(args, "yes", False):
-        print("doctor cleanup: refusing non-interactive cleanup without --yes")
-        return
+    dry_run = not getattr(args, "yes", False)
+    include_all = getattr(args, "all", False)
+    retention_days = getattr(args, "retention_days", None)
     try:
         from hermes_cli import hades_backend_db as hdb
     except Exception as exc:
         print(f"doctor cleanup: Hades backend state unavailable ({exc})")
         return
+
+    def _retention(default: int) -> int:
+        return default if retention_days is None else max(0, int(retention_days))
+
+    def _print_report(label: str, report: dict[str, int]) -> None:
+        count_key = "would_remove" if dry_run else "removed"
+        count = report.get(count_key, 0)
+        verb = "Would remove" if dry_run else "Removed"
+        print(
+            f"{verb} {count} {label} "
+            f"({report.get('candidates', 0)} candidate(s), {report.get('bytes', 0)} byte(s))."
+        )
+
     with hdb.connect_closing() as conn:
-        report = hdb.cleanup_orphaned_memory_cache(conn, include_all=getattr(args, "all", False))
-    removed = report.get("removed", 0)
-    print(
-        f"Removed {removed} orphaned Hades memory cache entr"
-        f"{'y' if removed == 1 else 'ies'} "
-        f"({report.get('candidates', 0)} candidate(s), {report.get('bytes', 0)} byte(s))."
-    )
+        if selected["orphaned_cache"]:
+            _print_report(
+                "orphaned Hades memory cache row(s)",
+                hdb.cleanup_orphaned_memory_cache(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(90),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_jobs"]:
+            _print_report(
+                "stale terminal Hades backend job(s)",
+                hdb.cleanup_terminal_backend_jobs(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_proposals"]:
+            _print_report(
+                "stale reviewed Hades memory proposal(s)",
+                hdb.cleanup_reviewed_memory_proposals(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(90),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_inbox"]:
+            _print_report(
+                "stale Hades inbox event(s)",
+                hdb.cleanup_inbox_events(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+    if dry_run:
+        print("doctor cleanup: dry run only; rerun with --yes to remove selected state.")
 
 
 def _submit_hades_doctor_report(issues: list[str]) -> None:

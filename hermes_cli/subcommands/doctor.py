@@ -40,6 +40,19 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
     doctor_sub = doctor_parser.add_subparsers(dest="doctor_action")
     cleanup = doctor_sub.add_parser("cleanup", help="Run local Hades maintenance cleanup")
     cleanup.add_argument("--orphaned-cache", action="store_true", help="Remove orphaned Hades shared-memory cache")
-    cleanup.add_argument("--all", action="store_true", help="Include non-expired orphaned cache")
+    cleanup.add_argument("--stale-jobs", action="store_true", help="Remove stale terminal Hades backend jobs")
+    cleanup.add_argument(
+        "--stale-proposals",
+        action="store_true",
+        help="Remove stale accepted or acknowledged Hades memory proposals",
+    )
+    cleanup.add_argument("--stale-inbox", action="store_true", help="Remove stale local Hades inbox events")
+    cleanup.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="Override the selected cleanup retention window",
+    )
+    cleanup.add_argument("--all", action="store_true", help="Include non-expired selected cleanup candidates")
     cleanup.add_argument("--yes", action="store_true", help="Proceed without an interactive confirmation")
     doctor_parser.set_defaults(func=cmd_doctor)

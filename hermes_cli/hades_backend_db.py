@@ -14,6 +14,16 @@ from typing import Any, Iterable
 from hermes_cli.sqlite_util import write_txn
 from hermes_constants import get_hermes_home
 
+TERMINAL_BACKEND_JOB_STATUSES = (
+    "cancelled",
+    "completed",
+    "expired",
+    "failed",
+    "skipped",
+    "unlinked",
+)
+REVIEWED_MEMORY_PROPOSAL_STATUSES = ("accepted", "acknowledged")
+
 
 def hades_backend_db_path() -> Path:
     return get_hermes_home() / "hades_backend.db"
@@ -748,6 +758,7 @@ def cleanup_orphaned_memory_cache(
     include_all: bool = False,
     retention_days: int = 90,
     now: int | None = None,
+    dry_run: bool = False,
 ) -> dict[str, int]:
     current = int(now if now is not None else _now())
     rows = conn.execute(
@@ -769,14 +780,152 @@ def cleanup_orphaned_memory_cache(
         if include_all or retention_days == 0 or int(row["updated_at"]) <= cutoff:
             remove_ids.append(str(row["workspace_binding_id"]))
             total_bytes += len(str(row["items"]).encode("utf-8"))
-    if remove_ids:
+    if remove_ids and not dry_run:
         with write_txn(conn):
             for workspace_binding_id in remove_ids:
                 conn.execute(
                     "DELETE FROM memory_cache WHERE workspace_binding_id = ?",
                     (workspace_binding_id,),
                 )
-    return {"candidates": candidates, "removed": len(remove_ids), "bytes": total_bytes}
+    removed = 0 if dry_run else len(remove_ids)
+    return {
+        "candidates": candidates,
+        "would_remove": len(remove_ids),
+        "removed": removed,
+        "bytes": total_bytes,
+    }
+
+
+def cleanup_terminal_backend_jobs(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    retention_days: int = 30,
+    now: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    current = int(now if now is not None else _now())
+    cutoff = current - (max(0, int(retention_days)) * 86400)
+    placeholders = ",".join("?" for _ in TERMINAL_BACKEND_JOB_STATUSES)
+    rows = conn.execute(
+        f"""
+        SELECT job_id, status, payload, result, updated_at
+        FROM backend_jobs
+        WHERE status IN ({placeholders})
+        ORDER BY updated_at ASC
+        """,
+        list(TERMINAL_BACKEND_JOB_STATUSES),
+    ).fetchall()
+    remove_ids: list[str] = []
+    by_status: dict[str, int] = {}
+    total_bytes = 0
+    for row in rows:
+        if not (include_all or retention_days == 0 or int(row["updated_at"]) <= cutoff):
+            continue
+        remove_ids.append(str(row["job_id"]))
+        status = str(row["status"])
+        by_status[status] = by_status.get(status, 0) + 1
+        total_bytes += len(str(row["payload"]).encode("utf-8"))
+        total_bytes += len(str(row["result"] or "").encode("utf-8"))
+    if remove_ids and not dry_run:
+        with write_txn(conn):
+            for job_id in remove_ids:
+                conn.execute("DELETE FROM backend_jobs WHERE job_id = ?", (job_id,))
+    removed = 0 if dry_run else len(remove_ids)
+    return {
+        "candidates": len(rows),
+        "would_remove": len(remove_ids),
+        "removed": removed,
+        "bytes": total_bytes,
+        **{f"status_{status}": count for status, count in sorted(by_status.items())},
+    }
+
+
+def cleanup_reviewed_memory_proposals(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    retention_days: int = 90,
+    now: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    current = int(now if now is not None else _now())
+    cutoff = current - (max(0, int(retention_days)) * 86400)
+    placeholders = ",".join("?" for _ in REVIEWED_MEMORY_PROPOSAL_STATUSES)
+    rows = conn.execute(
+        f"""
+        SELECT id, status, summary, provenance, reason, updated_at
+        FROM memory_proposals
+        WHERE status IN ({placeholders})
+        ORDER BY updated_at ASC
+        """,
+        list(REVIEWED_MEMORY_PROPOSAL_STATUSES),
+    ).fetchall()
+    remove_ids: list[str] = []
+    by_status: dict[str, int] = {}
+    total_bytes = 0
+    for row in rows:
+        if not (include_all or retention_days == 0 or int(row["updated_at"]) <= cutoff):
+            continue
+        remove_ids.append(str(row["id"]))
+        status = str(row["status"])
+        by_status[status] = by_status.get(status, 0) + 1
+        total_bytes += len(str(row["summary"]).encode("utf-8"))
+        total_bytes += len(str(row["provenance"]).encode("utf-8"))
+        total_bytes += len(str(row["reason"] or "").encode("utf-8"))
+    if remove_ids and not dry_run:
+        with write_txn(conn):
+            for proposal_id in remove_ids:
+                conn.execute("DELETE FROM memory_proposals WHERE id = ?", (proposal_id,))
+    removed = 0 if dry_run else len(remove_ids)
+    return {
+        "candidates": len(rows),
+        "would_remove": len(remove_ids),
+        "removed": removed,
+        "bytes": total_bytes,
+        **{f"status_{status}": count for status, count in sorted(by_status.items())},
+    }
+
+
+def cleanup_inbox_events(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    retention_days: int = 30,
+    now: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    current = int(now if now is not None else _now())
+    cutoff = current - (max(0, int(retention_days)) * 86400)
+    rows = conn.execute(
+        """
+        SELECT event_id, payload, received_at, read_at
+        FROM inbox_events
+        ORDER BY received_at ASC
+        """
+    ).fetchall()
+    remove_ids: list[str] = []
+    unread = 0
+    total_bytes = 0
+    for row in rows:
+        if not (include_all or retention_days == 0 or int(row["received_at"]) <= cutoff):
+            continue
+        remove_ids.append(str(row["event_id"]))
+        if row["read_at"] is None:
+            unread += 1
+        total_bytes += len(str(row["payload"]).encode("utf-8"))
+    if remove_ids and not dry_run:
+        with write_txn(conn):
+            for event_id in remove_ids:
+                conn.execute("DELETE FROM inbox_events WHERE event_id = ?", (event_id,))
+    removed = 0 if dry_run else len(remove_ids)
+    return {
+        "candidates": len(rows),
+        "would_remove": len(remove_ids),
+        "removed": removed,
+        "bytes": total_bytes,
+        "unread": unread,
+    }
 
 
 def replace_memory_cache(

@@ -106,6 +106,124 @@ def test_cleanup_orphaned_memory_cache_removes_unlinked_cache(monkeypatch, tmp_p
     assert cache is None
 
 
+def test_cleanup_terminal_backend_jobs_keeps_active_and_fresh_jobs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+
+    now = 2_000_000
+    old = now - 31 * 86400
+    fresh = now - 2 * 86400
+    with hdb.connect_closing() as conn:
+        hdb.upsert_job(
+            conn,
+            job_id="job_done_old",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="completed",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_failed_fresh",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="failed",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_waiting_old",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+        conn.execute("UPDATE backend_jobs SET updated_at = ? WHERE job_id = ?", (old, "job_done_old"))
+        conn.execute("UPDATE backend_jobs SET updated_at = ? WHERE job_id = ?", (fresh, "job_failed_fresh"))
+        conn.execute("UPDATE backend_jobs SET updated_at = ? WHERE job_id = ?", (old, "job_waiting_old"))
+        conn.commit()
+
+        dry_run = hdb.cleanup_terminal_backend_jobs(conn, retention_days=30, now=now, dry_run=True)
+        assert hdb.get_job(conn, "job_done_old") is not None
+
+        report = hdb.cleanup_terminal_backend_jobs(conn, retention_days=30, now=now)
+
+        assert dry_run["would_remove"] == 1
+        assert dry_run["removed"] == 0
+        assert report["removed"] == 1
+        assert report["status_completed"] == 1
+        assert hdb.get_job(conn, "job_done_old") is None
+        assert hdb.get_job(conn, "job_failed_fresh") is not None
+        assert hdb.get_job(conn, "job_waiting_old") is not None
+
+
+def test_cleanup_reviewed_memory_proposals_keeps_unacknowledged_refusals(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+
+    now = 2_000_000
+    old = now - 91 * 86400
+    with hdb.connect_closing() as conn:
+        accepted = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="memory_write",
+            summary="accepted",
+            provenance={},
+        )
+        refused = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="memory_write",
+            summary="refused",
+            provenance={},
+        )
+        hdb.mark_memory_proposal_status(conn, accepted.id, "accepted")
+        hdb.mark_memory_proposal_status(conn, refused.id, "refused", "backend policy")
+        conn.execute("UPDATE memory_proposals SET updated_at = ? WHERE id IN (?, ?)", (old, accepted.id, refused.id))
+        conn.commit()
+
+        report = hdb.cleanup_reviewed_memory_proposals(conn, retention_days=90, now=now)
+        remaining = {proposal.id: proposal.status for proposal in hdb.list_memory_proposals(conn)}
+
+    assert report["removed"] == 1
+    assert report["status_accepted"] == 1
+    assert accepted.id not in remaining
+    assert remaining[refused.id] == "refused"
+
+
+def test_cleanup_inbox_events_removes_stale_events(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+
+    now = 2_000_000
+    old = now - 31 * 86400
+    fresh = now - 2 * 86400
+    with hdb.connect_closing() as conn:
+        hdb.save_inbox_event(conn, event_id="evt_old", project_id="proj_1", event_type="notice", payload={"x": 1})
+        hdb.save_inbox_event(conn, event_id="evt_fresh", project_id="proj_1", event_type="notice", payload={"x": 2})
+        conn.execute("UPDATE inbox_events SET received_at = ? WHERE event_id = ?", (old, "evt_old"))
+        conn.execute("UPDATE inbox_events SET received_at = ? WHERE event_id = ?", (fresh, "evt_fresh"))
+        conn.commit()
+
+        report = hdb.cleanup_inbox_events(conn, retention_days=30, now=now)
+        remaining = [event.event_id for event in hdb.list_inbox_events(conn)]
+
+    assert report["removed"] == 1
+    assert report["unread"] == 1
+    assert remaining == ["evt_fresh"]
+
+
 def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

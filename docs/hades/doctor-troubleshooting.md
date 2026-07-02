@@ -26,15 +26,22 @@ job payload contents, or local absolute paths.
 ## Cleanup
 
 Maintenance commands live under the doctor namespace. MVP cleanup includes
-local-only cache/job cleanup such as:
+local-only cache/job/proposal/inbox cleanup. Cleanup is dry-run unless `--yes`
+is present:
 
 ```bash
 hades doctor cleanup --orphaned-cache
+hades doctor cleanup --stale-jobs
+hades doctor cleanup --stale-proposals
+hades doctor cleanup --stale-inbox
 hades doctor cleanup --orphaned-cache --all --yes
 ```
 
 Cleanup does not delete backend memory. It only removes local stale or orphaned
-state after confirmation.
+state after confirmation. Refused or conflicted memory proposals remain visible
+until they are acknowledged with `hades backend ack-proposal <proposal_id>`;
+cleanup removes accepted or already-acknowledged proposal rows after the local
+retention window.
 
 ## Degraded States
 

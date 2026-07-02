@@ -121,6 +121,54 @@ def test_doctor_cleanup_orphaned_cache_reports_removed(monkeypatch, tmp_path, ca
     assert cache is None
 
 
+def test_doctor_cleanup_stale_jobs_dry_run_keeps_rows(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.doctor as doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    now = 2_000_000
+    old = now - 31 * 86400
+    with db.connect_closing() as conn:
+        db.upsert_job(
+            conn,
+            job_id="job_done_old",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="completed",
+        )
+        conn.execute("UPDATE backend_jobs SET updated_at = ? WHERE job_id = ?", (old, "job_done_old"))
+        conn.commit()
+
+    monkeypatch.setattr(db, "_now", lambda: now)
+    doctor.run_doctor(
+        SimpleNamespace(
+            fix=False,
+            ack=None,
+            doctor_action="cleanup",
+            orphaned_cache=False,
+            stale_jobs=True,
+            stale_proposals=False,
+            stale_inbox=False,
+            retention_days=30,
+            all=False,
+            yes=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with db.connect_closing() as conn:
+        job = db.get_job(conn, "job_done_old")
+
+    assert "Would remove 1 stale terminal Hades backend job" in output
+    assert "dry run only" in output
+    assert job is not None
+
+
 def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path, capsys):
     from hermes_cli import hades_backend_db as db
     import hermes_cli.doctor as doctor
