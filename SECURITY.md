@@ -218,6 +218,9 @@ authorization model, but the rules below apply uniformly.
    `--host 0.0.0.0` or equivalent makes public-exposure hardening
    (§4) the operator's responsibility.
 
+The dashboard/API route inventory and public allowlist are documented in
+[`docs/security/dashboard-auth-matrix.md`](docs/security/dashboard-auth-matrix.md).
+
 ---
 
 ## 3. Scope

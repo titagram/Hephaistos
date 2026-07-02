@@ -1316,3 +1316,7 @@ locale.
   backend MVP, PyPI, Docker, website, desktop e update flow. Corretto anche il
   release script locale per includere `apps/desktop/package.json` nel commit
   automatico di bump versione.
+- Repo locale: P1-3 avviato con `docs/security/dashboard-auth-matrix.md` e
+  test `tests/hermes_cli/test_dashboard_auth_inventory.py`: l'allowlist pubblica
+  dashboard/API deve restare read-only salvo endpoint self-authenticated come
+  `/api/cron/fire`.

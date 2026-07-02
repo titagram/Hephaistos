@@ -28,12 +28,15 @@ Regole osservate:
 
 ## Network Exposure
 
-Fonte: `SECURITY.md`, `docker-compose.yml`, `hermes_cli/web_server.py`.
+Fonte: `SECURITY.md`, `docker-compose.yml`, `hermes_cli/web_server.py`,
+`docs/security/dashboard-auth-matrix.md`.
 
 Regole osservate:
 - Network-exposed adapters richiedono allowlist.
 - Dashboard compose default: host `127.0.0.1`.
 - Esposizione `0.0.0.0` e flags insecure sono break-glass operator decisions.
+- La matrice dashboard/API distingue loopback, auth-gated public bind,
+  reverse proxy, WebSocket e allowlist pubblica `/api/*`.
 
 ## Tool / Execution Risk
 
@@ -74,6 +77,5 @@ rg -n 'inherit_credentials=True|os.environ.copy\\(|get_secret\\(' .
 
 ## Da Completare
 
-- Mappa completa endpoint dashboard -> auth dependency.
 - Mappa plugin esterni installati dall'utente sotto `$HERMES_HOME/plugins/`
   non visibile dal checkout.
