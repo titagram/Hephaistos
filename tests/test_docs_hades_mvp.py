@@ -39,6 +39,7 @@ def test_hades_openapi_contract_covers_client_routes():
         "/api/hades/v1/workspaces/{workspaceBinding}/unlink",
         "/api/hades/v1/memory/snapshot",
         "/api/hades/v1/memory/proposals",
+        "/api/hades/v1/memory/import-bundles",
         "/api/hades/v1/agent/jobs",
         "/api/hades/v1/agent/jobs/{job}/status",
         "/api/hades/v1/agent/jobs/{job}/result",
@@ -54,7 +55,9 @@ def test_hades_openapi_contract_covers_client_routes():
     assert paths["/api/hades/v1/artifacts"]["post"]["requestBody"]
     assert paths["/api/hades/v1/doctor/reports"]["post"]["requestBody"]
     assert paths["/api/hades/v1/memory/proposals"]["post"]["responses"]["200"]
-    assert spec["components"]["schemas"]["ErrorResponse"]["required"] == ["error", "message"]
+    assert paths["/api/hades/v1/memory/import-bundles"]["post"]["requestBody"]
+    assert spec["components"]["schemas"]["ErrorResponse"]["required"] == ["error"]
+    assert spec["components"]["schemas"]["ErrorResponse"]["properties"]["error"]["required"] == ["code", "message"]
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"]["$ref"] == "#/components/responses/Unauthorized"
 
 
@@ -87,6 +90,7 @@ def test_hades_openapi_refs_and_launch_examples_are_resolved():
         "ValidationError",
         "MemoryProposalConflict",
         "MemoryProposalRefused",
+        "MemoryImportBundle",
         "ExpiredJobStatus",
         "TruncatedArtifactUpload",
         "InboxPolling",

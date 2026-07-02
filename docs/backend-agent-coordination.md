@@ -1287,7 +1287,7 @@ locale.
 
 - Backend remoto: `php artisan route:list --path=hades` mostra 22 route Hades,
   incluse le route dashboard admin per bootstrap token/job/proposal review e le
-  16 route operative `/api/hades/v1` coperte dal fixture OpenAPI locale.
+  route operative `/api/hades/v1` coperte dal fixture OpenAPI locale.
 - Backend remoto: suite `tests/Feature/Hades` passata in container con SQLite
   in-memory: `21 passed / 229 assertions`.
 - Repo locale: P0-5 implementato centralizzando lo status backend condiviso da
@@ -1324,6 +1324,19 @@ locale.
   symlink sono omessi con reason `symlink`, directory gitignored vengono
   potate prima del walk, e AST resta scope Python-only bounded senza sorgente
   raw.
+
+Aggiornamento verifica contratto 2026-07-02:
+
+- Divergenza trovata e chiusa: il backend esponeva anche
+  `POST /api/hades/v1/memory/import-bundles`, mancante dal fixture locale.
+  Il fixture `docs/hades/openapi-hades-v1.json` e `HadesBackendClient` ora lo
+  coprono come `import_memory_bundle`.
+- Confronto fresco via `php artisan route:list --path=hades --json`: le 17
+  route operative `/api/hades/v1` remote coincidono esattamente con il fixture
+  OpenAPI locale (`remote_only=[]`, `fixture_only=[]`).
+- Suite remota fresca:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades`
+  passata: `21 passed / 229 assertions`.
 - Repo locale: P1-7 avviato con `docs/hades/support-runbook.md`: safe support
   bundle, matrice symptom/command/evidence/recovery/escalation per bootstrap,
   token, workspace link, job/proposal, artifact, Docker, Windows PATH e

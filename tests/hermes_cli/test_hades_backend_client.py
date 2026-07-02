@@ -88,6 +88,34 @@ CLIENT_ROUTE_CASES = [
         "json_body": {"project_id": "proj_1", "action": "create", "summary": "Remember this"},
     },
     {
+        "method_name": "import_memory_bundle",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/memory/import-bundles",
+        "wire_path": "/api/hades/v1/memory/import-bundles",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source": {"kind": "hades_local_memory"},
+            "entries": [
+                {
+                    "source_hash": "sha256:abc",
+                    "summary": "Use backend memory as source of truth.",
+                }
+            ],
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source": {"kind": "hades_local_memory"},
+            "entries": [
+                {
+                    "source_hash": "sha256:abc",
+                    "summary": "Use backend memory as source of truth.",
+                }
+            ],
+        },
+    },
+    {
         "method_name": "pull_jobs",
         "http_method": "GET",
         "openapi_path": "/api/hades/v1/agent/jobs",

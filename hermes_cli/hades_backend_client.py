@@ -185,6 +185,9 @@ class HadesBackendClient:
     def create_memory_proposal(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "memory/proposals", json_body=payload)
 
+    def import_memory_bundle(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "memory/import-bundles", json_body=payload)
+
     def pull_jobs(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "agent/jobs", params=payload)
 
