@@ -47,9 +47,9 @@ def run_backend_sync(
         _job_payload,
         _requires_confirmation,
         _response_jobs,
-        _status_payload,
         _sync_memory,
     )
+    from hermes_cli.hades_backend_actions import status_payload as _status_payload
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
 

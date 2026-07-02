@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Brain,
@@ -8,8 +8,10 @@ import {
   GitBranch,
   Inbox,
   Link2,
+  Play,
   RefreshCw,
   Server,
+  XCircle,
   type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
@@ -20,7 +22,13 @@ import { Toast } from "@nous-research/ui/ui/components/toast";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { api } from "@/lib/api";
-import type { HadesBackendBinding, HadesBackendStatus } from "@/lib/api";
+import type {
+  HadesBackendActionResponse,
+  HadesBackendBinding,
+  HadesBackendJob,
+  HadesBackendMemoryProposal,
+  HadesBackendStatus,
+} from "@/lib/api";
 import { usePageHeader } from "@/contexts/usePageHeader";
 
 function recordTotal(record: Record<string, number> | null | undefined): number {
@@ -140,17 +148,39 @@ function SyncSummary({ status }: { status: HadesBackendStatus }) {
   );
 }
 
+function ReviewEmpty({ label }: { label: string }) {
+  return (
+    <div className="border border-dashed border-border px-3 py-4 text-sm text-muted-foreground">
+      {label}
+    </div>
+  );
+}
+
+function ReviewMeta({ children }: { children: ReactNode }) {
+  return <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{children}</div>;
+}
+
 export default function BackendPage() {
   const [status, setStatus] = useState<HadesBackendStatus | null>(null);
+  const [jobs, setJobs] = useState<HadesBackendJob[]>([]);
+  const [proposals, setProposals] = useState<HadesBackendMemoryProposal[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const { toast, showToast } = useToast();
   const { setEnd } = usePageHeader();
 
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      setStatus(await api.getHadesBackendStatus());
+      const [nextStatus, nextJobs, nextProposals] = await Promise.all([
+        api.getHadesBackendStatus(),
+        api.getHadesBackendJobs(),
+        api.getHadesBackendProposals(),
+      ]);
+      setStatus(nextStatus);
+      setJobs(nextJobs.jobs);
+      setProposals(nextProposals.proposals);
     } catch (error) {
       showToast(`Failed to load backend status: ${error}`, "error");
     } finally {
@@ -162,11 +192,16 @@ export default function BackendPage() {
   useEffect(() => {
     let cancelled = false;
 
-    api
-      .getHadesBackendStatus()
-      .then((payload) => {
+    Promise.all([
+      api.getHadesBackendStatus(),
+      api.getHadesBackendJobs(),
+      api.getHadesBackendProposals(),
+    ])
+      .then(([nextStatus, nextJobs, nextProposals]) => {
         if (!cancelled) {
-          setStatus(payload);
+          setStatus(nextStatus);
+          setJobs(nextJobs.jobs);
+          setProposals(nextProposals.proposals);
         }
       })
       .catch((error) => {
@@ -207,6 +242,22 @@ export default function BackendPage() {
     if (status.bindings.length === 0) return "Link a workspace with hades project link";
     return "No action needed";
   }, [status]);
+
+  const runReviewAction = useCallback(
+    async (key: string, action: () => Promise<HadesBackendActionResponse>, success: string) => {
+      setBusyAction(key);
+      try {
+        const result = await action();
+        showToast(result.ok ? success : `${result.status}: ${result.summary}`, result.ok ? "success" : "error");
+        await load();
+      } catch (error) {
+        showToast(`Backend action failed: ${error}`, "error");
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [load, showToast],
+  );
 
   if (loading) {
     return (
@@ -343,11 +394,120 @@ export default function BackendPage() {
           <CardContent className="grid gap-5 py-4">
             <section>
               <H2 variant="sm" className="mb-3 text-muted-foreground">Backend jobs</H2>
-              <CountList counts={status.job_counts} />
+              {jobs.length === 0 ? (
+                <ReviewEmpty label="No jobs waiting for confirmation" />
+              ) : (
+                <div className="grid gap-2">
+                  {jobs.map((job) => (
+                    <div className="border border-border bg-background/40 px-3 py-3" key={job.job_id}>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                            <span className="truncate">{job.capability}</span>
+                            <Badge tone={statusTone(job.status)}>{job.status}</Badge>
+                          </div>
+                          <ReviewMeta>
+                            {job.job_id} / {job.workspace_binding_id}
+                          </ReviewMeta>
+                        </div>
+                        {job.status === "waiting_confirmation" && (
+                          <div className="flex shrink-0 items-center gap-2">
+                            <Button
+                              size="sm"
+                              prefix={
+                                busyAction === `job:${job.job_id}:approve` ? (
+                                  <Spinner />
+                                ) : (
+                                  <Play className="h-4 w-4" />
+                                )
+                              }
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void runReviewAction(
+                                  `job:${job.job_id}:approve`,
+                                  () => api.approveHadesBackendJob(job.job_id),
+                                  "Backend job approved",
+                                )
+                              }
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              prefix={
+                                busyAction === `job:${job.job_id}:refuse` ? (
+                                  <Spinner />
+                                ) : (
+                                  <XCircle className="h-4 w-4" />
+                                )
+                              }
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void runReviewAction(
+                                  `job:${job.job_id}:refuse`,
+                                  () => api.refuseHadesBackendJob(job.job_id),
+                                  "Backend job refused",
+                                )
+                              }
+                            >
+                              Refuse
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
             <section>
               <H2 variant="sm" className="mb-3 text-muted-foreground">Memory proposals</H2>
-              <CountList counts={status.proposal_counts} />
+              {proposals.length === 0 ? (
+                <ReviewEmpty label="No refused or conflicted proposals" />
+              ) : (
+                <div className="grid gap-2">
+                  {proposals.map((proposal) => (
+                    <div className="border border-border bg-background/40 px-3 py-3" key={proposal.proposal_id}>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                            <span className="truncate">{proposal.summary}</span>
+                            <Badge tone={statusTone(proposal.status)}>{proposal.status}</Badge>
+                          </div>
+                          <ReviewMeta>
+                            {proposal.action} / {proposal.intent}
+                            {proposal.reason ? ` / ${proposal.reason}` : ""}
+                          </ReviewMeta>
+                        </div>
+                        {(proposal.status === "refused" || proposal.status === "conflicted") && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            prefix={
+                              busyAction === `proposal:${proposal.proposal_id}:ack` ? (
+                                <Spinner />
+                              ) : (
+                                <CheckCircle2 className="h-4 w-4" />
+                              )
+                            }
+                            disabled={busyAction !== null}
+                            onClick={() =>
+                              void runReviewAction(
+                                `proposal:${proposal.proposal_id}:ack`,
+                                () => api.acknowledgeHadesBackendProposal(proposal.proposal_id),
+                                "Memory proposal acknowledged",
+                              )
+                            }
+                          >
+                            Acknowledge
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
             <section>
               <H2 variant="sm" className="mb-3 text-muted-foreground">Persephone inbox</H2>

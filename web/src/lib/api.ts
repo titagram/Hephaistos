@@ -320,6 +320,29 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getHadesBackendStatus: () =>
     fetchJSON<HadesBackendStatus>("/api/hades/backend/status"),
+  getHadesBackendJobs: () =>
+    fetchJSON<HadesBackendJobsResponse>("/api/hades/backend/jobs"),
+  approveHadesBackendJob: (jobId: string) =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/jobs/${encodeURIComponent(jobId)}/approve`,
+      { method: "POST" },
+    ),
+  refuseHadesBackendJob: (jobId: string, reason = "dashboard_refused") =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/jobs/${encodeURIComponent(jobId)}/refuse`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      },
+    ),
+  getHadesBackendProposals: () =>
+    fetchJSON<HadesBackendProposalsResponse>("/api/hades/backend/proposals"),
+  acknowledgeHadesBackendProposal: (proposalId: string) =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/proposals/${encodeURIComponent(proposalId)}/ack`,
+      { method: "POST" },
+    ),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -1644,6 +1667,43 @@ export interface HadesBackendStatus {
   sync: HadesBackendSyncState;
   degraded: boolean;
   actions: string[];
+}
+
+export interface HadesBackendJob {
+  job_id: string;
+  project_id: string;
+  workspace_binding_id: string;
+  capability: string;
+  status: string;
+  payload_keys: string[];
+  result: Record<string, unknown> | null;
+}
+
+export interface HadesBackendJobsResponse {
+  jobs: HadesBackendJob[];
+}
+
+export interface HadesBackendMemoryProposal {
+  proposal_id: string;
+  project_id: string;
+  workspace_binding_id: string;
+  action: string;
+  intent: string;
+  summary: string;
+  status: string;
+  reason: string | null;
+}
+
+export interface HadesBackendProposalsResponse {
+  proposals: HadesBackendMemoryProposal[];
+}
+
+export interface HadesBackendActionResponse {
+  ok: boolean;
+  status: string;
+  summary: string;
+  job?: HadesBackendJob;
+  proposal?: HadesBackendMemoryProposal;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

@@ -2284,6 +2284,91 @@ def get_hades_backend_status(profile: Optional[str] = None):
         return load_backend_status_payload()
 
 
+class HadesBackendRefuseJobRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+def _hades_backend_action_payload(result: Any) -> Dict[str, Any]:
+    return {
+        "ok": bool(result.ok),
+        "status": result.status,
+        "summary": result.summary,
+        **result.payload,
+    }
+
+
+def _hades_backend_action_error(exc: Exception) -> HTTPException:
+    status_code = int(getattr(exc, "status_code", 400) or 400)
+    if status_code < 400 or status_code > 599:
+        status_code = 400
+    return HTTPException(status_code=status_code, detail=str(exc))
+
+
+@app.get("/api/hades/backend/jobs")
+def get_hades_backend_jobs(
+    status: Optional[List[str]] = None,
+    all: bool = False,  # noqa: A002 - query param intentionally mirrors CLI flag
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import list_backend_jobs
+
+        statuses = None if all else (status or ["waiting_confirmation"])
+        return {"jobs": list_backend_jobs(statuses=statuses)}
+
+
+@app.post("/api/hades/backend/jobs/{job_id}/approve")
+def approve_hades_backend_job(job_id: str, profile: Optional[str] = None):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import approve_backend_job
+
+        try:
+            return _hades_backend_action_payload(approve_backend_job(job_id))
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
+@app.post("/api/hades/backend/jobs/{job_id}/refuse")
+def refuse_hades_backend_job(
+    job_id: str,
+    body: HadesBackendRefuseJobRequest,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import refuse_backend_job
+
+        try:
+            return _hades_backend_action_payload(
+                refuse_backend_job(job_id, reason=body.reason or "dashboard_refused")
+            )
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
+@app.get("/api/hades/backend/proposals")
+def get_hades_backend_proposals(
+    status: Optional[List[str]] = None,
+    all: bool = False,  # noqa: A002 - query param intentionally mirrors CLI flag
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import list_memory_proposals
+
+        statuses = None if all else (status or ["refused", "conflicted"])
+        return {"proposals": list_memory_proposals(statuses=statuses)}
+
+
+@app.post("/api/hades/backend/proposals/{proposal_id}/ack")
+def acknowledge_hades_backend_proposal(proposal_id: str, profile: Optional[str] = None):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import acknowledge_memory_proposal
+
+        try:
+            return _hades_backend_action_payload(acknowledge_memory_proposal(proposal_id))
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
 _WINDOWS_11_MIN_BUILD = 22000
 
 
