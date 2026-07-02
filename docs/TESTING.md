@@ -82,6 +82,9 @@ npm run --prefix apps/desktop test:desktop:platforms
 - Desktop: `npm run --prefix apps/desktop typecheck` e test vicino al file.
 - Web dashboard: `npm run --prefix web typecheck`; aggiungi `npm run --prefix web test`
   se tocchi logica testata.
+- Accessibility/responsive QA: usa
+  `docs/hades/accessibility-responsive-qa.md` per keyboard path, screen reader
+  basics, viewport stretti/larghi, error copy e template evidenza manuale.
 - TUI: `npm run --prefix ui-tui typecheck` e `npm run --prefix ui-tui test`.
 - Docker/packaging: leggere `.github/workflows/docker*.yml`, `Dockerfile` e
   `docker-compose.yml`; non buildare immagini pesanti senza conferma.
