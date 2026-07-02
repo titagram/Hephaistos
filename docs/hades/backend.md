@@ -17,8 +17,11 @@ binding without deleting shared memory or job history.
 ## Shared Memory
 
 The backend owns shared memory. Hades reads versioned snapshots into a local
-cache and writes create/update requests as memory proposals. Hades does not
-directly delete shared backend memory.
+cache and writes create/update/delete requests as memory proposals. Hades does
+not directly mutate shared backend memory; the backend accepts, refuses, or
+conflicts each proposal. Update and delete proposals carry local memory identity
+and base version or etag in proposal provenance when the local memory tool
+provides them.
 
 If the backend refuses or conflicts a proposal, local status must show the
 reason. If the backend is unavailable, Hades uses local memory and may use stale

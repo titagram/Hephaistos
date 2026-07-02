@@ -42,6 +42,13 @@ hades backend proposals
 hades backend ack-proposal <proposal_id>
 ```
 
+Local memory writes are mirrored as backend proposals, not direct backend
+mutations. Adds become `create` proposals, replacements become `update`
+proposals, and removals become `delete` proposals. When available, Hades stores
+the local `memory_id` and `base_version`/`etag` in proposal provenance so the
+backend can reject stale or mismatched mutations instead of applying them
+silently.
+
 ## Sync
 
 `hades backend sync` remains the manual repair path and bypasses any background

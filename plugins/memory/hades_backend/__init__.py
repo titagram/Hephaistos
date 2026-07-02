@@ -14,6 +14,9 @@ from hermes_cli.hades_backend_sync import run_backend_sync
 
 
 PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
+CREATE_ACTIONS = {"add", "create"}
+UPDATE_ACTIONS = {"replace", "update"}
+DELETE_ACTIONS = {"remove", "delete"}
 
 
 class HadesBackendMemoryProvider(MemoryProvider):
@@ -87,24 +90,31 @@ class HadesBackendMemoryProvider(MemoryProvider):
     ) -> None:
         if self._binding is None:
             return
-        if action not in {"add", "create", "update"}:
+        proposal_action = _proposal_action(action)
+        if proposal_action is None:
             return
-        summary = str(content or "").strip()
+        metadata = dict(metadata or {})
+        previous_summary = str(metadata.get("old_text") or "").strip()
+        summary = str(content or "").strip() or previous_summary
         if not summary:
             return
+        provenance = _proposal_provenance(
+            provider=self.name,
+            target=target,
+            metadata=metadata,
+            action=action,
+            proposal_action=proposal_action,
+            previous_summary=previous_summary,
+        )
         with db.connect_closing() as conn:
             db.create_memory_proposal(
                 conn,
                 project_id=self._binding.project_id,
                 workspace_binding_id=self._binding.backend_workspace_binding_id,
-                action="create" if action in {"add", "create"} else "update",
+                action=proposal_action,
                 intent="memory_write",
                 summary=summary,
-                provenance={
-                    "target": target,
-                    "metadata": metadata or {},
-                    "provider": self.name,
-                },
+                provenance=provenance,
             )
 
     def _resolve_binding(self, cwd: Path) -> db.WorkspaceBinding | None:
@@ -123,6 +133,52 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 if best is None or len(str(root)) > len(best.repo_root):
                     best = binding
         return best
+
+
+def _proposal_action(action: str) -> str | None:
+    normalized = str(action or "").strip().lower()
+    if normalized in CREATE_ACTIONS:
+        return "create"
+    if normalized in UPDATE_ACTIONS:
+        return "update"
+    if normalized in DELETE_ACTIONS:
+        return "delete"
+    return None
+
+
+def _first_metadata_value(metadata: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _proposal_provenance(
+    *,
+    provider: str,
+    target: str,
+    metadata: dict[str, Any],
+    action: str,
+    proposal_action: str,
+    previous_summary: str,
+) -> dict[str, Any]:
+    provenance: dict[str, Any] = {
+        "target": target,
+        "metadata": metadata,
+        "provider": provider,
+        "local_action": action,
+        "proposal_action": proposal_action,
+    }
+    memory_id = _first_metadata_value(metadata, ("memory_id", "local_memory_id", "id"))
+    base_version = _first_metadata_value(metadata, ("base_version", "etag", "memory_etag", "version"))
+    if memory_id:
+        provenance["memory_id"] = memory_id
+    if base_version:
+        provenance["base_version"] = base_version
+    if previous_summary:
+        provenance["previous_summary"] = previous_summary
+    return provenance
 
 
 def register(ctx) -> None:
