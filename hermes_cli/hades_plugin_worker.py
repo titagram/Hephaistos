@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from threading import Event, Thread
 from typing import Any, Callable
 
 from hermes_cli import hades_backend_db as db
 from hermes_cli.hades_backend_client import redact_secret
+
+logger = logging.getLogger("hermes_cli.hades_backend")
 
 
 AgentRunner = Callable[[str, dict[str, Any]], str | dict[str, Any]]
@@ -38,11 +41,24 @@ def run_plugin_worker_once(
         agent = db.get_default_agent(conn)
 
     if agent is None:
+        logger.info(
+            "hades_backend.worker.skipped",
+            extra={"hades_event": "worker.skipped", "hades_reason": "not_configured"},
+        )
         return PluginWorkerResult({"error": 1}, 1)
 
     selected_project_id = str(project_id or agent.project_id).strip()
     selected_local_workspace_id = str(local_workspace_id or runtime.plugin_local_workspace_id()).strip()
     if not selected_local_workspace_id:
+        logger.warning(
+            "hades_backend.worker.skipped",
+            extra={
+                "hades_event": "worker.skipped",
+                "hades_reason": "missing_local_workspace_id",
+                "hades_project_id": selected_project_id,
+                "hades_agent_key": agent_key,
+            },
+        )
         if not quiet:
             print(
                 "backend worker: missing plugin local workspace id; pass --local-workspace-id "
@@ -53,12 +69,30 @@ def run_plugin_worker_once(
     try:
         client = client_factory() if client_factory is not None else runtime.plugin_work_items_client_from_config()
     except Exception as exc:
+        logger.warning(
+            "hades_backend.worker.client_error",
+            extra={
+                "hades_event": "worker.client_error",
+                "hades_project_id": selected_project_id,
+                "hades_agent_key": agent_key,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
         if not quiet:
             print(f"backend worker: failed to create plugin client: {redact_secret(str(exc))}")
         return PluginWorkerResult({"error": 1}, 1)
 
     runner = agent_runner or _default_agent_runner
     claimed = completed = failed = skipped = 0
+    logger.info(
+        "hades_backend.worker.start",
+        extra={
+            "hades_event": "worker.start",
+            "hades_project_id": selected_project_id,
+            "hades_agent_key": agent_key,
+            "hades_limit": max(1, int(limit or 1)),
+        },
+    )
 
     try:
         response = client.list_agent_work_items(
@@ -69,6 +103,15 @@ def run_plugin_worker_once(
         )
         items = _response_work_items(response)
     except Exception as exc:
+        logger.warning(
+            "hades_backend.worker.list_error",
+            extra={
+                "hades_event": "worker.list_error",
+                "hades_project_id": selected_project_id,
+                "hades_agent_key": agent_key,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
         if not quiet:
             print(f"backend worker: failed to list plugin work items: {redact_secret(str(exc))}")
         _close_client(client)
@@ -105,6 +148,16 @@ def run_plugin_worker_once(
             claimed += 1
             with db.connect_closing() as conn:
                 db.update_plugin_work_item_status(conn, work_item_id, "claimed", lease_token=lease_token)
+            logger.info(
+                "hades_backend.worker.claimed",
+                extra={
+                    "hades_event": "worker.claimed",
+                    "hades_project_id": selected_project_id,
+                    "hades_agent_key": agent_key,
+                    "hades_work_item_id": work_item_id,
+                    "hades_kind": kind,
+                },
+            )
 
             client.heartbeat_agent_work_item(work_item_id, lease_token=lease_token)
             prompt = _prompt_from_work_item_payload(_work_item_payload(claim_item) or payload)
@@ -132,10 +185,31 @@ def run_plugin_worker_once(
             )
             with db.connect_closing() as conn:
                 db.update_plugin_work_item_status(conn, work_item_id, "completed", result=result)
+            logger.info(
+                "hades_backend.worker.completed",
+                extra={
+                    "hades_event": "worker.completed",
+                    "hades_project_id": selected_project_id,
+                    "hades_agent_key": agent_key,
+                    "hades_work_item_id": work_item_id,
+                    "hades_kind": kind,
+                },
+            )
             completed += 1
         except Exception as exc:
             failed += 1
             message = redact_secret(str(exc))
+            logger.warning(
+                "hades_backend.worker.failed",
+                extra={
+                    "hades_event": "worker.failed",
+                    "hades_project_id": selected_project_id,
+                    "hades_agent_key": agent_key,
+                    "hades_work_item_id": work_item_id,
+                    "hades_kind": kind,
+                    "hades_error": message,
+                },
+            )
             if lease_token:
                 try:
                     client.fail_agent_work_item(work_item_id, lease_token=lease_token, message=message)
@@ -147,6 +221,21 @@ def run_plugin_worker_once(
                 print(f"backend worker: failed work item {work_item_id}: {message}")
 
     _close_client(client)
+    logger.info(
+        "hades_backend.worker.complete",
+        extra={
+            "hades_event": "worker.complete",
+            "hades_project_id": selected_project_id,
+            "hades_agent_key": agent_key,
+            "hades_summary": {
+                "listed": len(items),
+                "claimed": claimed,
+                "completed": completed,
+                "failed": failed,
+                "skipped": skipped,
+            },
+        },
+    )
     return PluginWorkerResult(
         {
             "listed": len(items),

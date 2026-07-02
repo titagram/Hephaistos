@@ -1,6 +1,67 @@
 from __future__ import annotations
 
 
+def test_sync_runner_logs_redacted_backend_errors(monkeypatch, tmp_path, caplog):
+    import logging
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def memory_snapshot(self, **payload):
+            raise RuntimeError("token=super-secret-token failed")
+
+        def list_inbox(self, **payload):
+            return {"events": []}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.hades_backend"):
+        result = run_backend_sync(client_factory=lambda: FakeClient(), quiet=True)
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "hades_event", None) == "sync.error"
+    ]
+
+    assert result.exit_code == 1
+    assert records
+    assert records[0].hades_workspace_binding_id == "wb_1"
+    assert "super-secret-token" not in records[0].hades_error
+    assert "super-secret-token" not in records[0].getMessage()
+
+
 def test_sync_runner_expires_waiting_jobs_after_deadline(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

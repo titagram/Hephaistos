@@ -4,6 +4,7 @@ Doctor command for hermes CLI.
 Diagnoses issues with Hermes Agent setup.
 """
 
+import logging
 import os
 import sys
 import subprocess
@@ -27,6 +28,8 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.models import _HERMES_USER_AGENT
 from hermes_constants import OPENROUTER_MODELS_URL
 from utils import base_url_host_matches
+
+logger = logging.getLogger("hermes_cli.hades_backend")
 
 
 _PROVIDER_ENV_HINTS = (
@@ -680,9 +683,31 @@ def _submit_hades_doctor_report(issues: list[str]) -> None:
         )
         report = response.get("report") if isinstance(response, dict) else None
         report_id = report.get("id") if isinstance(report, dict) else "submitted"
+        logger.info(
+            "hades_backend.doctor_report.submitted",
+            extra={
+                "hades_event": "doctor_report.submitted",
+                "hades_project_id": agent.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+                "hades_report_id": report_id,
+                "hades_status": status,
+                "hades_issue_count": len(issues),
+            },
+        )
         check_ok("Hades backend doctor report submitted", f"({report_id})")
     except Exception as exc:
-        check_warn("Hades backend doctor report failed", f"({exc})")
+        from hermes_cli.hades_backend_client import redact_secret
+
+        logger.warning(
+            "hades_backend.doctor_report.failed",
+            extra={
+                "hades_event": "doctor_report.failed",
+                "hades_project_id": agent.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
+        check_warn("Hades backend doctor report failed", f"({redact_secret(str(exc))})")
 
 
 def run_doctor(args):

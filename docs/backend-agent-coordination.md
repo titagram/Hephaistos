@@ -1309,3 +1309,6 @@ locale.
 - Repo locale: P1-4 avviato con smoke MVP no-network
   `tests/hermes_cli/test_hades_backend_mvp_smoke.py`, che compone agent/link,
   sync memoria/proposal, job/artifact, inbox, doctor report e status TUI.
+- Repo locale: P1-2 avviato con logging strutturato e redatto su logger
+  `hermes_cli.hades_backend` per sync, artifact upload, worker plugin e doctor
+  report; docs Hades ora includono eventi e runbook operator.

@@ -157,7 +157,9 @@ def test_plugin_worker_keeps_heartbeating_while_runner_is_active(monkeypatch, tm
     assert fake.heartbeat_count >= 2
 
 
-def test_plugin_worker_fails_claimed_item_with_redacted_message(monkeypatch, tmp_path):
+def test_plugin_worker_fails_claimed_item_with_redacted_message(monkeypatch, tmp_path, caplog):
+    import logging
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from hermes_cli import hades_backend_db as db
@@ -205,12 +207,13 @@ def test_plugin_worker_fails_claimed_item_with_redacted_message(monkeypatch, tmp
     def runner(prompt, item):
         raise RuntimeError("token=super-secret-token exploded")
 
-    result = run_plugin_worker_once(
-        client_factory=lambda: fake,
-        agent_runner=runner,
-        local_workspace_id="lw_1",
-        quiet=True,
-    )
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.hades_backend"):
+        result = run_plugin_worker_once(
+            client_factory=lambda: fake,
+            agent_runner=runner,
+            local_workspace_id="lw_1",
+            quiet=True,
+        )
 
     with db.connect_closing() as conn:
         item = db.get_plugin_work_item(conn, "awi_1")
@@ -222,3 +225,14 @@ def test_plugin_worker_fails_claimed_item_with_redacted_message(monkeypatch, tmp
     assert "super-secret-token" not in fake.failures[0][1]["message"]
     assert item is not None
     assert item.status == "failed"
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "hades_event", None) == "worker.failed"
+    ]
+    assert records
+    assert records[0].hades_work_item_id == "awi_1"
+    assert "super-secret-token" not in records[0].hades_error
+    assert "lease_1" not in records[0].getMessage()
+    assert "lease_1" not in str(records[0].__dict__)

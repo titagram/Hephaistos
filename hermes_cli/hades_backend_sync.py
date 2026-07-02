@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
 import time
 from typing import Callable
 
 from hermes_cli import hades_backend_db as db
+
+logger = logging.getLogger("hermes_cli.hades_backend")
 
 
 @dataclass(frozen=True)
@@ -56,13 +59,47 @@ def run_backend_sync(
         expired_jobs = db.expire_waiting_jobs(conn, now=now) if agent else []
 
     if agent is None:
+        logger.info(
+            "hades_backend.sync.skipped",
+            extra={"hades_event": "sync.skipped", "hades_reason": "not_configured"},
+        )
         return SyncResult({"error": 1}, 1)
     if not bindings:
+        logger.info(
+            "hades_backend.sync.skipped",
+            extra={
+                "hades_event": "sync.skipped",
+                "hades_reason": "no_linked_workspace",
+                "hades_agent_id": agent.agent_id,
+                "hades_project_id": agent.project_id,
+                "hades_expired_jobs": len(expired_jobs),
+            },
+        )
         return SyncResult({"pulled": 0, "completed": 0, "waiting": 0, "failed": 0, "skipped": 0, "expired": len(expired_jobs)}, 0)
+
+    logger.info(
+        "hades_backend.sync.start",
+        extra={
+            "hades_event": "sync.start",
+            "hades_agent_id": agent.agent_id,
+            "hades_project_id": agent.project_id,
+            "hades_binding_count": len(bindings),
+            "hades_expired_jobs": len(expired_jobs),
+        },
+    )
 
     try:
         client = client_factory() if client_factory is not None else runtime.client_from_config()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "hades_backend.sync.client_error",
+            extra={
+                "hades_event": "sync.client_error",
+                "hades_agent_id": agent.agent_id,
+                "hades_project_id": agent.project_id,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
         return SyncResult({"error": 1}, 1)
 
     pulled = completed = waiting = failed = skipped = 0
@@ -221,6 +258,16 @@ def run_backend_sync(
             db.clear_sync_state(conn, "last_sync_error")
             db.clear_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
 
+    logger.info(
+        "hades_backend.sync.complete",
+        extra={
+            "hades_event": "sync.complete",
+            "hades_agent_id": agent.agent_id,
+            "hades_project_id": agent.project_id,
+            "hades_exit_code": 1 if sync_errors else 0,
+            "hades_summary": summary,
+        },
+    )
     return SyncResult(summary, 1 if sync_errors else 0)
 
 
@@ -365,6 +412,16 @@ def _as_int(value: object) -> int:
 def _record_sync_error(binding: db.WorkspaceBinding, message: str) -> None:
     from hermes_cli.hades_backend_client import redact_secret
 
+    redacted = redact_secret(message)
+    logger.warning(
+        "hades_backend.sync.error",
+        extra={
+            "hades_event": "sync.error",
+            "hades_project_id": binding.project_id,
+            "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+            "hades_error": redacted,
+        },
+    )
     with db.connect_closing() as conn:
         db.record_sync_state(
             conn,
@@ -372,7 +429,7 @@ def _record_sync_error(binding: db.WorkspaceBinding, message: str) -> None:
             {
                 "workspace_binding_id": binding.backend_workspace_binding_id,
                 "project_id": binding.project_id,
-                "message": redact_secret(message),
+                "message": redacted,
             },
         )
 
@@ -394,6 +451,18 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
             artifact=artifact,
             truncated=bool(artifact.get("truncated", False)),
             redactions=int(artifact.get("redactions", 0) or 0),
+        )
+        logger.info(
+            "hades_backend.artifact.uploaded",
+            extra={
+                "hades_event": "artifact.uploaded",
+                "hades_project_id": binding.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                "hades_job_id": job_id,
+                "hades_schema": schema,
+                "hades_truncated": bool(artifact.get("truncated", False)),
+                "hades_redactions": int(artifact.get("redactions", 0) or 0),
+            },
         )
         return (1, 0)
     except AttributeError:

@@ -169,7 +169,9 @@ def test_doctor_cleanup_stale_jobs_dry_run_keeps_rows(monkeypatch, tmp_path, cap
     assert job is not None
 
 
-def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path, capsys):
+def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path, capsys, caplog):
+    import logging
+
     from hermes_cli import hades_backend_db as db
     import hermes_cli.doctor as doctor
 
@@ -226,7 +228,8 @@ def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path,
             payload={"message": "done"},
         )
 
-    doctor._submit_hades_doctor_report(["manual issue"])
+    with caplog.at_level(logging.INFO, logger="hermes_cli.hades_backend"):
+        doctor._submit_hades_doctor_report(["manual issue"])
 
     output = capsys.readouterr().out
     assert "Hades backend doctor report submitted" in output
@@ -235,3 +238,11 @@ def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path,
     assert fake.reports[0]["status"] == "warning"
     assert fake.reports[0]["payload"]["job_counts"] == {"waiting_confirmation": 1}
     assert fake.reports[0]["payload"]["inbox_counts"] == {"total": 1, "unread": 1}
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "hades_event", None) == "doctor_report.submitted"
+    ]
+    assert records
+    assert records[0].hades_report_id == "report_1"
+    assert records[0].hades_issue_count == 1

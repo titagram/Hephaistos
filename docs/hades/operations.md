@@ -97,6 +97,34 @@ hades doctor --report-backend
 Do not paste project bootstrap tokens, derived agent tokens, raw job payloads,
 or local absolute paths into logs or support tickets.
 
+## Observability
+
+Hades backend sync and plugin worker paths emit sanitized structured log records
+through the `hermes_cli.hades_backend` logger. In a normal CLI install these
+records appear in `$HERMES_HOME/logs/agent.log`; warnings also appear in
+`errors.log`.
+
+Useful event names:
+
+- `sync.start`, `sync.complete`, `sync.skipped`
+- `sync.error`, `sync.client_error`
+- `artifact.uploaded`
+- `worker.start`, `worker.claimed`, `worker.completed`, `worker.failed`
+- `doctor_report.submitted`, `doctor_report.failed`
+
+The records include IDs, counts, status summaries, artifact schema,
+truncation/redaction counts, and sanitized error text. They must not include
+backend tokens, bootstrap tokens, job payload contents, lease tokens, raw source,
+or local absolute paths.
+
+For a local diagnosis, collect:
+
+```bash
+hades backend status --json
+hades doctor
+hades logs --level WARNING --session latest
+```
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,
