@@ -4,11 +4,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HADES_DOCS = REPO_ROOT / "docs" / "hades"
+WEBSITE_DOCS = REPO_ROOT / "website" / "docs"
 
 
 def test_hades_mvp_user_docs_exist_with_required_topics():
     required = {
         "README.md": ["Hades MVP", "Install", "Backend", "Troubleshooting"],
+        "launch.md": ["install", "backend bootstrap", "privacy", "troubleshoot", "source of truth"],
         "installation.md": ["one-liner", "backend bootstrap", "Windows"],
         "backend.md": ["hades backend bootstrap", "hades project link", "shared memory"],
         "operations.md": ["job", "waiting_confirmation", "Persephone"],
@@ -88,3 +90,28 @@ def test_hades_support_runbook_covers_launch_failures_without_secret_collection(
         assert topic in lowered
     assert ".env" in text
     assert "raw source files" in lowered
+
+
+def test_hades_launch_docs_are_public_and_do_not_depend_on_coordination_logs():
+    launch_text = (HADES_DOCS / "launch.md").read_text(encoding="utf-8")
+    website_text = (WEBSITE_DOCS / "getting-started" / "hades-backend.md").read_text(encoding="utf-8")
+    index_text = (WEBSITE_DOCS / "index.mdx").read_text(encoding="utf-8")
+    install_text = (WEBSITE_DOCS / "getting-started" / "installation.md").read_text(encoding="utf-8")
+
+    for topic in [
+        "hades backend bootstrap",
+        "hades backend status --json",
+        "hades backend sync",
+        "derived agent token",
+        "profile secret",
+        "model provider choices",
+        "do not send",
+    ]:
+        assert topic in launch_text.lower()
+
+    assert "docs/backend-agent-coordination.md" in launch_text
+    assert "maintainer evidence" in launch_text.lower()
+    assert "/getting-started/hades-backend" in index_text
+    assert "Backend Setup" in install_text
+    assert "hades backend bootstrap" in website_text
+    assert "The backend does not choose your model" in website_text

@@ -114,8 +114,11 @@ hades doctor       # Diagnose any issues
 ```
 
 Backend MVP support runbooks live in
-[`docs/hades/support-runbook.md`](docs/hades/support-runbook.md). They list safe
-diagnostic commands and what not to send in support logs.
+[`docs/hades/launch.md`](docs/hades/launch.md) and
+[`docs/hades/support-runbook.md`](docs/hades/support-runbook.md). The launch
+guide covers install, backend bootstrap, privacy, verification, and safe
+troubleshooting; the support runbook lists recovery actions and what not to
+send in support logs.
 
 📖 **[Full documentation →](https://hades-agent.local/docs/)**
 

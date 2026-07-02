@@ -5,6 +5,7 @@ It replaces ad-hoc operational notes for install and backend onboarding.
 
 ## Install
 
+- For the end-to-end public path, start with [launch.md](launch.md).
 - Start with [installation.md](installation.md) for the tokenized one-liner and
   platform notes.
 - Use [backend.md](backend.md) for manual backend setup, project linking, and
@@ -38,3 +39,6 @@ hades backend sync
 
 Tokens are stored as profile secrets in `.env`; behavioral settings stay in
 `config.yaml`.
+
+Historical coordination files such as `docs/backend-agent-coordination.md` are
+maintainer evidence, not the primary user documentation path.

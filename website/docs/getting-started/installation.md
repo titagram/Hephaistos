@@ -71,6 +71,9 @@ hades config set     # Set individual config values
 hades setup          # Or run the full setup wizard to configure everything at once
 ```
 
+If you are joining a shared Hades backend project, use the project dashboard
+one-liner or follow [Backend Setup](./hades-backend.md) after the base install.
+
 :::tip Fastest path: Nous Portal
 One subscription covers 300+ models plus the [Tool Gateway](/user-guide/features/tool-gateway) (web search, image generation, TTS, cloud browser). Skip the per-tool key juggling:
 
