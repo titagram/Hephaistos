@@ -133,9 +133,12 @@ hades logs --level WARNING --session latest
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,
 omission, retention, and truncation metadata. It skips env/secrets, ignored
-files, generated dependency/build directories, binary/archive files, and files
-above the configured per-file budget. `populate_backend_ast` produces
-`hades.symbols.v1` artifacts with symbols and provenance, not raw source.
+files/directories, symlinks, generated dependency/build directories,
+binary/archive files, and files above the configured per-file budget.
+`populate_backend_ast` currently has an explicit Python-only MVP scope: it
+emits bounded `.py` class/function symbols with provenance, not raw source.
+Both artifact jobs report omission reasons instead of following path escapes or
+failing the whole sync.
 
 ## Persephone
 

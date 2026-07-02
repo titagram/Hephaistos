@@ -1320,3 +1320,7 @@ locale.
   test `tests/hermes_cli/test_dashboard_auth_inventory.py`: l'allowlist pubblica
   dashboard/API deve restare read-only salvo endpoint self-authenticated come
   `/api/cron/fire`.
+- Repo locale: P1-5 avviato rafforzando `hades_backend_jobs`: file/directory
+  symlink sono omessi con reason `symlink`, directory gitignored vengono
+  potate prima del walk, e AST resta scope Python-only bounded senza sorgente
+  raw.

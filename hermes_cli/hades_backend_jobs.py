@@ -100,6 +100,11 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _io_error_reason(prefix: str, exc: OSError) -> str:
+    errno = getattr(exc, "errno", None)
+    return f"{prefix}:{errno}" if errno is not None else prefix
+
+
 def _read_text_bounded(path: Path, max_bytes: int) -> tuple[str, bool, str]:
     limit = max(0, max_bytes)
     with path.open("rb") as handle:
@@ -128,6 +133,8 @@ def _gitignore_spec(root: Path):
 
 
 def _skip_file_reason(path: Path, rel: str, ignore_spec=None) -> str | None:
+    if path.is_symlink():
+        return "symlink"
     name = path.name
     lowered = name.lower()
     if lowered in SECRET_FILE_NAMES or lowered.startswith(".env."):
@@ -188,9 +195,26 @@ def _iter_workspace_files(root: Path, *, max_files: int) -> tuple[list[Path], li
     files: list[Path] = []
     omitted: list[dict[str, str]] = []
     for current, dirs, names in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        current_path = Path(current)
+        kept_dirs: list[str] = []
+        for dirname in sorted(dirs):
+            dir_path = current_path / dirname
+            rel = dir_path.relative_to(root).as_posix()
+            if dirname in SKIP_DIRS:
+                omitted.append({"path": rel, "reason": "generated_or_dependency_dir"})
+                continue
+            if dir_path.is_symlink():
+                omitted.append({"path": rel, "reason": "symlink"})
+                continue
+            if ignore_spec is not None and (
+                ignore_spec.match_file(rel) or ignore_spec.match_file(rel + "/")
+            ):
+                omitted.append({"path": rel, "reason": "gitignored"})
+                continue
+            kept_dirs.append(dirname)
+        dirs[:] = kept_dirs
         for name in sorted(names):
-            path = Path(current) / name
+            path = current_path / name
             rel = path.relative_to(root).as_posix()
             skip_reason = _skip_file_reason(path, rel, ignore_spec)
             if skip_reason:
@@ -213,7 +237,11 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
     candidates, omitted, truncated = _iter_workspace_files(workspace_root, max_files=max_files)
     for path in candidates:
         rel = path.relative_to(workspace_root).as_posix()
-        size = path.stat().st_size
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
         if size > max_file_bytes:
             omitted.append({"path": rel, "reason": "file_too_large"})
             truncated = True
@@ -222,12 +250,17 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
             truncated = True
             omitted.append({"path": rel, "reason": "byte_budget_exceeded"})
             break
+        try:
+            digest = _hash_file(path)
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
+            continue
         total_bytes += size
         files.append(
             {
                 "path": rel,
                 "bytes": size,
-                "sha256": _hash_file(path),
+                "sha256": digest,
             }
         )
     return {
@@ -257,7 +290,12 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         if path.suffix != ".py":
             continue
         rel = path.relative_to(workspace_root).as_posix()
-        if path.stat().st_size > max_file_bytes:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
+        if size > max_file_bytes:
             omitted.append({"path": rel, "reason": "file_too_large"})
             truncated = True
             continue
@@ -270,6 +308,9 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             tree = ast.parse(source)
         except SyntaxError as exc:
             omitted.append({"path": rel, "reason": f"syntax_error:{exc.lineno}"})
+            continue
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
