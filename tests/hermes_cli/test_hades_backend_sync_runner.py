@@ -419,6 +419,37 @@ def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_pa
     assert "super-secret-token" not in str(artifact)
 
 
+def test_read_files_omitted_reasons_do_not_leak_absolute_paths(monkeypatch, tmp_path):
+    import errno
+    from pathlib import Path
+
+    import hermes_cli.hades_backend_jobs as jobs
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    target = workspace / "allowed.txt"
+    target.write_text("hello\n", encoding="utf-8")
+
+    def fail_read(path: Path, max_bytes: int):
+        raise OSError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(jobs, "_read_text_bounded", fail_read)
+
+    result = jobs.execute_job(
+        {
+            "job_id": "job_read",
+            "capability": "read_files",
+            "payload": {"paths": ["allowed.txt"]},
+        },
+        workspace_root=workspace,
+    )
+
+    assert result["status"] == "completed"
+    assert result["attachments"] == []
+    assert result["omitted"] == [{"path": "allowed.txt", "reason": "read_error:13"}]
+    assert str(workspace) not in str(result)
+
+
 def test_background_sync_runs_once_and_records_success(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

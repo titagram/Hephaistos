@@ -105,6 +105,14 @@ def _io_error_reason(prefix: str, exc: OSError) -> str:
     return f"{prefix}:{errno}" if errno is not None else prefix
 
 
+def _safe_exception_reason(exc: Exception) -> str:
+    if isinstance(exc, OSError):
+        return _io_error_reason("read_error", exc)
+    if isinstance(exc, ValueError):
+        return str(exc)
+    return exc.__class__.__name__
+
+
 def _read_text_bounded(path: Path, max_bytes: int) -> tuple[str, bool, str]:
     limit = max(0, max_bytes)
     with path.open("rb") as handle:
@@ -179,7 +187,7 @@ def _execute_read_files(job: dict[str, Any], workspace_root: Path) -> dict[str, 
                 }
             )
         except Exception as exc:
-            omitted.append({"path": rel, "reason": str(exc)})
+            omitted.append({"path": rel, "reason": _safe_exception_reason(exc)})
     return {
         "status": "completed",
         "summary": f"Read {len(attachments)} file(s); omitted {len(omitted)}.",

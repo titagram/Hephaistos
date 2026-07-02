@@ -44,8 +44,11 @@ for waiting jobs, refused proposals, and degraded sync state.
 
 `jobs` defaults to `waiting_confirmation` work. `approve-job` executes a stored
 waiting job in the linked workspace, submits the result or artifact metadata,
-and records the final local status. `refuse-job` marks a waiting job cancelled
-and sends a redacted reason to the backend.
+and records the final local status. `read_files` jobs only send bounded,
+redacted source content after this explicit local confirmation and mark the
+result as `retention_class=source_content`; artifact jobs upload metadata and
+symbols, not raw source. `refuse-job` marks a waiting job cancelled and sends a
+redacted reason to the backend.
 
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop
