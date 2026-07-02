@@ -752,6 +752,13 @@ def get_sync_state(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else {}
 
 
+def get_sync_state_updated_at(conn: sqlite3.Connection, key: str) -> int | None:
+    row = conn.execute("SELECT updated_at FROM sync_state WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return None
+    return int(row["updated_at"])
+
+
 def cleanup_orphaned_memory_cache(
     conn: sqlite3.Connection,
     *,

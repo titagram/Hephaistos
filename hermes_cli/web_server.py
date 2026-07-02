@@ -2276,6 +2276,14 @@ async def get_status(profile: Optional[str] = None):
             status_scope.__exit__(*sys.exc_info())
 
 
+@app.get("/api/hades/backend/status")
+def get_hades_backend_status(profile: Optional[str] = None):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_status import load_backend_status_payload
+
+        return load_backend_status_payload()
+
+
 _WINDOWS_11_MIN_BUILD = 22000
 
 

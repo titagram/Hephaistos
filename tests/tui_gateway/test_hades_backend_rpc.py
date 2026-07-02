@@ -23,7 +23,12 @@ def test_backend_status_reports_unconfigured_state(monkeypatch, tmp_path):
     assert result["job_counts"] == {}
     assert result["proposal_counts"] == {}
     assert result["inbox_counts"] == {"total": 0, "unread": 0}
-    assert result["sync"] == {"background": None, "last_error": None, "last_summary": None}
+    assert result["sync"]["background"] is None
+    assert result["sync"]["background_updated_at"] is None
+    assert result["sync"]["last_error"] is None
+    assert result["sync"]["last_error_updated_at"] is None
+    assert result["sync"]["last_summary"] is None
+    assert result["sync"]["last_summary_updated_at"] is None
 
 
 def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
@@ -91,6 +96,7 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
     assert result["proposal_counts"] == {"conflicted": 1}
     assert result["inbox_counts"] == {"total": 1, "unread": 1}
     assert result["sync"]["last_error"]["message"] == "backend unavailable"
+    assert isinstance(result["sync"]["last_error_updated_at"], int)
     assert result["degraded"] is True
     assert result["actions"] == [
         "Review 1 backend job(s) waiting for confirmation.",

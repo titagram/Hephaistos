@@ -75,6 +75,7 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/mcp",
   "/api/messaging/platforms",
   "/api/messaging/telegram/onboarding",
+  "/api/hades/backend",
   "/api/model/info",
   "/api/model/set",
   "/api/model/auxiliary",
@@ -317,6 +318,8 @@ function appendProfileParam(url: string, profile?: string): string {
 export const api = {
   buildWsUrl,
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getHadesBackendStatus: () =>
+    fetchJSON<HadesBackendStatus>("/api/hades/backend/status"),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -1603,6 +1606,44 @@ export interface CheckpointSession {
 export interface CheckpointsResponse {
   sessions: CheckpointSession[];
   total_bytes: number;
+}
+
+export interface HadesBackendAgent {
+  agent_id: string;
+  project_id: string;
+  base_url: string;
+  label: string;
+  capabilities: string[];
+}
+
+export interface HadesBackendBinding {
+  workspace_fingerprint: string | null;
+  workspace_binding_id: string | null;
+  project_id: string | null;
+  local_project_id: string | null;
+  display_path: string | null;
+  status: string | null;
+}
+
+export interface HadesBackendSyncState {
+  last_summary: Record<string, unknown> | null;
+  last_summary_updated_at?: number | null;
+  last_error: Record<string, unknown> | null;
+  last_error_updated_at?: number | null;
+  background: Record<string, unknown> | null;
+  background_updated_at?: number | null;
+}
+
+export interface HadesBackendStatus {
+  configured: boolean;
+  agent: HadesBackendAgent | null;
+  bindings: HadesBackendBinding[];
+  job_counts: Record<string, number>;
+  proposal_counts: Record<string, number>;
+  inbox_counts: Record<string, number>;
+  sync: HadesBackendSyncState;
+  degraded: boolean;
+  actions: string[];
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

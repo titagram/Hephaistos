@@ -7,7 +7,11 @@ export interface HadesBackendStatusPayload {
   proposal_counts?: Record<string, unknown>
   sync?: {
     last_error?: Record<string, unknown> | null
+    last_error_updated_at?: number | null
     last_summary?: Record<string, unknown> | null
+    last_summary_updated_at?: number | null
+    background?: Record<string, unknown> | null
+    background_updated_at?: number | null
   }
 }
 

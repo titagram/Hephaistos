@@ -23,6 +23,9 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_summary = db.get_sync_state(conn, "last_sync_summary")
             last_error = db.get_sync_state(conn, "last_sync_error")
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+            last_summary_updated_at = db.get_sync_state_updated_at(conn, "last_sync_summary")
+            last_error_updated_at = db.get_sync_state_updated_at(conn, "last_sync_error")
+            background_sync_updated_at = db.get_sync_state_updated_at(conn, BACKGROUND_SYNC_STATE_KEY)
         else:
             bindings = []
             job_counts = {}
@@ -31,6 +34,9 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_summary = None
             last_error = None
             background_sync = None
+            last_summary_updated_at = None
+            last_error_updated_at = None
+            background_sync_updated_at = None
 
     return backend_status_payload(
         agent=agent,
@@ -41,6 +47,9 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_summary=last_summary,
         last_error=last_error,
         background_sync=background_sync,
+        last_summary_updated_at=last_summary_updated_at,
+        last_error_updated_at=last_error_updated_at,
+        background_sync_updated_at=background_sync_updated_at,
     )
 
 
@@ -54,6 +63,9 @@ def backend_status_payload(
     last_summary: dict[str, Any] | None,
     last_error: dict[str, Any] | None,
     background_sync: dict[str, Any] | None = None,
+    last_summary_updated_at: int | None = None,
+    last_error_updated_at: int | None = None,
+    background_sync_updated_at: int | None = None,
 ) -> dict[str, Any]:
     refused = _count(proposal_counts, "refused") + _count(proposal_counts, "conflicted")
     waiting = _count(job_counts, "waiting_confirmation")
@@ -80,7 +92,14 @@ def backend_status_payload(
         "job_counts": job_counts,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
-        "sync": {"last_summary": last_summary, "last_error": last_error, "background": background_sync},
+        "sync": {
+            "last_summary": last_summary,
+            "last_summary_updated_at": last_summary_updated_at,
+            "last_error": last_error,
+            "last_error_updated_at": last_error_updated_at,
+            "background": background_sync,
+            "background_updated_at": background_sync_updated_at,
+        },
         "degraded": bool(waiting or refused or last_error or background_failed),
         "actions": actions,
     }
