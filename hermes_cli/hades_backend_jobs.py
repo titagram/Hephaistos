@@ -273,7 +273,7 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
         )
     return {
         "status": "completed",
-        "summary": f"Collected {len(files)} git tree entrie(s).",
+        "summary": f"Collected {len(files)} git tree entries.",
         "artifact": {
             "schema": "hades.git_tree.v1",
             "root": workspace_root.name,
@@ -285,6 +285,17 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
             "raw_source_included": False,
         },
     }
+
+
+def _execute_project_inspection(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    result = _execute_sync_git_tree(job, workspace_root)
+    artifact = result.get("artifact")
+    if isinstance(artifact, dict):
+        artifact["requested_capability"] = "project_inspection"
+        artifact["inspection_mode"] = "metadata_tree"
+    files = artifact.get("files", []) if isinstance(artifact, dict) else []
+    result["summary"] = f"Collected {len(files)} project metadata entries; raw source not included."
+    return result
 
 
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
@@ -354,7 +365,7 @@ def execute_job(job: dict[str, Any], *, workspace_root: str | Path) -> dict[str,
     if capability == "populate_backend_ast":
         return _execute_populate_backend_ast(job, root)
     if capability == "project_inspection":
-        return _execute_sync_git_tree(job, root)
+        return _execute_project_inspection(job, root)
     return {
         "status": "failed",
         "summary": f"Unsupported Hades backend job capability: {capability}",

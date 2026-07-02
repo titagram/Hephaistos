@@ -47,7 +47,9 @@ waiting job in the linked workspace, submits the result or artifact metadata,
 and records the final local status. `read_files` jobs only send bounded,
 redacted source content after this explicit local confirmation and mark the
 result as `retention_class=source_content`; artifact jobs upload metadata and
-symbols, not raw source. `refuse-job` marks a waiting job cancelled and sends a
+symbols, not raw source. `project_inspection` is metadata-only in the local MVP:
+it uploads a `hades.git_tree.v1` artifact marked `inspection_mode=metadata_tree`,
+not a synthesized answer. `refuse-job` marks a waiting job cancelled and sends a
 redacted reason to the backend.
 
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`

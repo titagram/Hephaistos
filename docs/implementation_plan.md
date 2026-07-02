@@ -397,19 +397,15 @@ riepilogo setup.
   interazioni Laravel da definire dopo. Le
   richieste operative read-only sono divise in capability separate:
   `read_files`, deterministica e limitata a file/path/glob esplicitamente
-  richiesti dal backend, e `project_inspection`, piu' intelligente, che consente
-  all'agent locale di cercare file rilevanti nel workspace linkato, leggere
-  manifest/config/test o documenti utili e sintetizzare una risposta con
-  provenance. Per `project_inspection`, il
-  payload deve includere un `intent` obbligatorio da allow-list per applicare
-  policy e limiti; puo' includere una `question` opzionale in linguaggio
-  naturale per guidare la sintesi, ma la question non puo' ampliare capability,
-  workspace o scope autorizzati dall'intent. Intent iniziali:
-  `summarize_project`, `find_config`, `list_routes`,
-  `detect_test_framework`, `inspect_dependencies`, `summarize_recent_changes`,
-  `find_docs`, `sync_git_tree` per mantenere aggiornato il git tree sul
-  backend e `populate_backend_ast` per produrre dati destinati all'AST backend.
-  Il contratto di `sync_git_tree` e `populate_backend_ast` va discusso e
+  richiesti dal backend. Nota implementazione 2026-07-02: `project_inspection`
+  e' stato ristretto al contratto effettivo locale, cioe' una raccolta
+  metadata-only del project tree basata su artifact `hades.git_tree.v1` con
+  `inspection_mode=metadata_tree`; non legge raw source e non sintetizza ancora
+  risposte guidate da `intent`/`question`. Una futura ispezione intelligente
+  richiede un task separato con allow-list intent, provenance e limiti di
+  egress. Capability iniziali: `sync_git_tree` per mantenere aggiornato il git
+  tree sul backend e `populate_backend_ast` per produrre dati destinati all'AST
+  backend. Il contratto di `sync_git_tree` e `populate_backend_ast` va discusso e
   validato con l'agent del progetto backend; in particolare, la scelta tra
   parsing AST locale in Hades e invio di sorgenti/metadata al backend resta
   sospesa finche' non viene chiarito lo schema AST esistente lato Laravel.
@@ -542,7 +538,8 @@ riepilogo setup.
   capability-scoped, salvarlo in coda/crontable locale, eseguire quando
   possibile, pubblicare stato/risultato/errori al backend e bloccare payload non
   allow-listati o fuori workspace. Capability iniziali: `read_files` per file
-  espliciti e `project_inspection` per raccolte intelligenti bounded. Lifecycle
+  espliciti, `project_inspection` come raccolta metadata-only del project tree,
+  `sync_git_tree` e `populate_backend_ast`. Lifecycle
   stato: `received` dopo persistenza locale, poi `started`, `completed` o
   `failed`. Retry/backoff governati dal backend con fallback locale
   conservativo. Esecuzione automatica solo per `read_files` e intent

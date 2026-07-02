@@ -57,6 +57,36 @@ def test_sync_git_tree_returns_bounded_manifest(tmp_path):
     assert all(not path.startswith(".git") for path in paths)
 
 
+def test_project_inspection_is_metadata_tree_alias_without_raw_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "README.md").write_text("secret-token-123\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "service.py").write_text("def run():\n    return 'raw source'\n", encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_project_inspection",
+            "capability": "project_inspection",
+            "payload": {"max_files": 10, "max_bytes": 20_000},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    paths = {item["path"] for item in artifact["files"]}
+
+    assert result["status"] == "completed"
+    assert result["summary"] == "Collected 2 project metadata entries; raw source not included."
+    assert artifact["schema"] == "hades.git_tree.v1"
+    assert artifact["requested_capability"] == "project_inspection"
+    assert artifact["inspection_mode"] == "metadata_tree"
+    assert artifact["raw_source_included"] is False
+    assert paths == {"README.md", "src/service.py"}
+    assert "return 'raw source'" not in str(result)
+    assert "secret-token-123" not in str(result)
+
+
 def test_sync_git_tree_omits_symlink_file_and_directory_escapes(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
