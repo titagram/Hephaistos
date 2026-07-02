@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hades Wiki Push"
+  short_description: "Prepare project wiki updates for Hades backend"
+  default_prompt: "Use $hades-wiki-push to prepare and push a project wiki update to the Hades backend."

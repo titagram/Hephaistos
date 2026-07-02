@@ -45,7 +45,7 @@ Examples:
     hades --cli                  Force the classic REPL (overrides display.interface: tui)
     hades -c                     Resume the most recent session
     hades -c "my project"        Resume a session by name (latest in lineage)
-    hermes --resume <session_id>  Resume a specific session by ID
+    hades --resume <session_id>  Resume a specific session by ID
     hades setup                  Run setup wizard
     hades logout                 Clear stored authentication
     hades auth add <provider>    Add a pooled credential
@@ -60,8 +60,8 @@ Examples:
     hades config edit            Edit config in $EDITOR
     hades config set model gpt-4 Set a config value
     hades gateway                Run messaging gateway
-    hermes -s hermes-agent-dev,github-auth
-    hermes -w                     Start in isolated git worktree
+    hades -s hades-wiki-push
+    hades -w                     Start in isolated git worktree
     hades gateway install        Install gateway background service
     hades sessions list          List past sessions
     hades sessions browse        Interactive session picker

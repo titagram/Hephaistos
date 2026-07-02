@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import is_excluded_skill_path
+from hermes_cli.hades_exclusions import is_excluded_bundled_skill
 from typing import Dict, List, Optional, Set, Tuple
 from utils import atomic_replace
 
@@ -214,6 +215,8 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
         if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
+        if is_excluded_bundled_skill(skill_dir, bundled_dir):
+            continue
         skill_name = _read_skill_name(skill_md, skill_dir.name)
         skills.append((skill_name, skill_dir))
 

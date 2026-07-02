@@ -140,3 +140,47 @@ def test_jobs_memory_proposals_and_inbox_are_idempotent(tmp_path):
     assert proposals[0].status == "refused"
     assert proposals[0].reason == "policy_denied"
     assert len(events) == 1
+
+
+def test_plugin_work_items_are_tracked_separately_from_backend_jobs(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing(tmp_path / "hades_backend.db") as conn:
+        first = db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_1",
+            project_id="proj_1",
+            repository_id="repo_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            kind="devboard.agent_chat_turn.v1",
+            status="queued",
+            payload={"prompt": "hello"},
+        )
+        db.update_plugin_work_item_status(
+            conn,
+            "awi_1",
+            "claimed",
+            lease_token="lease_1",
+        )
+        second = db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_1",
+            project_id="proj_1",
+            repository_id="repo_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            kind="devboard.agent_chat_turn.v1",
+            status="completed",
+            payload={"prompt": "hello"},
+            result={"final_response": "done"},
+        )
+        counts = db.count_plugin_work_items_by_status(conn)
+        loaded = db.get_plugin_work_item(conn, "awi_1")
+
+    assert first.work_item_id == second.work_item_id
+    assert counts == {"completed": 1}
+    assert loaded is not None
+    assert loaded.status == "completed"
+    assert loaded.lease_token == "lease_1"
+    assert loaded.result == {"final_response": "done"}

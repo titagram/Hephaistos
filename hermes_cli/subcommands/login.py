@@ -43,7 +43,7 @@ def build_login_parser(subparsers, *, cmd_login: Callable) -> None:
     login_parser.add_argument(
         "--provider",
         default=None,
-        help="(deprecated) Provider name; ignored — see `hermes model`",
+        help="(deprecated) Provider name; ignored — see `hades model`",
     )
     login_parser.add_argument(
         "--portal-url", help="Portal base URL (default: production portal)"

@@ -32,6 +32,8 @@ fi
 # wrong user's home directory when running under sudo -u <user>.  See #21269.
 export UV_NO_CONFIG=1
 
+INSTALLER_START_DIR="$PWD"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -43,8 +45,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:gabriele/hades-agent.git"
-REPO_URL_HTTPS="https://github.com/gabriele/hades-agent.git"
+REPO_URL_SSH="git@github.com:titagram/Hephaistos.git"
+REPO_URL_HTTPS="https://github.com/titagram/Hephaistos.git"
 HERMES_HOME="${HERMES_HOME:-${HADES_HOME:-$HOME/.hermes}}"
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an
@@ -60,7 +62,7 @@ PYTHON_VERSION="3.11"
 NODE_VERSION="22"
 
 # FHS-style root install layout (set by resolve_install_layout when applicable):
-#   code at /usr/local/lib/hermes-agent, command at /usr/local/bin/hermes,
+#   code at /usr/local/lib/hermes-agent, command at /usr/local/bin/hades,
 #   data still at /root/.hermes (HERMES_HOME).  Matches Claude Code / Codex CLI
 #   and keeps Docker bind-mounted /root/ volumes lean.
 ROOT_FHS_LAYOUT=false
@@ -71,7 +73,7 @@ USE_VENV=true
 RUN_SETUP=true
 SKIP_BROWSER=false
 NO_SKILLS=false
-BRANCH="main"
+BRANCH="codex/hades-rebrand"
 INSTALL_COMMIT=""
 ENSURE_DEPS=""
 POSTINSTALL_MODE=false
@@ -191,13 +193,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-skills    Start with a blank slate — seed no bundled skills, and"
             echo "                   write \$HERMES_HOME/.no-bundled-skills so future"
             echo "                   'hermes update' runs never inject bundled skills either"
-            echo "  --branch NAME  Git branch to install (default: main)"
+            echo "  --branch NAME  Git branch to install (default: codex/hades-rebrand)"
             echo "  --commit SHA   Pin checkout to a specific commit after clone/update"
             echo "  --manifest     Print desktop bootstrap stage manifest as JSON"
             echo "  --stage NAME   Run one desktop bootstrap stage"
             echo "  --json         Print a JSON result frame for --stage"
             echo "  --non-interactive  Skip stages that require user input"
-            echo "  --include-desktop  Also build the desktop app (apps/desktop -> Hermes.app)"
+            echo "  --include-desktop  Also build the desktop app (apps/desktop -> Hades.app)"
             echo "  --backend-url URL        Hades backend URL for tokenized onboarding"
             echo "  --backend-project-id ID  Backend project id for tokenized onboarding"
             echo "  --backend-project-token TOKEN"
@@ -214,7 +216,7 @@ while [[ $# -gt 0 ]]; do
             echo "Notes:"
             echo "  When running as root on Linux, Hades installs the code under"
             echo "  /usr/local/lib/hermes-agent and links the command into"
-            echo "  /usr/local/bin/hermes (FHS layout — matches Claude Code / Codex CLI)."
+            echo "  /usr/local/bin/hades (FHS layout — matches Claude Code / Codex CLI)."
             echo "  Data, config, sessions, and logs still live in \$HERMES_HOME"
             echo "  (default /root/.hermes).  This keeps Docker bind-mounted volumes"
             echo "  small and ensures the command is on PATH for all shells."
@@ -355,7 +357,7 @@ emit_manifest() {
     if [ "$INCLUDE_DESKTOP" = true ]; then
         desktop_stage='{"name":"desktop","title":"Build desktop app","category":"runtime","needs_user_input":false},'
     fi
-    printf '%s' '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hades Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hermes command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},'"$desktop_stage"'{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'
+    printf '%s' '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hades Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hades command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},'"$desktop_stage"'{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'
     printf '\n'
 }
 
@@ -464,13 +466,13 @@ resolve_install_layout() {
         # Place uv-managed Python under /usr/local/share so the venv interpreter
         # is world-readable.  Default uv paths land in /root/.local/share/uv,
         # which non-root users can't traverse — leaving the shared
-        # /usr/local/bin/hermes wrapper unable to exec the bad-interpreter venv
+        # /usr/local/bin/hades wrapper unable to exec the bad-interpreter venv
         # python.  See #21457.
         export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/local/share/uv/python}"
         export UV_PYTHON_BIN_DIR="${UV_PYTHON_BIN_DIR:-/usr/local/share/uv/bin}"
         log_info "Root install on Linux — using FHS layout"
         log_info "  Code:    $INSTALL_DIR"
-        log_info "  Command: /usr/local/bin/hermes"
+        log_info "  Command: /usr/local/bin/hades"
         log_info "  Data:    $HERMES_HOME (unchanged)"
         log_info "  uv Python: $UV_PYTHON_INSTALL_DIR (world-readable)"
         return 0
@@ -1626,21 +1628,23 @@ PY
 }
 
 setup_path() {
-    log_info "Setting up hermes command..."
+    log_info "Setting up hades command..."
 
     if [ "$USE_VENV" = true ]; then
+        HADES_BIN="$INSTALL_DIR/venv/bin/hades"
         HERMES_BIN="$INSTALL_DIR/venv/bin/hermes"
     else
+        HADES_BIN="$(which hades 2>/dev/null || echo "")"
         HERMES_BIN="$(which hermes 2>/dev/null || echo "")"
-        if [ -z "$HERMES_BIN" ]; then
-            log_warn "hermes not found on PATH after install"
+        if [ -z "$HADES_BIN" ]; then
+            log_warn "hades not found on PATH after install"
             return 0
         fi
     fi
 
     # Verify the entry point script was actually generated
-    if [ ! -x "$HERMES_BIN" ]; then
-        log_warn "hermes entry point not found at $HERMES_BIN"
+    if [ ! -x "$HADES_BIN" ]; then
+        log_warn "hades entry point not found at $HADES_BIN"
         log_info "This usually means the pip install didn't complete successfully."
         if [ "$DISTRO" = "termux" ]; then
             log_info "Try: cd $INSTALL_DIR && python -m pip install -e '.[termux-all]' -c constraints-termux.txt"
@@ -1655,27 +1659,39 @@ setup_path() {
     command_link_dir="$(get_command_link_dir)"
     command_link_display_dir="$(get_command_link_display_dir)"
 
-    # Create a user-facing shim for the hermes command.
+    if [ -z "$HERMES_BIN" ] || [ ! -x "$HERMES_BIN" ]; then
+        HERMES_BIN="$HADES_BIN"
+    fi
+
+    # Create user-facing shims. `hades` is the primary command; `hermes`
+    # remains as a compatibility alias for older docs and scripts.
     # We intentionally clear PYTHONPATH/PYTHONHOME here so inherited env vars
     # can't make this launcher import modules from another checkout.
     mkdir -p "$command_link_dir"
-    # Older installs created this path as a symlink to $HERMES_BIN. Without
-    # the rm, `cat >` follows the symlink and overwrites the venv pip entry
-    # point with this shim — making `exec "$HERMES_BIN"` self-recurse. (#21454)
-    rm -f "$command_link_dir/hermes"
-    cat > "$command_link_dir/hermes" <<EOF
+    write_launcher_shim() {
+        local command_name="$1"
+        local target_bin="$2"
+        # Older installs created this path as a symlink to the venv entry point. Without
+        # the rm, `cat >` follows the symlink and overwrites the venv pip entry
+        # point with this shim, making the launcher self-recurse. (#21454)
+        rm -f "$command_link_dir/$command_name"
+        cat > "$command_link_dir/$command_name" <<EOF
 #!/usr/bin/env bash
 unset PYTHONPATH
 unset PYTHONHOME
-exec "$HERMES_BIN" "\$@"
+exec "$target_bin" "\$@"
 EOF
-    chmod +x "$command_link_dir/hermes"
-    log_success "Installed hermes launcher → $command_link_display_dir/hermes"
+        chmod +x "$command_link_dir/$command_name"
+    }
+    write_launcher_shim "hades" "$HADES_BIN"
+    write_launcher_shim "hermes" "$HERMES_BIN"
+    log_success "Installed hades launcher → $command_link_display_dir/hades"
+    log_info "Installed hermes compatibility launcher → $command_link_display_dir/hermes"
 
     if [ "$DISTRO" = "termux" ]; then
         export PATH="$command_link_dir:$PATH"
         log_info "$command_link_display_dir is the native Termux command path"
-        log_success "hermes command ready"
+        log_success "hades command ready"
         return 0
     fi
 
@@ -1690,14 +1706,14 @@ EOF
         # Probe a fresh non-login interactive bash the way the user will use it.
         # `bash -i -c` sources ~/.bashrc but NOT ~/.bash_profile or /etc/profile,
         # which is the exact scenario where RHEL root loses /usr/local/bin.
-        if env -i HOME="$HOME" TERM="${TERM:-dumb}" bash -i -c 'command -v hermes' \
+        if env -i HOME="$HOME" TERM="${TERM:-dumb}" bash -i -c 'command -v hades' \
                 >/dev/null 2>&1; then
             log_info "/usr/local/bin is already on PATH for all shells"
-            log_success "hermes command ready"
+            log_success "hades command ready"
             return 0
         fi
 
-        log_info "hermes not on PATH in non-login shells (common on RHEL-family)"
+        log_info "hades not on PATH in non-login shells (common on RHEL-family)"
         PATH_LINE='export PATH="/usr/local/bin:$PATH"'
         PATH_COMMENT='# Hades Agent — ensure /usr/local/bin is on PATH (RHEL non-login shells)'
         for SHELL_CONFIG in "$HOME/.bashrc" "$HOME/.bash_profile"; do
@@ -1710,7 +1726,7 @@ EOF
                 log_success "Added /usr/local/bin to PATH in $SHELL_CONFIG"
             fi
         done
-        log_success "hermes command ready"
+        log_success "hades command ready"
         return 0
     fi
 
@@ -1780,10 +1796,10 @@ EOF
         log_info "~/.local/bin already on PATH"
     fi
 
-    # Export for current session so hermes works immediately
+    # Export for current session so hades works immediately
     export PATH="$command_link_dir:$PATH"
 
-    log_success "hermes command ready"
+    log_success "hades command ready"
 }
 
 copy_config_templates() {
@@ -2284,7 +2300,7 @@ run_setup_wizard() {
     # but opening fails with ENXIO, so the wizard would proceed and
     # then crash on `< /dev/tty` below.
     if ! (: </dev/tty) 2>/dev/null; then
-        log_info "Setup wizard skipped (no terminal available). Run 'hermes setup' after install."
+        log_info "Setup wizard skipped (no terminal available). Run 'hades setup' after install."
         return 0
     fi
 
@@ -2313,8 +2329,6 @@ run_backend_bootstrap() {
     fi
 
     log_info "Configuring Hades backend project link..."
-    local hermes_cmd
-    hermes_cmd="$(get_hermes_command_path)"
     local args=(
         backend bootstrap
         --url "$BACKEND_URL"
@@ -2322,13 +2336,19 @@ run_backend_bootstrap() {
         --project-token "$BACKEND_PROJECT_TOKEN"
         --non-interactive
     )
-    if [ -n "$BACKEND_WORKSPACE" ]; then
-        args+=(--workspace "$BACKEND_WORKSPACE")
+    local backend_workspace
+    backend_workspace="${BACKEND_WORKSPACE:-$INSTALLER_START_DIR}"
+    if [ -n "$backend_workspace" ]; then
+        args+=(--workspace "$backend_workspace")
     fi
     if [ -n "$BACKEND_PROJECT_NAME" ]; then
         args+=(--project-name "$BACKEND_PROJECT_NAME")
     fi
-    "$hermes_cmd" "${args[@]}"
+    if [ "$USE_VENV" = true ] && [ -x "$INSTALL_DIR/venv/bin/python" ]; then
+        "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main "${args[@]}"
+    else
+        "$(get_hermes_command_path)" "${args[@]}"
+    fi
 }
 
 maybe_start_gateway() {
@@ -2377,7 +2397,7 @@ maybe_start_gateway() {
     # in Docker builds where the device node is in the mount namespace
     # but opening fails with ENXIO. See #16746.
     if ! (: </dev/tty) 2>/dev/null; then
-        log_info "Gateway setup skipped (no terminal available). Run 'hermes gateway install' later."
+        log_info "Gateway setup skipped (no terminal available). Run 'hades gateway install' later."
         return 0
     fi
 
@@ -2403,10 +2423,10 @@ maybe_start_gateway() {
                 if $HERMES_CMD gateway start 2>/dev/null; then
                     log_success "Gateway started! Your bot is now online."
                 else
-                    log_warn "Service installed but failed to start. Try: hermes gateway start"
+                    log_warn "Service installed but failed to start. Try: hades gateway start"
                 fi
             else
-                log_warn "Systemd install failed. You can start manually: hermes gateway"
+                log_warn "Systemd install failed. You can start manually: hades gateway"
             fi
         else
             if [ "$DISTRO" = "termux" ]; then
@@ -2418,13 +2438,13 @@ maybe_start_gateway() {
             GATEWAY_PID=$!
             log_success "Gateway started (PID $GATEWAY_PID). Logs: ~/.hermes/logs/gateway.log"
             log_info "To stop: kill $GATEWAY_PID"
-            log_info "To restart later: hermes gateway"
+            log_info "To restart later: hades gateway"
             if [ "$DISTRO" = "termux" ]; then
                 log_warn "Android may stop background processes when Termux is suspended or the system reclaims resources."
             fi
         fi
     else
-        log_info "Skipped. Start the gateway later with: hermes gateway"
+        log_info "Skipped. Start the gateway later with: hades gateway"
     fi
 }
 
@@ -2450,24 +2470,26 @@ print_success() {
     echo ""
     echo -e "${CYAN}${BOLD}🚀 Commands:${NC}"
     echo ""
-    echo -e "   ${GREEN}hermes${NC}              Start chatting"
-    echo -e "   ${GREEN}hermes setup${NC}        Configure API keys & settings"
-    echo -e "   ${GREEN}hermes config${NC}       View/edit configuration"
-    echo -e "   ${GREEN}hermes config edit${NC}  Open config in editor"
-    echo -e "   ${GREEN}hermes gateway install${NC} Install gateway service (messaging + cron)"
-    echo -e "   ${GREEN}hermes update${NC}       Update to latest version"
+    echo -e "   ${GREEN}hades${NC}              Start chatting"
+    echo -e "   ${GREEN}hades setup${NC}        Configure API keys & settings"
+    echo -e "   ${GREEN}hades config${NC}       View/edit configuration"
+    echo -e "   ${GREEN}hades config edit${NC}  Open config in editor"
+    echo -e "   ${GREEN}hades gateway install${NC} Install gateway service (messaging + cron)"
+    echo -e "   ${GREEN}hades update${NC}       Update to latest version"
+    echo -e "   ${GREEN}hades uninstall${NC}    Uninstall Hades (keeps data unless --full)"
+    echo -e "   ${GREEN}hermes${NC}             Compatibility alias"
     echo ""
 
     echo -e "${CYAN}─────────────────────────────────────────────────────────${NC}"
     echo ""
     if [ "$DISTRO" = "termux" ]; then
-        echo -e "${YELLOW}⚡ 'hermes' was linked into $(get_command_link_display_dir), which is already on PATH in Termux.${NC}"
+        echo -e "${YELLOW}⚡ 'hades' was linked into $(get_command_link_display_dir), which is already on PATH in Termux.${NC}"
         echo ""
     elif [ "$ROOT_FHS_LAYOUT" = true ]; then
-        echo -e "${YELLOW}⚡ 'hermes' was linked into /usr/local/bin and is ready to use — no shell reload needed.${NC}"
+        echo -e "${YELLOW}⚡ 'hades' was linked into /usr/local/bin and is ready to use — no shell reload needed.${NC}"
         echo ""
     else
-        echo -e "${YELLOW}⚡ Reload your shell to use 'hermes' command:${NC}"
+        echo -e "${YELLOW}⚡ Reload your shell to use 'hades' command:${NC}"
         echo ""
         LOGIN_SHELL="$(basename "${SHELL:-/bin/bash}")"
         if [ "$LOGIN_SHELL" = "zsh" ]; then
@@ -2632,10 +2654,10 @@ postinstall_mode() {
 
     HERMES_CMD="$(command -v hermes 2>/dev/null || echo "")"
     if [ -n "$HERMES_CMD" ]; then
-        log_info "Running hermes setup..."
+        log_info "Running hades setup..."
         "$HERMES_CMD" setup
     else
-        log_warn "hermes command not found on PATH"
+        log_warn "hades command not found on PATH"
         log_info "Try: python -m hermes_cli.main setup"
     fi
 }

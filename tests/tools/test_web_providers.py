@@ -24,7 +24,7 @@ from tests.tools.conftest import register_all_web_providers
 class TestWebProviderABCs:
     """The unified WebSearchProvider ABC enforces the interface contract.
 
-    After PR #25182, all seven providers are subclasses of
+After PR #25182, all retained providers are subclasses of
     :class:`agent.web_search_provider.WebSearchProvider`. The legacy
     in-tree ABCs at ``tools.web_providers.base`` (separate
     ``WebSearchProvider`` + ``WebExtractProvider``) were deleted in the
@@ -141,31 +141,31 @@ class TestPerCapabilityBackendSelection:
         from tools import web_tools
 
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
-            "backend": "firecrawl",
-            "search_backend": "tavily",
+            "backend": "parallel",
+            "search_backend": "brave-free",
         })
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        assert web_tools._get_search_backend() == "tavily"
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+        assert web_tools._get_search_backend() == "brave-free"
 
     def test_extract_backend_overrides_generic(self, monkeypatch):
         from tools import web_tools
 
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
-            "backend": "tavily",
-            "extract_backend": "exa",
+            "backend": "ddgs",
+            "extract_backend": "parallel",
         })
-        monkeypatch.setenv("EXA_API_KEY", "test-key")
-        assert web_tools._get_extract_backend() == "exa"
+        monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
+        assert web_tools._get_extract_backend() == "parallel"
 
     def test_falls_back_to_generic_backend_when_search_backend_empty(self, monkeypatch):
         from tools import web_tools
 
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
-            "backend": "tavily",
+            "backend": "parallel",
             "search_backend": "",
         })
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        assert web_tools._get_search_backend() == "tavily"
+        monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
+        assert web_tools._get_search_backend() == "parallel"
 
     def test_falls_back_to_generic_backend_when_extract_backend_empty(self, monkeypatch):
         from tools import web_tools
@@ -181,24 +181,24 @@ class TestPerCapabilityBackendSelection:
         from tools import web_tools
 
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
-            "backend": "firecrawl",
-            "search_backend": "exa",  # set but no EXA_API_KEY
+            "backend": "parallel",
+            "search_backend": "brave-free",  # set but no BRAVE_SEARCH_API_KEY
         })
-        monkeypatch.delenv("EXA_API_KEY", raising=False)
-        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-key")
-        # Should fall back to firecrawl since exa isn't configured
-        assert web_tools._get_search_backend() == "firecrawl"
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        monkeypatch.setenv("PARALLEL_API_KEY", "par-key")
+        # Should fall back to parallel since brave-free isn't configured.
+        assert web_tools._get_search_backend() == "parallel"
 
     def test_fully_backward_compatible_with_web_backend_only(self, monkeypatch):
         from tools import web_tools
 
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
-            "backend": "tavily",
+            "backend": "parallel",
         })
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+        monkeypatch.setenv("PARALLEL_API_KEY", "test-key")
         # No search_backend or extract_backend set — both fall through
-        assert web_tools._get_search_backend() == "tavily"
-        assert web_tools._get_extract_backend() == "tavily"
+        assert web_tools._get_search_backend() == "parallel"
+        assert web_tools._get_extract_backend() == "parallel"
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +243,8 @@ class TestWebSearchUsesSearchBackend:
             return result
 
         monkeypatch.setattr(web_tools, "_get_search_backend", tracking_get_search)
-        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "firecrawl"})
-        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake")
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "parallel"})
+        monkeypatch.setenv("PARALLEL_API_KEY", "fake")
 
         # The function will fail at Firecrawl client level but we just
         # need to verify _get_search_backend was called
@@ -298,7 +298,7 @@ class TestUnconfiguredErrorEnvelopeParity:
         from tools import web_tools
 
         self._clear_web_creds(monkeypatch)
-        # Reset firecrawl client cache so the unconfigured state is re-evaluated
+        # Reset legacy client cache so the unconfigured state is re-evaluated.
         monkeypatch.setattr(web_tools, "_firecrawl_client", None, raising=False)
         monkeypatch.setattr(web_tools, "_firecrawl_client_config", None, raising=False)
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
@@ -307,8 +307,7 @@ class TestUnconfiguredErrorEnvelopeParity:
         result = json.loads(web_tools.web_search_tool("hello world", limit=3))
         assert "error" in result, f"expected top-level 'error' key, got {result}"
         # ``Error searching web:`` prefix comes from web_tools' top-level except handler
-        assert "Error searching web:" in result["error"]
-        assert "FIRECRAWL_API_KEY" in result["error"]
+        assert "ddgs package is not installed" in result["error"]
         # No per-result burying
         assert "results" not in result
 
@@ -352,10 +351,10 @@ class TestDispatchersTriggerPluginDiscovery:
         before looking up the configured backend so the registry is
         populated even from cold-start subprocess contexts.
 
-        Without the fix, ``get_provider('firecrawl')`` returns ``None``
+        Without the fix, ``get_provider('parallel')`` returns ``None``
         on a fresh process and the dispatcher emits "No web extract
         provider configured" despite the user having both
-        ``web.extract_backend: firecrawl`` and ``FIRECRAWL_API_KEY`` set
+        ``web.extract_backend: parallel`` and ``PARALLEL_API_KEY`` set
         (issue #27580).
         """
         import asyncio
@@ -367,14 +366,14 @@ class TestDispatchersTriggerPluginDiscovery:
 
         restore = self._clear_registry()
         try:
-            class FakeFirecrawl(WebSearchProvider):
+            class FakeParallel(WebSearchProvider):
                 @property
                 def name(self) -> str:
-                    return "firecrawl"
+                    return "parallel"
 
                 @property
                 def display_name(self) -> str:
-                    return "Fake Firecrawl"
+                    return "Fake Parallel"
 
                 def is_available(self) -> bool:
                     return True
@@ -389,16 +388,16 @@ class TestDispatchersTriggerPluginDiscovery:
                         for u in urls
                     ]
 
-            # Simulate "plugin discovery loads the firecrawl plugin": the
+            # Simulate "plugin discovery loads the parallel plugin": the
             # wrapped helper registers the provider, mirroring what
-            # ``plugins/web/firecrawl/__init__.py:register`` does at
+            # ``plugins/web/parallel/__init__.py:register`` does at
             # real-process startup. Wrapping with ``MagicMock`` lets us
             # also assert the dispatcher actually invoked the hook — if
             # a future refactor accidentally drops the call the regression
             # would otherwise hide behind a still-populated registry.
             def _register_fake() -> None:
-                if web_search_registry.get_provider("firecrawl") is None:
-                    web_search_registry.register_provider(FakeFirecrawl())
+                if web_search_registry.get_provider("parallel") is None:
+                    web_search_registry.register_provider(FakeParallel())
 
             mock_hook = MagicMock(wraps=_register_fake)
             # Patch the helper on ``tools.web_tools`` directly rather than the
@@ -410,10 +409,10 @@ class TestDispatchersTriggerPluginDiscovery:
             )
             monkeypatch.setattr(
                 web_tools, "_load_web_config",
-                lambda: {"extract_backend": "firecrawl"},
+                lambda: {"extract_backend": "parallel"},
             )
             # Sanity: registry IS empty before the tool call.
-            assert web_search_registry.get_provider("firecrawl") is None
+            assert web_search_registry.get_provider("parallel") is None
 
             result = json.loads(asyncio.run(
                 web_tools.web_extract_tool(
@@ -431,7 +430,7 @@ class TestDispatchersTriggerPluginDiscovery:
                 "before resolving the registry"
             )
             assert "No web extract provider configured" not in json.dumps(result)
-            assert web_search_registry.get_provider("firecrawl") is not None
+            assert web_search_registry.get_provider("parallel") is not None
         finally:
             restore()
 
@@ -492,4 +491,3 @@ class TestDispatchersTriggerPluginDiscovery:
             assert web_search_registry.get_provider("brave-free") is not None
         finally:
             restore()
-

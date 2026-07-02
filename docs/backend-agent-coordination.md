@@ -556,3 +556,726 @@ conversazione e segna esplicitamente i punti ancora aperti.
 Quando una conclusione diventa stabile, aggiornare anche
 `docs/implementation_plan.md` sotto la voce pertinente senza spuntare la voce
 principale finche' resta lavoro operativo.
+
+## Fix esposizione Admin Hades 2026-07-01
+
+Problema verificato: `https://home-sweet-home.cloud/admin/hades` era una route
+Laravel/Inertia registrata e buildata, ma Traefik la inoltrava al container
+`frontend` perche' il router Laravel pubblico copriva solo `/api`, `/sanctum`,
+`/storage` e `/api/hades/v1`. Con BasicAuth valida la risposta era quindi la
+SPA Nginx generica, non la pagina `Admin/Hades`.
+
+Fix remoto applicato in `/home/ubuntu/dev-sandbox/docker-compose.devboard.traefik.yaml`:
+aggiunto router `devboard-laravel-web` con priorita' 130 per `Path(/login)`,
+`Path(/logout)`, `PathPrefix(/admin/hades)` e `PathPrefix(/build)`, mantenendo
+`devboard-basic-auth`. Ricreato `devboard-app-1` con la compose base +
+override Traefik.
+
+Verifiche fresche:
+
+- Senza BasicAuth: `/admin/hades` resta `HTTP 401` Traefik.
+- Con BasicAuth: `/admin/hades` risponde da PHP/Laravel con redirect a
+  `/login`, non piu' da Nginx frontend.
+- Con BasicAuth: `/login` risponde `HTTP 200` con HTML Inertia e asset
+  `/build/assets/app-BTNwdPjc.js` risponde `HTTP 200`.
+- `https://home-sweet-home.cloud/api/hades/v1/health` resta `HTTP 200`.
+- Suite remota: `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+  DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  -> 27 test passati.
+
+## Diagnosi routing frontend 2026-07-01
+
+Richiesta riportata all'agent backend remoto: il frontend sospetta che alcune
+route pubbliche vadano ancora al frontend Laravel/Inertia legacy invece del
+frontend React corretto. Ho chiesto diagnosi non distruttiva su route Laravel,
+fallback SPA React, Traefik/nginx, `/login`, dashboard e asset/static serving.
+
+Risposta sintetica dell'agent backend:
+
+- Il sospetto e' confermato per le page-route: Laravel ha ancora pagine web
+  legacy registrate per `/login` e `/admin/hades`, mentre il frontend React ha
+  fallback SPA e asset statici propri.
+- La causa operativa e' il router Traefik `devboard-laravel-web`, aggiunto nel
+  fix precedente, che instrada verso Laravel anche `/login`, `/logout`,
+  `PathPrefix(/admin/hades)` e probabilmente `/build`.
+- I file/config coinvolti sono il compose override Traefik remoto
+  `/home/ubuntu/dev-sandbox/docker-compose.devboard.traefik.yaml`, le route web
+  Laravel/Inertia per login/admin e la build/fallback del frontend React.
+- Public smoke senza BasicAuth: `/login` e `/api/dashboard/me` rispondono
+  `401`; questo e' coerente con BasicAuth Traefik, ma il routing effettivo e'
+  determinato dalle label Traefik sopra.
+
+Fix consigliato dall'agent backend:
+
+- Rimuovere `/login`, `/logout` e probabilmente `/build` dal router
+  `devboard-laravel-web`.
+- Lasciare a Laravel solo `/api/*`, `/sanctum/*`, `/storage/*` e le API
+  agent-facing gia' separate.
+- Far servire tutte le page-route pubbliche dal catch-all del frontend React.
+- Per `/admin/hades`, decidere esplicitamente: se deve essere UI pubblica va
+  portata nel frontend React; se resta un tool Laravel temporaneo, spostarla su
+  un path legacy/admin separato per non interferire con la SPA.
+
+Nessuna modifica remota applicata durante questa diagnosi.
+
+## Fix routing React per Admin Hades 2026-07-01
+
+Obiettivo: correggere il routing pubblico dopo la diagnosi sopra e verificare
+che `/admin/hades` non venga piu' catturato dal frontend Laravel/Inertia.
+
+Intervento remoto eseguito in `/home/ubuntu/dev-sandbox`:
+
+- Rimosse dal compose override Traefik le label del router
+  `devboard-laravel-web`, che catturavano `/login`, `/logout`,
+  `PathPrefix(/admin/hades)` e `PathPrefix(/build)` verso Laravel.
+- Ricreato `devboard-app-1` con:
+  `docker compose -f docker-compose.devboard.yaml -f docker-compose.devboard.traefik.yaml up -d app`
+  usando l'`APP_KEY` gia' presente nel container, senza stamparlo.
+- Rimosso il backup temporaneo creato durante l'edit.
+
+Verifiche fresche:
+
+- `docker inspect devboard-app-1` non contiene piu' label
+  `devboard-laravel-web`.
+- Traefik ha ricaricato una config con:
+  - `devboard-frontend`: `Host(home-sweet-home.cloud)`, priority `1`,
+    servizio `devboard-frontend`, BasicAuth;
+  - `devboard-web`: solo `PathPrefix(/api)`, `PathPrefix(/sanctum)` e
+    `PathPrefix(/storage)`, servizio Laravel;
+  - `devboard-hades`: solo `PathPrefix(/api/hades/v1)`, servizio Laravel;
+  - `devboard-plugin`: solo `PathPrefix(/api/plugin/v1)`, servizio Laravel.
+- HTTP pubblico senza BasicAuth:
+  - `/admin/hades` -> `401 Unauthorized` da Traefik BasicAuth, coerente con il
+    router frontend protetto;
+  - `/login` -> `401 Unauthorized` da Traefik BasicAuth;
+  - `/api/hades/v1/health` -> `200 OK` JSON Hades;
+  - `/api/dashboard/me` -> `401 Unauthorized` da Traefik BasicAuth.
+- Verifica diretta del frontend container:
+  `docker exec devboard-frontend-1 wget -S -O - http://127.0.0.1/admin/hades`
+  -> `HTTP/1.1 200 OK`, `Server: nginx/1.27.5`, HTML React con
+  `DevBoard - Operational Dashboard`, `/static/js/main.e0cdc452.js` e
+  `/static/css/main.4898dcfb.css`.
+- Route Laravel esistono ancora internamente per `admin/hades` e `login`, ma
+  non sono piu' esposte dal router pubblico Traefik per quelle page-route.
+- Test remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  -> 27 test passati, 239 assertions.
+
+Stato remoto finale:
+
+- `docker-compose.devboard.traefik.yaml` torna pulito rispetto a git.
+- Rimane modificato solo `backend/bootstrap/app.php`, gia' presente prima di
+  questo intervento e non toccato qui.
+
+## Alias React Admin Hades 2026-07-01
+
+Osservazione dopo il fix proxy: il routing Traefik mandava correttamente
+`/admin/hades` al frontend React, ma `src/App.tsx` del frontend remoto aveva
+solo la route `/admin`. Di conseguenza `/admin/hades` cadeva nel catch-all
+React `*`, che naviga a `/`; da li' l'app puo' poi finire su `/projects` in
+base al ruolo/sessione.
+
+Intervento remoto eseguito nel repo frontend
+`/home/ubuntu/emergent_devboard_frontend/frontend`:
+
+- aggiunta una sola route:
+  `/admin/hades` -> `<Section navKey="admin"><AdminPage /></Section>`;
+- rebuild e redeploy del container:
+  `docker compose -f docker-compose.devboard.yaml -f docker-compose.devboard.traefik.yaml up -d --build frontend`.
+
+Verifiche fresche:
+
+- Build Docker frontend completata con `craco build` e nuovo bundle
+  `/static/js/main.41ad833e.js`.
+- Il bundle deployato contiene la stringa `/admin/hades`.
+- `docker exec devboard-frontend-1 wget -S -O - http://127.0.0.1/admin/hades`
+  -> `HTTP/1.1 200 OK`, HTML React aggiornato con `main.41ad833e.js`.
+- HTTP pubblico senza BasicAuth:
+  - `/admin/hades` -> `401 Unauthorized` Traefik, cioe' la protezione esterna
+    resta attiva;
+  - `/login` -> `401 Unauthorized` Traefik;
+  - `/api/hades/v1/health` -> `200 OK`.
+
+Nota: non e' stato fatto un browser smoke autenticato perche' in questa
+sessione non sono state usate credenziali BasicAuth. L'evidenza server-side
+dimostra pero' che `/admin/hades` non e' piu' una route wildcard che cade su
+`/projects`: il path esiste nel router React deployato e viene servito dal
+frontend container.
+
+## Fix cache index SPA Admin Hades 2026-07-01
+
+Segnalazione successiva dal browser reale: DevTools mostrava ancora il body
+HTML vecchio per `/admin/hades`, con script `/static/js/main.e0cdc452.js`, e
+l'app finiva su `/projects`. La riga Network indicava document servito da disk
+cache. Il deploy corretto invece aveva gia' generato `main.41ad833e.js` con la
+route `/admin/hades`.
+
+Intervento remoto nel frontend:
+
+- aggiornato `nginx.conf` per rendere non cacheabile `index.html` e tutti i
+  fallback SPA:
+  - `Cache-Control: no-store, no-cache, must-revalidate`;
+  - `Pragma: no-cache`;
+  - `expires off`;
+- mantenuto cache lungo solo su `/static/`, dove i file sono hashed;
+- rebuild e redeploy di `devboard-frontend-1`.
+
+Verifiche fresche dal container deployato:
+
+- `wget -S -O - http://127.0.0.1/admin/hades` -> `HTTP/1.1 200 OK`.
+- Header presenti: `Cache-Control: no-store, no-cache, must-revalidate` e
+  `Pragma: no-cache`.
+- Body aggiornato: script `/static/js/main.41ad833e.js`, non piu'
+  `main.e0cdc452.js`.
+- Bundle deployato: `/usr/share/nginx/html/static/js/main.41ad833e.js`
+  contiene `/admin/hades`.
+
+Nota operativa: i browser che hanno gia' messo in disk cache il vecchio
+documento potrebbero richiedere un hard reload o "Disable cache" in DevTools
+una volta. Dopo la prima fetch fresca, il nuovo `index.html` non dovrebbe piu'
+essere riusato da cache.
+
+## Porting React Admin Hades e installer 2026-07-01
+
+Nuova segnalazione: `/admin` e `/admin/hades` mostravano la stessa pagina
+React, e dalla UI non risultavano istruzioni di installazione Hades.
+
+Diagnosi:
+
+- Il backend Laravel aveva gia' le API Hades agent-facing M1-M5 sotto
+  `/api/hades/v1/*`.
+- Esistevano anche endpoint mutating dashboard per provisioning:
+  `POST /api/dashboard/admin/hades/bootstrap-tokens`, revoke token, create job
+  e review memory proposal.
+- Mancava pero' un endpoint dashboard GET per lo snapshot Hades consumabile da
+  React: la vecchia pagina Laravel/Inertia `GET /admin/hades` riceveva i dati
+  server-side.
+- La route React `/admin/hades` era stata solo aliasata ad `AdminPage`, quindi
+  mostrava token/plugin/devices e non Hades.
+- I comandi install generati dal backend puntavano a `/install.sh` e
+  `/install.ps1`, ma il frontend pubblico serviva quei path come fallback SPA;
+  inoltre Traefik li proteggeva con BasicAuth, rompendo `curl | bash`.
+
+Interventi remoti:
+
+- Backend `/home/ubuntu/dev-sandbox/backend`:
+  - aggiunto `GET /api/dashboard/admin/hades` in
+    `Dashboard\Api\DashboardHadesController@index`;
+  - rimosso il web route legacy Laravel/Inertia `GET /admin/hades`;
+  - aggiornato `tests/Feature/Hades/HadesM5MvpCompletionTest.php` per coprire
+    lo snapshot dashboard Hades.
+- Frontend `/home/ubuntu/emergent_devboard_frontend/frontend`:
+  - aggiunta `src/pages/HadesAdminPage.tsx`;
+  - `/admin/hades` ora punta a `HadesAdminPage`, non piu' ad `AdminPage`;
+  - aggiunti tipi/metodi API Hades dashboard in `src/types/devboard.ts`,
+    `src/api/devboardApi.ts`, `src/api/httpApi.ts` e mock fallback;
+  - copiati gli installer Hades reali in `public/install.sh` e
+    `public/install.ps1`.
+- Traefik:
+  - aggiunto router `devboard-install` per `Path(/install.sh) ||
+    Path(/install.ps1)` verso `devboard-frontend`, senza BasicAuth.
+
+Verifiche:
+
+- Backend:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  -> 4 test passati, 59 assertions.
+- Route list backend `--path=hades`:
+  - non mostra piu' `GET admin/hades`;
+  - mostra `GET api/dashboard/admin/hades` e le route Hades API.
+- Frontend:
+  - `npm run build` locale remoto passato;
+  - Docker build/deploy passato con bundle `main.8f5b836d.js`;
+  - bundle deployato contiene `Admin - Hades` e `/admin/hades`.
+- Installer pubblici:
+  - `https://home-sweet-home.cloud/install.sh` -> HTTP 200, script Bash Hades,
+    non HTML React;
+  - `https://home-sweet-home.cloud/install.ps1` -> HTTP 200, script PowerShell
+    Hades, non HTML React.
+- Hades API:
+  - `https://home-sweet-home.cloud/api/hades/v1/health` -> HTTP 200 JSON.
+
+## Menu React Hades e test installer pubblico 2026-07-01
+
+Richiesta successiva: esporre nel menu React un accesso rapido a
+`/admin/hades` e verificare il comando installer generato per il progetto
+Carnovali.
+
+Interventi remoti frontend:
+
+- aggiunta voce visibile nel menu React:
+  `Hades` -> `/admin/hades`, con ruolo `admin`;
+- aggiornato `src/App.tsx` per usare `navKey="hades"` sulla route
+  `/admin/hades`;
+- rebuild e redeploy del container `devboard-frontend-1`;
+- bundle deployato `main.7aa6d769.js` verificato con stringhe `Hades` e
+  `/admin/hades`.
+
+Problemi trovati durante il test dell'installer pubblico:
+
+- gli installer pubblici puntavano al repository storico
+  `gabriele/hades-agent`, non accessibile dal clone HTTPS;
+- dopo la correzione al repository `titagram/Hephaistos`, il default `main`
+  non conteneva ancora il subcommand `hades backend`;
+- il default dichiarato `--backend-workspace PATH` come "current dir" era
+  fragile: l'installer cambia directory internamente, quindi senza workspace
+  esplicita il bootstrap poteva legare la cartella sbagliata.
+
+Correzioni installer:
+
+- `scripts/install.sh` e `scripts/install.ps1` ora usano:
+  - SSH/HTTPS repo `titagram/Hephaistos`;
+  - branch default `codex/hades-rebrand`, finche' l'implementazione Hades non
+    viene mergiata su `main`;
+  - la directory iniziale dello script come workspace backend di default,
+    prima dei `cd` interni dell'installer;
+  - in Bash, `backend bootstrap` viene eseguito con il Python del venv appena
+    installato quando `--no-venv` non e' attivo, evitando launcher `hermes`
+    vecchi su PATH.
+- Aggiornamento naming comando:
+  - il comando primario installato e documentato dagli installer e' `hades`;
+  - `hermes` resta installato solo come alias di compatibilita';
+  - su questo Mac e' stato creato subito `~/.local/bin/hades`.
+- Copiati gli installer aggiornati in
+  `/home/ubuntu/emergent_devboard_frontend/frontend/public/` e redeployato il
+  frontend.
+
+Verifiche:
+
+- `curl https://home-sweet-home.cloud/install.sh` mostra:
+  - `REPO_URL_HTTPS="https://github.com/titagram/Hephaistos.git"`;
+  - `BRANCH="codex/hades-rebrand"`;
+  - `INSTALLER_START_DIR="$PWD"`;
+  - passaggio workspace con `BACKEND_WORKSPACE:-$INSTALLER_START_DIR`.
+- `curl https://home-sweet-home.cloud/install.ps1` mostra repo/branch Hades e
+  fallback workspace a `$InstallerStartDir`.
+- Eseguito da `/Users/gabriele/Dev/sinervis/carnovali` il comando pubblico
+  generato con token redatto nei log:
+  - installazione completata;
+  - checkout passato a `codex/hades-rebrand`;
+  - `uv.lock` sul ramo Hades risulta da aggiornare: l'installer ha completato
+    usando il fallback `uv pip install -e '.[all]'`;
+  - `Backend setup complete`;
+  - agent `ha_c8df14317e732d80`;
+  - workspace corretta `/Users/gabriele/Dev/sinervis/carnovali`;
+  - binding corretto `01KWEPJGFG5K0W0J7NJEQ8YF0N`;
+  - sync finale: 0 job, 2 snapshot memoria, 0 proposal/artifact/inbox.
+- Stato locale finale:
+  - `hades backend status` -> 1 binding;
+  - unico binding attivo verso `~/Dev/sinervis/carnovali`.
+
+Pulizia:
+
+- Un run intermedio, prima della correzione workspace, aveva creato localmente
+  un progetto `carnovali-2` verso `~/.hermes/hermes-agent/ui-tui`.
+- Il progetto e' stato archiviato e il binding/cache locale spurio sono stati
+  rimossi; resta attivo solo `carnovali`.
+
+## Fix memory proposal summary lunga 2026-07-01
+
+Problema osservato durante il test locale nel workspace Carnovali:
+
+- `hades backend sync` inviava una memory proposal locale con summary lunga;
+- il backend rispondeva HTTP 500;
+- Laravel log riportava PostgreSQL `SQLSTATE[22001] value too long for type
+  character varying(255)` su `project_memory_entries.summary`;
+- il contratto API validava gia' `summary` fino a 4000 caratteri e
+  `hades_memory_proposals.summary` era gia' `text`, quindi il collo di
+  bottiglia era solo la tabella condivisa `project_memory_entries`.
+
+Interventi backend remoto:
+
+- `project_memory_entries.summary` cambiato da `string` a `text` nella
+  migration sorgente;
+- aggiunta migration runtime
+  `2026_07_01_000005_expand_project_memory_entry_summary_column.php`;
+- applicata migration su PostgreSQL con `php artisan migrate --force`;
+- verificato via DB che l'ultima entry `hades_agent/proposal` per Carnovali
+  contiene summary lunga 1005 caratteri.
+
+Interventi client Hades locale:
+
+- `hades_backend_sync.run_backend_sync()` ora cancella `last_sync_error` quando
+  una sync completa termina senza errori;
+- aggiunto helper `clear_sync_state()` in `hades_backend_db`;
+- aggiornato anche il managed checkout locale `~/.hermes/hermes-agent` per
+  rendere subito corretto il comando `hades` installato su questo Mac.
+
+Verifiche:
+
+- Test rosso schema: `project_memory_entries.summary` era `varchar`;
+- test verde remoto: `22 passed / 237 assertions` su
+  `tests/Feature/Hades` + `ProjectWorkspaceMemoryQueueSchemaTest.php`;
+- test verde locale: `13 passed` su backend command, doctor e TUI RPC;
+- `hades backend sync` da `/Users/gabriele/Dev/sinervis/carnovali`:
+  `memory 1, proposals 1`, senza errori;
+- sync successiva: `proposal_errors: 0`, `last_error: null`;
+- stato locale: proposal accettata `accepted: 1`; resta una vecchia proposal
+  `refused: 1` da revisionare separatamente, non collegata al 500.
+
+## Richieste backend su wiki, memory, OpenCode e import memoria 2026-07-01
+
+Richiesta girata al backend agent remoto prima di proseguire i test:
+
+- accesso wiki poco chiaro/non discoverable;
+- popolamento/aggiornamento wiki non esposto al frontend React;
+- inserimento manuale memory da dashboard con categoria/source
+  "inserito dall'utente";
+- configurazione API key OpenCode/OpenCode Go non funzionante;
+- import/trasferimento di memory esistenti da altra cartella/workspace, con
+  cooperazione tra Hades locale/frontend e backend.
+
+Output backend:
+
+- creato report remoto:
+  `/home/ubuntu/dev-sandbox/ai-sandbox/docs/devboard-backend-blockers-report-2026-07-01.md`;
+- aggiornato logbook remoto:
+  `/home/ubuntu/dev-sandbox/ai-sandbox/logbooks/LOGBOOK_PROJECT.md`;
+- nessun codice applicativo o dato runtime modificato.
+
+Punti principali dal report:
+
+- wiki: API read gia' presenti (`GET /api/dashboard/wiki`,
+  `GET /api/dashboard/projects/{project}/wiki`,
+  `GET /api/dashboard/wiki/pages/{page}`), ma `wiki` e' nascosta nella nav
+  React; proposta backend: aggiungere `links.wiki` e `links.wiki_api` al
+  payload progetto e verificare routing SPA;
+- wiki refresh: oggi scrittura wiki esiste via plugin/revision service, ma
+  manca un endpoint dashboard; proposta:
+  `POST /api/dashboard/projects/{project}/wiki/refresh-requests`, che accoda un
+  job Hades `populate_project_wiki`, con result applicato da
+  `WikiRevisionService`;
+- memory manuale: `POST /api/dashboard/projects/{project}/memory` esiste ma
+  salva `source = dashboard_user`; proposta: per il form manuale salvare
+  `source = user_inserted` e mantenerla nello snapshot Hades;
+- OpenCode: backend puo' salvare provider generici cifrati, ma manca preset
+  `opencode_go`, creazione profilo modello e validate endpoint; configurare
+  OpenCode localmente non configura automaticamente Laravel;
+- import memory: esistono workspace binding e proposals, ma manca import batch
+  con dedupe/provenance; proposta:
+  `GET /api/dashboard/projects/{project}/workspace-bindings`,
+  `POST /api/dashboard/projects/{project}/memory/imports` e
+  `POST /api/hades/v1/memory/import-bundles`.
+
+Ordine consigliato dal backend:
+
+1. Rendere discoverable la wiki e aggiungere link payload.
+2. Salvare memory manuale con `source = user_inserted`.
+3. Esporre wiki refresh request come job Hades.
+4. Applicare result wiki Hades tramite `WikiRevisionService`.
+5. Aggiungere provider/profile/validate per OpenCode.
+6. Implementare import batch e bundle Hades per trasferimento memory.
+
+## Fix Socrates queue e visibilita' wiki upload 2026-07-01
+
+Root cause verificata sul backend remoto:
+
+- `POST /api/dashboard/projects/{project}/agent-work` accettava
+  `assigned_agent_key = socrates`, ma nessun consumer server-side processava
+  quei work item; il plugin locale claimava solo `local_agent`.
+- Il worker Docker era fermo da ore per un vecchio errore sulla tabella
+  `cache`, ma il bug Socrates non dipendeva dal worker: mancava proprio il
+  processore per `socrates`.
+- Il job wiki locale era `completed`, ma `WikiRefreshResultService` leggeva
+  solo `result.pages`; l'agent locale aveva prodotto `result.wiki_revisions`,
+  quindi `applied.pages_written` restava `0`.
+
+Implementazione applicata:
+
+- aggiunto `App\Services\ServerAgentWorkService`;
+- `DashboardAgentWorkController` ora processa immediatamente i work item
+  server-side per `socrates` usando il profilo `socrate_supervisor` e provider
+  OpenAI-compatible configurato;
+- la risposta Socrates viene salvata come `project_memory_entries` con
+  `source = server_agent`, `kind = agent_note`, `agent_key = socrates`, e
+  collegata a `agent_work_items.result_memory_entry_id`;
+- errori provider diventano stato `failed` visibile sul work item, non una
+  coda muta;
+- `WikiRefreshResultService` accetta `pages`, `wiki_revisions` e `revisions`,
+  supporta evidence legacy (`evidence`, `citations`, `code_evidence`) e
+  restituisce anche `title` nelle pagine applicate;
+- frontend React `WikiPage` mostra nel pannello refresh il numero di pagine
+  applicate e link/chip alle pagine scritte.
+
+Dati runtime riparati:
+
+- riapplicato job wiki `01KWF3RFFDA7NZ1E5GMV42AQH4`;
+- scritte 3 pagine Carnovali: `overview`, `architecture`,
+  `development-operations`;
+- processato work item Socrates `01KWF3BYJNG2EPVK5CT63TBJ4M`;
+- generata memory entry Socrates `01KWF52Q8F0TH4XA94EQPHCSB7`;
+- worker Docker riavviato e verificato in esecuzione con
+  `php artisan queue:work`.
+
+Verifiche:
+
+- `php -l` su service/controller modificati;
+- `composer dump-autoload`;
+- `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Dashboard/AgentWorkDashboardApiTest.php tests/Feature/Dashboard/WikiRefreshDashboardApiTest.php --display-warnings`
+  passato: `20 passed / 161 assertions`;
+- `vendor/bin/pint --test` passato sui file toccati;
+- `npx tsc --noEmit` passato;
+- `npm run build` passato;
+- rebuild Docker frontend completato con bundle `main.27ff9256.js`;
+- `php artisan queue:failed` non mostra failed jobs.
+
+## Nota futura: domini memoria separati 2026-07-01
+
+Richiesta utente da tenere come requisito per la prossima slice backend/Hades:
+la memoria di progetto non deve restare un unico stream indistinto. Deve
+esistere una separazione interrogabile per dominio:
+
+- `logbook`: cronologia/diario operativo e decisioni temporali del progetto;
+- `wiki`: conoscenza documentale strutturata, evidence-backed e navigabile;
+- `agent_notes`: note generiche e handoff prodotti dagli agent locali o dagli
+  agent server-side.
+
+Ogni dominio deve essere interrogabile separatamente sia dall'agente locale
+Hades sia dagli agent presenti nel backend. Il contratto dovrebbe quindi
+prevedere filtri/scope espliciti negli endpoint snapshot/search/recall e nella
+UI dashboard, evitando che wiki, logbook e note operative vengano mescolati
+senza intenzione.
+
+Nota collegata sul graph: se il graph backend non e' accessibile, gli agent
+frontend/backend perdono un canale utile per orientarsi su relazioni fra
+progetti, repository, run, wiki, artifact, task e simboli. Conviene ripristinare
+un accesso graph read-only e interrogabile esplicitamente dagli agent, ma come
+scope separato dalla memoria: utile per discovery/relazioni, non come recall
+generico sempre iniettato.
+
+Nota UI frontend backend: nella pagina React `/admin`, la sezione `Model
+profiles` ha un'impaginazione poco leggibile. Da riprendere come miglioramento
+di layout dedicato: ridurre densita' visiva disordinata, rendere confrontabili
+profile/provider/model/agent associati e tenere azioni/configurazione in
+controlli prevedibili.
+
+Nota admin AI: in `/admin` deve essere possibile gestire in modo esplicito la
+rimozione di `model profiles` e la cancellazione delle `model provider
+credentials`, con azioni amministrative visibili e conferme adeguate.
+
+Nota agent work/chat: in
+`/projects/01KWEP8MV76QKQJ4CWXAJMTZ4T/agent-work` le righe delle risposte /
+work item agent dovrebbero essere cliccabili e aprire un dettaglio. Dal
+dettaglio dovrebbe essere possibile proseguire la conversazione o aggiungere
+follow-up collegati allo stesso contesto.
+
+Nota chat persistente agent-scoped: serve un'area chat dedicata dove scegliere
+con quale agent parlare, mantenere thread persistenti e riaprire chat passate,
+in stile mini ChatGPT. Questa richiede un contratto backend dedicato per
+conversation/thread/messages, selezione agent, stato e memoria del thread; non
+va modellata solo come singolo `agent_work` fire-and-forget.
+
+## Dropdown progetto sidebar React 2026-07-01
+
+Stato: implementato e deployato nel frontend remoto.
+
+- `AppShell` ora carica i progetti attivi con `api.getProjects("active")`.
+- La sidebar desktop e il menu mobile mostrano un dropdown `Project scope`.
+- Selezionando un progetto si naviga allo scope project-specific e, dove
+  possibile, si conserva la sezione corrente (`/kanban`, `/ask`, `/memory`,
+  `/wiki`, `/engineering`).
+- Selezionando `Global workspace` si torna a `/projects`.
+- La topbar mostra il nome progetto quando disponibile, altrimenti l'id
+  decodificato.
+
+Verifiche:
+
+- `npx tsc --noEmit` passato.
+- `npm run build` passato.
+- container `devboard-frontend-1` ricreato con bundle `main.c6aecc29.js`.
+- asset container verificato: `index.html` punta a
+  `/static/js/main.c6aecc29.js`.
+- browser in-app Codex non ha potuto aprire `https://home-sweet-home.cloud/projects`
+  per `net::ERR_BLOCKED_BY_CLIENT`; verifica renderizzata pubblica da fare con
+  Chrome autenticato dell'utente o dopo refresh manuale della tab.
+
+## Admin AI model profile e provider credentials 2026-07-01
+
+Stato: implementato e deployato.
+
+- Backend: aggiunto `DELETE /api/dashboard/admin/ai-model-profiles/{profile}`.
+- Backend: la cancellazione di un model profile fallisce con `409` se il
+  profilo e' ancora assegnato a uno o piu' controlled agents.
+- Backend: aggiunti audit log `ai_model_profile.deleted` e test per clear key,
+  delete profile, blocco delete assegnato e divieto non-admin.
+- Frontend `/admin`: il provider mostra lo stato della key e un'azione esplicita
+  `Clear key` con conferma.
+- Frontend `/admin`: ogni model profile mostra `Delete` con conferma; il
+  pulsante e' disabilitato quando il profilo e' assegnato a un agent.
+
+Verifiche:
+
+- `php -l` sui controller/service toccati.
+- `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Dashboard/AiAgentRegistryDashboardTest.php --display-warnings`
+  passato: `11 passed / 96 assertions`.
+- `./vendor/bin/pint --test app/Assistants/AiAgentRegistry.php app/Http/Controllers/Dashboard/Api/DashboardAiAgentController.php routes/web.php tests/Feature/Dashboard/AiAgentRegistryDashboardTest.php`
+  passato.
+- `php artisan route:list --path=ai-model-profiles` mostra `POST`, `PUT` e
+  `DELETE`.
+- `npx tsc --noEmit` passato.
+- `npm run build` passato.
+- container `devboard-frontend-1` ricreato con bundle `main.c2e1f226.js`.
+- asset container verificato: `index.html` punta a
+  `/static/js/main.c2e1f226.js` e il bundle contiene `Clear key`,
+  `Delete profile` e `Project scope`.
+
+## Memory/wiki/agent-work slice 2026-07-01
+
+Stato: implementato e deployato nel backend remoto e nel frontend React
+standalone.
+
+- Skill locale creata:
+  `skills/autonomous-ai-agents/hades-wiki-push/SKILL.md`.
+- Backend agent coordinato su logbook/wiki/agent_notes, graph read-only,
+  agent tools, agent-work detail e ripristino agenti.
+- Backend: aggiunto `DELETE
+  /api/dashboard/projects/{project}/memory/{memory}` con audit
+  `project_memory.deleted`.
+- Backend: aggiunti `POST /api/dashboard/projects/{project}/wiki/pages` e
+  `PATCH /api/dashboard/wiki/pages/{page}` tramite `WikiRevisionService`.
+- Backend: audit wiki corretto per segnare `actor_type=user` quando scrive un
+  utente dashboard.
+- Frontend React: Memory ora supporta domini `logbook`, `wiki`, `agent_notes`,
+  ricerca e delete delle entry non-wiki.
+- Frontend React: Wiki ora permette creazione pagina/sezione da Markdown e
+  modifica Markdown/stato da dettaglio pagina.
+- Frontend React: Agent Work ha righe cliccabili con dettaglio eventi,
+  memoria risultato e messaggi chat persistiti; il follow-up rimanda ad Ask
+  per nuova richiesta agent-scoped.
+
+Verifiche:
+
+- Skill validator: `Skill is valid!`.
+- Backend targeted:
+  `php artisan test tests/Feature/Dashboard/ProjectMemoryDashboardApiTest.php tests/Feature/Dashboard/WikiManualDashboardApiTest.php --display-warnings`
+  passato: `19 passed / 96 assertions`.
+- Backend full suite:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test --display-warnings`
+  passato: `290 passed / 2493 assertions`.
+- Backend Pint:
+  `./vendor/bin/pint --test ...` passato sui file toccati.
+- Frontend: `npm run build` passato.
+- Frontend: `CI=true npm test -- --watchAll=false` passato:
+  `4 suites / 31 tests`.
+- OpenCode Go runtime validation: provider `opencode_go` trovato con key e
+  base URL configurati ma `enabled=false`; abilitato con audit di sistema e
+  validato live. Esito: `ready_for_runtime`, `api_reachable=true`,
+  `checked_model=glm-5.2`, nessun errore redatto.
+- `git diff --check` pulito su backend e frontend.
+- Container `devboard-frontend-1` ricreato con bundle `main.2a8a2e0f.js`.
+- Smoke interno container: `/projects` serve `main.2a8a2e0f.js` e
+  `/admin/hades` serve `DevBoard - Operational Dashboard`.
+- Smoke pubblico con `curl` senza sessione restituisce `401`, coerente con
+  accesso autenticato; verifica browser da fare con sessione Chrome utente.
+
+## Agent chat backend contract 2026-07-01
+
+Stato: implementato e migrato nel backend remoto.
+
+- Backend: aggiunte tabelle `agent_chat_threads` e `agent_chat_messages` per
+  una chat persistente agent-scoped, separata da `agent_work_items`.
+- Backend: esposti endpoint dashboard dedicati:
+  - `GET /api/dashboard/projects/{project}/agent-chats`
+  - `POST /api/dashboard/projects/{project}/agent-chats`
+  - `GET /api/dashboard/projects/{project}/agent-chats/{thread}`
+  - `POST /api/dashboard/projects/{project}/agent-chats/{thread}/messages`
+- Il thread conserva `agent_key`, scope project/repository/task, stato,
+  ultimo `agent_work_item` e ultimo `assistant_run`.
+- Ogni turno utente crea un messaggio persistente e un `agent_work_item`
+  collegato con payload `devboard.agent_chat_turn.v1`.
+- Per `socrates`, `platon` e `aristoteles` il controller riusa il runner
+  `ServerAgentWorkService`, poi copia la risposta assistant nel thread.
+- Per `local_agent` il turno resta in `pending_local_agent` con work item
+  queued, pronto per completamento lato agente locale.
+- Backend plugin: `POST /api/plugin/v1/agent-work-items/{workItem}/complete`
+  accetta anche `chat_message` opzionale; quando il work item arriva da
+  `devboard.agent_chat_turn.v1`, il completamento appende un messaggio
+  `assistant` nel thread.
+- Backend plugin: `POST /api/plugin/v1/agent-work-items/{workItem}/fail`
+  appende un messaggio `system` nel thread collegato e porta il thread a
+  `failed`.
+- Permessi: PM/Developer/Admin possono creare e proseguire chat; Sysadmin puo'
+  leggere ma non scrivere; progetti archived/deleted bloccano le scritture.
+
+Verifiche:
+
+- `php artisan route:list --path=agent-chats` mostra 4 route dedicate.
+- `./vendor/bin/pint --test app/Http/Controllers/Dashboard/Api/DashboardAgentChatController.php app/Dashboard/DashboardApiReader.php routes/web.php database/migrations/2026_07_01_000009_create_agent_chat_thread_tables.php tests/Feature/Dashboard/AgentChatDashboardApiTest.php`
+  passato.
+- Targeted:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Dashboard/AgentChatDashboardApiTest.php tests/Feature/Dashboard/AgentWorkDashboardApiTest.php tests/Feature/Plugin/PluginSharedMemoryAndWorkQueueTest.php --display-warnings`
+  passato: `42 passed / 291 assertions`.
+- Full suite:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test --display-warnings`
+  passato: `299 passed / 2562 assertions`.
+- Runtime migration: `php artisan migrate --force` passato, inclusa
+  `2026_07_01_000009_create_agent_chat_thread_tables`.
+- `git diff --check` pulito sul backend.
+
+## Agent chat React surface 2026-07-01
+
+Stato: implementato e deployato nel frontend React remoto.
+
+- Frontend React: aggiunta pagina `/agent-chat` e route project-scoped
+  `/projects/{project}/agent-chat`.
+- Frontend React: aggiunta voce primaria `Chat` nel menu, project-scoped come
+  Work/Ask/Memory/Wiki/Engineering; Sysadmin vede la chat in read-only.
+- Frontend React: aggiunti tipi e metodi adapter per:
+  - `GET /api/dashboard/projects/{project}/agent-chats`
+  - `POST /api/dashboard/projects/{project}/agent-chats`
+  - `GET /api/dashboard/projects/{project}/agent-chats/{thread}`
+  - `POST /api/dashboard/projects/{project}/agent-chats/{thread}/messages`
+- Frontend React: pagina Chat con lista thread persistenti, selezione agent per
+  nuova chat, composer, stati `active`, `waiting_for_agent`,
+  `pending_local_agent`, `failed`, polling leggero degli stati pending e
+  dettaglio messaggi.
+- Frontend React: `Ask` ora avvia una chat persistente invece di creare solo un
+  work item isolato.
+- Frontend React: dettaglio `Agent Work` rimanda a `Chat` precompilando agente e
+  prompt del work item.
+- Mock adapter: aggiunta implementazione locale di thread agent-scoped; per
+  `local_agent` crea work item pending, per agent server genera risposta e
+  memoria mock.
+
+Verifiche:
+
+- Frontend targeted:
+  `npm test -- --watchAll=false src/lib/nav.test.ts src/api/httpApi.test.ts src/api/mockApi.test.ts`
+  passato: `3 suites / 28 tests`.
+- Frontend build locale:
+  `npm run build` passato con bundle `main.a5b6585b.js`.
+- Frontend container:
+  `DEVBOARD_APP_KEY=... docker compose -f docker-compose.devboard.yaml -f docker-compose.devboard.traefik.yaml up -d --build frontend`
+  passato con bundle deployato `main.be94e134.js`.
+- Smoke interno container: `/agent-chat`,
+  `/projects/01KWEP8MV76QKQJ4CWXAJMTZ4T/agent-chat` e `/admin/hades` servono
+  `main.be94e134.js`.
+- Smoke pubblico senza credenziali: `https://home-sweet-home.cloud/agent-chat`
+  risponde `401`, coerente con basic-auth Traefik.
+- Backend route smoke: `php artisan route:list --path=agent-chats` mostra le 4
+  route dashboard dedicate.
+- Backend targeted:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Dashboard/AgentChatDashboardApiTest.php tests/Feature/Plugin/PluginSharedMemoryAndWorkQueueTest.php --display-warnings`
+  passato: `24 passed / 156 assertions`.
+- Backend Pint targeted passato sui file agent-chat/agent-work/server-agent.
+- Locale Hades:
+  `.venv/bin/python -m pytest tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_client.py`
+  passato: `15 passed`.
+- OpenCode Go runtime validation:
+  `app(App\Assistants\AiAgentRegistry::class)->validateProvider('opencode_go')`
+  passato con `status=ready_for_runtime`, `api_reachable=true`,
+  `checked_model=glm-5.2`.
+
+Aggiornamento locale 2026-07-01:
+
+- Il backend plugin accetta gia' `chat_message` su
+  `POST /api/plugin/v1/agent-work-items/{workItem}/complete` e lo persiste nel
+  thread chat collegato.
+- Nel repo locale Hephaistos e' stato aggiunto un client dedicato
+  `/api/plugin/v1/agent-work-items` separato dal sync Hades `/api/hades/v1`.
+- `hades backend worker --once --local-workspace-id <id>` lista gli item
+  `queued`, claim con `local_workspace_id`, mantiene heartbeat periodico mentre
+  l'agente locale lavora e completa passando il testo finale anche in
+  `chat_message`.
+- Se il backend richiede un plugin token distinto dal token agente Hades,
+  configurare `backend.plugin_token_env_key` o `HADES_BACKEND_PLUGIN_TOKEN`.

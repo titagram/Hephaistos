@@ -169,6 +169,81 @@ def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
     assert fake.results[0][1]["status"] == "completed"
 
 
+def test_backend_worker_command_dispatches_plugin_worker(monkeypatch, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_worker as worker
+
+    calls = []
+
+    def fake_run_plugin_worker_once(**kwargs):
+        calls.append(kwargs)
+        return worker.PluginWorkerResult({"listed": 1, "claimed": 1, "completed": 1, "failed": 0, "skipped": 0}, 0)
+
+    monkeypatch.setattr(worker, "run_plugin_worker_once", fake_run_plugin_worker_once)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker",
+            once=True,
+            project_id="proj_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            limit=2,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["completed"] == 1
+    assert calls == [
+        {
+            "project_id": "proj_1",
+            "local_workspace_id": "lw_1",
+            "agent_key": "local_agent",
+            "limit": 2,
+            "quiet": True,
+        }
+    ]
+
+
+def test_backend_worker_json_error_output_is_machine_readable(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker",
+            once=True,
+            project_id=None,
+            local_workspace_id=None,
+            agent_key="local_agent",
+            limit=1,
+            json=True,
+        )
+    )
+
+    output = capsys.readouterr().out.strip()
+
+    assert rc == 1
+    assert json.loads(output) == {"error": 1}
+    assert output.startswith("{")
+
+
 def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
@@ -211,6 +286,7 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
             summary="Use /api/hades/v1 for backend calls",
             provenance={"source": "test"},
         )
+        hdb.record_sync_state(conn, "last_sync_error", {"message": "previous backend failure"})
 
     class FakeClient:
         def __init__(self):
@@ -241,6 +317,7 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
         cache = hdb.get_memory_cache(conn, "wb_1")
         proposals = hdb.list_memory_proposals(conn)
         summary = hdb.get_sync_state(conn, "last_sync_summary")
+        last_error = hdb.get_sync_state(conn, "last_sync_error")
 
     assert rc == 0
     assert "memory 1" in output
@@ -253,6 +330,7 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
     assert fake.proposals[0]["summary"] == "Use /api/hades/v1 for backend calls"
     assert summary["memory_snapshots"] == 1
     assert summary["proposals_synced"] == 1
+    assert last_error is None
 
 
 def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch, tmp_path, capsys):

@@ -1,4 +1,4 @@
-"""``hermes debug`` subcommand parser.
+"""``hades debug`` subcommand parser.
 
 Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
 Handler injected to avoid importing ``main``.
@@ -18,18 +18,18 @@ def build_debug_parser(subparsers, *, cmd_debug: Callable) -> None:
     debug_parser = subparsers.add_parser(
         "debug",
         help="Debug tools — upload logs and system info for support",
-        description="Debug utilities for Hermes Agent. Use 'hermes debug share' to "
+        description="Debug utilities for Hades Agent. Use 'hades debug share' to "
         "upload a debug report (system info + recent logs) to a paste "
         "service and get a shareable URL.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-    hermes debug share              Upload debug report and print URL
-    hermes debug share --lines 500  Include more log lines
-    hermes debug share --expire 30  Keep paste for 30 days
-    hermes debug share --local      Print report locally (no upload)
-    hermes debug share --no-redact  Disable upload-time secret redaction
-    hermes debug delete <url>       Delete a previously uploaded paste
+    hades debug share               Upload debug report and print URL
+    hades debug share --lines 500   Include more log lines
+    hades debug share --expire 30   Keep paste for 30 days
+    hades debug share --local       Print report locally (no upload)
+    hades debug share --no-redact   Disable upload-time secret redaction
+    hades debug delete <url>        Delete a previously uploaded paste
 """,
     )
     debug_sub = debug_parser.add_subparsers(dest="debug_command")

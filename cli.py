@@ -8074,6 +8074,66 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             print("       DISCORD_BOT_TOKEN=your_token")
             print(f"    2. Or configure settings in {display_hermes_home()}/config.yaml")
             print()
+
+    def _handle_hades_subcommand_slash(self, cmd_original: str) -> None:
+        """Run selected top-level Hades CLI subcommands from a live session."""
+        import shlex
+        import subprocess
+
+        try:
+            argv = shlex.split(cmd_original.lstrip("/"))
+        except ValueError as exc:
+            self._console_print(f"[bold red]Invalid command syntax: {_escape(str(exc))}[/]")
+            return
+
+        if not argv:
+            return
+
+        subcommand = argv[0]
+        if subcommand == "uninstall" and not any(
+            arg in {"--yes", "-y", "--gui-summary"} for arg in argv[1:]
+        ):
+            self._console_print(
+                "[yellow]/uninstall is destructive and cannot run "
+                "interactively inside a live Hades session.[/]\n"
+                "[dim]Use `hades uninstall` in a shell, or `/uninstall --yes` "
+                "for the non-interactive keep-data uninstall path.[/]"
+            )
+            return
+
+        command = [sys.executable, "-m", "hermes_cli.main", *argv]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=os.getcwd(),
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            self._console_print(
+                f"[bold red]Command timed out:[/] [dim]{_escape(' '.join(argv))}[/]"
+            )
+            return
+        except Exception as exc:
+            self._console_print(
+                f"[bold red]Command failed:[/] [dim]{_escape(str(exc))}[/]"
+            )
+            return
+
+        output = "\n".join(
+            part.rstrip()
+            for part in (result.stdout, result.stderr)
+            if part and part.strip()
+        ).strip()
+        if output:
+            self._console_print(_rich_text_from_ansi(output))
+        else:
+            self._console_print("[dim]Command returned no output[/]")
+        if result.returncode != 0:
+            self._console_print(f"[bold red]Command exited with code {result.returncode}[/]")
     
     def process_command(self, command: str) -> bool:
         """
@@ -8469,6 +8529,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     print("  Enable/disable: hermes plugins enable/disable <name>")
             except Exception as e:
                 print(f"Plugin system error: {e}")
+        elif canonical in {"backend", "project", "doctor", "uninstall"}:
+            self._handle_hades_subcommand_slash(cmd_original)
         elif canonical == "rollback":
             self._handle_rollback_command(cmd_original)
         elif canonical == "snapshot":

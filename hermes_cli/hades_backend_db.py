@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS backend_jobs (
     updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS plugin_work_items (
+    work_item_id        TEXT PRIMARY KEY,
+    project_id          TEXT NOT NULL,
+    repository_id       TEXT,
+    local_workspace_id  TEXT,
+    agent_key           TEXT NOT NULL,
+    kind                TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    lease_token         TEXT,
+    payload             TEXT NOT NULL,
+    result              TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plugin_work_items_status
+    ON plugin_work_items(project_id, status);
+
 CREATE TABLE IF NOT EXISTS memory_proposals (
     id                   TEXT PRIMARY KEY,
     project_id           TEXT NOT NULL,
@@ -187,6 +205,20 @@ class BackendJob:
 
 
 @dataclass(frozen=True)
+class PluginWorkItem:
+    work_item_id: str
+    project_id: str
+    repository_id: str
+    local_workspace_id: str
+    agent_key: str
+    kind: str
+    status: str
+    lease_token: str
+    payload: dict[str, Any]
+    result: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class MemoryProposal:
     id: str
     project_id: str
@@ -266,6 +298,21 @@ def _job_from_row(row: sqlite3.Row) -> BackendJob:
         capability=row["capability"],
         payload=_json_loads(row["payload"]),
         status=row["status"],
+        result=_json_loads(row["result"]) if row["result"] else None,
+    )
+
+
+def _plugin_work_item_from_row(row: sqlite3.Row) -> PluginWorkItem:
+    return PluginWorkItem(
+        work_item_id=row["work_item_id"],
+        project_id=row["project_id"],
+        repository_id=row["repository_id"] or "",
+        local_workspace_id=row["local_workspace_id"] or "",
+        agent_key=row["agent_key"],
+        kind=row["kind"],
+        status=row["status"],
+        lease_token=row["lease_token"] or "",
+        payload=_json_loads(row["payload"]),
         result=_json_loads(row["result"]) if row["result"] else None,
     )
 
@@ -486,6 +533,93 @@ def list_jobs(conn: sqlite3.Connection, *, statuses: Iterable[str] | None = None
     return [_job_from_row(row) for row in rows]
 
 
+def upsert_plugin_work_item(
+    conn: sqlite3.Connection,
+    *,
+    work_item_id: str,
+    project_id: str,
+    repository_id: str | None = None,
+    local_workspace_id: str | None = None,
+    agent_key: str,
+    kind: str,
+    status: str,
+    payload: dict[str, Any],
+    lease_token: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> PluginWorkItem:
+    now = _now()
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO plugin_work_items "
+            "(work_item_id, project_id, repository_id, local_workspace_id, agent_key, kind, status, "
+            " lease_token, payload, result, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(work_item_id) DO UPDATE SET "
+            "project_id = excluded.project_id, repository_id = excluded.repository_id, "
+            "local_workspace_id = COALESCE(excluded.local_workspace_id, plugin_work_items.local_workspace_id), "
+            "agent_key = excluded.agent_key, kind = excluded.kind, status = excluded.status, "
+            "lease_token = COALESCE(excluded.lease_token, plugin_work_items.lease_token), "
+            "payload = excluded.payload, result = COALESCE(excluded.result, plugin_work_items.result), "
+            "updated_at = excluded.updated_at",
+            (
+                work_item_id,
+                project_id,
+                repository_id,
+                local_workspace_id,
+                agent_key,
+                kind,
+                status,
+                lease_token,
+                _json_dumps(payload),
+                _json_dumps(result) if result is not None else None,
+                now,
+                now,
+            ),
+        )
+    loaded = get_plugin_work_item(conn, work_item_id)
+    assert loaded is not None
+    return loaded
+
+
+def get_plugin_work_item(conn: sqlite3.Connection, work_item_id: str) -> PluginWorkItem | None:
+    row = conn.execute(
+        "SELECT * FROM plugin_work_items WHERE work_item_id = ?",
+        (work_item_id,),
+    ).fetchone()
+    return _plugin_work_item_from_row(row) if row is not None else None
+
+
+def update_plugin_work_item_status(
+    conn: sqlite3.Connection,
+    work_item_id: str,
+    status: str,
+    *,
+    lease_token: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> PluginWorkItem | None:
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE plugin_work_items SET status = ?, "
+            "lease_token = COALESCE(?, lease_token), result = COALESCE(?, result), updated_at = ? "
+            "WHERE work_item_id = ?",
+            (
+                status,
+                lease_token,
+                _json_dumps(result) if result is not None else None,
+                _now(),
+                work_item_id,
+            ),
+        )
+    return get_plugin_work_item(conn, work_item_id)
+
+
+def count_plugin_work_items_by_status(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM plugin_work_items GROUP BY status ORDER BY status"
+    ).fetchall()
+    return {str(row["status"]): int(row["count"]) for row in rows}
+
+
 def expire_waiting_jobs(conn: sqlite3.Connection, *, now: int | None = None) -> list[BackendJob]:
     current = int(now if now is not None else _now())
     expired: list[str] = []
@@ -593,6 +727,11 @@ def record_sync_state(conn: sqlite3.Connection, key: str, value: dict[str, Any])
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             (key, _json_dumps(value), _now()),
         )
+
+
+def clear_sync_state(conn: sqlite3.Connection, key: str) -> None:
+    with write_txn(conn):
+        conn.execute("DELETE FROM sync_state WHERE key = ?", (key,))
 
 
 def get_sync_state(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:

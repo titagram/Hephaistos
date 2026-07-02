@@ -203,6 +203,8 @@ def run_backend_sync(
     }
     with db.connect_closing() as conn:
         db.record_sync_state(conn, "last_sync_summary", summary)
+        if sync_errors == 0:
+            db.clear_sync_state(conn, "last_sync_error")
 
     return SyncResult(summary, 1 if sync_errors else 0)
 

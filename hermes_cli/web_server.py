@@ -13272,6 +13272,7 @@ def _discover_dashboard_plugins() -> list:
     plugins = []
     seen_names: set = set()
 
+    from hermes_cli.hades_exclusions import is_excluded_dashboard_plugin
     from hermes_cli.plugins import get_bundled_plugins_dir
     bundled_root = get_bundled_plugins_dir()
     search_dirs = [
@@ -13303,6 +13304,8 @@ def _discover_dashboard_plugins() -> list:
             try:
                 data = json.loads(manifest_file.read_text(encoding="utf-8"))
                 name = data.get("name", child.name)
+                if is_excluded_dashboard_plugin(name=name, source=source):
+                    continue
                 if name in seen_names:
                     continue
                 seen_names.add(name)

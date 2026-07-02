@@ -40,6 +40,7 @@ from hermes_cli.config import (
     get_env_value,
     save_env_value,
 )
+from hermes_cli.hades_exclusions import is_excluded_optional_mcp
 from hermes_cli.cli_output import prompt as _prompt_input
 
 _MANIFEST_VERSION = 1
@@ -276,11 +277,16 @@ def list_catalog() -> List[CatalogEntry]:
     entries: List[CatalogEntry] = []
     _CATALOG_DIAGNOSTICS.clear()
     for child in sorted(root.iterdir()):
+        if is_excluded_optional_mcp(child.name):
+            continue
         manifest = child / "manifest.yaml"
         if not manifest.is_file():
             continue
         try:
-            entries.append(_parse_manifest(manifest))
+            entry = _parse_manifest(manifest)
+            if is_excluded_optional_mcp(entry.name):
+                continue
+            entries.append(entry)
         except CatalogError as exc:
             msg = str(exc)
             # Recognize the future-manifest error specifically so the UI can

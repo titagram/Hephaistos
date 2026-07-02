@@ -49,6 +49,13 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     status.add_argument("--json", action="store_true", help="Emit machine-readable status JSON")
     profiles = sub.add_parser("profiles", help="Show curated local-only Hades coordination profiles")
     profiles.add_argument("--json", action="store_true", help="Emit machine-readable profile JSON")
+    worker = sub.add_parser("worker", help="Process one batch of local plugin work items")
+    worker.add_argument("--once", action="store_true", help="Explicit one-shot mode; currently the default")
+    worker.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
+    worker.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
+    worker.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
+    worker.add_argument("--limit", type=int, default=1, help="Maximum work items to process")
+    worker.add_argument("--json", action="store_true", help="Emit machine-readable worker summary")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
 
@@ -472,6 +479,32 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _cmd_worker(args: argparse.Namespace) -> int:
+    from hermes_cli.hades_plugin_worker import run_plugin_worker_once
+
+    json_mode = bool(getattr(args, "json", False))
+    result = run_plugin_worker_once(
+        project_id=getattr(args, "project_id", None),
+        local_workspace_id=getattr(args, "local_workspace_id", None),
+        agent_key=getattr(args, "agent_key", "local_agent") or "local_agent",
+        limit=max(1, int(getattr(args, "limit", 1) or 1)),
+        quiet=json_mode,
+    )
+    if json_mode:
+        print(json.dumps(result.summary, sort_keys=True))
+        return result.exit_code
+    summary = result.summary
+    if "error" in summary:
+        return result.exit_code
+    print(
+        "Hades backend worker: "
+        f"listed {summary.get('listed', 0)} item(s), claimed {summary.get('claimed', 0)}, "
+        f"completed {summary.get('completed', 0)}, failed {summary.get('failed', 0)}, "
+        f"skipped {summary.get('skipped', 0)}"
+    )
+    return result.exit_code
+
+
 def _version() -> str:
     try:
         from hermes_cli import __version__
@@ -491,7 +524,9 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_status(args)
     if action == "profiles":
         return _cmd_profiles(args)
+    if action == "worker":
+        return _cmd_worker(args)
     if action == "sync":
         return _cmd_sync(args)
-    print("usage: hades backend <setup|bootstrap|status|profiles|sync>", file=sys.stderr)
+    print("usage: hades backend <setup|bootstrap|status|profiles|worker|sync>", file=sys.stderr)
     return 0

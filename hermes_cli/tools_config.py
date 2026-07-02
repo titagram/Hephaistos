@@ -24,6 +24,7 @@ from hermes_cli.config import (
     load_config, save_config, get_env_value, save_env_value,
 )
 from hermes_cli.colors import Colors, color
+from hermes_cli.hades_exclusions import is_excluded_toolset
 from hermes_cli.nous_subscription import (
     apply_nous_managed_defaults,
     get_nous_subscription_features,
@@ -84,6 +85,9 @@ CONFIGURABLE_TOOLSETS = [
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS/Windows/Linux)", "background desktop control via cua-driver"),
 ]
+CONFIGURABLE_TOOLSETS = [
+    entry for entry in CONFIGURABLE_TOOLSETS if not is_excluded_toolset(entry[0])
+]
 
 
 def gui_toolset_label(label: str) -> str:
@@ -115,7 +119,11 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+_DEFAULT_OFF_TOOLSETS = {
+    name
+    for name in {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+    if not is_excluded_toolset(name)
+}
 
 
 def _xai_credentials_present() -> bool:
@@ -329,36 +337,9 @@ TOOL_CATEGORIES = {
         "setup_title": "Select Search Provider",
         "setup_note": "A free DuckDuckGo search skill is also included — skip this if you don't need a premium provider.",
         "icon": "🔍",
-        # Per-provider rows are injected at runtime from
-        # plugins.web.<vendor>.provider via _plugin_web_search_providers()
-        # in _visible_providers(). Only non-provider UX setup-flow rows
-        # for the firecrawl backend are listed here:
-        #   - "Nous Subscription" — managed Firecrawl billed via Nous
-        #     subscription (requires_nous_auth + override_env_vars).
-        #   - "Firecrawl Self-Hosted" — points firecrawl at a private
-        #     Docker instance via FIRECRAWL_API_URL only.
-        # See PR #25182 for the migration rationale.
-        "providers": [
-            {
-                "name": "Nous Subscription",
-                "badge": "subscription",
-                "tag": "Managed Firecrawl billed to your subscription",
-                "web_backend": "firecrawl",
-                "env_vars": [],
-                "requires_nous_auth": True,
-                "managed_nous_feature": "web",
-                "override_env_vars": ["FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"],
-            },
-            {
-                "name": "Firecrawl Self-Hosted",
-                "badge": "free · self-hosted",
-                "tag": "Run your own Firecrawl instance (Docker)",
-                "web_backend": "firecrawl",
-                "env_vars": [
-                    {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
-                ],
-            },
-        ],
+        # Provider rows are injected at runtime from non-excluded
+        # plugins.web.<vendor>.provider via _plugin_web_search_providers().
+        "providers": [],
     },
     "image_gen": {
         "name": "Image Generation",
@@ -1289,7 +1270,9 @@ def valid_post_setup_keys() -> Set[str]:
     caller can't drive ``_run_post_setup`` with an arbitrary key.
     """
     keys: Set[str] = set()
-    for cat in TOOL_CATEGORIES.values():
+    for cat_key, cat in TOOL_CATEGORIES.items():
+        if is_excluded_toolset(cat_key):
+            continue
         for prov in cat.get("providers", []):
             ps = prov.get("post_setup")
             if ps:
@@ -1322,7 +1305,7 @@ def run_post_setup_command(args) -> int:
     """
     key = getattr(args, "post_setup_key", None)
     if not key:
-        _print_error("Usage: hermes tools post-setup <key>")
+        _print_error("Usage: hades tools post-setup <key>")
         return 2
     valid = valid_post_setup_keys()
     if key not in valid:
@@ -1421,6 +1404,7 @@ def _get_platform_tools(
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
+    platform_has_explicit_list = isinstance(toolset_names, list)
 
     if toolset_names is None or not isinstance(toolset_names, list):
         plat_info = PLATFORMS.get(platform)
@@ -1433,7 +1417,9 @@ def _get_platform_tools(
 
     # YAML may parse bare numeric names (e.g. ``12306:``) as int.
     # Normalise to str so downstream sorted() never mixes types.
-    toolset_names = [str(ts) for ts in toolset_names]
+    toolset_names = [
+        str(ts) for ts in toolset_names if not is_excluded_toolset(str(ts))
+    ]
 
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_ts_keys = _get_plugin_toolset_keys()
@@ -1444,7 +1430,9 @@ def _get_platform_tools(
     # This avoids the subset-inference bug where composite toolsets like
     # "hermes-cli" (which include all _HERMES_CORE_TOOLS) cause disabled
     # toolsets to re-appear as enabled.
-    has_explicit_config = any(ts in configurable_keys for ts in toolset_names)
+    has_explicit_config = platform_has_explicit_list or any(
+        ts in configurable_keys for ts in toolset_names
+    )
 
     if has_explicit_config:
         enabled_toolsets = {
@@ -1674,13 +1662,13 @@ def _get_platform_tools(
             _warned_invalid_platform_toolsets.add(platform)
             logger.warning(
                 "platform '%s' has no valid toolsets configured (unknown "
-                "name(s): %s) - tools will be unavailable. Run `hermes tools` "
+                "name(s): %s) - tools will be unavailable. Run `hades tools` "
                 "to reconfigure. See issue #38798.",
                 platform,
                 ", ".join(_named),
             )
 
-    return enabled_toolsets
+    return {ts for ts in enabled_toolsets if not is_excluded_toolset(ts)}
 
 
 def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[str]):
