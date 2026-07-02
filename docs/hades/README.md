@@ -21,6 +21,8 @@ local contract fixture is [openapi-hades-v1.json](openapi-hades-v1.json).
   `waiting_confirmation`, and Persephone.
 - [doctor-troubleshooting.md](doctor-troubleshooting.md) covers `hades doctor`,
   cleanup, degraded states, and recovery.
+- [support-runbook.md](support-runbook.md) maps launch failures to safe support
+  commands, recovery actions, and escalation.
 - [developer-flow.md](developer-flow.md) covers local-only subagent and model
   routing defaults.
 

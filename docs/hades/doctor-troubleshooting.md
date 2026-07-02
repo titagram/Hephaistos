@@ -55,6 +55,8 @@ Common degraded states:
 - stale shared memory cache
 
 Use `hades backend status --json` to get machine-readable actions.
+For beta support and incident escalation, use
+[support-runbook.md](support-runbook.md) so diagnostics stay token-free.
 
 ## Operator Runbooks
 

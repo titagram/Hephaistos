@@ -13,6 +13,7 @@ def test_hades_mvp_user_docs_exist_with_required_topics():
         "backend.md": ["hades backend bootstrap", "hades project link", "shared memory"],
         "operations.md": ["job", "waiting_confirmation", "Persephone"],
         "doctor-troubleshooting.md": ["hades doctor", "cleanup", "degraded"],
+        "support-runbook.md": ["Safe Support Bundle", "Recovery Matrix", "Escalate"],
         "developer-flow.md": ["subagent", "model routing", "local-only", "hades backend profiles"],
     }
 
@@ -62,3 +63,28 @@ def test_hades_coordination_skill_exists_with_local_only_guardrails():
     assert "local-only" in lowered
     assert "persephone" in lowered
     assert "do not write the resolved model" in lowered
+
+
+def test_hades_support_runbook_covers_launch_failures_without_secret_collection():
+    text = (HADES_DOCS / "support-runbook.md").read_text(encoding="utf-8")
+    lowered = text.lower()
+
+    required_topics = [
+        "backend unreachable",
+        "token expired or revoked",
+        "failed bootstrap",
+        "workspace already linked",
+        "job waiting confirmation",
+        "proposal refused or conflicted",
+        "artifact too large or truncated",
+        "docker permissions",
+        "windows path issue",
+        "desktop/backend version mismatch",
+        "hades doctor --report-backend",
+        "do not ask users to send",
+    ]
+
+    for topic in required_topics:
+        assert topic in lowered
+    assert ".env" in text
+    assert "raw source files" in lowered

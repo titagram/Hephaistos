@@ -1324,3 +1324,7 @@ locale.
   symlink sono omessi con reason `symlink`, directory gitignored vengono
   potate prima del walk, e AST resta scope Python-only bounded senza sorgente
   raw.
+- Repo locale: P1-7 avviato con `docs/hades/support-runbook.md`: safe support
+  bundle, matrice symptom/command/evidence/recovery/escalation per bootstrap,
+  token, workspace link, job/proposal, artifact, Docker, Windows PATH e
+  desktop/backend mismatch.
