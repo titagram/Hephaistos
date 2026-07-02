@@ -126,6 +126,8 @@ Developers should treat these as the source of truth for the backend MVP:
 - `tui_gateway/server.py` for backend status RPC exposure.
 - `tests/test_docs_hades_mvp.py` and `tests/hermes_cli/test_hades_backend_mvp_smoke.py`
   for the minimum documentation and no-network smoke gates.
+- `docs/hades/plugin-skill-distribution.md` for official, optional,
+  community/upstream, and excluded plugin/skill boundaries.
 
 Historical coordination files, including `docs/backend-agent-coordination.md`
 and `docs/mvp_checkpoint_2026-07-01.md`, are maintainer evidence. They are not

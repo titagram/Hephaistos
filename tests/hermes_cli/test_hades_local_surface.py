@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+HADES_DISTRIBUTION_DOC = REPO_ROOT / "docs" / "hades" / "plugin-skill-distribution.md"
 
 
 def test_hades_slash_registry_exposes_backend_project_doctor_uninstall():
@@ -224,3 +226,51 @@ def test_installers_advertise_uninstall_and_no_windows_skills_flag():
     assert "hades uninstall" in sh
     assert "hades uninstall" in ps1
     assert "[switch]$NoSkills" in ps1
+
+
+def test_hades_plugin_skill_distribution_audit_tracks_exclusions():
+    from hermes_cli import hades_exclusions as exclusions
+
+    text = HADES_DISTRIBUTION_DOC.read_text(encoding="utf-8")
+    lowered = text.lower()
+
+    for topic in [
+        "bundled skills",
+        "official optional skills",
+        "plugin-provided skills",
+        "bundled plugin classes",
+        "hades exclusions",
+        "website skill index",
+        "community/upstream",
+    ]:
+        assert topic in lowered
+
+    expected_entries = (
+        exclusions.EXCLUDED_BUNDLED_PLUGIN_KEYS
+        | exclusions.EXCLUDED_BUNDLED_PLUGIN_PREFIXES
+        | exclusions.EXCLUDED_DASHBOARD_PLUGIN_NAMES
+        | exclusions.EXCLUDED_LAZY_FEATURES
+        | exclusions.EXCLUDED_OPTIONAL_MCP_NAMES
+        | exclusions.EXCLUDED_BUNDLED_SKILL_REL_PREFIXES
+        | exclusions.EXCLUDED_TOOLSETS
+    )
+    for entry in expected_entries:
+        assert entry in text
+
+
+def test_hades_skill_index_community_sources_are_not_documented_as_official():
+    data = json.loads((REPO_ROOT / "website" / "static" / "api" / "skills-index.json").read_text(encoding="utf-8"))
+    sources = {
+        skill.get("source")
+        for skill in data.get("skills", [])
+        if isinstance(skill, dict) and skill.get("source")
+    }
+    non_official_sources = sources - {"official"}
+
+    assert non_official_sources
+
+    text = HADES_DISTRIBUTION_DOC.read_text(encoding="utf-8").lower()
+    assert "source: \"official\"" in text
+    assert "trust_level: \"builtin\"" in text
+    assert "community/upstream catalog data" in text
+    assert "must not be copied into user docs as official hades copy" in text

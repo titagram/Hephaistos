@@ -29,6 +29,9 @@ local contract fixture is [openapi-hades-v1.json](openapi-hades-v1.json).
   commands, recovery actions, and escalation.
 - [developer-flow.md](developer-flow.md) covers local-only subagent and model
   routing defaults.
+- [plugin-skill-distribution.md](plugin-skill-distribution.md) defines which
+  plugins and skills are official, optional, community/upstream, or excluded
+  from the Hades distribution.
 
 ## Troubleshooting
 

@@ -14,6 +14,7 @@ You can also point Hermes at **external skill directories** — additional folde
 
 See also:
 
+- [Plugin And Skill Distribution](/user-guide/features/plugin-skill-distribution)
 - [Bundled Skills Catalog](/reference/skills-catalog)
 - [Official Optional Skills Catalog](/reference/optional-skills-catalog)
 
