@@ -238,3 +238,213 @@ def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_pa
     assert artifact["retention_class"] == "source_metadata"
     assert artifact["redactions"] == len(artifact["omitted"])
     assert "super-secret-token" not in str(artifact)
+
+
+def test_background_sync_runs_once_and_records_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_sync as sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    calls = []
+
+    def fake_sync_runner(**kwargs):
+        calls.append(kwargs)
+        return sync.SyncResult({"pulled": 0, "completed": 0}, 0)
+
+    first = sync.maybe_run_backend_sync(now=1000, run_inline=True, sync_runner=fake_sync_runner)
+    second = sync.maybe_run_backend_sync(now=1001, run_inline=True, sync_runner=fake_sync_runner)
+
+    with hdb.connect_closing() as conn:
+        state = hdb.get_sync_state(conn, sync.BACKGROUND_SYNC_STATE_KEY)
+
+    assert first.status == "ran"
+    assert first.reason == "ok"
+    assert second.status == "skipped"
+    assert second.reason == "backoff"
+    assert calls == [{"quiet": True}]
+    assert state is not None
+    assert state["status"] == "ok"
+    assert state["failure_count"] == 0
+    assert state["next_attempt_at"] == 1300
+
+
+def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+    import hermes_cli.hades_backend_sync as sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    def failing_sync_runner(**kwargs):
+        return sync.SyncResult({"error": 1}, 1)
+
+    decision = sync.maybe_run_backend_sync(
+        now=2000,
+        run_inline=True,
+        failure_base_delay_seconds=30,
+        sync_runner=failing_sync_runner,
+    )
+    skipped = sync.maybe_run_backend_sync(now=2020, run_inline=True, sync_runner=failing_sync_runner)
+    payload = load_backend_status_payload()
+
+    assert decision.status == "ran"
+    assert decision.reason == "failed"
+    assert skipped.status == "skipped"
+    assert skipped.reason == "backoff"
+    assert payload["degraded"] is True
+    assert payload["sync"]["background"]["status"] == "failed"
+    assert payload["sync"]["background"]["failure_count"] == 1
+    assert payload["sync"]["background"]["next_attempt_at"] == 2030
+    assert payload["actions"] == [
+        "Background backend sync is backing off; run `hades backend sync` to retry now."
+    ]
+
+
+def test_manual_sync_success_clears_background_backoff_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY, run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.record_sync_state(
+            conn,
+            BACKGROUND_SYNC_STATE_KEY,
+            {"status": "failed", "failure_count": 3, "next_attempt_at": 9999},
+        )
+
+    class FakeClient:
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    result = run_backend_sync(client_factory=lambda: FakeClient())
+
+    with hdb.connect_closing() as conn:
+        state = hdb.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+
+    assert result.exit_code == 0
+    assert state is None
+
+
+def test_background_sync_skips_when_already_running(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_sync as sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    monkeypatch.setattr(sync, "_BACKGROUND_SYNC_RUNNING", True)
+
+    decision = sync.maybe_run_backend_sync(now=3000, run_inline=True)
+
+    assert decision.status == "skipped"
+    assert decision.reason == "already_running"

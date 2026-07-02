@@ -42,6 +42,17 @@ hades backend proposals
 hades backend ack-proposal <proposal_id>
 ```
 
+## Sync
+
+`hades backend sync` remains the manual repair path and bypasses any background
+backoff. A successful manual sync clears stale background-sync failure state.
+
+Normal agent turns start a lightweight piggyback sync when a profile has a
+linked backend workspace and the per-profile backoff window is due. The
+piggyback run is asynchronous, quiet, and fail-open: chat continues even if the
+backend is offline. Repeated failures are recorded in local sync state and
+surface as a degraded backend action in `hades backend status --json`.
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,

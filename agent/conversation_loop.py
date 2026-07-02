@@ -494,6 +494,20 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
     return sp
 
 
+def _maybe_piggyback_hades_backend_sync(agent) -> None:
+    try:
+        from hermes_cli.hades_backend_sync import maybe_run_backend_sync
+
+        decision = maybe_run_backend_sync()
+        if decision.status == "started":
+            logger.debug(
+                "started Hades backend piggyback sync session=%s",
+                getattr(agent, "session_id", None) or "none",
+            )
+    except Exception:
+        logger.debug("Hades backend piggyback sync skipped after unexpected error", exc_info=True)
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -575,6 +589,7 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    _maybe_piggyback_hades_backend_sync(agent)
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0

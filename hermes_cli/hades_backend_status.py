@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from hermes_cli import hades_backend_db as db
+from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
 
 
 def load_backend_status_payload() -> dict[str, Any]:
@@ -21,6 +22,7 @@ def load_backend_status_payload() -> dict[str, Any]:
             inbox_counts = db.count_inbox_events(conn)
             last_summary = db.get_sync_state(conn, "last_sync_summary")
             last_error = db.get_sync_state(conn, "last_sync_error")
+            background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
         else:
             bindings = []
             job_counts = {}
@@ -28,6 +30,7 @@ def load_backend_status_payload() -> dict[str, Any]:
             inbox_counts = {"total": 0, "unread": 0}
             last_summary = None
             last_error = None
+            background_sync = None
 
     return backend_status_payload(
         agent=agent,
@@ -37,6 +40,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         inbox_counts=inbox_counts,
         last_summary=last_summary,
         last_error=last_error,
+        background_sync=background_sync,
     )
 
 
@@ -49,9 +53,11 @@ def backend_status_payload(
     inbox_counts: dict[str, Any],
     last_summary: dict[str, Any] | None,
     last_error: dict[str, Any] | None,
+    background_sync: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     refused = _count(proposal_counts, "refused") + _count(proposal_counts, "conflicted")
     waiting = _count(job_counts, "waiting_confirmation")
+    background_failed = bool(background_sync and background_sync.get("status") == "failed")
     actions: list[str] = []
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
@@ -59,6 +65,8 @@ def backend_status_payload(
         actions.append(f"Review {refused} refused/conflicted memory proposal(s).")
     if last_error:
         actions.append("Inspect last backend sync error and rerun `hades backend sync`.")
+    elif background_failed:
+        actions.append("Background backend sync is backing off; run `hades backend sync` to retry now.")
     return {
         "configured": agent is not None,
         "agent": None if agent is None else {
@@ -72,8 +80,8 @@ def backend_status_payload(
         "job_counts": job_counts,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
-        "sync": {"last_summary": last_summary, "last_error": last_error},
-        "degraded": bool(waiting or refused or last_error),
+        "sync": {"last_summary": last_summary, "last_error": last_error, "background": background_sync},
+        "degraded": bool(waiting or refused or last_error or background_failed),
         "actions": actions,
     }
 

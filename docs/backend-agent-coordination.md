@@ -1299,3 +1299,6 @@ locale.
 - Repo locale: P0-3 avviato con comandi CLI di review:
   `hades backend jobs`, `approve-job`, `refuse-job`, `proposals`,
   `ack-proposal`.
+- Repo locale: P0-6 avviato con sync piggyback asincrono nel loop agente. Lo
+  stato di backoff e fallimento vive in `hades_backend.db` `sync_state`, non
+  blocca la chat, e viene ripulito da un `hades backend sync` manuale riuscito.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
+import time
 from typing import Callable
 
 from hermes_cli import hades_backend_db as db
@@ -12,6 +14,18 @@ from hermes_cli import hades_backend_db as db
 class SyncResult:
     summary: dict[str, int]
     exit_code: int
+
+
+@dataclass(frozen=True)
+class BackgroundSyncDecision:
+    status: str
+    reason: str
+    summary: dict[str, int] | None = None
+
+
+BACKGROUND_SYNC_STATE_KEY = "background_sync"
+_BACKGROUND_SYNC_LOCK = threading.Lock()
+_BACKGROUND_SYNC_RUNNING = False
 
 
 def run_backend_sync(
@@ -205,8 +219,147 @@ def run_backend_sync(
         db.record_sync_state(conn, "last_sync_summary", summary)
         if sync_errors == 0:
             db.clear_sync_state(conn, "last_sync_error")
+            db.clear_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
 
     return SyncResult(summary, 1 if sync_errors else 0)
+
+
+def maybe_run_backend_sync(
+    *,
+    now: int | None = None,
+    min_interval_seconds: int = 300,
+    failure_base_delay_seconds: int = 60,
+    max_backoff_seconds: int = 3600,
+    force: bool = False,
+    run_inline: bool = False,
+    client_factory: Callable[[], object] | None = None,
+    sync_runner: Callable[..., SyncResult] = run_backend_sync,
+) -> BackgroundSyncDecision:
+    """Start a bounded piggyback sync if the profile is linked and due."""
+    current = int(now if now is not None else time.time())
+    if not db.hades_backend_db_path().exists():
+        return BackgroundSyncDecision("skipped", "not_configured")
+
+    with db.connect_closing() as conn:
+        agent = db.get_default_agent(conn)
+        bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
+        state = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY) or {}
+    if agent is None or not bindings:
+        return BackgroundSyncDecision("skipped", "not_configured")
+
+    if not force:
+        next_attempt = _as_int(state.get("next_attempt_at"))
+        if next_attempt and current < next_attempt:
+            return BackgroundSyncDecision("skipped", "backoff")
+        last_attempt = _as_int(state.get("last_attempt_at"))
+        if last_attempt and current - last_attempt < max(0, int(min_interval_seconds)):
+            return BackgroundSyncDecision("skipped", "interval")
+
+    global _BACKGROUND_SYNC_RUNNING
+    with _BACKGROUND_SYNC_LOCK:
+        if _BACKGROUND_SYNC_RUNNING:
+            return BackgroundSyncDecision("skipped", "already_running")
+        _BACKGROUND_SYNC_RUNNING = True
+
+    _record_background_sync_state(
+        {
+            "status": "running",
+            "last_attempt_at": current,
+            "failure_count": _as_int(state.get("failure_count")),
+            "next_attempt_at": current + max(0, int(min_interval_seconds)),
+        }
+    )
+
+    if run_inline:
+        return _run_background_sync_once(
+            started_at=current,
+            previous_state=state,
+            min_interval_seconds=min_interval_seconds,
+            failure_base_delay_seconds=failure_base_delay_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+            client_factory=client_factory,
+            sync_runner=sync_runner,
+        )
+
+    thread = threading.Thread(
+        target=_run_background_sync_once,
+        kwargs={
+            "started_at": current,
+            "previous_state": state,
+            "min_interval_seconds": min_interval_seconds,
+            "failure_base_delay_seconds": failure_base_delay_seconds,
+            "max_backoff_seconds": max_backoff_seconds,
+            "client_factory": client_factory,
+            "sync_runner": sync_runner,
+        },
+        name="hades-backend-sync",
+        daemon=True,
+    )
+    thread.start()
+    return BackgroundSyncDecision("started", "due")
+
+
+def _run_background_sync_once(
+    *,
+    started_at: int,
+    previous_state: dict,
+    min_interval_seconds: int,
+    failure_base_delay_seconds: int,
+    max_backoff_seconds: int,
+    client_factory: Callable[[], object] | None,
+    sync_runner: Callable[..., SyncResult],
+) -> BackgroundSyncDecision:
+    global _BACKGROUND_SYNC_RUNNING
+    try:
+        kwargs: dict[str, object] = {"quiet": True}
+        if client_factory is not None:
+            kwargs["client_factory"] = client_factory
+        result = sync_runner(**kwargs)
+        finished_at = started_at
+        if result.exit_code == 0:
+            state = {
+                "status": "ok",
+                "last_attempt_at": started_at,
+                "last_success_at": finished_at,
+                "failure_count": 0,
+                "next_attempt_at": finished_at + max(0, int(min_interval_seconds)),
+                "summary": result.summary,
+                "exit_code": result.exit_code,
+            }
+            _record_background_sync_state(state)
+            return BackgroundSyncDecision("ran", "ok", result.summary)
+
+        failure_count = _as_int(previous_state.get("failure_count")) + 1
+        delay = min(
+            max(0, int(max_backoff_seconds)),
+            max(0, int(failure_base_delay_seconds)) * (2 ** max(0, failure_count - 1)),
+        )
+        state = {
+            "status": "failed",
+            "last_attempt_at": started_at,
+            "last_success_at": previous_state.get("last_success_at"),
+            "failure_count": failure_count,
+            "next_attempt_at": finished_at + delay,
+            "summary": result.summary,
+            "exit_code": result.exit_code,
+        }
+        _record_background_sync_state(state)
+        return BackgroundSyncDecision("ran", "failed", result.summary)
+    finally:
+        with _BACKGROUND_SYNC_LOCK:
+            _BACKGROUND_SYNC_RUNNING = False
+
+
+def _record_background_sync_state(value: dict) -> None:
+    with db.connect_closing() as conn:
+        db.record_sync_state(conn, BACKGROUND_SYNC_STATE_KEY, value)
+
+
+def _as_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _record_sync_error(binding: db.WorkspaceBinding, message: str) -> None:
