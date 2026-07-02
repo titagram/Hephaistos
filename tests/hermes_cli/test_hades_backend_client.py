@@ -112,6 +112,32 @@ def test_get_payloads_use_query_params_for_laravel_routes():
     assert seen
 
 
+def test_client_unlinks_workspace_with_route_parameter():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append((request.method, request.url.path, payload))
+        return httpx.Response(200, json={"ok": True})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.unlink_workspace("wb_1", project_id="proj_1", agent_id="agent_1") == {"ok": True}
+    assert seen == [
+        (
+            "POST",
+            "/api/hades/v1/workspaces/wb_1/unlink",
+            {"project_id": "proj_1", "agent_id": "agent_1"},
+        )
+    ]
+
+
 def test_client_posts_doctor_reports_and_persephone_messages():
     from hermes_cli.hades_backend_client import HadesBackendClient
 

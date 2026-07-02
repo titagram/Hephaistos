@@ -1279,3 +1279,23 @@ Aggiornamento locale 2026-07-01:
   `chat_message`.
 - Se il backend richiede un plugin token distinto dal token agente Hades,
   configurare `backend.plugin_token_env_key` o `HADES_BACKEND_PLUGIN_TOKEN`.
+
+## Production readiness execution 2026-07-02
+
+Stato: verifica remota non distruttiva completata durante implementazione P0
+locale.
+
+- Backend remoto: `php artisan route:list --path=hades` mostra 22 route Hades,
+  incluse le route dashboard admin per bootstrap token/job/proposal review e le
+  16 route operative `/api/hades/v1` coperte dal fixture OpenAPI locale.
+- Backend remoto: suite `tests/Feature/Hades` passata in container con SQLite
+  in-memory: `21 passed / 229 assertions`.
+- Repo locale: P0-5 implementato centralizzando lo status backend condiviso da
+  CLI e TUI RPC; il payload include `configured`, `degraded`, `actions`,
+  conteggi job/proposte/inbox e stato sync.
+- Repo locale: P0-4 rafforzato per artifact Hades; `sync_git_tree` e AST
+  inviano metadati/simboli, non sorgenti raw, omettendo env/segreti, ignored,
+  generated, binari/archivi e file oltre budget.
+- Repo locale: P0-3 avviato con comandi CLI di review:
+  `hades backend jobs`, `approve-job`, `refuse-job`, `proposals`,
+  `ack-proposal`.

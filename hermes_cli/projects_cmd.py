@@ -380,14 +380,29 @@ def _cmd_link_backend(args, conn, proj) -> int:
 @_with_project
 def _cmd_unlink_backend(args, conn, proj) -> int:
     from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_runtime import workspace_fingerprint
 
     agent = _default_backend_agent()
     path = Path(args.path or proj.primary_path or ".").expanduser().resolve()
     fp = workspace_fingerprint(path, agent.project_id)
     with hdb.connect_closing() as hconn:
+        binding = hdb.get_binding_for_fingerprint(hconn, fp)
+    if binding is None or binding.status != "linked":
+        print(f"project: no linked Hades backend workspace for {proj.slug}", file=sys.stderr)
+        return 1
+    try:
+        _backend_client_from_config().unlink_workspace(
+            binding.backend_workspace_binding_id,
+            project_id=binding.project_id,
+            agent_id=agent.agent_id,
+        )
+    except Exception as exc:
+        print(f"project: backend unlink failed: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+    with hdb.connect_closing() as hconn:
         hdb.mark_binding_unlinked(hconn, fp)
-    print(f"Unlinked {proj.slug} from backend workspace {fp}")
+    print(f"Unlinked {proj.slug} from backend workspace {binding.backend_workspace_binding_id}")
     return 0
 
 

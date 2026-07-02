@@ -173,6 +173,12 @@ class HadesBackendClient:
     def bind_workspace(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "workspaces/bind", json_body=payload)
 
+    def unlink_workspace(self, workspace_binding_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(workspace_binding_id or "").strip()
+        if not clean:
+            raise ValueError("workspace binding id is required")
+        return self._request("POST", f"workspaces/{clean}/unlink", json_body=payload)
+
     def memory_snapshot(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "memory/snapshot", params=payload)
 

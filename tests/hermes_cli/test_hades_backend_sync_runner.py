@@ -197,3 +197,44 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     assert fake.results[0][0] == "job_tree"
     assert events[0].event_id == "evt_1"
     assert events[0].event_type == "proposal.reviewed"
+
+
+def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (workspace / ".env").write_text("HADES_TOKEN=super-secret-token\n", encoding="utf-8")
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    (workspace / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+    (workspace / "large.txt").write_text("x" * 64, encoding="utf-8")
+    (workspace / "logo.png").write_bytes(b"\x89PNG\r\n")
+
+    result = execute_job(
+        {
+            "job_id": "job_tree",
+            "capability": "sync_git_tree",
+            "payload": {"max_files": 20, "max_bytes": 10_000, "max_file_bytes": 16},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    paths = {item["path"] for item in artifact["files"]}
+    omitted = {item["path"]: item["reason"] for item in artifact["omitted"]}
+
+    assert result["status"] == "completed"
+    assert "README.md" in paths
+    assert ".env" not in paths
+    assert "ignored.txt" not in paths
+    assert "large.txt" not in paths
+    assert "logo.png" not in paths
+    assert omitted[".env"] == "sensitive_name"
+    assert omitted["ignored.txt"] == "gitignored"
+    assert omitted["large.txt"] == "file_too_large"
+    assert omitted["logo.png"] == "binary_or_archive"
+    assert artifact["raw_source_included"] is False
+    assert artifact["retention_class"] == "source_metadata"
+    assert artifact["redactions"] == len(artifact["omitted"])
+    assert "super-secret-token" not in str(artifact)

@@ -11,8 +11,8 @@ It sends a redacted display path, workspace fingerprint, git remote display,
 remote hash, and HEAD commit. The backend returns the stable
 `workspace_binding_id`.
 
-`hades project unlink <project>` disables the local binding without deleting
-shared memory or job history.
+`hades project unlink <project>` notifies the backend, then disables the local
+binding without deleting shared memory or job history.
 
 ## Shared Memory
 
@@ -32,7 +32,21 @@ Use:
 hades backend status
 hades backend status --json
 hades backend sync
+hades backend jobs
+hades backend approve-job <job_id>
+hades backend refuse-job <job_id> --reason "too broad"
+hades backend proposals
+hades backend ack-proposal <proposal_id>
 ```
 
 The JSON status includes job counts, proposal counts, sync state, and actions
 for waiting jobs, refused proposals, and degraded sync state.
+
+`jobs` defaults to `waiting_confirmation` work. `approve-job` executes a stored
+waiting job in the linked workspace, submits the result or artifact metadata,
+and records the final local status. `refuse-job` marks a waiting job cancelled
+and sends a redacted reason to the backend.
+
+`proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
+marks one of those local proposals as acknowledged so status surfaces stop
+reporting it as needing review.

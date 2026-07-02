@@ -90,6 +90,67 @@ def test_project_link_uses_backend_binding_and_stores_redacted_path(monkeypatch,
     assert "Linked demo" in output
 
 
+def test_project_unlink_notifies_backend_before_marking_local_binding(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import projects_db as pdb
+    import hermes_cli.projects_cmd as projects_cmd
+    from hermes_cli.hades_backend_runtime import workspace_fingerprint
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with pdb.connect_closing() as conn:
+        pdb.create_project(conn, name="Demo", folders=[str(workspace)], primary_path=str(workspace))
+    fp = workspace_fingerprint(workspace, "backend_proj")
+    with hdb.connect_closing() as conn:
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="backend_proj",
+            agent_id="agent_1",
+            local_project_id="p_1",
+            workspace_fingerprint=fp,
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_backend_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.unlinked = []
+
+        def unlink_workspace(self, workspace_binding_id, **payload):
+            self.unlinked.append((workspace_binding_id, payload))
+            return {"ok": True}
+
+    fake = FakeClient()
+    monkeypatch.setattr(projects_cmd, "_backend_client_from_config", lambda: fake)
+    monkeypatch.setattr(projects_cmd, "_default_backend_agent", lambda: SimpleNamespace(agent_id="agent_1", project_id="backend_proj"))
+
+    rc = projects_cmd.projects_command(
+        SimpleNamespace(
+            project_action="unlink",
+            project="demo",
+            path=str(workspace),
+            yes=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        binding = hdb.get_binding_for_fingerprint(conn, fp)
+
+    assert rc == 0
+    assert "Unlinked demo" in output
+    assert fake.unlinked == [("wb_backend_1", {"project_id": "backend_proj", "agent_id": "agent_1"})]
+    assert binding is not None
+    assert binding.status == "unlinked"
+
+
 def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
@@ -484,6 +545,214 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
         "Review 1 refused/conflicted memory proposal(s).",
         "Inspect last backend sync error and rerun `hades backend sync`.",
     ]
+
+
+def test_backend_jobs_json_lists_waiting_jobs(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_done",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="completed",
+        )
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="jobs", status=None, all=False, json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert [job["job_id"] for job in payload["jobs"]] == ["job_wait"]
+    assert payload["jobs"][0]["payload_keys"] == ["paths"]
+
+
+def test_backend_approve_job_executes_waiting_job(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.statuses = []
+            self.results = []
+
+        def update_job_status(self, job_id, **payload):
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+        def submit_job_result(self, job_id, **payload):
+            self.results.append((job_id, payload))
+            return {}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="approve-job", job_id="job_wait"))
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_wait")
+
+    assert rc == 0
+    assert "completed" in output
+    assert job is not None
+    assert job.status == "completed"
+    assert fake.statuses == [("job_wait", "started", fake.statuses[0][2])]
+    assert fake.results[0][0] == "job_wait"
+    assert fake.results[0][1]["status"] == "completed"
+
+
+def test_backend_refuse_job_cancels_waiting_job(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(tmp_path / "repo"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.statuses = []
+
+        def update_job_status(self, job_id, **payload):
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(backend_action="refuse-job", job_id="job_wait", reason="too broad")
+    )
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_wait")
+
+    assert rc == 0
+    assert "cancelled" in output
+    assert job is not None
+    assert job.status == "cancelled"
+    assert job.result == {"summary": "too broad"}
+    assert fake.statuses[0][0] == "job_wait"
+    assert fake.statuses[0][1] == "cancelled"
+    assert fake.statuses[0][2]["reason"] == "too broad"
+
+
+def test_backend_ack_proposal_marks_refused_proposal_reviewed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        proposal = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="memory_write",
+            summary="Remember backend contract",
+            provenance={},
+        )
+        hdb.mark_memory_proposal_status(conn, proposal.id, "refused", "policy_denied")
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="ack-proposal", proposal_id=proposal.id))
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        reviewed = hdb.list_memory_proposals(conn, ids=[proposal.id])[0]
+
+    assert rc == 0
+    assert "acknowledged" in output
+    assert reviewed.status == "acknowledged"
+    assert reviewed.reason == "policy_denied"
 
 
 def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):

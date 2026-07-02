@@ -18,6 +18,12 @@ def test_backend_status_reports_unconfigured_state(monkeypatch, tmp_path):
     assert result["configured"] is False
     assert result["agent"] is None
     assert result["bindings"] == []
+    assert result["degraded"] is False
+    assert result["actions"] == []
+    assert result["job_counts"] == {}
+    assert result["proposal_counts"] == {}
+    assert result["inbox_counts"] == {"total": 0, "unread": 0}
+    assert result["sync"] == {"last_error": None, "last_summary": None}
 
 
 def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
@@ -57,7 +63,7 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
             payload={},
             status="waiting_confirmation",
         )
-        db.create_memory_proposal(
+        proposal = db.create_memory_proposal(
             conn,
             project_id="proj_1",
             workspace_binding_id="wb_1",
@@ -66,6 +72,7 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
             summary="Remember backend contract",
             provenance={},
         )
+        db.mark_memory_proposal_status(conn, proposal.id, "conflicted", "superseded")
         db.save_inbox_event(
             conn,
             event_id="evt_1",
@@ -81,6 +88,12 @@ def test_backend_status_reports_agent_and_bindings(monkeypatch, tmp_path):
     assert result["agent"]["agent_id"] == "agent_1"
     assert result["bindings"][0]["workspace_binding_id"] == "wb_1"
     assert result["job_counts"] == {"waiting_confirmation": 1}
-    assert result["proposal_counts"] == {"pending": 1}
+    assert result["proposal_counts"] == {"conflicted": 1}
     assert result["inbox_counts"] == {"total": 1, "unread": 1}
     assert result["sync"]["last_error"]["message"] == "backend unavailable"
+    assert result["degraded"] is True
+    assert result["actions"] == [
+        "Review 1 backend job(s) waiting for confirmation.",
+        "Review 1 refused/conflicted memory proposal(s).",
+        "Inspect last backend sync error and rerun `hades backend sync`.",
+    ]

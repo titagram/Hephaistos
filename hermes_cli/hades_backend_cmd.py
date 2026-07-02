@@ -15,6 +15,7 @@ from hermes_cli.hades_coordination import hades_coordination_profiles
 from hermes_cli.hades_backend_client import HadesBackendClient, redact_secret, token_env_key
 from hermes_cli.hades_backend_jobs import execute_job
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
+from hermes_cli.hades_backend_status import load_backend_status_payload
 from hermes_cli import hades_backend_db as db
 
 
@@ -56,6 +57,21 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     worker.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
     worker.add_argument("--limit", type=int, default=1, help="Maximum work items to process")
     worker.add_argument("--json", action="store_true", help="Emit machine-readable worker summary")
+    jobs = sub.add_parser("jobs", help="List local backend jobs needing review")
+    jobs.add_argument("--status", action="append", default=None, help="Filter by job status; repeatable")
+    jobs.add_argument("--all", action="store_true", help="Show all local backend jobs")
+    jobs.add_argument("--json", action="store_true", help="Emit machine-readable job JSON")
+    approve_job = sub.add_parser("approve-job", help="Approve and execute a waiting backend job")
+    approve_job.add_argument("job_id", help="Local/backend job id")
+    refuse_job = sub.add_parser("refuse-job", help="Refuse a waiting backend job")
+    refuse_job.add_argument("job_id", help="Local/backend job id")
+    refuse_job.add_argument("--reason", default="local_refused", help="Reason sent to the backend")
+    proposals = sub.add_parser("proposals", help="List local memory proposals needing review")
+    proposals.add_argument("--status", action="append", default=None, help="Filter by proposal status; repeatable")
+    proposals.add_argument("--all", action="store_true", help="Show all local memory proposals")
+    proposals.add_argument("--json", action="store_true", help="Emit machine-readable proposal JSON")
+    ack_proposal = sub.add_parser("ack-proposal", help="Acknowledge a refused or conflicted memory proposal locally")
+    ack_proposal.add_argument("proposal_id", help="Local memory proposal id")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
 
@@ -115,52 +131,26 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
-        bindings = []
-        if agent:
-            bindings = conn.execute(
-                "SELECT * FROM workspace_bindings WHERE agent_id = ? ORDER BY updated_at DESC",
-                (agent.agent_id,),
-            ).fetchall()
-            job_counts = db.count_jobs_by_status(conn)
-            proposal_counts = db.count_memory_proposals_by_status(conn)
-            inbox_counts = db.count_inbox_events(conn)
-            last_summary = db.get_sync_state(conn, "last_sync_summary")
-            last_error = db.get_sync_state(conn, "last_sync_error")
-        else:
-            job_counts = {}
-            proposal_counts = {}
-            inbox_counts = {"total": 0, "unread": 0}
-            last_summary = None
-            last_error = None
-
-    payload = _backend_status_payload(
-        agent=agent,
-        bindings=bindings,
-        job_counts=job_counts,
-        proposal_counts=proposal_counts,
-        inbox_counts=inbox_counts,
-        last_summary=last_summary,
-        last_error=last_error,
-    )
+    payload = load_backend_status_payload()
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
-        return 0 if agent is not None else 1
+        return 0 if payload["configured"] else 1
+    agent = payload["agent"]
     if agent is None:
         print("Hades backend: not configured")
         return 1
     print("Hades backend")
-    print(f"  URL:     {agent.base_url}")
-    print(f"  Project: {agent.project_id}")
-    print(f"  Agent:   {agent.agent_id} ({agent.label})")
-    print(f"  Bindings: {len(bindings)}")
-    if job_counts:
-        print(f"  Jobs:    {job_counts}")
-    if proposal_counts:
-        print(f"  Memory proposals: {proposal_counts}")
-    if inbox_counts.get("total"):
-        print(f"  Persephone inbox: {inbox_counts}")
+    print(f"  URL:     {agent['base_url']}")
+    print(f"  Project: {agent['project_id']}")
+    print(f"  Agent:   {agent['agent_id']} ({agent['label']})")
+    print(f"  Bindings: {len(payload['bindings'])}")
+    if payload["job_counts"]:
+        print(f"  Jobs:    {payload['job_counts']}")
+    if payload["proposal_counts"]:
+        print(f"  Memory proposals: {payload['proposal_counts']}")
+    if payload["inbox_counts"].get("total"):
+        print(f"  Persephone inbox: {payload['inbox_counts']}")
+    last_error = payload["sync"]["last_error"]
     if last_error:
         print(f"  Last sync error: {last_error.get('message', 'unknown error')}")
     for action in payload["actions"]:
@@ -193,54 +183,6 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
         print(f"    Budget:        {budget.get('max_turns', '?')} turns / {budget.get('max_runtime_seconds', '?')}s")
         print(f"    Toolsets:      {', '.join(str(item) for item in toolsets)}")
     return 0
-
-
-def _backend_status_payload(
-    *,
-    agent,
-    bindings,
-    job_counts: dict,
-    proposal_counts: dict,
-    inbox_counts: dict,
-    last_summary,
-    last_error,
-) -> dict:
-    refused = int(proposal_counts.get("refused", 0) or 0) + int(proposal_counts.get("conflicted", 0) or 0)
-    waiting = int(job_counts.get("waiting_confirmation", 0) or 0)
-    actions: list[str] = []
-    if waiting:
-        actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
-    if refused:
-        actions.append(f"Review {refused} refused/conflicted memory proposal(s).")
-    if last_error:
-        actions.append("Inspect last backend sync error and rerun `hades backend sync`.")
-    return {
-        "configured": agent is not None,
-        "agent": None if agent is None else {
-            "agent_id": agent.agent_id,
-            "project_id": agent.project_id,
-            "base_url": agent.base_url,
-            "label": agent.label,
-            "capabilities": agent.capabilities,
-        },
-        "bindings": [
-            {
-                "workspace_fingerprint": row["workspace_fingerprint"],
-                "workspace_binding_id": row["backend_workspace_binding_id"],
-                "project_id": row["project_id"],
-                "local_project_id": row["local_project_id"],
-                "display_path": row["display_path"],
-                "status": row["status"],
-            }
-            for row in bindings
-        ],
-        "job_counts": job_counts,
-        "proposal_counts": proposal_counts,
-        "inbox_counts": inbox_counts,
-        "sync": {"last_summary": last_summary, "last_error": last_error},
-        "degraded": bool(waiting or refused or last_error),
-        "actions": actions,
-    }
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -505,6 +447,180 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def _job_payload_for_display(job: db.BackendJob) -> dict:
+    return {
+        "job_id": job.job_id,
+        "project_id": job.project_id,
+        "workspace_binding_id": job.workspace_binding_id,
+        "capability": job.capability,
+        "status": job.status,
+        "payload_keys": sorted(str(key) for key in job.payload.keys()),
+        "result": job.result,
+    }
+
+
+def _proposal_payload_for_display(proposal: db.MemoryProposal) -> dict:
+    return {
+        "proposal_id": proposal.id,
+        "project_id": proposal.project_id,
+        "workspace_binding_id": proposal.workspace_binding_id,
+        "action": proposal.action,
+        "intent": proposal.intent,
+        "summary": proposal.summary,
+        "status": proposal.status,
+        "reason": proposal.reason,
+    }
+
+
+def _cmd_jobs(args: argparse.Namespace) -> int:
+    statuses = None if getattr(args, "all", False) else (getattr(args, "status", None) or ["waiting_confirmation"])
+    with db.connect_closing() as conn:
+        jobs = db.list_jobs(conn, statuses=statuses)
+    payload = [_job_payload_for_display(job) for job in jobs]
+    if getattr(args, "json", False):
+        print(json.dumps({"jobs": payload}, sort_keys=True))
+        return 0
+    if not payload:
+        print("No Hades backend jobs need review")
+        return 0
+    print("Hades backend jobs")
+    for item in payload:
+        print(f"  {item['job_id']}: {item['status']} {item['capability']} ({item['workspace_binding_id']})")
+    return 0
+
+
+def _cmd_approve_job(args: argparse.Namespace) -> int:
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    job_id = str(args.job_id or "").strip()
+    with db.connect_closing() as conn:
+        agent = db.get_default_agent(conn)
+        job = db.get_job(conn, job_id)
+        binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id) if job else None
+    if agent is None:
+        print("Hades backend approve-job: backend not configured", file=sys.stderr)
+        return 1
+    if job is None:
+        print(f"Hades backend approve-job: job not found: {job_id}", file=sys.stderr)
+        return 1
+    if binding is None:
+        print(f"Hades backend approve-job: workspace binding not found: {job.workspace_binding_id}", file=sys.stderr)
+        return 1
+    if job.status != "waiting_confirmation":
+        print(f"Hades backend approve-job: job {job_id} is {job.status}, not waiting_confirmation", file=sys.stderr)
+        return 1
+
+    client = None
+    try:
+        client = runtime.client_from_config()
+        with db.connect_closing() as conn:
+            db.update_job_status(conn, job_id, "started")
+        client.update_job_status(job_id, **_status_payload(agent, binding, "started"))
+        result = execute_job(
+            {"job_id": job.job_id, "capability": job.capability, "payload": job.payload},
+            workspace_root=binding.repo_root,
+        )
+        final_status = str(result.get("status") or "completed")
+        if final_status not in {"completed", "failed"}:
+            final_status = "completed"
+        with db.connect_closing() as conn:
+            db.update_job_status(conn, job_id, final_status, result=result)
+        if final_status == "completed":
+            _upload_job_artifact(client, agent, binding, job_id, result)
+            client.submit_job_result(job_id, **_status_payload(agent, binding, final_status, result=result))
+        else:
+            client.update_job_status(
+                job_id,
+                **_status_payload(agent, binding, final_status, error=redact_secret(result.get("summary", ""))),
+            )
+    except Exception as exc:
+        result = {"status": "failed", "summary": redact_secret(str(exc))}
+        with db.connect_closing() as conn:
+            db.update_job_status(conn, job_id, "failed", result=result)
+        if client is not None:
+            try:
+                client.update_job_status(job_id, **_status_payload(agent, binding, "failed", error=result["summary"]))
+            except Exception:
+                pass
+        print(f"Hades backend approve-job: {result['summary']}", file=sys.stderr)
+        return 1
+
+    print(f"Hades backend job {job_id}: {final_status}")
+    return 0 if final_status == "completed" else 1
+
+
+def _cmd_refuse_job(args: argparse.Namespace) -> int:
+    from hermes_cli import hades_backend_runtime as runtime
+
+    job_id = str(args.job_id or "").strip()
+    reason = redact_secret(str(getattr(args, "reason", None) or "local_refused"))
+    with db.connect_closing() as conn:
+        agent = db.get_default_agent(conn)
+        job = db.get_job(conn, job_id)
+        binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id) if job else None
+    if agent is None:
+        print("Hades backend refuse-job: backend not configured", file=sys.stderr)
+        return 1
+    if job is None:
+        print(f"Hades backend refuse-job: job not found: {job_id}", file=sys.stderr)
+        return 1
+    if binding is None:
+        print(f"Hades backend refuse-job: workspace binding not found: {job.workspace_binding_id}", file=sys.stderr)
+        return 1
+    if job.status != "waiting_confirmation":
+        print(f"Hades backend refuse-job: job {job_id} is {job.status}, not waiting_confirmation", file=sys.stderr)
+        return 1
+
+    try:
+        client = runtime.client_from_config()
+        client.update_job_status(job_id, **_status_payload(agent, binding, "cancelled", reason=reason))
+    except Exception as exc:
+        print(f"Hades backend refuse-job: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+    with db.connect_closing() as conn:
+        db.update_job_status(conn, job_id, "cancelled", result={"summary": reason})
+    print(f"Hades backend job {job_id}: cancelled")
+    return 0
+
+
+def _cmd_proposals(args: argparse.Namespace) -> int:
+    statuses = None if getattr(args, "all", False) else (getattr(args, "status", None) or ["refused", "conflicted"])
+    with db.connect_closing() as conn:
+        proposals = db.list_memory_proposals(conn) if statuses is None else db.list_memory_proposals_by_status(conn, statuses)
+    payload = [_proposal_payload_for_display(proposal) for proposal in proposals]
+    if getattr(args, "json", False):
+        print(json.dumps({"proposals": payload}, sort_keys=True))
+        return 0
+    if not payload:
+        print("No Hades memory proposals need review")
+        return 0
+    print("Hades memory proposals")
+    for item in payload:
+        reason = f" reason={item['reason']}" if item["reason"] else ""
+        print(f"  {item['proposal_id']}: {item['status']} {item['action']} {item['summary']}{reason}")
+    return 0
+
+
+def _cmd_ack_proposal(args: argparse.Namespace) -> int:
+    proposal_id = str(args.proposal_id or "").strip()
+    with db.connect_closing() as conn:
+        proposals = db.list_memory_proposals(conn, ids=[proposal_id])
+        if not proposals:
+            print(f"Hades backend ack-proposal: proposal not found: {proposal_id}", file=sys.stderr)
+            return 1
+        proposal = proposals[0]
+        if proposal.status not in {"refused", "conflicted"}:
+            print(
+                f"Hades backend ack-proposal: proposal {proposal_id} is {proposal.status}, not refused/conflicted",
+                file=sys.stderr,
+            )
+            return 1
+        db.mark_memory_proposal_status(conn, proposal_id, "acknowledged", proposal.reason)
+    print(f"Hades memory proposal {proposal_id}: acknowledged")
+    return 0
+
+
 def _version() -> str:
     try:
         from hermes_cli import __version__
@@ -526,7 +642,20 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_profiles(args)
     if action == "worker":
         return _cmd_worker(args)
+    if action == "jobs":
+        return _cmd_jobs(args)
+    if action == "approve-job":
+        return _cmd_approve_job(args)
+    if action == "refuse-job":
+        return _cmd_refuse_job(args)
+    if action == "proposals":
+        return _cmd_proposals(args)
+    if action == "ack-proposal":
+        return _cmd_ack_proposal(args)
     if action == "sync":
         return _cmd_sync(args)
-    print("usage: hades backend <setup|bootstrap|status|profiles|worker|sync>", file=sys.stderr)
+    print(
+        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|sync>",
+        file=sys.stderr,
+    )
     return 0
