@@ -7,6 +7,12 @@ blocking arbitrary outbound connections. Dashboard/API exposure is a separate
 auth concern; see [`dashboard-auth-matrix.md`](dashboard-auth-matrix.md) for
 localhost-only, reverse-proxy, WebSocket, and public allowlist rules.
 
+For new self-hosted production installs, start with
+[`../hades/docker-production.md`](../hades/docker-production.md) and
+`docker-compose.production.yml`. This page covers the stricter egress proxy
+override pattern to layer on top of that profile when outbound allowlisting is
+required.
+
 This is primarily a defense against prompt injection attacks that attempt to
 exfiltrate data via `curl`, `wget`, or raw HTTP from tool-generated shell
 commands.

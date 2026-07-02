@@ -101,6 +101,12 @@ Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before
 shipping backend MVP, PyPI, Docker, website, desktop, or update artifacts.
 
+Self-hosted Docker production deployments should start from
+[`docker-production.md`](docker-production.md) and
+`docker-compose.production.yml`. The compatibility `docker-compose.yml`
+host-network profile is the break-glass path, not the safe default for new
+production installs.
+
 ## Observability
 
 Hades backend sync and plugin worker paths emit sanitized structured log records

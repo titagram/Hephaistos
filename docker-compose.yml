@@ -4,6 +4,11 @@
 # Usage:
 #   HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d
 #
+# Production:
+#   New self-hosted production installs should use
+#   docker-compose.production.yml. This compatibility file keeps host
+#   networking for existing deployments and break-glass cases.
+#
 # Set HERMES_UID / HERMES_GID to the host user that owns ~/.hermes so
 # files created inside the container stay readable/writable on the host.
 # The s6-overlay stage2 hook remaps the internal `hermes` user to these

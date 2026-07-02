@@ -20,6 +20,9 @@ local contract fixture is [openapi-hades-v1.json](openapi-hades-v1.json).
 
 - [operations.md](operations.md) covers shared memory, read-only jobs,
   `waiting_confirmation`, and Persephone.
+- [docker-production.md](docker-production.md) covers the supported self-hosted
+  Docker production profile, auth, egress, backups, restore, updates, and
+  break-glass host networking.
 - [doctor-troubleshooting.md](doctor-troubleshooting.md) covers `hades doctor`,
   cleanup, degraded states, and recovery.
 - [support-runbook.md](support-runbook.md) maps launch failures to safe support

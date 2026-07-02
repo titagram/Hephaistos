@@ -66,6 +66,15 @@ You'll see a one-line breadcrumb in `docker logs` confirming the upgrade. To opt
 This behavior applies to the s6-based image only. Earlier (tini-based) images still run `gateway run` as the foreground main process.
 :::
 
+:::tip Production compose profile
+For a supported self-hosted production deployment, use the repository
+`docker-compose.production.yml` instead of the compatibility host-network
+compose file. It runs gateway and dashboard in one supervised container,
+publishes the dashboard on `127.0.0.1:9119`, requires dashboard auth variables,
+and documents egress proxy, backup, restore, update, and break-glass steps in
+`docs/hades/docker-production.md`.
+:::
+
 :::note Where gateway logs go
 See the [Where the logs go](#where-the-logs-go) section below for the full routing map (per-profile gateways, dashboard, boot reconciler, container-wide `docker logs`).
 :::
