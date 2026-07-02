@@ -24,7 +24,7 @@
             "description": "Bootstrap token is valid"
           },
           "401": {
-            "$ref": "#/components/responses/Error"
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -212,7 +212,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "422": {
-            "description": "Validation error"
+            "$ref": "#/components/responses/ValidationError"
           }
         }
       }
@@ -243,7 +243,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "422": {
-            "description": "Validation error"
+            "$ref": "#/components/responses/ValidationError"
           }
         }
       }
@@ -350,7 +350,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "422": {
-            "description": "Validation error"
+            "$ref": "#/components/responses/ValidationError"
           }
         }
       }
@@ -372,6 +372,131 @@
               "$ref": "#/components/schemas/ErrorResponse"
             }
           }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing, expired, or invalid bearer token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "unauthorized": {
+                "$ref": "#/components/examples/UnauthorizedError"
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated agent is not allowed to perform this action",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "forbidden": {
+                "$ref": "#/components/examples/ForbiddenError"
+              }
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Request validation failed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "validation": {
+                "$ref": "#/components/examples/ValidationError"
+              }
+            }
+          }
+        }
+      }
+    },
+    "examples": {
+      "UnauthorizedError": {
+        "summary": "401 unauthorized",
+        "value": {
+          "error": "unauthorized",
+          "message": "Authentication required."
+        }
+      },
+      "ForbiddenError": {
+        "summary": "403 forbidden",
+        "value": {
+          "error": "forbidden",
+          "message": "Agent is not allowed to access this workspace."
+        }
+      },
+      "ValidationError": {
+        "summary": "422 validation error",
+        "value": {
+          "error": "validation_failed",
+          "message": "workspace_binding_id is required."
+        }
+      },
+      "MemoryProposalConflict": {
+        "summary": "Memory proposal conflict",
+        "value": {
+          "status": "conflicted",
+          "reason": "superseded_by_newer_memory",
+          "proposal_id": "proposal_123"
+        }
+      },
+      "MemoryProposalRefused": {
+        "summary": "Memory proposal refused",
+        "value": {
+          "status": "refused",
+          "reason": "project_policy_denied",
+          "proposal_id": "proposal_123"
+        }
+      },
+      "ExpiredJobStatus": {
+        "summary": "Expired job transition",
+        "value": {
+          "job_id": "job_123",
+          "status": "expired",
+          "message": "Job deadline expired before local confirmation."
+        }
+      },
+      "TruncatedArtifactUpload": {
+        "summary": "Artifact upload with truncation metadata",
+        "value": {
+          "project_id": "project_123",
+          "workspace_binding_id": "workspace_123",
+          "schema": "hades.git_tree.v1",
+          "artifact": {
+            "truncated": true,
+            "omitted": [
+              {
+                "path": "node_modules",
+                "reason": "excluded_directory"
+              }
+            ]
+          },
+          "truncated": true,
+          "redactions": 1
+        }
+      },
+      "InboxPolling": {
+        "summary": "Persistent Persephone inbox polling response",
+        "value": {
+          "events": [
+            {
+              "event_id": "evt_123",
+              "event_type": "proposal.reviewed",
+              "payload": {
+                "message": "Proposal reviewed"
+              }
+            }
+          ]
         }
       }
     },

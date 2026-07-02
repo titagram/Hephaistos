@@ -55,6 +55,45 @@ def test_hades_openapi_contract_covers_client_routes():
     assert paths["/api/hades/v1/doctor/reports"]["post"]["requestBody"]
     assert paths["/api/hades/v1/memory/proposals"]["post"]["responses"]["200"]
     assert spec["components"]["schemas"]["ErrorResponse"]["required"] == ["error", "message"]
+    assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"]["$ref"] == "#/components/responses/Unauthorized"
+
+
+def test_hades_openapi_refs_and_launch_examples_are_resolved():
+    spec = json.loads((HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"))
+    refs: set[str] = set()
+
+    def collect_refs(value):
+        if isinstance(value, dict):
+            if "$ref" in value:
+                refs.add(value["$ref"])
+            for child in value.values():
+                collect_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_refs(child)
+
+    collect_refs(spec)
+    for ref in refs:
+        current = spec
+        for part in ref.removeprefix("#/").split("/"):
+            assert isinstance(current, dict), ref
+            assert part in current, ref
+            current = current[part]
+
+    examples = spec["components"]["examples"]
+    required_examples = {
+        "UnauthorizedError",
+        "ForbiddenError",
+        "ValidationError",
+        "MemoryProposalConflict",
+        "MemoryProposalRefused",
+        "ExpiredJobStatus",
+        "TruncatedArtifactUpload",
+        "InboxPolling",
+    }
+    assert required_examples <= set(examples)
+    assert examples["TruncatedArtifactUpload"]["value"]["truncated"] is True
+    assert examples["InboxPolling"]["value"]["events"][0]["event_type"] == "proposal.reviewed"
 
 
 def test_hades_coordination_skill_exists_with_local_only_guardrails():
