@@ -74,6 +74,29 @@ Cleanup is dry-run by default. Add `--yes` to remove rows and
 one-off maintenance run. `--all` includes non-expired selected candidates, but
 does not delete active jobs or unreviewed refused/conflicted proposals.
 
+## MVP Smoke
+
+The deterministic no-network MVP smoke composes local setup state, shared-memory
+snapshot/proposal sync, job execution, artifact upload, inbox polling, doctor
+reporting, and the TUI/backend status payload:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/hermes_cli/test_hades_backend_mvp_smoke.py
+```
+
+For live staging smoke, use a disposable `HERMES_HOME` and a backend dashboard
+bootstrap command for a test project. Then run:
+
+```bash
+hades backend status --json
+hades backend sync
+hades doctor --report-backend
+```
+
+Do not paste project bootstrap tokens, derived agent tokens, raw job payloads,
+or local absolute paths into logs or support tickets.
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,

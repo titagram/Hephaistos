@@ -1306,3 +1306,6 @@ locale.
   job terminali, memory proposal accettate/acknowledged, inbox stale e cache
   shared-memory orfana via `hades doctor cleanup`. Refused/conflicted proposal
   restano visibili finche' non vengono acknowledge.
+- Repo locale: P1-4 avviato con smoke MVP no-network
+  `tests/hermes_cli/test_hades_backend_mvp_smoke.py`, che compone agent/link,
+  sync memoria/proposal, job/artifact, inbox, doctor report e status TUI.
