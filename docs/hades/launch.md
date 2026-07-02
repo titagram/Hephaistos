@@ -18,6 +18,18 @@ Native Windows users can run:
 iex (irm https://hades-agent.local/install.ps1)
 ```
 
+The public installer defaults to the `main` branch. For a controlled beta or a
+release-candidate smoke, pin the channel explicitly:
+
+```bash
+curl -fsSL https://hades-agent.local/install.sh | bash -s -- --branch <branch-or-tag>
+```
+
+```powershell
+iex (irm https://hades-agent.local/install.ps1)
+.\install.ps1 -Branch <branch-or-tag>
+```
+
 The detailed platform notes live in [installation.md](installation.md).
 
 ## 2. Configure A Model

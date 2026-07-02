@@ -29,6 +29,22 @@ irm https://home-sweet-home.cloud/install.ps1 | iex
   -BackendProjectName "My Project"
 ```
 
+The installer defaults to the public `main` channel. Beta, release-candidate,
+and branch-specific validation must pin the source explicitly:
+
+```bash
+curl -fsSL https://home-sweet-home.cloud/install.sh | bash -s -- \
+  --branch <branch-or-tag> \
+  --backend-url https://home-sweet-home.cloud \
+  --backend-project-id <project-id> \
+  --backend-project-token <bootstrap-token>
+```
+
+```powershell
+$env:HADES_INSTALL_BRANCH = "<branch-or-tag>"
+irm https://home-sweet-home.cloud/install.ps1 | iex
+```
+
 ## Backend Bootstrap
 
 Installers call `hades backend bootstrap` after runtime setup when backend

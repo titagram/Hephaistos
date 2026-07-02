@@ -15,6 +15,10 @@ python3 scripts/docs_audit.py
 python scripts/release.py --bump patch
 ```
 
+Public installer scripts must resolve to `main` or an explicit release tag by
+default. Feature branches are allowed only for beta/release-candidate smoke when
+the command pins `--branch` or `HADES_INSTALL_BRANCH`.
+
 For a pull request, branch protection should require only the
 `CI / All required checks pass` job from `.github/workflows/ci.yml`. That
 aggregate currently blocks on Python tests, Python lint, TypeScript, docs-site

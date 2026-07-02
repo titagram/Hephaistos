@@ -16,7 +16,7 @@ param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
     [switch]$NoSkills,
-    [string]$Branch = "codex/hades-rebrand",
+    [string]$Branch = $(if ($env:HADES_INSTALL_BRANCH) { $env:HADES_INSTALL_BRANCH } else { "main" }),
     # -Commit and -Tag are higher-precedence variants of -Branch for users
     # who need reproducible installs (desktop installer pinning, CI, release
     # bundles).  When set, the repository stage clones $Branch (faster than
@@ -2035,7 +2035,7 @@ function Write-BootstrapMarker {
 
     $pinnedBranch = $Branch
     if (-not $pinnedBranch) {
-        $pinnedBranch = "codex/hades-rebrand"  # install.ps1's own default for -Branch
+        $pinnedBranch = $(if ($env:HADES_INSTALL_BRANCH) { $env:HADES_INSTALL_BRANCH } else { "main" })
     }
 
     $markerPath = Join-Path $InstallDir ".hermes-bootstrap-complete"
