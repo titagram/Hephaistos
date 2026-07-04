@@ -713,7 +713,7 @@ class TestSubcommandCompletion:
         """`/tools enable ` should suggest currently-disabled toolsets."""
         from hermes_cli import commands as commands_mod
 
-        # `web` is enabled, `spotify` is disabled — enabling should only offer
+        # `web` is enabled, `browser` is disabled — enabling should only offer
         # the disabled ones.
         monkeypatch.setattr(
             "hermes_cli.tools_config._get_platform_tools",
@@ -730,7 +730,7 @@ class TestSubcommandCompletion:
         # Should include disabled toolsets, exclude already-enabled ones.
         assert "web" not in texts
         assert "file" not in texts
-        assert "spotify" in texts
+        assert "browser" in texts
 
     def test_tools_disable_completes_enabled_toolsets_only(self, monkeypatch):
         monkeypatch.setattr(
@@ -759,9 +759,9 @@ class TestSubcommandCompletion:
             lambda: set(),
         )
 
-        completions = _completions(SlashCommandCompleter(), "/tools enable sp")
+        completions = _completions(SlashCommandCompleter(), "/tools enable br")
         texts = {c.text for c in completions}
-        assert texts == {"spotify"}
+        assert texts == {"browser"}
 
     def test_tools_enable_skips_already_listed(self, monkeypatch):
         """If the user already typed a name, don't suggest it again."""

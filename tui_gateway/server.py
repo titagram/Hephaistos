@@ -11094,6 +11094,7 @@ def _(rid, params: dict) -> dict:
             COMMAND_REGISTRY,
             SUBCOMMANDS,
             _build_description,
+            is_hades_visible_command,
         )
 
         all_pairs: list[list[str]] = []
@@ -11103,7 +11104,11 @@ def _(rid, params: dict) -> dict:
         cat_order: list[str] = []
 
         for cmd in COMMAND_REGISTRY:
-            if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
+            if (
+                cmd.name in _TUI_HIDDEN
+                or cmd.gateway_only
+                or not is_hades_visible_command(cmd.name)
+            ):
                 continue
 
             c = f"/{cmd.name}"
@@ -12095,7 +12100,7 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"items": []})
 
     try:
-        from hermes_cli.commands import SlashCommandCompleter
+        from hermes_cli.commands import SlashCommandCompleter, is_hades_visible_command
         from prompt_toolkit.document import Document
         from prompt_toolkit.formatted_text import to_plain_text
 
@@ -12105,6 +12110,7 @@ def _(rid, params: dict) -> dict:
         completer = SlashCommandCompleter(
             skill_commands_provider=lambda: get_skill_commands(),
             skill_bundles_provider=lambda: get_skill_bundles(),
+            command_filter=is_hades_visible_command,
         )
         doc = Document(text, len(text))
         items = [

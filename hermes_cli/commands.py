@@ -288,6 +288,17 @@ def resolve_command(name: str) -> CommandDef | None:
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
+def is_hades_visible_command(name: str | None) -> bool:
+    """Return True if a slash command belongs in the local Hades surface."""
+    if not name:
+        return False
+    resolved = resolve_command(name)
+    canonical = resolved.name if resolved else str(name).lower().lstrip("/")
+    from hermes_cli.hades_exclusions import is_hades_visible_slash_command_name
+
+    return is_hades_visible_slash_command_name(canonical)
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:
@@ -311,6 +322,24 @@ for _cmd in COMMAND_REGISTRY:
         _cat[f"/{_cmd.name}"] = COMMANDS[f"/{_cmd.name}"]
         for _alias in _cmd.aliases:
             _cat[f"/{_alias}"] = COMMANDS[f"/{_alias}"]
+
+
+def hades_cli_commands_by_category() -> dict[str, dict[str, str]]:
+    """Return the curated local command help surface for Hades.
+
+    ``COMMANDS`` and ``COMMANDS_BY_CATEGORY`` remain the compatibility maps for
+    registry tests and gateway infrastructure. Local discovery surfaces use
+    this narrower view.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for cmd in COMMAND_REGISTRY:
+        if cmd.gateway_only or not is_hades_visible_command(cmd.name):
+            continue
+        cat = result.setdefault(cmd.category, {})
+        cat[f"/{cmd.name}"] = _build_description(cmd)
+        for alias in cmd.aliases:
+            cat[f"/{alias}"] = f"{cmd.description} (alias for /{cmd.name})"
+    return result
 
 
 # Subcommands lookup: "/cmd" -> ["sub1", "sub2", ...]

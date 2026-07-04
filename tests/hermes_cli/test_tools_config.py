@@ -143,11 +143,11 @@ def test_gui_toolset_label_strips_leading_emoji():
     assert gui_toolset_label("Terminal & Processes") == "Terminal & Processes"
 
 
-def test_configurable_toolsets_include_context_engine():
-    assert any(ts_key == "context_engine" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+def test_hades_excludes_context_engine_from_configurable_toolsets():
+    assert not any(ts_key == "context_engine" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
 
 
-def test_get_platform_tools_active_context_engine_is_enabled_for_explicit_config():
+def test_get_platform_tools_active_context_engine_is_not_enabled_for_hades():
     config = {
         "context": {"engine": "lcm"},
         "platform_toolsets": {"cli": ["web", "terminal"]},
@@ -155,7 +155,7 @@ def test_get_platform_tools_active_context_engine_is_enabled_for_explicit_config
 
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
 
-    assert "context_engine" in enabled
+    assert "context_engine" not in enabled
     assert "web" in enabled
     assert "terminal" in enabled
 
@@ -191,7 +191,7 @@ def test_get_platform_tools_default_whatsapp_includes_web():
 def test_get_platform_tools_homeassistant_platform_keeps_homeassistant_toolset():
     enabled = _get_platform_tools({}, "homeassistant")
 
-    assert "homeassistant" in enabled
+    assert "homeassistant" not in enabled
 
 
 def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_token_set(monkeypatch):
@@ -207,12 +207,12 @@ def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_tok
     monkeypatch.setenv("HASS_TOKEN", "fake-test-token")
 
     cron_enabled = _get_platform_tools({}, "cron")
-    assert "homeassistant" in cron_enabled
+    assert "homeassistant" not in cron_enabled
     # moa must stay off — the original goal of #14798
     assert "moa" not in cron_enabled
 
     cli_enabled = _get_platform_tools({}, "cli")
-    assert "homeassistant" in cli_enabled
+    assert "homeassistant" not in cli_enabled
 
 
 def test_get_platform_tools_homeassistant_toolset_off_for_cron_when_hass_token_missing(monkeypatch):
@@ -240,7 +240,7 @@ def test_get_platform_tools_x_search_auto_enabled_when_xai_oauth_present(monkeyp
 
     for plat in ("cli", "cron", "telegram"):
         enabled = _get_platform_tools({}, plat)
-        assert "x_search" in enabled, f"x_search missing for {plat}"
+        assert "x_search" not in enabled, f"x_search leaked onto {plat}"
 
 
 def test_get_platform_tools_x_search_auto_enabled_when_xai_api_key_present(monkeypatch):
@@ -249,7 +249,7 @@ def test_get_platform_tools_x_search_auto_enabled_when_xai_api_key_present(monke
     monkeypatch.setenv("XAI_API_KEY", "fake-xai-key")
 
     cli_enabled = _get_platform_tools({}, "cli")
-    assert "x_search" in cli_enabled
+    assert "x_search" not in cli_enabled
 
 
 def test_get_platform_tools_x_search_off_when_no_xai_credentials(monkeypatch):
@@ -1292,13 +1292,13 @@ def test_get_platform_tools_discord_both_off_by_default():
 
 def test_discord_toolsets_in_configurable_toolsets():
     keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
-    assert "discord" in keys
-    assert "discord_admin" in keys
+    assert "discord" not in keys
+    assert "discord_admin" not in keys
 
 
 def test_discord_toolsets_in_default_off():
-    assert "discord" in _DEFAULT_OFF_TOOLSETS
-    assert "discord_admin" in _DEFAULT_OFF_TOOLSETS
+    assert "discord" not in _DEFAULT_OFF_TOOLSETS
+    assert "discord_admin" not in _DEFAULT_OFF_TOOLSETS
 
 
 def test_discord_toolsets_not_available_on_other_platforms():
@@ -1317,10 +1317,10 @@ def test_discord_toolsets_not_available_on_other_platforms():
 
 
 def test_discord_toolsets_user_enabled_are_honored():
-    """When the user opts in via `hermes tools`, the toolset appears."""
+    """Hades strips Discord toolsets even when hand-written into config."""
     config = {"platform_toolsets": {"discord": ["web", "terminal", "discord"]}}
     enabled = _get_platform_tools(config, "discord")
-    assert "discord" in enabled
+    assert "discord" not in enabled
     assert "discord_admin" not in enabled
 
 
@@ -1351,7 +1351,7 @@ def test_get_platform_tools_feishu_tools_not_on_other_platforms():
 
 
 def test_get_effective_configurable_toolsets_excludes_spotify():
-    """Spotify is excluded from the Hades configurable toolset surface."""
+    """Consumer/peripheral toolsets are excluded from Hades' configurable surface."""
     from hermes_cli.tools_config import _get_effective_configurable_toolsets
 
     all_ts = _get_effective_configurable_toolsets()
@@ -1360,7 +1360,23 @@ def test_get_effective_configurable_toolsets_excludes_spotify():
         f"duplicate toolset keys in effective list: "
         f"{[k for k in keys if keys.count(k) > 1]}"
     )
-    assert "spotify" not in keys
+    for excluded in {
+        "computer_use",
+        "context_engine",
+        "cronjob",
+        "discord",
+        "discord_admin",
+        "homeassistant",
+        "image_gen",
+        "spotify",
+        "tts",
+        "video",
+        "video_gen",
+        "vision",
+        "x_search",
+        "yuanbao",
+    }:
+        assert excluded not in keys
 
 
 @pytest.mark.parametrize("provider,config_key,expected", [
@@ -1585,9 +1601,9 @@ def test_real_configurable_changes_still_reported_in_diff():
     new_enabled = {t for t in current if t not in ("kanban", "terminal")}
     assert ((current - new_enabled) & universe) == {"terminal"}
 
-    # User adds 'vision' (configurable) — must still report as added.
-    new_enabled2 = (current - {"kanban"}) | {"vision"}
-    assert ((new_enabled2 - current) & universe) == {"vision"}
+    # User adds 'browser' (configurable) — must still report as added.
+    new_enabled2 = (current - {"kanban"}) | {"browser"}
+    assert ((new_enabled2 - current) & universe) == {"browser"}
 
 
 def test_vision_picker_writes_provider_and_model(tmp_path, monkeypatch):

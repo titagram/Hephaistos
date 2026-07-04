@@ -28,13 +28,36 @@ The sync manifest preserves local edits and local deletion. A user-modified
 skill is not overwritten by update. A deleted bundled skill is not silently
 re-added unless the user opts back in or restores it.
 
+Hades now treats the in-repo bundled skills as a curated developer/AI-ops
+surface. Default sync includes only:
+
+- `autonomous-ai-agents/` skills for coordinating coding agents, Hades backend
+  work, wiki sync, and other AI CLIs, except legacy Hermes agent docs
+- `github/`
+- `mlops/`
+- `software-development/`
+- `dogfood`
+
 Hades excludes these bundled skill paths from default sync:
 
+- `apple/`
 - `autonomous-ai-agents/hermes-agent`
+- `computer-use`
 - `creative/`
-- `productivity/teams-meeting-pipeline`
+- `data-science/`
+- `email/`
+- `media/`
+- `note-taking/`
+- `productivity/`
+- `research/`
+- `smart-home/`
+- `social-media/`
+- `yuanbao`
 
-The exclusion list lives in `EXCLUDED_BUNDLED_SKILL_REL_PREFIXES`.
+The allow/exclusion lists live in
+`ALLOWED_BUNDLED_SKILL_REL_PREFIXES`,
+`ALLOWED_BUNDLED_SKILL_REL_PATHS`, and
+`EXCLUDED_BUNDLED_SKILL_REL_PREFIXES`.
 
 ## Official Optional Skills
 
@@ -114,8 +137,19 @@ Excluded optional MCP catalog entries:
 
 Excluded toolsets:
 
+- `computer_use`
+- `context_engine`
+- `cronjob`
+- `discord`
+- `discord_admin`
+- `homeassistant`
 - `image_gen`
+- `tts`
+- `video`
 - `video_gen`
+- `vision`
+- `x_search`
+- `yuanbao`
 - `spotify`
 
 These entries must not appear as configurable Hades defaults, model toolsets,

@@ -6316,11 +6316,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
     def _command_available(self, slash_command: str) -> bool:
         if slash_command == "/fast":
             return self._fast_command_available()
-        return True
+        try:
+            from hermes_cli.commands import is_hades_visible_command
+
+            return is_hades_visible_command(slash_command)
+        except Exception:
+            return True
 
     def show_help(self):
         """Display help information with categorized commands."""
-        from hermes_cli.commands import COMMANDS_BY_CATEGORY
+        from hermes_cli.commands import hades_cli_commands_by_category
 
         try:
             from hermes_cli.skin_engine import get_active_help_header
@@ -6335,7 +6340,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         _cprint(f"{_BOLD}|{header:^{inner_width}}|{_RST}")
         _cprint(f"{_BOLD}+{'-' * inner_width}+{_RST}")
 
-        for category, commands in COMMANDS_BY_CATEGORY.items():
+        for category, commands in hades_cli_commands_by_category().items():
             _cprint(f"\n  {_BOLD}── {category} ──{_RST}")
             for cmd, desc in commands.items():
                 if not self._command_available(cmd):

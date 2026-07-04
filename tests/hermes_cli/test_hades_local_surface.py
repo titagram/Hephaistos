@@ -176,6 +176,84 @@ def test_hades_bundled_skill_discovery_filters_excluded_skills():
     assert "autonomous-ai-agents/hermes-agent" not in discovered
 
 
+def test_hades_bundled_skill_discovery_is_developer_ai_ops_only():
+    from tools.skills_sync import _discover_bundled_skills
+
+    discovered = {
+        path.relative_to(REPO_ROOT / "skills").as_posix()
+        for _name, path in _discover_bundled_skills(REPO_ROOT / "skills")
+    }
+
+    expected_present = {
+        "autonomous-ai-agents/backend-knowledge-sync",
+        "autonomous-ai-agents/claude-code",
+        "autonomous-ai-agents/codex",
+        "autonomous-ai-agents/hades-coordination",
+        "autonomous-ai-agents/hades-wiki-push",
+        "autonomous-ai-agents/opencode",
+        "github/github-pr-workflow",
+        "mlops/huggingface-hub",
+        "software-development/plan",
+        "software-development/test-driven-development",
+    }
+    expected_absent = {
+        "apple/apple-notes",
+        "creative/ascii-art",
+        "email/himalaya",
+        "media/gif-search",
+        "note-taking/obsidian",
+        "productivity/google-workspace",
+        "research/arxiv",
+        "smart-home/openhue",
+        "social-media/xurl",
+        "yuanbao",
+    }
+
+    assert expected_present.issubset(discovered)
+    assert expected_absent.isdisjoint(discovered)
+
+
+def test_hades_cli_help_view_is_curated_for_developer_ai_ops():
+    from hermes_cli.commands import hades_cli_commands_by_category
+
+    commands = {
+        command
+        for category in hades_cli_commands_by_category().values()
+        for command in category
+    }
+
+    expected_present = {
+        "/backend",
+        "/browser",
+        "/codex-runtime",
+        "/debug",
+        "/doctor",
+        "/kanban",
+        "/learn",
+        "/model",
+        "/moa",
+        "/plugins",
+        "/project",
+        "/skills",
+        "/tools",
+    }
+    expected_absent = {
+        "/billing",
+        "/blueprint",
+        "/cron",
+        "/hatch",
+        "/image",
+        "/paste",
+        "/pet",
+        "/platforms",
+        "/suggestions",
+        "/voice",
+    }
+
+    assert expected_present.issubset(commands)
+    assert expected_absent.isdisjoint(commands)
+
+
 def test_uninstall_removes_hades_and_legacy_hermes_wrappers(tmp_path, monkeypatch):
     import hermes_cli.uninstall as uninstall
 
