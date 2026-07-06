@@ -7337,3 +7337,62 @@ class TestMemoryProviderTurnStart:
         # The extracted body uses ``agent.X`` rather than ``self.X``;
         # assert the extracted-form spelling directly.
         assert "on_turn_start(agent._user_turn_count" in src
+
+    def test_prefetched_context_is_injected_on_each_api_iteration(self, agent):
+        """A tool loop gets multiple API calls in one user turn. External
+        memory is prefetched once, then reused in the current user message copy
+        for every provider request without mutating persisted messages."""
+
+        class FakeMemoryManager:
+            def on_turn_start(self, *args, **kwargs):
+                return None
+
+            def prefetch_all(self, query, *, session_id=""):
+                assert query == "which route?"
+                return "Shared Hades project memory:\n- Backend routes use /api/hades/v1."
+
+            def sync_all(self, *args, **kwargs):
+                return None
+
+            def queue_prefetch_all(self, *args, **kwargs):
+                return None
+
+        captured_requests = []
+        tool_call = _mock_tool_call(name="web_search", arguments='{"q":"hades"}', call_id="call_mem")
+        responses = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tool_call]),
+            _mock_response(content="done", finish_reason="stop"),
+        ]
+
+        def _fake_api_call(api_kwargs):
+            captured_requests.append(api_kwargs)
+            return responses.pop(0)
+
+        def _fake_execute_tool_calls(assistant_message, messages, task_id, api_call_count=None):
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": "web_search",
+                    "tool_call_id": assistant_message.tool_calls[0].id,
+                    "content": '{"ok": true}',
+                }
+            )
+
+        agent._memory_manager = FakeMemoryManager()
+        agent._interruptible_api_call = _fake_api_call
+        agent._execute_tool_calls = _fake_execute_tool_calls
+        agent._persist_session = lambda *args, **kwargs: None
+        agent._save_trajectory = lambda *args, **kwargs: None
+
+        result = agent.run_conversation("which route?")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "done"
+        assert len(captured_requests) == 2
+        for request in captured_requests:
+            user_messages = [msg for msg in request["messages"] if msg.get("role") == "user"]
+            assert user_messages
+            content = user_messages[-1]["content"]
+            assert "<memory-context>" in content
+            assert "Backend routes use /api/hades/v1" in content
+        assert "<memory-context>" not in result["messages"][0]["content"]

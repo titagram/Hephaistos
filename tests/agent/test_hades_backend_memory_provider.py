@@ -1,5 +1,56 @@
 from __future__ import annotations
 
+import json
+
+
+def _create_linked_provider(monkeypatch, tmp_path, *, items=None):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_runtime import workspace_fingerprint
+    from plugins.memory import load_memory_provider
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    fp = workspace_fingerprint(workspace, "proj_1")
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_1",
+            workspace_fingerprint=fp,
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        if items is not None:
+            db.replace_memory_cache(
+                conn,
+                project_id="proj_1",
+                workspace_binding_id="wb_1",
+                version="v1",
+                items=items,
+            )
+
+    provider = load_memory_provider("hades_backend")
+    assert provider is not None
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+    return provider
+
 
 def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypatch, tmp_path):
     from hermes_cli import hades_backend_db as db
@@ -43,8 +94,15 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
             items=[
                 {
                     "id": "mem_1",
+                    "domain": "project_memory",
                     "summary": "The Laravel API uses /api/hades/v1 routes.",
                     "etag": "e1",
+                },
+                {
+                    "id": "chunk_1",
+                    "domain": "source_chunks",
+                    "schema": "hades.backend_wiki.file_chunk.v1",
+                    "summary": "RAW route dump should not be auto injected.",
                 }
             ],
         )
@@ -57,7 +115,136 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
 
     assert "Shared Hades project memory" in context
     assert "/api/hades/v1" in context
-    assert provider.get_tool_schemas() == []
+    assert "RAW route dump" not in context
+    assert [schema["name"] for schema in provider.get_tool_schemas()] == [
+        "hades_backend_project_memory_search"
+    ]
+
+
+def test_hades_backend_memory_provider_prefetch_ranks_by_query(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {"id": "mem_1", "domain": "project_memory", "summary": "Security billing jobs use route exports."},
+            {
+                "id": "mem_2",
+                "domain": "wiki",
+                "summary": "Security activity routes are handled by SecurityActivityCategoryController.",
+            },
+        ],
+    )
+
+    context = provider.prefetch("security activity routes", session_id="session_1")
+
+    assert context.index("Security activity routes") < context.index("Security billing jobs")
+
+
+def test_hades_backend_memory_search_tool_filters_domains_and_raw_chunks(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {"id": "mem_1", "domain": "logbook", "summary": "DECIDED: backend memory stays authoritative."},
+            {"id": "mem_2", "domain": "wiki", "summary": "Backend routes live under /api/hades/v1."},
+            {
+                "id": "chunk_1",
+                "domain": "source_chunks",
+                "schema": "hades.backend_wiki.file_chunk.v1",
+                "path": "docs/backend.md",
+                "summary": "Exact chunk mentions /api/hades/v1/source.",
+            },
+        ],
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "backend routes", "domain": "wiki", "limit": 5},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["domain"] == "wiki"
+    assert result["count"] == 1
+    assert result["raw_chunks_omitted"] == 0
+    assert result["items"][0]["id"] == "mem_2"
+    assert result["items"][0]["domain"] == "wiki"
+
+
+def test_hades_backend_memory_search_tool_can_include_raw_chunks(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "chunk_1",
+                "domain": "source_chunks",
+                "schema": "hades.backend_wiki.file_chunk.v1",
+                "path": "docs/backend.md",
+                "summary": "Exact chunk mentions taxonomy route extraction.",
+            },
+        ],
+    )
+
+    without_raw = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "taxonomy route", "domain": "source_chunks"},
+        )
+    )
+    with_raw = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {
+                "query": "taxonomy route",
+                "domain": "source_chunks",
+                "include_raw_chunks": True,
+            },
+        )
+    )
+
+    assert without_raw["count"] == 0
+    assert without_raw["raw_chunks_omitted"] == 1
+    assert with_raw["count"] == 1
+    assert with_raw["items"][0]["raw_chunk"] is True
+    assert with_raw["items"][0]["source"] == "docs/backend.md"
+
+
+def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from plugins.memory import load_memory_provider
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "unmapped"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+
+    provider = load_memory_provider("hades_backend")
+    assert provider is not None
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+
+    block = provider.system_prompt_block()
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "routes"},
+        )
+    )
+
+    assert "not linked" in block
+    assert result["status"] == "unmapped_project"
+    assert result["items"] == []
 
 
 def test_hades_backend_memory_write_creates_local_proposal(monkeypatch, tmp_path):
