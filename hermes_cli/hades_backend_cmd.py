@@ -83,7 +83,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
 
 
 def _detect_default_capabilities() -> list[str]:
-    return ["read_files", "project_inspection", "sync_git_tree", "populate_backend_ast"]
+    return ["read_files", "read_source_slice", "project_inspection", "sync_git_tree", "populate_backend_ast"]
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:

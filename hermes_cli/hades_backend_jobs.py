@@ -470,6 +470,101 @@ def _execute_read_files(job: dict[str, Any], workspace_root: Path) -> dict[str, 
     }
 
 
+def _line_window(content: str, start_line: int, end_line: int) -> tuple[str, int, int]:
+    lines = content.splitlines()
+    if not lines:
+        return "", 1, 1
+    start = max(1, start_line)
+    end = max(start, end_line)
+    bounded_start = min(start, len(lines))
+    bounded_end = min(end, len(lines))
+    selected = lines[bounded_start - 1 : bounded_end]
+    return "\n".join(selected), bounded_start, bounded_end
+
+
+def _execute_read_source_slice(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    rel = _safe_relpath(str(payload.get("path") or ""))
+    if not rel:
+        return {
+            "status": "failed",
+            "summary": "Missing source slice path.",
+            "omitted": [{"reason": "missing_path"}],
+            "retention_class": "source_slice",
+        }
+    start_line = max(1, int(payload.get("start_line") or payload.get("line") or 1))
+    end_line = max(start_line, int(payload.get("end_line") or start_line))
+    if end_line - start_line + 1 > int(payload.get("max_lines") or 120):
+        end_line = start_line + int(payload.get("max_lines") or 120) - 1
+    max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
+    max_slice_bytes = int(payload.get("max_slice_bytes") or 64_000)
+    ignore_spec = _gitignore_spec(workspace_root)
+
+    try:
+        path = _resolve_inside(workspace_root, rel)
+        if not path.is_file():
+            return {
+                "status": "failed",
+                "summary": f"Source slice path is not a file: {rel}",
+                "omitted": [{"path": rel, "reason": "not_file"}],
+                "retention_class": "source_slice",
+            }
+        skip_reason = _skip_file_reason(path, rel, ignore_spec)
+        if skip_reason:
+            return {
+                "status": "failed",
+                "summary": f"Source slice path omitted: {skip_reason}",
+                "omitted": [{"path": rel, "reason": skip_reason}],
+                "retention_class": "source_slice",
+            }
+        size = path.stat().st_size
+        if size > max_file_bytes:
+            return {
+                "status": "failed",
+                "summary": f"Source slice file exceeds max_file_bytes: {rel}",
+                "omitted": [{"path": rel, "reason": "file_too_large"}],
+                "retention_class": "source_slice",
+            }
+        source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "summary": f"Failed to read source slice: {_safe_exception_reason(exc)}",
+            "omitted": [{"path": rel, "reason": _safe_exception_reason(exc)}],
+            "retention_class": "source_slice",
+        }
+
+    content, bounded_start, bounded_end = _line_window(source, start_line, end_line)
+    redacted = redact_secret(content)
+    redaction_count = 1 if redacted != content else 0
+    encoded = redacted.encode("utf-8")
+    truncated = was_truncated
+    if len(encoded) > max_slice_bytes:
+        redacted = encoded[:max_slice_bytes].decode("utf-8", errors="ignore")
+        truncated = True
+    source_slice = {
+        "path": rel,
+        "start_line": bounded_start,
+        "end_line": bounded_end,
+        "language": _language_for_path(rel),
+        "symbol": str(payload.get("symbol") or "").strip(),
+        "content_redacted": redacted,
+        "sha256": _hash_bytes(redacted.encode("utf-8")),
+        "redactions": redaction_count,
+        "truncated": truncated,
+        "retention_class": "source_slice",
+        "policy": str(payload.get("policy") or "manual_review"),
+        "raw_source_included": True,
+    }
+    return {
+        "status": "completed",
+        "summary": f"Read source slice {rel}:{bounded_start}-{bounded_end}; redactions {source_slice['redactions']}.",
+        "source_slice": {key: value for key, value in source_slice.items() if value not in ("", None)},
+        "redactions": source_slice["redactions"],
+        "retention_class": "source_slice",
+    }
+
+
 def _iter_workspace_files(root: Path, *, max_files: int) -> tuple[list[Path], list[dict[str, str]], bool]:
     ignore_spec = _gitignore_spec(root)
     files: list[Path] = []
@@ -854,6 +949,8 @@ def execute_job(job: dict[str, Any], *, workspace_root: str | Path) -> dict[str,
     capability = str(job.get("capability") or "")
     if capability == "read_files":
         return _execute_read_files(job, root)
+    if capability == "read_source_slice":
+        return _execute_read_source_slice(job, root)
     if capability == "sync_git_tree":
         return _execute_sync_git_tree(job, root)
     if capability == "populate_backend_ast":

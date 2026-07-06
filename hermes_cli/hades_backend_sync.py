@@ -104,7 +104,7 @@ def run_backend_sync(
 
     pulled = completed = waiting = failed = skipped = 0
     memory_snapshots = proposals_synced = proposal_errors = 0
-    artifacts_uploaded = artifact_errors = inbox_events = 0
+    artifacts_uploaded = artifact_errors = source_slices_uploaded = source_slice_errors = inbox_events = 0
     sync_errors = 0
     expired = 0
 
@@ -217,9 +217,13 @@ def run_backend_sync(
                     db.update_job_status(conn, jid, final_status, result=result)
                 if final_status == "completed":
                     uploaded, upload_failed = _upload_job_artifact(client, agent, binding, jid, result)
+                    slices_uploaded, slices_failed = _upload_job_source_slice(client, agent, binding, jid, result)
                     artifacts_uploaded += uploaded
                     artifact_errors += upload_failed
+                    source_slices_uploaded += slices_uploaded
+                    source_slice_errors += slices_failed
                     sync_errors += upload_failed
+                    sync_errors += slices_failed
                     client.submit_job_result(jid, **_status_payload(agent, binding, final_status, result=result))
                     completed += 1
                 else:
@@ -250,6 +254,8 @@ def run_backend_sync(
         "proposal_errors": proposal_errors,
         "artifacts_uploaded": artifacts_uploaded,
         "artifact_errors": artifact_errors,
+        "source_slices_uploaded": source_slices_uploaded,
+        "source_slice_errors": source_slice_errors,
         "inbox_events": inbox_events,
     }
     with db.connect_closing() as conn:
@@ -475,6 +481,42 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
         return (0, 0)
     except Exception as exc:
         _record_sync_error(binding, f"artifact upload failed: {exc}")
+        return (0, 1)
+
+
+def _upload_job_source_slice(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int]:
+    source_slice = result.get("source_slice") if isinstance(result, dict) else None
+    if not isinstance(source_slice, dict):
+        return (0, 0)
+    source_slice_payload = dict(source_slice)
+    head_commit = str(binding.head_commit or "").strip()
+    if head_commit:
+        source_slice_payload.setdefault("head_commit", head_commit)
+    try:
+        client.create_source_slice(
+            project_id=binding.project_id,
+            agent_id=agent.agent_id,
+            workspace_binding_id=binding.backend_workspace_binding_id,
+            job_id=job_id,
+            **source_slice_payload,
+        )
+        logger.info(
+            "hades_backend.source_slice.uploaded",
+            extra={
+                "hades_event": "source_slice.uploaded",
+                "hades_project_id": binding.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                "hades_job_id": job_id,
+                "hades_path": source_slice_payload.get("path"),
+                "hades_truncated": bool(source_slice_payload.get("truncated", False)),
+                "hades_redactions": int(source_slice_payload.get("redactions", 0) or 0),
+            },
+        )
+        return (1, 0)
+    except AttributeError:
+        return (0, 0)
+    except Exception as exc:
+        _record_sync_error(binding, f"source slice upload failed: {exc}")
         return (0, 1)
 
 

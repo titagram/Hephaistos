@@ -221,6 +221,12 @@ class HadesBackendClient:
     def upload_artifact(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "artifacts", json_body=payload)
 
+    def create_source_slice(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "source-slices", json_body=payload)
+
+    def source_slices(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "source-slices", params=payload)
+
     def submit_doctor_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "doctor/reports", json_body=payload)
 

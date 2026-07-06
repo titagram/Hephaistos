@@ -31,6 +31,70 @@ def test_read_files_job_redacts_and_bounds_payload(tmp_path):
     assert result["attachments"][0]["redactions"] >= 1
 
 
+def test_read_source_slice_job_redacts_and_bounds_line_window(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    source = "\n".join(
+        [
+            "<?php",
+            "class OrderController {",
+            "    public function show($order) {",
+            "        $token = 'sk-live-secret';",
+            "        return $order;",
+            "    }",
+            "}",
+        ]
+    )
+    (tmp_path / "app" / "Http" / "Controllers").mkdir(parents=True)
+    (tmp_path / "app" / "Http" / "Controllers" / "OrderController.php").write_text(source, encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_slice",
+            "capability": "read_source_slice",
+            "payload": {
+                "path": "app/Http/Controllers/OrderController.php",
+                "start_line": 3,
+                "end_line": 5,
+                "symbol": "OrderController@show",
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    source_slice = result["source_slice"]
+
+    assert result["status"] == "completed"
+    assert source_slice["path"] == "app/Http/Controllers/OrderController.php"
+    assert source_slice["start_line"] == 3
+    assert source_slice["end_line"] == 5
+    assert source_slice["language"] == "php"
+    assert source_slice["symbol"] == "OrderController@show"
+    assert source_slice["retention_class"] == "source_slice"
+    assert source_slice["raw_source_included"] is True
+    assert "sk-live-secret" not in source_slice["content_redacted"]
+    assert source_slice["redactions"] == 1
+
+
+def test_read_source_slice_job_omits_sensitive_path(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / ".env").write_text("TOKEN=super-secret\n", encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_slice_secret",
+            "capability": "read_source_slice",
+            "payload": {"path": ".env", "start_line": 1, "end_line": 1},
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert result["status"] == "failed"
+    assert result["omitted"] == [{"path": ".env", "reason": "sensitive_name"}]
+    assert "super-secret" not in str(result)
+
+
 def test_sync_git_tree_returns_bounded_manifest(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

@@ -1649,3 +1649,56 @@ Verifiche eseguite:
 - Remoto completo Hades + plugin auth:
   `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
   passato: `40 passed / 407 assertions`.
+
+## Esecuzione source slices Hades - 2026-07-07
+
+Stato: completata la slice P0-5 base del piano "Bug Root Cause Awareness".
+Hades puo' ora salvare e recuperare source slices bounded/redatte dal backend,
+senza trasformarle in memoria ordinaria o auto-prefetch.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`, senza push.
+- Nuova migration: `hades_source_slices`.
+- Nuovo controller: `SourceSliceController` con:
+  - `POST /api/hades/v1/source-slices` per store bounded/redacted;
+  - `GET /api/hades/v1/source-slices` per fetch/search filtrato per id,
+    path, symbol, line o query.
+- `HadesProjectAwareness` calcola `coverage.source_slices` da tabella reale e
+  confronta `head_commit` della slice col commit del workspace.
+- Health/capabilities espongono la route source slices.
+- La suite remota verifica anche `diagnosable_without_source=true` quando
+  memoria, artifact current, code graph, bug evidence e source slices sono
+  tutti current.
+
+Integrazione Hades locale:
+
+- Nuova capability dichiarata: `read_source_slice`.
+- `read_source_slice` non e' auto-eseguita in piggyback sync: resta
+  policy-gated/manual-review.
+- `hades_backend_jobs` legge solo finestre lineari bounded, redatte e con path
+  containment/secret-file guard.
+- `hades backend sync` e `hades backend approve-job` caricano source slices con
+  `head_commit` del binding locale quando disponibile.
+- `HadesBackendClient` espone `create_source_slice()` e `source_slices()`.
+- Provider memoria espone `hades_backend_source_slice_fetch`, live-only con
+  timeout breve e senza cache fallback.
+- Fixture OpenAPI e docs operative aggiornate.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py`
+  passato: `77 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_jobs.py hermes_cli/hades_backend_sync.py hermes_cli/hades_backend_actions.py hermes_cli/hades_backend_client.py hermes_cli/hades_backend_cmd.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_backend_jobs.py hermes_cli/hades_backend_sync.py hermes_cli/hades_backend_actions.py hermes_cli/hades_backend_client.py hermes_cli/hades_backend_cmd.py plugins/memory/hades_backend/__init__.py`
+  passato.
+- Remoto Pint:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/SourceSliceController.php app/Http/Controllers/Hades/CapabilitiesController.php app/Http/Controllers/Hades/HealthController.php app/Services/Hades/HadesProjectAwareness.php app/Services/Hades/HadesCapabilityPolicy.php app/Services/Hades/HadesTokenService.php app/Http/Controllers/Dashboard/Api/DashboardHadesController.php routes/api.php database/migrations/2026_07_07_000002_create_hades_source_slices_table.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `42 passed / 438 assertions`.

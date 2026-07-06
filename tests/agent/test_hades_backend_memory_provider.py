@@ -119,6 +119,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
     assert [schema["name"] for schema in provider.get_tool_schemas()] == [
         "hades_backend_project_memory_search",
         "hades_backend_bug_evidence_search",
+        "hades_backend_source_slice_fetch",
         "hades_backend_project_awareness_status",
     ]
 
@@ -409,6 +410,107 @@ def test_hades_backend_bug_evidence_search_tool_uses_short_timeout(monkeypatch, 
     )
 
     assert timeouts == [2.0]
+
+
+def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def source_slices(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "source_slice_search_v1",
+                "etag": "source_slice_search_v1",
+                "query": payload["query"],
+                "path": payload["path"],
+                "symbol": payload["symbol"],
+                "line": payload["line"],
+                "count": 1,
+                "candidate_count": 1,
+                "truncated": False,
+                "freshness": {
+                    "workspace_head_commit": "abc123",
+                    "index_status": "live_query",
+                },
+                "server_time": "2026-07-07T12:00:00Z",
+                "items": [
+                    {
+                        "id": "slice_1",
+                        "path": "app/Http/Controllers/OrderController.php",
+                        "start_line": 41,
+                        "end_line": 43,
+                        "language": "php",
+                        "symbol": "OrderController@show",
+                        "head_commit": "abc123",
+                        "sha256": "b" * 64,
+                        "content_redacted": "41: public function show() {\n42:     return ***;\n43: }",
+                        "redactions": 1,
+                        "truncated": False,
+                        "retention_class": "source_slice",
+                        "policy": "manual_review",
+                        "updated_at": "2026-07-07T11:59:00Z",
+                        "score": 25,
+                        "version": "source_slice_1",
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_source_slice_fetch",
+            {
+                "query": "OrderController show",
+                "path": "app/Http/Controllers/OrderController.php",
+                "symbol": "OrderController@show",
+                "line": 42,
+                "limit": 3,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is False
+    assert result["backend_version"] == "source_slice_search_v1"
+    assert result["freshness"]["index_status"] == "live_query"
+    assert result["items"][0]["id"] == "slice_1"
+    assert result["items"][0]["start_line"] == 41
+    assert result["items"][0]["content_redacted"].endswith("}")
+    assert result["items"][0]["redactions"] == 1
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "id": None,
+            "query": "OrderController show",
+            "path": "app/Http/Controllers/OrderController.php",
+            "symbol": "OrderController@show",
+            "line": 42,
+            "limit": 3,
+        }
+    ]
+    assert fake.closed == 1
+
+
+def test_hades_backend_source_slice_fetch_tool_requires_scope(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(provider.handle_tool_call("hades_backend_source_slice_fetch", {}))
+
+    assert result["error"].startswith("Provide at least one")
 
 
 def test_hades_backend_project_awareness_status_tool_reads_live_backend(monkeypatch, tmp_path):

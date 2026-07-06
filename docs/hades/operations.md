@@ -8,6 +8,7 @@ sync. Jobs are capability-scoped and bounded to a linked workspace.
 Initial read-only capabilities:
 
 - `read_files`
+- `read_source_slice`
 - `project_inspection`
 - `sync_git_tree`
 - `populate_backend_ast`
@@ -203,6 +204,12 @@ with detected routes, classes, methods, Eloquent relations, static calls, and
 instantiation edges. On Python workspaces it keeps the existing
 `hades.symbols.v1` class/function symbol output. Both artifact jobs report
 omission reasons instead of following path escapes or failing the whole sync.
+
+`read_source_slice` is intentionally policy-gated/manual-review source access:
+it reads only a bounded line window, redacts likely secrets, uploads
+`retention_class=source_slice`, and does not create ordinary memory notes or
+automatic prefetch context. Use it to support line-level diagnosis after bug
+evidence or graph results point to a concrete file/symbol/line.
 
 ## Persephone
 

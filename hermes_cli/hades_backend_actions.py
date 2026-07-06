@@ -74,7 +74,7 @@ def list_memory_proposals(*, statuses: Iterable[str] | None = None) -> list[dict
 
 def approve_backend_job(job_id: str) -> BackendActionResult:
     from hermes_cli import hades_backend_runtime as runtime
-    from hermes_cli.hades_backend_sync import _upload_job_artifact
+    from hermes_cli.hades_backend_sync import _upload_job_artifact, _upload_job_source_slice
 
     job_id = str(job_id or "").strip()
     with db.connect_closing() as conn:
@@ -107,6 +107,7 @@ def approve_backend_job(job_id: str) -> BackendActionResult:
             updated = db.update_job_status(conn, job_id, final_status, result=result)
         if final_status == "completed":
             _upload_job_artifact(client, agent, binding, job_id, result)
+            _upload_job_source_slice(client, agent, binding, job_id, result)
             client.submit_job_result(job_id, **status_payload(agent, binding, final_status, result=result))
         else:
             client.update_job_status(

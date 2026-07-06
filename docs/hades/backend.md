@@ -96,6 +96,10 @@ projects. The PHP graph includes route-handler, class/method, Eloquent
 relation, static-call, and instantiation metadata so backend search can answer
 structure questions without loading source chunks.
 
+`read_source_slice` is the bounded source-content path for diagnosis: it is not
+auto-executed by piggyback sync, stores only a selected redacted line window as
+`source_slice`, and keeps that content out of automatic project-memory recall.
+
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop
 reporting it as needing review.

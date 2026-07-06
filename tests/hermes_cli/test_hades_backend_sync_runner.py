@@ -441,6 +441,68 @@ def test_sync_runner_uploads_php_graph_artifacts():
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
 
 
+def test_sync_runner_uploads_source_slices():
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_source_slice
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def create_source_slice(self, **payload):
+            self.uploads.append(payload)
+            return {"source_slice": {"id": "slice_1"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"jobs": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="b" * 40,
+        status="active",
+    )
+
+    uploaded, failed = _upload_job_source_slice(
+        client,
+        agent,
+        binding,
+        "job_slice",
+        {
+            "source_slice": {
+                "path": "app/Http/Controllers/OrderController.php",
+                "start_line": 41,
+                "end_line": 43,
+                "content_redacted": "return ***;",
+                "sha256": "c" * 64,
+                "redactions": 1,
+                "truncated": False,
+            }
+        },
+    )
+
+    assert uploaded == 1
+    assert failed == 0
+    assert client.uploads[0]["project_id"] == "proj_1"
+    assert client.uploads[0]["workspace_binding_id"] == "wb_1"
+    assert client.uploads[0]["job_id"] == "job_slice"
+    assert client.uploads[0]["head_commit"] == "b" * 40
+    assert client.uploads[0]["content_redacted"] == "return ***;"
+
+
 def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

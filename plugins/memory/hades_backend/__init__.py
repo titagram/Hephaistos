@@ -26,6 +26,7 @@ AUTO_PREFETCH_LIMIT = 8
 TOOL_RESULT_LIMIT = 20
 SEARCH_TOOL_NAME = "hades_backend_project_memory_search"
 BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
+SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 RAW_CHUNK_DOMAINS = {
     "backend_wiki_chunks",
@@ -157,6 +158,51 @@ BUG_EVIDENCE_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+SOURCE_SLICE_FETCH_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": SOURCE_SLICE_FETCH_TOOL_NAME,
+    "description": (
+        "Fetch bounded, redacted source slices already stored in the linked "
+        "Hades backend for this workspace. Use this after bug evidence or graph "
+        "search points to a file/symbol/line and before claiming line-level root "
+        "causes without local source access. Results are live backend data; "
+        "there is no local cache fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Optional exact source slice id.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional text to match path, symbol, language, or redacted content.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional exact project-relative source path.",
+            },
+            "symbol": {
+                "type": "string",
+                "description": "Optional symbol such as Controller@method or fully qualified class.",
+            },
+            "line": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional source line that must fall inside the stored slice.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 3,
+                "description": "Maximum number of source slices to return.",
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
 PROJECT_AWARENESS_STATUS_TOOL_SCHEMA: Dict[str, Any] = {
     "name": PROJECT_AWARENESS_STATUS_TOOL_NAME,
     "description": (
@@ -281,12 +327,15 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return [
             SEARCH_TOOL_SCHEMA,
             BUG_EVIDENCE_SEARCH_TOOL_SCHEMA,
+            SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == PROJECT_AWARENESS_STATUS_TOOL_NAME:
             return self._handle_project_awareness_status()
+        if tool_name == SOURCE_SLICE_FETCH_TOOL_NAME:
+            return self._handle_source_slice_fetch(args)
         if tool_name == BUG_EVIDENCE_SEARCH_TOOL_NAME:
             return self._handle_bug_evidence_search(args)
         if tool_name != SEARCH_TOOL_NAME:
@@ -398,6 +447,57 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "workspace_binding_id": self._binding.backend_workspace_binding_id,
             "message": "Hades backend project awareness status is unavailable.",
             "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_source_slice_fetch(self, args: Dict[str, Any]) -> str:
+        slice_id = str(args.get("id") or "").strip()
+        query = str(args.get("query") or "").strip()
+        path = str(args.get("path") or "").strip()
+        symbol = str(args.get("symbol") or "").strip()
+        line_value = args.get("line")
+        line = _bounded_int(line_value, default=0, minimum=0, maximum=10_000_000) if line_value is not None else 0
+        limit = _bounded_int(args.get("limit"), default=3, minimum=1, maximum=10)
+        if not any((slice_id, query, path, symbol, line)):
+            return tool_error("Provide at least one of id, query, path, symbol, or line.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so source slices are unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "items": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_source_slice_fetch(
+            slice_id=slice_id,
+            query=query,
+            path=path,
+            symbol=symbol,
+            line=line,
+            limit=limit,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_source_slices(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend source slice live fetch is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "items": [],
         }
         if backend_error:
             result["backend_live_error"] = backend_error
@@ -552,6 +652,39 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     query=query,
                     kind=kind or None,
                     bug_report_id=bug_report_id or None,
+                    limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_source_slice_fetch(
+        self,
+        *,
+        slice_id: str,
+        query: str,
+        path: str,
+        symbol: str,
+        line: int,
+        limit: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.source_slices(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    id=slice_id or None,
+                    query=query or None,
+                    path=path or None,
+                    symbol=symbol or None,
+                    line=line or None,
                     limit=limit,
                 )
             finally:
@@ -941,6 +1074,60 @@ def _tool_result_from_backend_bug_evidence_search(response: dict[str, Any]) -> d
         "query": response.get("query", ""),
         "kind": response.get("kind") or "all",
         "bug_report_id": response.get("bug_report_id"),
+        "searched_cache_only": False,
+        "count": count,
+        "candidate_count": candidate_count,
+        "truncated": bool(response.get("truncated")),
+        "server_time": response.get("server_time"),
+        "items": items,
+    }
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _source_slice_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": _item_id(item),
+        "path": item.get("path"),
+        "start_line": item.get("start_line"),
+        "end_line": item.get("end_line"),
+        "language": item.get("language"),
+        "symbol": item.get("symbol"),
+        "head_commit": item.get("head_commit"),
+        "sha256": item.get("sha256"),
+        "content_redacted": item.get("content_redacted"),
+        "redactions": item.get("redactions"),
+        "truncated": bool(item.get("truncated")),
+        "retention_class": item.get("retention_class"),
+        "policy": item.get("policy"),
+        "updated_at": item.get("updated_at"),
+        "version": item.get("version"),
+        "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_source_slices(response: dict[str, Any]) -> dict[str, Any]:
+    items = [_source_slice_item_from_backend(item) for item in _backend_items(response)]
+    count = _bounded_int(response.get("count"), default=len(items), minimum=0, maximum=1_000_000)
+    candidate_count = _bounded_int(
+        response.get("candidate_count"),
+        default=count,
+        minimum=0,
+        maximum=1_000_000,
+    )
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "backend_version": response.get("version"),
+        "backend_etag": response.get("etag"),
+        "query": response.get("query", ""),
+        "path": response.get("path"),
+        "symbol": response.get("symbol"),
+        "line": response.get("line"),
         "searched_cache_only": False,
         "count": count,
         "candidate_count": candidate_count,
