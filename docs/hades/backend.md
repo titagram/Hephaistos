@@ -90,6 +90,12 @@ it uploads a `hades.git_tree.v1` artifact marked `inspection_mode=metadata_tree`
 not a synthesized answer. `refuse-job` marks a waiting job cancelled and sends a
 redacted reason to the backend.
 
+`populate_backend_ast` uploads source-symbol artifacts without raw source:
+`hades.php_graph.v1` for PHP/Laravel projects and `hades.symbols.v1` for Python
+projects. The PHP graph includes route-handler, class/method, Eloquent
+relation, static-call, and instantiation metadata so backend search can answer
+structure questions without loading source chunks.
+
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop
 reporting it as needing review.

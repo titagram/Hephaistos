@@ -439,7 +439,7 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
     if not isinstance(artifact, dict):
         return (0, 0)
     schema = str(artifact.get("schema") or "").strip()
-    if schema not in {"hades.git_tree.v1", "hades.symbols.v1"}:
+    if schema not in {"hades.git_tree.v1", "hades.symbols.v1", "hades.php_graph.v1"}:
         return (0, 0)
     artifact_payload = dict(artifact)
     head_commit = str(binding.head_commit or "").strip()

@@ -230,6 +230,85 @@ def test_populate_backend_ast_extracts_python_symbols_without_source(tmp_path):
     assert "return 1" not in str(result)
 
 
+def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    (workspace / "routes").mkdir()
+    (workspace / "app" / "Http" / "Controllers").mkdir(parents=True)
+    (workspace / "app" / "Models").mkdir(parents=True)
+    (workspace / "app" / "Services").mkdir(parents=True)
+    (workspace / "routes" / "web.php").write_text(
+        "<?php\n"
+        "use App\\Http\\Controllers\\OrderController;\n"
+        "Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Controllers" / "OrderController.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "use App\\Models\\Order;\n"
+        "use App\\Services\\OrderService;\n"
+        "class OrderController extends Controller {\n"
+        "    public function show(Order $order) {\n"
+        "        return OrderService::format($order);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Models" / "Order.php").write_text(
+        "<?php\n"
+        "namespace App\\Models;\n"
+        "use Illuminate\\Database\\Eloquent\\Model;\n"
+        "class Order extends Model {\n"
+        "    public function customer() {\n"
+        "        return $this->belongsTo(Customer::class);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Services" / "OrderService.php").write_text(
+        "<?php\n"
+        "namespace App\\Services;\n"
+        "class OrderService {\n"
+        "    public static function format($order) { return ['id' => $order->id]; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_php_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    routes = {(item["method"], item["uri"], item["handler"]) for item in artifact["routes"]}
+    symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.php_graph.v1"
+    assert artifact["framework"] == "laravel"
+    assert artifact["raw_source_included"] is False
+    assert ("GET", "/orders/{order}", "OrderController@show") in routes
+    assert ("class", "App\\Http\\Controllers\\OrderController") in symbols
+    assert ("class", "App\\Models\\Order") in symbols
+    assert ("class", "App\\Services\\OrderService") in symbols
+    assert ("method", "OrderController@show") in symbols
+    assert ("method", "Order@customer") in symbols
+    assert ("route_handler", "route:orders.show", "OrderController@show") in edges
+    assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
+    assert "Route::get" not in str(artifact)
+    assert "return $this->belongsTo" not in str(artifact)
+    assert "return OrderService::format" not in str(artifact)
+
+
 def test_populate_backend_ast_omits_symlinked_python_escape(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

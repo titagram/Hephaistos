@@ -1439,8 +1439,8 @@ locale.
   `/api/cron/fire`.
 - Repo locale: P1-5 avviato rafforzando `hades_backend_jobs`: file/directory
   symlink sono omessi con reason `symlink`, directory gitignored vengono
-  potate prima del walk, e AST resta scope Python-only bounded senza sorgente
-  raw.
+  potate prima del walk; in quella slice l'AST era ancora scope Python-only
+  bounded senza sorgente raw.
 
 Aggiornamento verifica contratto 2026-07-02:
 
@@ -1606,3 +1606,46 @@ Verifiche eseguite:
   include `GET|HEAD api/hades/v1/project-awareness/status`.
 - Smoke pubblico: `https://home-sweet-home.cloud/api/hades/v1/health` risponde
   `HTTP/2 200` e include `project_awareness_status`.
+
+## Esecuzione PHP graph artifact Hades - 2026-07-07
+
+Stato: completata la slice P0-4 base del piano "Bug Root Cause Awareness".
+`populate_backend_ast` non e' piu' solo Python per workspace PHP/Laravel:
+produce un grafo metadata/symbol bounded e caricabile sul backend condiviso.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`, senza push.
+- Commit remoto: `fb2e4a2 feat: support Hades PHP graph artifacts`.
+- `ArtifactController` accetta anche `hades.php_graph.v1`.
+- `MemorySearchController` produce summary searchable per grafi PHP: route,
+  classi/metodi, ruoli e conteggio edge per kind.
+- `HadesProjectAwareness` trattava gia' `hades.php_graph.v1` come code graph
+  current; i test ora verificano che la coverage `code_graph` diventi
+  `current` quando l'artifact e' allineato al commit del workspace.
+
+Integrazione Hades locale:
+
+- `populate_backend_ast` produce `hades.php_graph.v1` quando trova file `.php`;
+  per workspace Python mantiene `hades.symbols.v1`.
+- Il grafo include route Laravel, class/interface/trait/enum, metodi,
+  `extends`, relazioni Eloquent, static call e instantiation edge.
+- Il grafo non include raw source content; conserva path/line/simboli/edge e
+  omission reasons.
+- `hades backend sync` carica anche `hades.php_graph.v1`.
+- Documentazione operativa e fixture OpenAPI locale aggiornate.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `26 passed`.
+- Remoto syntax:
+  `php -l app/Http/Controllers/Hades/MemorySearchController.php && php -l app/Http/Controllers/Hades/ArtifactController.php`
+  passato nel container app.
+- Remoto Pint:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/ArtifactController.php app/Http/Controllers/Hades/MemorySearchController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  passato.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `40 passed / 407 assertions`.

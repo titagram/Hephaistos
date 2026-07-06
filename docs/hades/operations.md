@@ -197,10 +197,12 @@ Laravel routes, dependency manifests, and database migration paths. The backend
 memory search can retrieve this under the `artifacts` domain, so the agent can
 ask about project structure without loading raw source chunks into ordinary
 memory.
-`populate_backend_ast` currently has an explicit Python-only MVP scope: it
-emits bounded `.py` class/function symbols with provenance, not raw source.
-Both artifact jobs report omission reasons instead of following path escapes or
-failing the whole sync.
+`populate_backend_ast` emits bounded source-symbol artifacts with provenance,
+not raw source. On PHP/Laravel workspaces it produces `hades.php_graph.v1`
+with detected routes, classes, methods, Eloquent relations, static calls, and
+instantiation edges. On Python workspaces it keeps the existing
+`hades.symbols.v1` class/function symbol output. Both artifact jobs report
+omission reasons instead of following path escapes or failing the whole sync.
 
 ## Persephone
 

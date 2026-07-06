@@ -105,6 +105,24 @@ ROUTE_CALL_RE = re.compile(
 LARAVEL_HANDLER_RE = re.compile(
     r"\[\s*(?P<class>[A-Za-z0-9_\\\\]+)::class\s*,\s*['\"](?P<method>[A-Za-z0-9_]+)['\"]\s*\]"
 )
+PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
+PHP_CLASS_RE = re.compile(
+    r"\b(?P<kind>class|interface|trait|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s+extends\s+(?P<extends>[A-Za-z0-9_\\]+))?",
+    re.MULTILINE,
+)
+PHP_METHOD_RE = re.compile(
+    r"\b(?P<visibility>public|protected|private)\s+(?:static\s+)?function\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    re.MULTILINE,
+)
+PHP_ELOQUENT_RELATION_RE = re.compile(
+    r"\$this->(?P<relation>hasOne|hasMany|belongsTo|belongsToMany|morphOne|morphMany|morphToMany)"
+    r"\s*\(\s*(?P<target>[A-Za-z0-9_\\]+)::class",
+    re.MULTILINE,
+)
+PHP_STATIC_CALL_RE = re.compile(r"\b(?P<class>[A-Z][A-Za-z0-9_\\]+)::(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+PHP_NEW_RE = re.compile(r"\bnew\s+(?P<class>[A-Z][A-Za-z0-9_\\]+)\s*\(")
 
 
 def _safe_relpath(path: str) -> str:
@@ -284,6 +302,61 @@ def _normalize_laravel_handler(raw: str) -> str:
         class_name = match.group("class").split("\\")[-1]
         return f"{class_name}@{match.group('method')}"
     return compact[:160]
+
+
+def _line_number(content: str, offset: int) -> int:
+    return content.count("\n", 0, max(0, offset)) + 1
+
+
+def _php_namespace(content: str) -> str:
+    match = PHP_NAMESPACE_RE.search(content)
+    return match.group("namespace") if match else ""
+
+
+def _php_fqcn(namespace: str, name: str) -> str:
+    clean = name.strip("\\")
+    if "\\" in clean or namespace == "":
+        return clean
+    return f"{namespace}\\{clean}"
+
+
+def _php_short_name(name: str) -> str:
+    return name.strip("\\").split("\\")[-1]
+
+
+def _php_role(path: str, class_name: str, extends: str) -> str:
+    short = _php_short_name(class_name)
+    if path.startswith("app/Http/Controllers/") or short.endswith("Controller"):
+        return "controller"
+    if path.startswith("app/Models/") or _php_short_name(extends) == "Model":
+        return "model"
+    if path.startswith("app/Http/Middleware/") or short.endswith("Middleware"):
+        return "middleware"
+    if path.startswith("app/Jobs/") or short.endswith("Job"):
+        return "job"
+    if path.startswith("app/Events/") or short.endswith("Event"):
+        return "event"
+    if path.startswith("app/Policies/") or short.endswith("Policy"):
+        return "policy"
+    if path.startswith("app/Services/") or short.endswith("Service"):
+        return "service"
+    return "php_class"
+
+
+def _class_context(classes: list[dict[str, Any]], offset: int) -> dict[str, Any] | None:
+    current = None
+    for item in classes:
+        if int(item["offset"]) > offset:
+            break
+        current = item
+    return current
+
+
+def _edge_append(edges: list[dict[str, Any]], edge: dict[str, Any], *, max_edges: int) -> bool:
+    if len(edges) >= max_edges:
+        return False
+    edges.append({key: value for key, value in edge.items() if value not in ("", None)})
+    return True
 
 
 def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, str]]:
@@ -504,13 +577,228 @@ def _execute_project_inspection(job: dict[str, Any], workspace_root: Path) -> di
     return result
 
 
+def _php_graph_summary(routes: list[dict[str, str]], symbols: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    role_counts: dict[str, int] = {}
+    for symbol in symbols:
+        role = str(symbol.get("role") or symbol.get("kind") or "symbol")
+        role_counts[role] = role_counts.get(role, 0) + 1
+    roles = ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())[:8])
+    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {roles or 'roles:none'}"
+
+
+def _php_route_edges(routes: list[dict[str, str]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+    truncated = False
+    for route in routes:
+        route_id = route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}".strip()
+        handler = route.get("handler", "")
+        if "@" not in handler:
+            continue
+        if not _edge_append(
+            edges,
+            {
+                "kind": "route_handler",
+                "from": f"route:{route_id}",
+                "to": handler,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+            },
+            max_edges=max_edges,
+        ):
+            truncated = True
+            break
+    return truncated
+
+
+def _build_php_graph(
+    workspace_root: Path,
+    candidates: list[Path],
+    omitted: list[dict[str, str]],
+    *,
+    truncated: bool,
+    max_symbols: int,
+    max_edges: int,
+    max_file_bytes: int,
+) -> dict[str, Any]:
+    php_files = [path for path in candidates if path.suffix.lower() == ".php"]
+    file_refs = [{"path": path.relative_to(workspace_root).as_posix()} for path in php_files]
+    routes = _laravel_routes(workspace_root, file_refs)
+    symbols: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    truncated = _php_route_edges(routes, edges, max_edges=max_edges) or truncated
+
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
+        if size > max_file_bytes:
+            omitted.append({"path": rel, "reason": "file_too_large"})
+            truncated = True
+            continue
+        try:
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+            if was_truncated:
+                omitted.append({"path": rel, "reason": "file_too_large"})
+                truncated = True
+                continue
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
+            continue
+
+        namespace = _php_namespace(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            role = _php_role(rel, fqcn, extends)
+            class_symbol = {
+                "kind": match.group("kind"),
+                "name": fqcn,
+                "short_name": class_name,
+                "role": role,
+                "path": rel,
+                "line": _line_number(source, match.start()),
+                "extends": _php_fqcn(namespace, extends) if extends else None,
+                "offset": match.start(),
+            }
+            classes.append(class_symbol)
+            if len(symbols) < max_symbols:
+                symbols.append({key: value for key, value in class_symbol.items() if key != "offset" and value not in ("", None)})
+            else:
+                truncated = True
+            if extends:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "extends",
+                        "from": fqcn,
+                        "to": _php_fqcn(namespace, extends),
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
+        classes.sort(key=lambda item: int(item["offset"]))
+
+        for match in PHP_METHOD_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            if class_info is None:
+                continue
+            method_name = match.group("name")
+            fqcn = str(class_info["name"])
+            if len(symbols) < max_symbols:
+                symbols.append(
+                    {
+                        "kind": "method",
+                        "name": f"{_php_short_name(fqcn)}@{method_name}",
+                        "class": fqcn,
+                        "method": method_name,
+                        "visibility": match.group("visibility"),
+                        "role": class_info.get("role"),
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    }
+                )
+            else:
+                truncated = True
+
+        for match in PHP_ELOQUENT_RELATION_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            if class_info is None:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "eloquent_relation",
+                    "from": class_info["name"],
+                    "to": _php_fqcn(namespace, match.group("target")),
+                    "relation": match.group("relation"),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_STATIC_CALL_RE.finditer(source):
+            class_name = match.group("class")
+            if _php_short_name(class_name) in {"self", "static", "parent", "Route"}:
+                continue
+            class_info = _class_context(classes, match.start())
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "static_call",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": f"{_php_fqcn(namespace, class_name)}::{match.group('method')}",
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_NEW_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "instantiates",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": _php_fqcn(namespace, match.group("class")),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+    graph = {
+        "schema": "hades.php_graph.v1",
+        "language": "php",
+        "framework": "laravel" if routes or (workspace_root / "artisan").exists() else "php",
+        "root": workspace_root.name,
+        "routes": routes,
+        "symbols": symbols,
+        "edges": edges,
+        "database": _database_summary(file_refs),
+        "summary": "",
+        "omitted": omitted,
+        "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges,
+        "redactions": len(omitted),
+        "retention_class": "source_symbols",
+        "raw_source_included": False,
+    }
+    graph["summary"] = _php_graph_summary(routes, symbols, edges)
+    return graph
+
+
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     payload = job.get("payload") or {}
     max_files = int(payload.get("max_files") or 1_000)
     max_symbols = int(payload.get("max_symbols") or 5_000)
     max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
-    symbols: list[dict[str, Any]] = []
     candidates, omitted, truncated = _iter_workspace_files(workspace_root, max_files=max_files)
+    if any(path.suffix.lower() == ".php" for path in candidates):
+        max_edges = int(payload.get("max_edges") or max_symbols * 2)
+        graph = _build_php_graph(
+            workspace_root,
+            candidates,
+            omitted,
+            truncated=truncated,
+            max_symbols=max_symbols,
+            max_edges=max_edges,
+            max_file_bytes=max_file_bytes,
+        )
+        return {
+            "status": "completed",
+            "summary": graph["summary"],
+            "artifact": graph,
+        }
+
+    symbols: list[dict[str, Any]] = []
     for path in candidates:
         if path.suffix != ".py":
             continue
