@@ -26,6 +26,7 @@ AUTO_PREFETCH_LIMIT = 8
 TOOL_RESULT_LIMIT = 20
 SEARCH_TOOL_NAME = "hades_backend_project_memory_search"
 BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
+GRAPH_SEARCH_TOOL_NAME = "hades_backend_graph_search"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 RAW_CHUNK_DOMAINS = {
@@ -155,6 +156,36 @@ BUG_EVIDENCE_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
             },
         },
         "required": ["query"],
+    },
+}
+
+GRAPH_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": GRAPH_SEARCH_TOOL_NAME,
+    "description": (
+        "Search current Hades backend project graph/artifact context such as "
+        "Laravel routes, controller methods, class symbols, and graph edges. "
+        "Use this after bug evidence search and before source slice fetch when "
+        "diagnosing call paths or owner methods without local source access. "
+        "Results are live backend artifact search; there is no local cache "
+        "fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Route, symbol, file, class, method, edge, or framework term to search.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": TOOL_RESULT_LIMIT,
+                "default": 8,
+                "description": "Maximum number of graph/artifact results to return.",
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
     },
 }
 
@@ -327,6 +358,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return [
             SEARCH_TOOL_SCHEMA,
             BUG_EVIDENCE_SEARCH_TOOL_SCHEMA,
+            GRAPH_SEARCH_TOOL_SCHEMA,
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
         ]
@@ -336,6 +368,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return self._handle_project_awareness_status()
         if tool_name == SOURCE_SLICE_FETCH_TOOL_NAME:
             return self._handle_source_slice_fetch(args)
+        if tool_name == GRAPH_SEARCH_TOOL_NAME:
+            return self._handle_graph_search(args)
         if tool_name == BUG_EVIDENCE_SEARCH_TOOL_NAME:
             return self._handle_bug_evidence_search(args)
         if tool_name != SEARCH_TOOL_NAME:
@@ -496,6 +530,52 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "project_id": self._binding.project_id,
             "workspace_binding_id": self._binding.backend_workspace_binding_id,
             "message": "Hades backend source slice live fetch is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "items": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_graph_search(self, args: Dict[str, Any]) -> str:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return tool_error("Missing required parameter: query")
+        limit = _bounded_int(args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT)
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so graph search is unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "items": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_memory_search(
+            query=query,
+            domain="artifacts",
+            limit=limit,
+            include_raw_chunks=False,
+        )
+        if backend_result is not None:
+            result = _tool_result_from_backend_search(backend_result)
+            result["tool_domain"] = "graph"
+            return tool_result(result)
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend graph live search is unavailable.",
             "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
             "items": [],
         }

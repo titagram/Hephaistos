@@ -1702,3 +1702,38 @@ Verifiche eseguite:
 - Remoto completo Hades + plugin auth:
   `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
   passato: `42 passed / 438 assertions`.
+
+## Esecuzione workflow agent bug diagnosis Hades - 2026-07-07
+
+Stato: avviata la slice P0-6 del piano "Bug Root Cause Awareness".
+
+Integrazione Hades locale:
+
+- Provider memoria: aggiunto tool `hades_backend_graph_search`, live-only,
+  implementato sopra backend artifact search (`domain=artifacts`) per route,
+  symbol, graph edge e artifact PHP graph.
+- Provider memoria: `hades_backend_source_slice_fetch` e'
+  disponibile nel workflow diagnosis e resta live-only senza cache fallback.
+- Nuova skill built-in:
+  `skills/autonomous-ai-agents/hades-bug-diagnosis/SKILL.md`.
+- La skill impone ordine operativo:
+  awareness status -> bug evidence -> graph search -> source slice fetch ->
+  diagnosis strutturata con root cause, mechanism, evidence refs, freshness,
+  confidence e next verification.
+- Guardrail espliciti: niente line-level cause senza source slice current,
+  niente call path esatto senza graph current, niente raw chunks come evidence
+  automatico.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py`
+  passato: `18 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato.
+
+Resta fuori da questa slice:
+
+- Tool/backend endpoint per `hades_backend_diagnosis_report_create`.
+- Suite no-codebase E2E P0-7 con bug fixture e valutazione strutturata.

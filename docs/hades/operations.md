@@ -184,6 +184,11 @@ hades doctor
 hades logs --level WARNING --session latest
 ```
 
+When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
+or follow the same order manually: project awareness status, bug evidence
+search, graph search, minimal source slice fetch, then a structured diagnosis
+with evidence refs and confidence.
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,

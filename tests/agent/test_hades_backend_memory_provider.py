@@ -119,6 +119,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
     assert [schema["name"] for schema in provider.get_tool_schemas()] == [
         "hades_backend_project_memory_search",
         "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
         "hades_backend_project_awareness_status",
     ]
@@ -247,6 +248,74 @@ def test_hades_backend_memory_search_tool_prefers_live_backend(monkeypatch, tmp_
     assert fake.calls[1]["limit"] == 5
     assert fake.calls[1]["workspace_binding_id"] == "wb_1"
     assert fake.closed == 2
+
+
+def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def memory_search(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "graph_search_v1",
+                "etag": "graph_search_v1",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "include_raw_chunks": payload["include_raw_chunks"],
+                "count": 1,
+                "candidate_count": 1,
+                "truncated": False,
+                "raw_chunks_omitted": 0,
+                "freshness": {"index_status": "live_query"},
+                "items": [
+                    {
+                        "id": "artifact_1",
+                        "domain": "artifacts",
+                        "schema": "hades.php_graph.v1",
+                        "source": "hades.php_graph.v1",
+                        "summary": "GET /orders/{order} -> OrderController@show",
+                        "score": 21,
+                        "raw_chunk": False,
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderController show", "limit": 4},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["tool_domain"] == "graph"
+    assert result["domain"] == "artifacts"
+    assert result["items"][0]["schema"] == "hades.php_graph.v1"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "query": "OrderController show",
+            "domain": "artifacts",
+            "limit": 4,
+            "include_raw_chunks": False,
+        }
+    ]
+    assert fake.closed == 1
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):
