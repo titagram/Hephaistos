@@ -294,6 +294,7 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     workspace = tmp_path / "repo"
     workspace.mkdir()
     (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    head_commit = "f" * 40
 
     with hdb.connect_closing() as conn:
         hdb.save_agent(
@@ -315,7 +316,7 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
             repo_root=str(workspace),
             git_remote_display="",
             git_remote_hash="",
-            head_commit="",
+            head_commit=head_commit,
             backend_workspace_binding_id="wb_1",
         )
 
@@ -373,6 +374,9 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     assert fake.artifacts[0]["schema"] == "hades.git_tree.v1"
     assert fake.artifacts[0]["job_id"] == "job_tree"
     assert fake.artifacts[0]["workspace_binding_id"] == "wb_1"
+    assert fake.artifacts[0]["artifact"]["head_commit"] == head_commit
+    assert fake.artifacts[0]["artifact"]["indexed_head_commit"] == head_commit
+    assert fake.artifacts[0]["artifact"]["workspace_head_commit"] == head_commit
     assert fake.results[0][0] == "job_tree"
     assert events[0].event_id == "evt_1"
     assert events[0].event_type == "proposal.reviewed"

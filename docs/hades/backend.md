@@ -47,6 +47,21 @@ count, retention class, and occurrence timestamp. This data is searchable by the
 agent through a service-gated provider tool and is not injected into ordinary
 automatic memory recall.
 
+## Project Awareness
+
+The backend exposes `GET /api/hades/v1/project-awareness/status` for a linked
+workspace. The response reports freshness and coverage for shared memory,
+artifacts, bug evidence, source slices, and code graph data. It also returns
+`overall_status`, `diagnosable_without_source`, stale reasons, and concrete
+actions.
+
+The local agent can call the service-gated
+`hades_backend_project_awareness_status` tool. Treat `stale`, `unknown`,
+`missing`, or `partial` coverage as a hard warning before making exact root
+cause, call-path, owner-method, or line-level claims without source access.
+`hades backend sync` uploads artifacts with the linked workspace HEAD commit so
+the backend can distinguish current indexes from stale ones.
+
 ## Status
 
 Use:

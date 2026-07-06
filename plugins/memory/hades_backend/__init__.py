@@ -26,6 +26,7 @@ AUTO_PREFETCH_LIMIT = 8
 TOOL_RESULT_LIMIT = 20
 SEARCH_TOOL_NAME = "hades_backend_project_memory_search"
 BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
+PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 RAW_CHUNK_DOMAINS = {
     "backend_wiki_chunks",
     "chunk",
@@ -156,6 +157,22 @@ BUG_EVIDENCE_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+PROJECT_AWARENESS_STATUS_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": PROJECT_AWARENESS_STATUS_TOOL_NAME,
+    "description": (
+        "Read the linked Hades backend project-awareness gate for this workspace. "
+        "Use this before precise root-cause claims or source-free diagnosis to "
+        "check whether memory, indexed artifacts, code graph, source slices, and "
+        "bug evidence are current, stale, partial, or missing. Results are live "
+        "backend data; there is no local cache fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
 
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
@@ -187,8 +204,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "Use recalled project memory as background context; the Hades "
             "backend remains the authoritative source of shared memory. "
             "Automatic recall is compact and excludes raw source/wiki chunks; "
-            "search project memory or bug evidence explicitly when exact "
-            "evidence is needed."
+            "search project memory, bug evidence, or project awareness status "
+            "explicitly when exact evidence or diagnosis readiness is needed."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -261,9 +278,15 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_TOOL_SCHEMA, BUG_EVIDENCE_SEARCH_TOOL_SCHEMA]
+        return [
+            SEARCH_TOOL_SCHEMA,
+            BUG_EVIDENCE_SEARCH_TOOL_SCHEMA,
+            PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
+        ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == PROJECT_AWARENESS_STATUS_TOOL_NAME:
+            return self._handle_project_awareness_status()
         if tool_name == BUG_EVIDENCE_SEARCH_TOOL_NAME:
             return self._handle_bug_evidence_search(args)
         if tool_name != SEARCH_TOOL_NAME:
@@ -343,6 +366,38 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "truncated": total > len(items),
             "raw_chunks_omitted": raw_omitted,
             "items": items,
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_project_awareness_status(self) -> str:
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so project awareness status is unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                }
+            )
+
+        backend_result, backend_error = self._backend_project_awareness_status()
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_project_awareness_status(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend project awareness status is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
         }
         if backend_error:
             result["backend_live_error"] = backend_error
@@ -498,6 +553,24 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     kind=kind or None,
                     bug_report_id=bug_report_id or None,
                     limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_project_awareness_status(self) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.project_awareness_status(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -878,6 +951,28 @@ def _tool_result_from_backend_bug_evidence_search(response: dict[str, Any]) -> d
     freshness = response.get("freshness")
     if isinstance(freshness, dict):
         result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_project_awareness_status(response: dict[str, Any]) -> dict[str, Any]:
+    freshness = response.get("freshness")
+    coverage = response.get("coverage")
+    actions = response.get("actions")
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "workspace_head_commit": response.get("workspace_head_commit"),
+        "overall_status": response.get("overall_status"),
+        "diagnosable_without_source": bool(response.get("diagnosable_without_source")),
+        "server_time": response.get("server_time"),
+    }
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
+    if isinstance(coverage, dict):
+        result["coverage"] = coverage
+    if isinstance(actions, list):
+        result["actions"] = [str(action) for action in actions if str(action).strip()]
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 

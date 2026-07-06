@@ -441,6 +441,12 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
     schema = str(artifact.get("schema") or "").strip()
     if schema not in {"hades.git_tree.v1", "hades.symbols.v1"}:
         return (0, 0)
+    artifact_payload = dict(artifact)
+    head_commit = str(binding.head_commit or "").strip()
+    if head_commit:
+        artifact_payload.setdefault("head_commit", head_commit)
+        artifact_payload.setdefault("indexed_head_commit", head_commit)
+        artifact_payload.setdefault("workspace_head_commit", head_commit)
     try:
         client.upload_artifact(
             project_id=binding.project_id,
@@ -448,9 +454,9 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
             workspace_binding_id=binding.backend_workspace_binding_id,
             job_id=job_id,
             schema=schema,
-            artifact=artifact,
-            truncated=bool(artifact.get("truncated", False)),
-            redactions=int(artifact.get("redactions", 0) or 0),
+            artifact=artifact_payload,
+            truncated=bool(artifact_payload.get("truncated", False)),
+            redactions=int(artifact_payload.get("redactions", 0) or 0),
         )
         logger.info(
             "hades_backend.artifact.uploaded",
@@ -460,8 +466,8 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                 "hades_workspace_binding_id": binding.backend_workspace_binding_id,
                 "hades_job_id": job_id,
                 "hades_schema": schema,
-                "hades_truncated": bool(artifact.get("truncated", False)),
-                "hades_redactions": int(artifact.get("redactions", 0) or 0),
+                "hades_truncated": bool(artifact_payload.get("truncated", False)),
+                "hades_redactions": int(artifact_payload.get("redactions", 0) or 0),
             },
         )
         return (1, 0)

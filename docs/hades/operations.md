@@ -83,6 +83,24 @@ tool when diagnosing a bug. There is intentionally no local cache fallback for
 bug evidence search: stale or unavailable evidence must be surfaced as degraded
 state rather than treated as authoritative.
 
+## Project Awareness Gate
+
+Use `hades_backend_project_awareness_status` from the agent, or the backend API
+`GET /api/hades/v1/project-awareness/status`, before precise source-free bug
+diagnosis. The status distinguishes:
+
+- `freshness.status`: `current`, `stale`, `missing`, or `unknown`.
+- `coverage.memory`, `coverage.artifacts`, `coverage.bug_evidence`,
+  `coverage.code_graph`, and `coverage.source_slices`.
+- `diagnosable_without_source`: true only when the backend has enough current
+  evidence to support exact source-free diagnosis.
+
+If freshness is stale/unknown or coverage is missing/partial, the agent should
+state that limitation and gather/index the missing evidence before claiming a
+precise cause. A successful `hades backend sync` sends artifact HEAD metadata
+from the linked workspace binding so the backend can clear stale artifact
+warnings when the index matches the current checkout.
+
 ## Lifecycle And Cleanup
 
 Local Hades backend state has explicit retention classes:

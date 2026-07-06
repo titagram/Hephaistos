@@ -119,6 +119,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
     assert [schema["name"] for schema in provider.get_tool_schemas()] == [
         "hades_backend_project_memory_search",
         "hades_backend_bug_evidence_search",
+        "hades_backend_project_awareness_status",
     ]
 
 
@@ -410,6 +411,100 @@ def test_hades_backend_bug_evidence_search_tool_uses_short_timeout(monkeypatch, 
     assert timeouts == [2.0]
 
 
+def test_hades_backend_project_awareness_status_tool_reads_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def project_awareness_status(self, **payload):
+            self.calls.append(payload)
+            return {
+                "protocol_version": "v1",
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "workspace_head_commit": "abc123",
+                "overall_status": "partial",
+                "diagnosable_without_source": False,
+                "freshness": {
+                    "status": "current",
+                    "workspace_head_commit": "abc123",
+                    "artifact_head_commit": "abc123",
+                    "index_status": "live_query",
+                    "stale_reason": None,
+                },
+                "coverage": {
+                    "memory": {"status": "current", "count": 2},
+                    "artifacts": {"status": "current", "count": 1},
+                    "bug_evidence": {"status": "missing", "count": 0},
+                    "code_graph": {"status": "partial", "count": 1},
+                    "source_slices": {"status": "missing", "count": 0},
+                },
+                "actions": ["Capture typed bug evidence before precise root-cause claims."],
+                "server_time": "2026-07-07T12:00:00Z",
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_awareness_status",
+            {},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["overall_status"] == "partial"
+    assert result["diagnosable_without_source"] is False
+    assert result["freshness"]["status"] == "current"
+    assert result["coverage"]["code_graph"]["status"] == "partial"
+    assert "Capture typed bug evidence" in result["actions"][0]
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+        }
+    ]
+    assert fake.closed == 1
+
+
+def test_hades_backend_project_awareness_status_tool_uses_short_timeout(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def project_awareness_status(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "overall_status": "missing_index",
+                "diagnosable_without_source": False,
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return FakeClient()
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    provider.handle_tool_call("hades_backend_project_awareness_status", {})
+
+    assert timeouts == [2.0]
+
+
 def test_hades_backend_memory_search_tool_allows_artifacts_domain(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
@@ -531,12 +626,19 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
             {"query": "stack trace"},
         )
     )
+    awareness_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_awareness_status",
+            {},
+        )
+    )
 
     assert "not linked" in block
     assert result["status"] == "unmapped_project"
     assert result["items"] == []
     assert bug_result["status"] == "unmapped_project"
     assert bug_result["items"] == []
+    assert awareness_result["status"] == "unmapped_project"
 
 
 def test_hades_backend_memory_write_creates_local_proposal(monkeypatch, tmp_path):

@@ -1545,3 +1545,64 @@ Nota operativa:
   virgolette, causata dal metodo di patch iniziale via shell. Corretto
   sostituendo la migration con diff generato dal file remoto reale; il test
   Hades M3 ora passa.
+
+## Esecuzione freshness/coverage Hades - 2026-07-07
+
+Stato: completata la slice P0-3 del piano "Bug Root Cause Awareness": lo stato
+di project awareness e' ora una superficie API/tool consultabile prima di claim
+precisi senza accesso al source code.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`, senza push.
+- Nuovo controller:
+  `app/Http/Controllers/Hades/ProjectAwarenessStatusController.php`.
+- Nuovo service:
+  `app/Services/Hades/HadesProjectAwareness.php`.
+- Nuova route Hades v1:
+  `GET /api/hades/v1/project-awareness/status`.
+- Lo status calcola freshness confrontando `hades_workspace_bindings.head_commit`
+  con il commit indicizzato negli artifact quando presente.
+- La response espone `freshness.status`, `stale_reason`, coverage per memoria,
+  artifact, bug evidence, source slices e code graph, `overall_status`,
+  `diagnosable_without_source` e azioni correttive.
+- `MemorySearchController` e `BugEvidenceController` riusano lo stesso calcolo
+  di freshness, mantenendo `index_status=live_query`.
+- `CapabilitiesController` e `HealthController` espongono la nuova route.
+
+Integrazione Hades locale:
+
+- `HadesBackendClient` espone `project_awareness_status()`.
+- Il provider memoria `hades_backend` espone il nuovo tool service-gated
+  `hades_backend_project_awareness_status`.
+- Il tool usa timeout live di 2 secondi e non ha cache fallback, come bug
+  evidence.
+- `hades backend sync` arricchisce gli artifact caricati con
+  `head_commit`, `indexed_head_commit` e `workspace_head_commit` dal binding
+  locale quando disponibile.
+- La fixture OpenAPI locale documenta il nuovo endpoint.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `58 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_client.py hermes_cli/hades_backend_sync.py plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/docs_audit.py`
+  passato: `docs audit passed: 18 required docs checked`.
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `14 passed / 169 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `38 passed / 382 assertions`.
+- Remoto Pint:
+  `vendor/bin/pint --test app/Services/Hades/HadesProjectAwareness.php app/Http/Controllers/Hades/ProjectAwarenessStatusController.php app/Http/Controllers/Hades/MemorySearchController.php app/Http/Controllers/Hades/BugEvidenceController.php app/Http/Controllers/Hades/CapabilitiesController.php app/Http/Controllers/Hades/HealthController.php routes/api.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Route list remota: `php artisan route:list --path=hades` mostra 28 route e
+  include `GET|HEAD api/hades/v1/project-awareness/status`.
+- Smoke pubblico: `https://home-sweet-home.cloud/api/hades/v1/health` risponde
+  `HTTP/2 200` e include `project_awareness_status`.
