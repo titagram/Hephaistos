@@ -117,7 +117,8 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
     assert "/api/hades/v1" in context
     assert "RAW route dump" not in context
     assert [schema["name"] for schema in provider.get_tool_schemas()] == [
-        "hades_backend_project_memory_search"
+        "hades_backend_project_memory_search",
+        "hades_backend_bug_evidence_search",
     ]
 
 
@@ -282,6 +283,133 @@ def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_pa
     assert timeouts == [2.0]
 
 
+def test_hades_backend_bug_evidence_search_tool_prefers_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def bug_evidence_search(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "bug_evidence_search_v1",
+                "etag": "bug_evidence_search_v1",
+                "query": payload["query"],
+                "kind": payload["kind"],
+                "bug_report_id": payload["bug_report_id"],
+                "count": 1,
+                "candidate_count": 1,
+                "truncated": False,
+                "freshness": {
+                    "workspace_head_commit": "abc123",
+                    "index_status": "live_query",
+                },
+                "server_time": "2026-07-07T12:00:00Z",
+                "items": [
+                    {
+                        "id": "evidence_1",
+                        "bug_report_id": "bug_1",
+                        "kind": "stack_trace",
+                        "summary": "Call to member function active() on null in SecurityActivityCategoryController.",
+                        "source": "laravel.log",
+                        "payload": {
+                            "frames": [
+                                {
+                                    "file": "app/Http/Controllers/Taxonomy/SecurityActivityCategoryController.php",
+                                    "line": 42,
+                                }
+                            ]
+                        },
+                        "sha256": "a" * 64,
+                        "redactions": 1,
+                        "retention_class": "stack_trace",
+                        "occurred_at": "2026-07-07T11:58:00Z",
+                        "score": 42,
+                        "version": "bug_evidence_1",
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_bug_evidence_search",
+            {
+                "query": "SecurityActivityCategoryController active null",
+                "kind": "stack_trace",
+                "bug_report_id": "bug_1",
+                "limit": 5,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is False
+    assert result["backend_version"] == "bug_evidence_search_v1"
+    assert result["kind"] == "stack_trace"
+    assert result["bug_report_id"] == "bug_1"
+    assert result["freshness"]["index_status"] == "live_query"
+    assert result["items"][0]["id"] == "evidence_1"
+    assert result["items"][0]["payload"]["frames"][0]["line"] == 42
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "query": "SecurityActivityCategoryController active null",
+            "kind": "stack_trace",
+            "bug_report_id": "bug_1",
+            "limit": 5,
+        }
+    ]
+    assert fake.closed == 1
+
+
+def test_hades_backend_bug_evidence_search_tool_uses_short_timeout(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def bug_evidence_search(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "bug_evidence_search_v1",
+                "query": payload["query"],
+                "count": 0,
+                "candidate_count": 0,
+                "items": [],
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return FakeClient()
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    provider.handle_tool_call(
+        "hades_backend_bug_evidence_search",
+        {"query": "stack trace"},
+    )
+
+    assert timeouts == [2.0]
+
+
 def test_hades_backend_memory_search_tool_allows_artifacts_domain(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
@@ -397,10 +525,18 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
             {"query": "routes"},
         )
     )
+    bug_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_bug_evidence_search",
+            {"query": "stack trace"},
+        )
+    )
 
     assert "not linked" in block
     assert result["status"] == "unmapped_project"
     assert result["items"] == []
+    assert bug_result["status"] == "unmapped_project"
+    assert bug_result["items"] == []
 
 
 def test_hades_backend_memory_write_creates_local_proposal(monkeypatch, tmp_path):

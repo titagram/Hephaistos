@@ -1487,3 +1487,61 @@ Aggiornamento verifica backend Laravel 2026-07-02:
   implementata come sostituzione completa dei riferimenti opzionali; se il
   frontend invia patch parziali senza `repository_id`, `task_id` o `run_id`, i
   riferimenti esistenti vengono azzerati.
+
+## Esecuzione bug evidence Hades - 2026-07-07
+
+Stato: completata la prima slice P0 del piano "Bug Root Cause Awareness":
+substrato tipizzato per bug report/evidence e tool agent per consultarlo.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`, senza push.
+- Nuova migration:
+  `database/migrations/2026_07_07_000001_create_hades_bug_evidence_tables.php`.
+- Nuove tabelle:
+  `hades_bug_reports` e `hades_bug_evidence_items`.
+- Nuovi controller:
+  `app/Http/Controllers/Hades/BugReportController.php` e
+  `app/Http/Controllers/Hades/BugEvidenceController.php`.
+- Nuove route Hades v1:
+  - `POST /api/hades/v1/bug-reports`
+  - `GET /api/hades/v1/bug-reports/{bugReport}`
+  - `POST /api/hades/v1/bug-evidence`
+  - `GET /api/hades/v1/bug-evidence/search`
+- Tutte le operazioni sono scoped al token agent, `project_id` e
+  `workspace_binding_id` linked.
+- Bug evidence supporta kind tipizzati: stack trace, log excerpt, failing test,
+  HTTP trace, browser console, deploy version, config snapshot, user steps,
+  screenshot reference e `other`.
+- Ogni evidence item conserva payload bounded, `sha256`, `redactions`,
+  `retention_class`, source e timestamp. La search restituisce freshness con
+  `workspace_head_commit` e `index_status=live_query`.
+- `CapabilitiesController` e `HealthController` espongono i nuovi endpoint.
+
+Integrazione Hades locale:
+
+- `HadesBackendClient` espone `create_bug_report()`, `get_bug_report()`,
+  `create_bug_evidence()` e `bug_evidence_search()`.
+- Il provider memoria `hades_backend` espone il nuovo tool service-gated
+  `hades_backend_bug_evidence_search`.
+- Il tool usa timeout live di 2 secondi e non ha cache fallback, per evitare che
+  bug evidence stale venga trattata come autorevole.
+- I payload evidence vengono restituiti bounded; se superano budget, il tool
+  produce excerpt marcato `truncated`.
+- La fixture OpenAPI locale documenta i quattro endpoint nuovi.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`
+  passato: `41 passed`.
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `11 passed / 129 assertions`.
+
+Nota operativa:
+
+- Il primo run remoto ha fallito per una migration con literal PHP senza
+  virgolette, causata dal metodo di patch iniziale via shell. Corretto
+  sostituendo la migration con diff generato dal file remoto reale; il test
+  Hades M3 ora passa.

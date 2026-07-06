@@ -191,6 +191,21 @@ class HadesBackendClient:
     def import_memory_bundle(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "memory/import-bundles", json_body=payload)
 
+    def create_bug_report(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "bug-reports", json_body=payload)
+
+    def get_bug_report(self, bug_report_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(bug_report_id or "").strip()
+        if not clean:
+            raise ValueError("bug report id is required")
+        return self._request("GET", f"bug-reports/{clean}", params=payload)
+
+    def create_bug_evidence(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "bug-evidence", json_body=payload)
+
+    def bug_evidence_search(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "bug-evidence/search", params=payload)
+
     def pull_jobs(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "agent/jobs", params=payload)
 

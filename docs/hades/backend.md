@@ -27,6 +27,26 @@ If the backend refuses or conflicts a proposal, local status must show the
 reason. If the backend is unavailable, Hades uses local memory and may use stale
 shared memory cache as degraded context.
 
+## Bug Evidence
+
+Bug reports and bug evidence are stored separately from generic shared memory.
+Use bug evidence for root-cause investigation inputs such as stack traces, log
+excerpts, failing tests, HTTP traces, browser console output, deploy versions,
+config snapshots, user reproduction steps, and screenshot references.
+
+The Hades v1 backend exposes:
+
+- `POST /api/hades/v1/bug-reports`
+- `GET /api/hades/v1/bug-reports/{bug_report_id}`
+- `POST /api/hades/v1/bug-evidence`
+- `GET /api/hades/v1/bug-evidence/search`
+
+Each item is scoped to the authenticated project and linked workspace binding.
+Evidence carries a kind, bounded summary/payload, source, sha256, redaction
+count, retention class, and occurrence timestamp. This data is searchable by the
+agent through a service-gated provider tool and is not injected into ordinary
+automatic memory recall.
+
 ## Status
 
 Use:

@@ -60,6 +60,29 @@ piggyback run is asynchronous, quiet, and fail-open: chat continues even if the
 backend is offline. Repeated failures are recorded in local sync state and
 surface as a degraded backend action in `hades backend status --json`.
 
+## Bug Evidence
+
+Bug evidence is the first production slice for no-codebase root-cause
+investigation. Store observations as typed evidence instead of generic memory
+notes:
+
+- `stack_trace`
+- `log_excerpt`
+- `failing_test`
+- `http_request`
+- `http_response`
+- `browser_console`
+- `deploy_version`
+- `config_snapshot`
+- `user_steps`
+- `screenshot_ref`
+
+Evidence is project/workspace scoped and should stay bounded and redacted. The
+local agent can search it with the `hades_backend_bug_evidence_search` provider
+tool when diagnosing a bug. There is intentionally no local cache fallback for
+bug evidence search: stale or unavailable evidence must be surfaced as degraded
+state rather than treated as authoritative.
+
 ## Lifecycle And Cleanup
 
 Local Hades backend state has explicit retention classes:

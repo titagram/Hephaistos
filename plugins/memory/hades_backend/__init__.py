@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -24,6 +25,7 @@ DELETE_ACTIONS = {"remove", "delete"}
 AUTO_PREFETCH_LIMIT = 8
 TOOL_RESULT_LIMIT = 20
 SEARCH_TOOL_NAME = "hades_backend_project_memory_search"
+BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
 RAW_CHUNK_DOMAINS = {
     "backend_wiki_chunks",
     "chunk",
@@ -62,6 +64,20 @@ DOMAIN_ALIASES = {
     "wiki_revision": "wiki",
 }
 SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks", "artifacts")
+BUG_EVIDENCE_KINDS = (
+    "all",
+    "stack_trace",
+    "log_excerpt",
+    "failing_test",
+    "http_request",
+    "http_response",
+    "browser_console",
+    "deploy_version",
+    "config_snapshot",
+    "user_steps",
+    "screenshot_ref",
+    "other",
+)
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 
 SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
@@ -102,6 +118,44 @@ SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+BUG_EVIDENCE_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": BUG_EVIDENCE_SEARCH_TOOL_NAME,
+    "description": (
+        "Search linked Hades backend bug evidence such as stack traces, log "
+        "excerpts, failing tests, HTTP traces, browser console output, deploy "
+        "versions, and user reproduction steps. Use this before making precise "
+        "root-cause claims about a project bug. Results are live backend data; "
+        "there is no local cache fallback for bug evidence."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search text from the symptom, exception, frame, route, test, log, or deploy evidence.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": list(BUG_EVIDENCE_KINDS),
+                "default": "all",
+                "description": "Restrict search to one bug evidence kind.",
+            },
+            "bug_report_id": {
+                "type": "string",
+                "description": "Optional Hades bug report id to scope the search.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": TOOL_RESULT_LIMIT,
+                "default": 8,
+                "description": "Maximum number of bounded evidence results to return.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
@@ -133,7 +187,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "Use recalled project memory as background context; the Hades "
             "backend remains the authoritative source of shared memory. "
             "Automatic recall is compact and excludes raw source/wiki chunks; "
-            "search project memory explicitly when exact evidence is needed."
+            "search project memory or bug evidence explicitly when exact "
+            "evidence is needed."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -206,9 +261,11 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_TOOL_SCHEMA]
+        return [SEARCH_TOOL_SCHEMA, BUG_EVIDENCE_SEARCH_TOOL_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == BUG_EVIDENCE_SEARCH_TOOL_NAME:
+            return self._handle_bug_evidence_search(args)
         if tool_name != SEARCH_TOOL_NAME:
             return tool_error(f"Unknown Hades backend memory tool: {tool_name}")
         query = str(args.get("query") or "").strip()
@@ -291,6 +348,54 @@ class HadesBackendMemoryProvider(MemoryProvider):
             result["backend_live_error"] = backend_error
         return tool_result(result)
 
+    def _handle_bug_evidence_search(self, args: Dict[str, Any]) -> str:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return tool_error("Missing required parameter: query")
+        kind = str(args.get("kind") or "all").strip()
+        if kind not in BUG_EVIDENCE_KINDS:
+            return tool_error(f"Unsupported bug evidence kind: {kind}", allowed_kinds=list(BUG_EVIDENCE_KINDS))
+        limit = _bounded_int(args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT)
+        bug_report_id = str(args.get("bug_report_id") or "").strip()
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so shared bug evidence is unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "items": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_bug_evidence_search(
+            query=query,
+            kind="" if kind == "all" else kind,
+            bug_report_id=bug_report_id,
+            limit=limit,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_bug_evidence_search(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend bug evidence live search is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "items": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
     def on_memory_write(
         self,
         action: str,
@@ -364,6 +469,35 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     domain=domain,
                     limit=limit,
                     include_raw_chunks=include_raw_chunks,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_bug_evidence_search(
+        self,
+        *,
+        query: str,
+        kind: str,
+        bug_report_id: str,
+        limit: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.bug_evidence_search(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    query=query,
+                    kind=kind or None,
+                    bug_report_id=bug_report_id or None,
+                    limit=limit,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -675,6 +809,69 @@ def _tool_result_from_backend_search(response: dict[str, Any]) -> dict[str, Any]
         "candidate_count": candidate_count,
         "truncated": bool(response.get("truncated")),
         "raw_chunks_omitted": raw_omitted,
+        "server_time": response.get("server_time"),
+        "items": items,
+    }
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _bounded_payload(value: Any) -> Any:
+    if not isinstance(value, (dict, list)):
+        return None
+    encoded = json.dumps(value, sort_keys=True, default=str)
+    if len(encoded) <= 4000:
+        return value
+    return {
+        "truncated": True,
+        "excerpt": _compact_text(encoded, max_chars=4000),
+    }
+
+
+def _bug_evidence_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
+    payload = _bounded_payload(item.get("payload"))
+    result: dict[str, Any] = {
+        "id": _item_id(item),
+        "bug_report_id": item.get("bug_report_id"),
+        "kind": item.get("kind"),
+        "summary": _compact_text(item.get("summary"), max_chars=1000),
+        "source": item.get("source"),
+        "payload": payload,
+        "sha256": item.get("sha256"),
+        "redactions": item.get("redactions"),
+        "retention_class": item.get("retention_class"),
+        "occurred_at": item.get("occurred_at"),
+        "updated_at": item.get("updated_at"),
+        "version": item.get("version"),
+        "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_bug_evidence_search(response: dict[str, Any]) -> dict[str, Any]:
+    items = [_bug_evidence_item_from_backend(item) for item in _backend_items(response)]
+    count = _bounded_int(response.get("count"), default=len(items), minimum=0, maximum=1_000_000)
+    candidate_count = _bounded_int(
+        response.get("candidate_count"),
+        default=count,
+        minimum=0,
+        maximum=1_000_000,
+    )
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "backend_version": response.get("version"),
+        "backend_etag": response.get("etag"),
+        "query": response.get("query", ""),
+        "kind": response.get("kind") or "all",
+        "bug_report_id": response.get("bug_report_id"),
+        "searched_cache_only": False,
+        "count": count,
+        "candidate_count": candidate_count,
+        "truncated": bool(response.get("truncated")),
         "server_time": response.get("server_time"),
         "items": items,
     }
