@@ -1,0 +1,273 @@
+{
+  "schema": "hades.no_codebase_eval.v1",
+  "fixtures": [
+    {
+      "id": "laravel_service_dependency_null",
+      "title": "Laravel route 500 from null service dependency",
+      "expected_root_cause_id": "rc.laravel.order_customer_null",
+      "expected_confidence": "high",
+      "required_evidence_refs": [
+        "bug_evidence:ev.order.stack",
+        "bug_evidence:ev.order.http",
+        "graph:graph.route.orders.show",
+        "source_slice:slice.order_controller.show"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ]
+    },
+    {
+      "id": "laravel_schema_mismatch",
+      "title": "Laravel migration/schema mismatch",
+      "expected_root_cause_id": "rc.laravel.orders_status_column_missing",
+      "expected_confidence": "high",
+      "required_evidence_refs": [
+        "bug_evidence:ev.schema.sqlstate",
+        "bug_evidence:ev.schema.failing_test",
+        "graph:graph.model.order_status",
+        "source_slice:slice.order_migration_status"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ]
+    },
+    {
+      "id": "laravel_policy_mismatch",
+      "title": "Laravel auth policy mismatch",
+      "expected_root_cause_id": "rc.laravel.invoice_policy_guard_mismatch",
+      "expected_confidence": "medium",
+      "required_evidence_refs": [
+        "bug_evidence:ev.policy.http403",
+        "bug_evidence:ev.policy.user_steps",
+        "graph:graph.policy.invoice_update",
+        "source_slice:slice.invoice_policy.update"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ]
+    },
+    {
+      "id": "laravel_queue_serialization_failure",
+      "title": "Laravel queue job serialization failure",
+      "expected_root_cause_id": "rc.laravel.shipment_job_unserializable_closure",
+      "expected_confidence": "high",
+      "required_evidence_refs": [
+        "bug_evidence:ev.queue.worker_log",
+        "bug_evidence:ev.queue.failed_job",
+        "graph:graph.job.shipment_notify",
+        "source_slice:slice.shipment_job.handle"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ]
+    },
+    {
+      "id": "python_config_missing",
+      "title": "Python FastAPI missing redacted config",
+      "expected_root_cause_id": "rc.python.fastapi_missing_payment_endpoint",
+      "expected_confidence": "medium",
+      "required_evidence_refs": [
+        "bug_evidence:ev.python.config_log",
+        "bug_evidence:ev.python.failing_test",
+        "graph:graph.python.payment_client",
+        "source_slice:slice.python.payment_settings"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ]
+    },
+    {
+      "id": "incomplete_missing_source_slice",
+      "title": "Stack trace and graph exist but source slice is missing",
+      "expected_root_cause_id": null,
+      "expected_confidence": "insufficient",
+      "required_evidence_refs": [
+        "bug_evidence:ev.missing_slice.stack",
+        "graph:graph.missing_slice.controller"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "expected_missing_evidence": [
+        "source_slice"
+      ]
+    },
+    {
+      "id": "incomplete_stale_graph",
+      "title": "Evidence exists but indexed graph is stale",
+      "expected_root_cause_id": null,
+      "expected_confidence": "insufficient",
+      "required_evidence_refs": [
+        "bug_evidence:ev.stale_graph.stack"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "expected_missing_evidence": [
+        "current_graph"
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "fixture_id": "laravel_service_dependency_null",
+      "root_cause_id": "rc.laravel.order_customer_null",
+      "confidence": "high",
+      "evidence_refs": [
+        "bug_evidence:ev.order.stack",
+        "bug_evidence:ev.order.http",
+        "graph:graph.route.orders.show",
+        "source_slice:slice.order_controller.show"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "laravel_schema_mismatch",
+      "root_cause_id": "rc.laravel.orders_status_column_missing",
+      "confidence": "high",
+      "evidence_refs": [
+        "bug_evidence:ev.schema.sqlstate",
+        "bug_evidence:ev.schema.failing_test",
+        "graph:graph.model.order_status",
+        "source_slice:slice.order_migration_status"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "laravel_policy_mismatch",
+      "root_cause_id": "rc.laravel.invoice_policy_guard_mismatch",
+      "confidence": "medium",
+      "evidence_refs": [
+        "bug_evidence:ev.policy.http403",
+        "bug_evidence:ev.policy.user_steps",
+        "graph:graph.policy.invoice_update",
+        "source_slice:slice.invoice_policy.update"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "laravel_queue_serialization_failure",
+      "root_cause_id": "rc.laravel.shipment_job_unserializable_closure",
+      "confidence": "high",
+      "evidence_refs": [
+        "bug_evidence:ev.queue.worker_log",
+        "bug_evidence:ev.queue.failed_job",
+        "graph:graph.job.shipment_notify",
+        "source_slice:slice.shipment_job.handle"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "python_config_missing",
+      "root_cause_id": "rc.python.fastapi_missing_payment_endpoint",
+      "confidence": "medium",
+      "evidence_refs": [
+        "bug_evidence:ev.python.config_log",
+        "bug_evidence:ev.python.failing_test",
+        "graph:graph.python.payment_client",
+        "source_slice:slice.python.payment_settings"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "incomplete_missing_source_slice",
+      "root_cause_id": null,
+      "confidence": "insufficient",
+      "evidence_refs": [
+        "bug_evidence:ev.missing_slice.stack",
+        "graph:graph.missing_slice.controller"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "missing_evidence": [
+        "source_slice"
+      ],
+      "persisted_report": true
+    },
+    {
+      "fixture_id": "incomplete_stale_graph",
+      "root_cause_id": null,
+      "confidence": "insufficient",
+      "evidence_refs": [
+        "bug_evidence:ev.stale_graph.stack"
+      ],
+      "tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_graph_search",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "missing_evidence": [
+        "current_graph"
+      ],
+      "persisted_report": true
+    }
+  ]
+}

@@ -1758,4 +1758,36 @@ Verifiche eseguite:
 
 Resta fuori da questa slice:
 
-- Suite no-codebase E2E P0-7 con bug fixture e valutazione strutturata.
+- Completamento P0-7 remoto/CI della suite no-codebase con bug fixture e
+  valutazione strutturata; la prima slice locale e' tracciata sotto.
+
+## Esecuzione no-codebase evaluation suite Hades - 2026-07-07
+
+Stato: avviata la slice P0-7 del piano "Bug Root Cause Awareness".
+
+Integrazione locale:
+
+- Nuovo evaluator `hermes_cli/hades_no_codebase_eval.py` per confrontare output
+  diagnosis strutturati contro fixture no-codebase.
+- Nuova fixture `tests/fixtures/hades/no_codebase_bug_cases.json` con 7 casi:
+  5 bug completi e 2 casi insufficient-evidence.
+- Nuovo test `tests/agent/test_hades_bug_diagnosis_no_codebase.py`.
+- Il report calcola total/pass/fail, complete accuracy, insufficient accuracy,
+  evidence ref coverage, tool coverage, persistence coverage e violazioni
+  no-codebase.
+- Il gate fallisce se una run usa tool raw source/file/shell come `read_file`,
+  `rg`, `shell` o `terminal`.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `3 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_no_codebase_eval.py tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato.
+
+Resta fuori da questa slice:
+
+- Feature tests remoti P0-7 con SQLite in-memory.
+- CI gate dedicato lightweight.

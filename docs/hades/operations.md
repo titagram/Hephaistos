@@ -195,6 +195,16 @@ or follow the same order manually: project awareness status, bug evidence
 search, graph search, minimal source slice fetch, then a persisted structured
 diagnosis report with evidence refs and confidence.
 
+The local no-codebase release gate is:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/agent/test_hades_bug_diagnosis_no_codebase.py
+```
+
+It verifies five complete bug fixtures, two insufficient-evidence fixtures,
+evidence/tool/persistence coverage, and zero raw source/file/shell tool access.
+
 ## Artifacts
 
 `sync_git_tree` produces `hades.git_tree.v1` artifacts with path, size, hash,
