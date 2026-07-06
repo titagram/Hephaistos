@@ -245,6 +245,69 @@ Follow-up emersi da M1:
 - [ ] Aggiungere smoke Hades client reale con bootstrap token appena esiste il
   provisioning.
 
+## Esecuzione memoria search backend remoto - 2026-07-06
+
+Stato: completata la slice query-aware per shared memory Hades, con backend
+Laravel remoto e provider locale Hades collegati.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`.
+- Commit remoto: `98a1f63 feat: add Hades memory search endpoint`.
+- Route aggiunta: `GET /api/hades/v1/memory/search`, protetta da
+  `hades.agent` e `throttle:plugin-api-light`.
+- Controller aggiunto:
+  `backend/app/Http/Controllers/Hades/MemorySearchController.php`.
+- Contratto: richiede `project_id` e `workspace_binding_id`; accetta `query`,
+  `domain` (`all`, `project_memory`, `logbook`, `wiki`, `agent_notes`,
+  `source_chunks`), `limit` e `include_raw_chunks`.
+- Il controller verifica che il token agent sia scoped allo stesso progetto e
+  che il workspace binding sia linked per quell'agent.
+- Cerca in `project_memory_entries` e nelle revisioni wiki correnti
+  (`wiki_pages.current_revision_id` -> `wiki_revisions.id`).
+- I raw source/file chunks restano esclusi per default, anche quando matchano
+  la query; vengono restituiti solo con `include_raw_chunks=true`.
+- La response include `version`/`etag`, `candidate_count`,
+  `raw_chunks_omitted`, `freshness.workspace_head_commit`, `index_status` e
+  `server_time`, cosi' Hades puo' distinguere live search, cache e staleness.
+
+Integrazione Hades locale:
+
+- `HadesBackendClient` espone `memory_search()`.
+- Il provider memoria `hades_backend` prova prima la live search backend per
+  auto-recall e tool `hades_backend_project_memory_search`.
+- Se il backend non e' raggiungibile, non ha ancora la route o manca il token,
+  il provider degrada alla cache locale esistente e redige l'errore live.
+- Il tool result distingue `searched_cache_only: false` per risposte live e
+  `searched_cache_only: true` per fallback cache.
+- La fixture OpenAPI locale include `/api/hades/v1/memory/search`.
+
+Verifiche remote:
+
+- `php -l app/Http/Controllers/Hades/MemorySearchController.php`: passato.
+- `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`:
+  passato, `7 tests / 76 assertions`.
+- `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`:
+  passato, `31 tests / 289 assertions`.
+- `vendor/bin/pint --test app/Http/Controllers/Hades/MemorySearchController.php routes/api.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`:
+  passato.
+- `git diff --check`: passato.
+- `php artisan route:list --path=hades`: mostra
+  `GET|HEAD api/hades/v1/memory/search`.
+- Smoke pubblico `https://home-sweet-home.cloud/api/hades/v1/health`: HTTP
+  200.
+
+Verifiche locali:
+
+- `.venv/bin/python -m pytest tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato, `33 passed`.
+- `.venv/bin/python -m pytest tests/run_agent/test_run_agent.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato, `439 passed`.
+- `.venv/bin/python -m ruff check hermes_cli/hades_backend_client.py plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato.
+- `.venv/bin/python -m py_compile hermes_cli/hades_backend_client.py plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato.
+
 ## Migliorie emerse
 
 - [ ] Separare le tabelle Hades da `api_tokens.device_id` per supportare piu'

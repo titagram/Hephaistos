@@ -80,6 +80,28 @@ CLIENT_ROUTE_CASES = [
         "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
     },
     {
+        "method_name": "memory_search",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/memory/search",
+        "wire_path": "/api/hades/v1/memory/search",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "query": "hades routes",
+            "domain": "wiki",
+            "limit": 5,
+            "include_raw_chunks": False,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "query": "hades routes",
+            "domain": "wiki",
+            "limit": "5",
+            "include_raw_chunks": "false",
+        },
+    },
+    {
         "method_name": "create_memory_proposal",
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/memory/proposals",

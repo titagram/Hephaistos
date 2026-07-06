@@ -10,7 +10,8 @@ from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from hermes_cli import hades_backend_db as db
-from hermes_cli.hades_backend_runtime import current_agent
+from hermes_cli import hades_backend_runtime as runtime
+from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_backend_sync import run_backend_sync
 from tools.registry import tool_error, tool_result
 
@@ -109,7 +110,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return "hades_backend"
 
     def is_available(self) -> bool:
-        agent = current_agent()
+        agent = runtime.current_agent()
         return bool(agent and agent.capabilities.get("memory", True))
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -135,6 +136,14 @@ class HadesBackendMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._binding is None:
             return ""
+        backend_result, _backend_error = self._backend_memory_search(
+            query=query,
+            domain="all",
+            limit=AUTO_PREFETCH_LIMIT,
+            include_raw_chunks=False,
+        )
+        if backend_result is not None:
+            return _format_backend_prefetch(backend_result)
         cache = self._load_memory_cache()
         if cache is None or not cache.items:
             return (
@@ -225,18 +234,28 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 }
             )
 
+        backend_result, backend_error = self._backend_memory_search(
+            query=query,
+            domain=domain,
+            limit=limit,
+            include_raw_chunks=include_raw_chunks,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_search(backend_result))
+
         cache = self._load_memory_cache()
         if cache is None or not cache.items:
-            return tool_result(
-                {
-                    "status": "empty_cache",
-                    "project_id": self._binding.project_id,
-                    "workspace_binding_id": self._binding.backend_workspace_binding_id,
-                    "message": "No synced Hades backend memory snapshot is available locally.",
-                    "actions": ["Run `hades backend sync` to refresh project memory."],
-                    "items": [],
-                }
-            )
+            result = {
+                "status": "empty_cache",
+                "project_id": self._binding.project_id,
+                "workspace_binding_id": self._binding.backend_workspace_binding_id,
+                "message": "No synced Hades backend memory snapshot is available locally.",
+                "actions": ["Run `hades backend sync` to refresh project memory."],
+                "items": [],
+            }
+            if backend_error:
+                result["backend_live_error"] = backend_error
+            return tool_result(result)
 
         matches, raw_omitted, total = _search_memory_items(
             cache.items,
@@ -249,24 +268,25 @@ class HadesBackendMemoryProvider(MemoryProvider):
             _tool_result_item(item, score=score, raw_chunk=raw)
             for score, _idx, raw, item in matches
         ]
-        return tool_result(
-            {
-                "status": "ok",
-                "project_id": self._binding.project_id,
-                "workspace_binding_id": self._binding.backend_workspace_binding_id,
-                "cache_version": cache.version,
-                "cache_updated_at": cache.updated_at,
-                "query": query,
-                "domain": domain,
-                "include_raw_chunks": include_raw_chunks,
-                "searched_cache_only": True,
-                "count": len(items),
-                "candidate_count": total,
-                "truncated": total > len(items),
-                "raw_chunks_omitted": raw_omitted,
-                "items": items,
-            }
-        )
+        result = {
+            "status": "ok",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "cache_version": cache.version,
+            "cache_updated_at": cache.updated_at,
+            "query": query,
+            "domain": domain,
+            "include_raw_chunks": include_raw_chunks,
+            "searched_cache_only": True,
+            "count": len(items),
+            "candidate_count": total,
+            "truncated": total > len(items),
+            "raw_chunks_omitted": raw_omitted,
+            "items": items,
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
 
     def on_memory_write(
         self,
@@ -320,6 +340,35 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 if best is None or len(str(root)) > len(best.repo_root):
                     best = binding
         return best
+
+    def _backend_memory_search(
+        self,
+        *,
+        query: str,
+        domain: str,
+        limit: int,
+        include_raw_chunks: bool,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config()
+            try:
+                response = client.memory_search(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    query=query,
+                    domain=domain,
+                    limit=limit,
+                    include_raw_chunks=include_raw_chunks,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
 
 
 def _proposal_action(action: str) -> str | None:
@@ -542,6 +591,93 @@ def _tool_result_item(item: dict[str, Any], *, score: int, raw_chunk: bool) -> d
     etag = _first_item_value(item, ("etag", "version", "base_version"))
     if etag:
         result["etag"] = etag
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _backend_items(response: dict[str, Any]) -> list[dict[str, Any]]:
+    value = response.get("items")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _format_backend_prefetch(response: dict[str, Any]) -> str:
+    items = _backend_items(response)
+    raw_omitted = _bounded_int(response.get("raw_chunks_omitted"), default=0, minimum=0, maximum=1_000_000)
+    if not items:
+        if raw_omitted:
+            return (
+                "Shared Hades project memory: no compact live-recall entries "
+                f"matched this turn; {raw_omitted} raw chunk item(s) were "
+                "excluded from automatic context."
+            )
+        return ""
+    version = str(response.get("version") or response.get("etag") or "live")
+    lines = [f"Shared Hades project memory (live search {version}):"]
+    for item in items:
+        summary = _compact_text(_item_summary(item), max_chars=520)
+        if not summary:
+            continue
+        domain = _item_domain(item)
+        label = f"[{domain}] " if domain else ""
+        lines.append(f"- {label}{summary}")
+    if raw_omitted:
+        lines.append(f"- {raw_omitted} raw chunk item(s) excluded from automatic context.")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _tool_result_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
+    score = _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000)
+    raw_chunk = bool(item.get("raw_chunk") or _is_raw_chunk_item(item))
+    result = _tool_result_item(item, score=score, raw_chunk=raw_chunk)
+    for key in (
+        "payload_excerpt",
+        "page_id",
+        "page_slug",
+        "page_type",
+        "source_type",
+        "source_status",
+        "evidence_count",
+        "occurred_at",
+        "updated_at",
+        "version",
+    ):
+        value = item.get(key)
+        if value not in ("", None):
+            result[key] = value
+    return result
+
+
+def _tool_result_from_backend_search(response: dict[str, Any]) -> dict[str, Any]:
+    items = [_tool_result_item_from_backend(item) for item in _backend_items(response)]
+    count = _bounded_int(response.get("count"), default=len(items), minimum=0, maximum=1_000_000)
+    candidate_count = _bounded_int(
+        response.get("candidate_count"),
+        default=count,
+        minimum=0,
+        maximum=1_000_000,
+    )
+    raw_omitted = _bounded_int(response.get("raw_chunks_omitted"), default=0, minimum=0, maximum=1_000_000)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "backend_version": response.get("version"),
+        "backend_etag": response.get("etag"),
+        "query": response.get("query", ""),
+        "domain": _normalize_domain(response.get("domain") or "all"),
+        "include_raw_chunks": bool(response.get("include_raw_chunks")),
+        "searched_cache_only": False,
+        "count": count,
+        "candidate_count": candidate_count,
+        "truncated": bool(response.get("truncated")),
+        "raw_chunks_omitted": raw_omitted,
+        "server_time": response.get("server_time"),
+        "items": items,
+    }
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 

@@ -107,6 +107,21 @@
         }
       }
     },
+    "/api/hades/v1/memory/search": {
+      "get": {
+        "summary": "Search linked shared project memory for a Hades agent workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked shared memory search results"
+          }
+        }
+      }
+    },
     "/api/hades/v1/memory/proposals": {
       "post": {
         "security": [

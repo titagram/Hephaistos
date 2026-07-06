@@ -165,11 +165,85 @@ def test_hades_backend_memory_search_tool_filters_domains_and_raw_chunks(monkeyp
     )
 
     assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
     assert result["domain"] == "wiki"
     assert result["count"] == 1
     assert result["raw_chunks_omitted"] == 0
     assert result["items"][0]["id"] == "mem_2"
     assert result["items"][0]["domain"] == "wiki"
+
+
+def test_hades_backend_memory_search_tool_prefers_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def memory_search(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "search_v1",
+                "etag": "search_v1",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "include_raw_chunks": payload["include_raw_chunks"],
+                "count": 1,
+                "candidate_count": 2,
+                "truncated": True,
+                "raw_chunks_omitted": 1,
+                "freshness": {
+                    "workspace_head_commit": "abc123",
+                    "index_status": "live_query",
+                },
+                "server_time": "2026-07-06T12:00:00Z",
+                "items": [
+                    {
+                        "id": "wiki_1",
+                        "domain": "wiki",
+                        "schema": "devboard.wiki_revision.v1",
+                        "source": "wiki_revision",
+                        "summary": "Live backend wiki says Hades routes live under /api/hades/v1.",
+                        "score": 18,
+                        "page_slug": "architecture/hades-memory",
+                        "raw_chunk": False,
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda: fake)
+
+    context = provider.prefetch("Hades routes", session_id="session_1")
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "Hades routes", "domain": "wiki", "limit": 5},
+        )
+    )
+
+    assert "live search search_v1" in context
+    assert "/api/hades/v1" in context
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is False
+    assert result["backend_version"] == "search_v1"
+    assert result["candidate_count"] == 2
+    assert result["truncated"] is True
+    assert result["raw_chunks_omitted"] == 1
+    assert result["freshness"]["index_status"] == "live_query"
+    assert result["items"][0]["page_slug"] == "architecture/hades-memory"
+    assert fake.calls[0]["limit"] == 8
+    assert fake.calls[1]["limit"] == 5
+    assert fake.calls[1]["workspace_binding_id"] == "wb_1"
+    assert fake.closed == 2
 
 
 def test_hades_backend_memory_search_tool_can_include_raw_chunks(monkeypatch, tmp_path):

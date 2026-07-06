@@ -182,6 +182,9 @@ class HadesBackendClient:
     def memory_snapshot(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "memory/snapshot", params=payload)
 
+    def memory_search(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "memory/search", params=payload)
+
     def create_memory_proposal(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "memory/proposals", json_body=payload)
 
