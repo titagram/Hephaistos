@@ -566,6 +566,36 @@
         }
       }
     },
+    "/api/hades/v1/diagnosis-reports": {
+      "post": {
+        "summary": "Store a Hades diagnosis report for a linked workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Diagnosis report stored"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
     "/api/hades/v1/source-slices": {
       "get": {
         "summary": "Fetch bounded redacted source slices for a linked workspace",

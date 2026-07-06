@@ -24,15 +24,16 @@ the evidence source; do not infer precise causes from memory alone.
    missing coverage before any precise claim.
 3. Search typed evidence with `hades_backend_bug_evidence_search` using the
    symptom, exception, route, test, frame, or deploy term.
-4. Search project memory/artifacts for graph context. Prefer the dedicated
-   graph/artifact query path when available; otherwise use project memory search
-   with `domain=artifacts`.
+4. Search project graph/artifacts with `hades_backend_graph_search`.
 5. Fetch only the minimal relevant source with
    `hades_backend_source_slice_fetch` after evidence or graph results identify a
    concrete file, symbol, or line.
 6. Compare evidence, graph, source slices, and freshness. If the evidence does
    not uniquely support a cause, say `insufficient evidence` and list the exact
    missing item.
+7. Save the outcome with `hades_backend_diagnosis_report_create` when the
+   workflow has enough evidence for a final report or when preserving an
+   insufficient-evidence result would avoid redoing the investigation.
 
 ## Output Contract
 

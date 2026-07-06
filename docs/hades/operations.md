@@ -84,6 +84,12 @@ tool when diagnosing a bug. There is intentionally no local cache fallback for
 bug evidence search: stale or unavailable evidence must be surfaced as degraded
 state rather than treated as authoritative.
 
+Diagnosis outcomes should be persisted with
+`hades_backend_diagnosis_report_create` / `POST /api/hades/v1/diagnosis-reports`
+once the workflow reaches either a supported root cause or a useful
+insufficient-evidence result. Reports carry confidence, root cause, runtime
+mechanism, evidence refs, freshness, bounded payload, and redaction count.
+
 ## Project Awareness Gate
 
 Use `hades_backend_project_awareness_status` from the agent, or the backend API
@@ -186,8 +192,8 @@ hades logs --level WARNING --session latest
 
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, bug evidence
-search, graph search, minimal source slice fetch, then a structured diagnosis
-with evidence refs and confidence.
+search, graph search, minimal source slice fetch, then a persisted structured
+diagnosis report with evidence refs and confidence.
 
 ## Artifacts
 

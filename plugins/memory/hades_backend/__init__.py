@@ -29,6 +29,7 @@ BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
 GRAPH_SEARCH_TOOL_NAME = "hades_backend_graph_search"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
+DIAGNOSIS_REPORT_CREATE_TOOL_NAME = "hades_backend_diagnosis_report_create"
 RAW_CHUNK_DOMAINS = {
     "backend_wiki_chunks",
     "chunk",
@@ -81,6 +82,8 @@ BUG_EVIDENCE_KINDS = (
     "screenshot_ref",
     "other",
 )
+DIAGNOSIS_REPORT_STATUSES = ("draft", "final")
+DIAGNOSIS_CONFIDENCE_LEVELS = ("high", "medium", "low", "insufficient")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 
 SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
@@ -250,6 +253,72 @@ PROJECT_AWARENESS_STATUS_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": DIAGNOSIS_REPORT_CREATE_TOOL_NAME,
+    "description": (
+        "Persist a structured Hades backend diagnosis report for the linked "
+        "workspace after the bug-diagnosis workflow has compared awareness, bug "
+        "evidence, graph results, and source slices. Use this to preserve final "
+        "or insufficient-evidence outcomes with evidence refs. Results are live "
+        "backend data; there is no local cache fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "bug_report_id": {
+                "type": "string",
+                "description": "Optional Hades bug report id this diagnosis belongs to.",
+            },
+            "status": {
+                "type": "string",
+                "enum": list(DIAGNOSIS_REPORT_STATUSES),
+                "default": "final",
+                "description": "Whether this is a draft or final diagnosis report.",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": list(DIAGNOSIS_CONFIDENCE_LEVELS),
+                "description": "Confidence level supported by the cited evidence.",
+            },
+            "root_cause": {
+                "type": "string",
+                "description": "Precise root cause, or 'not determined' for insufficient evidence.",
+            },
+            "mechanism": {
+                "type": "string",
+                "description": "How the bug happens at runtime.",
+            },
+            "evidence_refs": {
+                "type": "array",
+                "description": "Evidence references such as bug evidence, graph artifact, and source slice ids.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+            },
+            "freshness": {
+                "type": "object",
+                "description": "Freshness and commit comparison used by the diagnosis.",
+                "additionalProperties": True,
+            },
+            "payload": {
+                "type": "object",
+                "description": "Optional bounded structured diagnosis detail.",
+                "additionalProperties": True,
+            },
+            "redactions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000,
+                "default": 0,
+                "description": "Number of redactions applied to report payload/evidence.",
+            },
+        },
+        "required": ["confidence", "root_cause"],
+        "additionalProperties": False,
+    },
+}
+
 
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
@@ -361,9 +430,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
             GRAPH_SEARCH_TOOL_SCHEMA,
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
+            DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == DIAGNOSIS_REPORT_CREATE_TOOL_NAME:
+            return self._handle_diagnosis_report_create(args)
         if tool_name == PROJECT_AWARENESS_STATUS_TOOL_NAME:
             return self._handle_project_awareness_status()
         if tool_name == SOURCE_SLICE_FETCH_TOOL_NAME:
@@ -449,6 +521,76 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "truncated": total > len(items),
             "raw_chunks_omitted": raw_omitted,
             "items": items,
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_diagnosis_report_create(self, args: Dict[str, Any]) -> str:
+        root_cause = str(args.get("root_cause") or "").strip()
+        if not root_cause:
+            return tool_error("Missing required parameter: root_cause")
+        confidence = str(args.get("confidence") or "").strip()
+        if confidence not in DIAGNOSIS_CONFIDENCE_LEVELS:
+            return tool_error(
+                f"Unsupported diagnosis confidence: {confidence}",
+                allowed_confidence=list(DIAGNOSIS_CONFIDENCE_LEVELS),
+            )
+        status = str(args.get("status") or "final").strip()
+        if status not in DIAGNOSIS_REPORT_STATUSES:
+            return tool_error(
+                f"Unsupported diagnosis report status: {status}",
+                allowed_statuses=list(DIAGNOSIS_REPORT_STATUSES),
+            )
+
+        evidence_refs = args.get("evidence_refs")
+        if evidence_refs is None:
+            evidence_refs = []
+        if not isinstance(evidence_refs, list):
+            return tool_error("Parameter evidence_refs must be an array when provided.")
+        freshness = args.get("freshness")
+        if freshness is not None and not isinstance(freshness, dict):
+            return tool_error("Parameter freshness must be an object when provided.")
+        payload = args.get("payload")
+        if payload is not None and not isinstance(payload, dict):
+            return tool_error("Parameter payload must be an object when provided.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so diagnosis reports cannot be saved."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                }
+            )
+
+        backend_result, backend_error = self._backend_diagnosis_report_create(
+            bug_report_id=str(args.get("bug_report_id") or "").strip(),
+            status=status,
+            confidence=confidence,
+            root_cause=root_cause,
+            mechanism=str(args.get("mechanism") or "").strip(),
+            evidence_refs=evidence_refs,
+            freshness=freshness,
+            payload=payload,
+            redactions=_bounded_int(args.get("redactions"), default=0, minimum=0, maximum=100_000),
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_diagnosis_report(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend diagnosis report create is unavailable.",
+            "actions": ["Run `hades backend status` and retry after backend connectivity is healthy."],
         }
         if backend_error:
             result["backend_live_error"] = backend_error
@@ -766,6 +908,45 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     symbol=symbol or None,
                     line=line or None,
                     limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_diagnosis_report_create(
+        self,
+        *,
+        bug_report_id: str,
+        status: str,
+        confidence: str,
+        root_cause: str,
+        mechanism: str,
+        evidence_refs: list[Any],
+        freshness: dict[str, Any] | None,
+        payload: dict[str, Any] | None,
+        redactions: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.create_diagnosis_report(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    bug_report_id=bug_report_id or None,
+                    status=status,
+                    confidence=confidence,
+                    root_cause=root_cause,
+                    mechanism=mechanism or None,
+                    evidence_refs=evidence_refs,
+                    freshness=freshness,
+                    payload=payload,
+                    redactions=redactions,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -1218,6 +1399,37 @@ def _tool_result_from_backend_source_slices(response: dict[str, Any]) -> dict[st
     freshness = response.get("freshness")
     if isinstance(freshness, dict):
         result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_diagnosis_report(response: dict[str, Any]) -> dict[str, Any]:
+    report = response.get("diagnosis_report")
+    if not isinstance(report, dict):
+        report = {}
+    report_payload: dict[str, Any] = {
+        "id": report.get("id"),
+        "bug_report_id": report.get("bug_report_id"),
+        "status": report.get("status"),
+        "confidence": report.get("confidence"),
+        "root_cause": _compact_text(report.get("root_cause"), max_chars=1200),
+        "mechanism": _compact_text(report.get("mechanism"), max_chars=1600),
+        "evidence_refs": report.get("evidence_refs") if isinstance(report.get("evidence_refs"), list) else [],
+        "freshness": report.get("freshness") if isinstance(report.get("freshness"), dict) else {},
+        "payload": _bounded_payload(report.get("payload")),
+        "redactions": report.get("redactions"),
+        "created_at": report.get("created_at"),
+        "updated_at": report.get("updated_at"),
+        "version": report.get("version"),
+    }
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "server_time": response.get("server_time"),
+        "diagnosis_report": {
+            key: value for key, value in report_payload.items() if value not in ("", None)
+        },
+    }
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 

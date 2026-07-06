@@ -1705,7 +1705,7 @@ Verifiche eseguite:
 
 ## Esecuzione workflow agent bug diagnosis Hades - 2026-07-07
 
-Stato: avviata la slice P0-6 del piano "Bug Root Cause Awareness".
+Stato: completata la prima slice P0-6 del piano "Bug Root Cause Awareness".
 
 Integrazione Hades locale:
 
@@ -1718,22 +1718,44 @@ Integrazione Hades locale:
   `skills/autonomous-ai-agents/hades-bug-diagnosis/SKILL.md`.
 - La skill impone ordine operativo:
   awareness status -> bug evidence -> graph search -> source slice fetch ->
-  diagnosis strutturata con root cause, mechanism, evidence refs, freshness,
-  confidence e next verification.
+  persisted diagnosis report con root cause, mechanism, evidence refs,
+  freshness, confidence e next verification.
+- Provider memoria: aggiunto tool `hades_backend_diagnosis_report_create`,
+  live-only, per salvare report finali o insufficient-evidence senza cache
+  fallback.
 - Guardrail espliciti: niente line-level cause senza source slice current,
   niente call path esatto senza graph current, niente raw chunks come evidence
   automatico.
+
+Integrazione backend remota:
+
+- Commit remoto `f6443a1 feat: add Hades diagnosis reports`.
+- Nuova tabella `hades_diagnosis_reports` con project, workspace, bug report
+  opzionale, status, confidence, root cause, mechanism, evidence refs,
+  freshness, payload bounded e redactions.
+- Nuovo endpoint `POST /api/hades/v1/diagnosis-reports` esposto in health e
+  capabilities.
+- Feature test backend: salvataggio diagnosis report con evidence refs per
+  workspace linkato.
 
 Verifiche eseguite:
 
 - Locale:
   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py`
-  passato: `18 passed`.
+  passato: `20 passed`.
+- Locale mirato Hades:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `58 passed`.
 - Locale:
   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
   passato.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/DiagnosisReportController.php app/Http/Controllers/Hades/CapabilitiesController.php app/Http/Controllers/Hades/HealthController.php routes/api.php database/migrations/2026_07_07_000003_create_hades_diagnosis_reports_table.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `43 passed / 447 assertions`.
 
 Resta fuori da questa slice:
 
-- Tool/backend endpoint per `hades_backend_diagnosis_report_create`.
 - Suite no-codebase E2E P0-7 con bug fixture e valutazione strutturata.

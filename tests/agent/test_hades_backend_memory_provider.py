@@ -122,6 +122,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
         "hades_backend_project_awareness_status",
+        "hades_backend_diagnosis_report_create",
     ]
 
 
@@ -582,6 +583,111 @@ def test_hades_backend_source_slice_fetch_tool_requires_scope(monkeypatch, tmp_p
     assert result["error"].startswith("Provide at least one")
 
 
+def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def create_diagnosis_report(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "server_time": "2026-07-07T12:00:00Z",
+                "diagnosis_report": {
+                    "id": "diag_1",
+                    "bug_report_id": payload["bug_report_id"],
+                    "status": payload["status"],
+                    "confidence": payload["confidence"],
+                    "root_cause": payload["root_cause"],
+                    "mechanism": payload["mechanism"],
+                    "evidence_refs": payload["evidence_refs"],
+                    "freshness": payload["freshness"],
+                    "payload": payload["payload"],
+                    "redactions": payload["redactions"],
+                    "created_at": "2026-07-07T11:59:00Z",
+                    "updated_at": "2026-07-07T11:59:00Z",
+                    "version": "diagnosis_report_1",
+                },
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "bug_report_id": "bug_1",
+                "status": "final",
+                "confidence": "high",
+                "root_cause": "OrderController dereferences a missing customer relation.",
+                "mechanism": "The show action assumes customer is loaded and calls active().",
+                "evidence_refs": [
+                    {"type": "bug_evidence", "id": "evidence_1"},
+                    {"type": "source_slice", "id": "slice_1"},
+                ],
+                "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
+                "redactions": 2,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["diagnosis_report"]["id"] == "diag_1"
+    assert result["diagnosis_report"]["confidence"] == "high"
+    assert result["diagnosis_report"]["root_cause"].startswith("OrderController")
+    assert result["diagnosis_report"]["evidence_refs"][1]["id"] == "slice_1"
+    assert result["diagnosis_report"]["freshness"]["workspace_head_commit"] == "abc123"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "bug_report_id": "bug_1",
+            "status": "final",
+            "confidence": "high",
+            "root_cause": "OrderController dereferences a missing customer relation.",
+            "mechanism": "The show action assumes customer is loaded and calls active().",
+            "evidence_refs": [
+                {"type": "bug_evidence", "id": "evidence_1"},
+                {"type": "source_slice", "id": "slice_1"},
+            ],
+            "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+            "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
+            "redactions": 2,
+        }
+    ]
+    assert fake.closed == 1
+    assert timeouts == [2.0]
+
+
+def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {"confidence": "insufficient"},
+        )
+    )
+
+    assert result["error"] == "Missing required parameter: root_cause"
+
+
 def test_hades_backend_project_awareness_status_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
@@ -803,6 +909,12 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
             {},
         )
     )
+    diagnosis_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {"confidence": "insufficient", "root_cause": "not determined"},
+        )
+    )
 
     assert "not linked" in block
     assert result["status"] == "unmapped_project"
@@ -810,6 +922,7 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
     assert bug_result["status"] == "unmapped_project"
     assert bug_result["items"] == []
     assert awareness_result["status"] == "unmapped_project"
+    assert diagnosis_result["status"] == "unmapped_project"
 
 
 def test_hades_backend_memory_write_creates_local_proposal(monkeypatch, tmp_path):
