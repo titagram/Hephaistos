@@ -220,7 +220,7 @@ def test_hades_backend_memory_search_tool_prefers_live_backend(monkeypatch, tmp_
     fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda: fake)
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
 
     context = provider.prefetch("Hades routes", session_id="session_1")
     result = json.loads(
@@ -244,6 +244,88 @@ def test_hades_backend_memory_search_tool_prefers_live_backend(monkeypatch, tmp_
     assert fake.calls[1]["limit"] == 5
     assert fake.calls[1]["workspace_binding_id"] == "wb_1"
     assert fake.closed == 2
+
+
+def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def memory_search(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "search_v1",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "count": 0,
+                "candidate_count": 0,
+                "items": [],
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return FakeClient()
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    provider.handle_tool_call(
+        "hades_backend_project_memory_search",
+        {"query": "Hades routes"},
+    )
+
+    assert timeouts == [2.0]
+
+
+def test_hades_backend_memory_search_tool_allows_artifacts_domain(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def memory_search(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "search_artifacts",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "count": 1,
+                "candidate_count": 1,
+                "raw_chunks_omitted": 0,
+                "items": [
+                    {
+                        "id": "artifact_1",
+                        "domain": "artifacts",
+                        "schema": "hades.git_tree.v1",
+                        "source": "hades.git_tree.v1",
+                        "summary": "Project index: GET /hades/memory -> MemoryController@index",
+                        "score": 16,
+                    }
+                ],
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: FakeClient())
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "hades memory route", "domain": "artifacts"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["domain"] == "artifacts"
+    assert result["items"][0]["domain"] == "artifacts"
+    assert result["items"][0]["schema"] == "hades.git_tree.v1"
 
 
 def test_hades_backend_memory_search_tool_can_include_raw_chunks(monkeypatch, tmp_path):

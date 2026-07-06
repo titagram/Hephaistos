@@ -150,7 +150,12 @@ uses that same artifact schema as a metadata-only project tree inspection
 (`inspection_mode=metadata_tree`); it does not synthesize an answer or include
 raw source. It skips env/secrets, ignored files/directories, symlinks, generated
 dependency/build directories, binary/archive files, and files above the
-configured per-file budget.
+configured per-file budget. The artifact also carries a metadata-only
+`project_index` (`hades.project_index.v1`) with language counts, detected
+Laravel routes, dependency manifests, and database migration paths. The backend
+memory search can retrieve this under the `artifacts` domain, so the agent can
+ask about project structure without loading raw source chunks into ordinary
+memory.
 `populate_backend_ast` currently has an explicit Python-only MVP scope: it
 emits bounded `.py` class/function symbols with provenance, not raw source.
 Both artifact jobs report omission reasons instead of following path escapes or

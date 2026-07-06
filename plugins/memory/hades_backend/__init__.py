@@ -17,6 +17,7 @@ from tools.registry import tool_error, tool_result
 
 
 PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
+LIVE_SEARCH_TIMEOUT_SECONDS = 2.0
 CREATE_ACTIONS = {"add", "create"}
 UPDATE_ACTIONS = {"replace", "update"}
 DELETE_ACTIONS = {"remove", "delete"}
@@ -44,6 +45,8 @@ DOMAIN_ALIASES = {
     "agent_note": "agent_notes",
     "agent-notes": "agent_notes",
     "agent_notes": "agent_notes",
+    "artifact": "artifacts",
+    "artifacts": "artifacts",
     "log": "logbook",
     "logbook": "logbook",
     "memory": "project_memory",
@@ -58,7 +61,7 @@ DOMAIN_ALIASES = {
     "wiki": "wiki",
     "wiki_revision": "wiki",
 }
-SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks")
+SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks", "artifacts")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 
 SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
@@ -352,7 +355,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config()
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
             try:
                 response = client.memory_search(
                     project_id=self._binding.project_id,

@@ -40,14 +40,14 @@ def plugin_work_items_token(agent: db.BackendAgent) -> str:
     return get_secret("HADES_BACKEND_PLUGIN_TOKEN", "") or agent_token(agent)
 
 
-def client_from_config() -> HadesBackendClient:
+def client_from_config(*, timeout: float = 15.0) -> HadesBackendClient:
     agent = current_agent()
     if agent is None:
         raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
     token = agent_token(agent)
     if not token:
         raise RuntimeError(f"Hades backend token is missing from .env ({agent.token_env_key})")
-    return HadesBackendClient(agent.base_url, token)
+    return HadesBackendClient(agent.base_url, token, timeout=timeout)
 
 
 def plugin_work_items_client_from_config() -> HadesPluginWorkItemsClient:

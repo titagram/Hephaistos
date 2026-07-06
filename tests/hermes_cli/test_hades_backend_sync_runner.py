@@ -419,6 +419,70 @@ def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_pa
     assert "super-secret-token" not in str(artifact)
 
 
+def test_git_tree_artifact_includes_structured_project_index(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "routes").mkdir()
+    (workspace / "database" / "migrations").mkdir(parents=True)
+    (workspace / "composer.json").write_text(
+        '{"require":{"laravel/framework":"^11.0","guzzlehttp/guzzle":"^7.0"}}',
+        encoding="utf-8",
+    )
+    (workspace / "package.json").write_text(
+        '{"dependencies":{"@vitejs/plugin-react":"latest"},"devDependencies":{"vitest":"latest"}}',
+        encoding="utf-8",
+    )
+    (workspace / "routes" / "api.php").write_text(
+        "<?php\nRoute::get('/hades/memory', [MemoryController::class, 'index'])->name('hades.memory');\n",
+        encoding="utf-8",
+    )
+    (workspace / "database" / "migrations" / "2026_07_06_000000_create_hades_memory.php").write_text(
+        "<?php\nreturn new class {};\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_tree",
+            "capability": "sync_git_tree",
+            "payload": {"max_files": 50, "max_bytes": 100_000, "max_file_bytes": 10_000},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    index = artifact["project_index"]
+
+    assert index["schema"] == "hades.project_index.v1"
+    assert index["source_schema"] == "hades.git_tree.v1"
+    assert index["language_counts"]["php"]["files"] >= 2
+    assert {
+        "method": "GET",
+        "uri": "/hades/memory",
+        "handler": "MemoryController@index",
+        "name": "hades.memory",
+        "path": "routes/api.php",
+    } in index["routes"]
+    assert {
+        "manager": "composer",
+        "path": "composer.json",
+        "packages": ["guzzlehttp/guzzle", "laravel/framework"],
+    } in index["dependency_manifests"]
+    assert {
+        "manager": "npm",
+        "path": "package.json",
+        "packages": ["@vitejs/plugin-react", "vitest"],
+    } in index["dependency_manifests"]
+    assert index["database"]["migrations"] == [
+        "database/migrations/2026_07_06_000000_create_hades_memory.php"
+    ]
+    assert artifact["raw_source_included"] is False
+    assert "laravel/framework" in artifact["summary"]
+    assert "Route::get" not in str(artifact)
+
+
 def test_read_files_omitted_reasons_do_not_leak_absolute_paths(monkeypatch, tmp_path):
     import errno
     from pathlib import Path

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
+import tomllib
 from typing import Any
 
 from hermes_cli.hades_backend_client import redact_secret
@@ -72,6 +75,36 @@ BINARY_SUFFIXES = {
     ".woff2",
     ".zip",
 }
+LANGUAGE_SUFFIXES = {
+    ".css": "css",
+    ".go": "go",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".md": "markdown",
+    ".php": "php",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".sh": "shell",
+    ".sql": "sql",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
+DEPENDENCY_MANIFESTS = {
+    "composer.json": "composer",
+    "package.json": "npm",
+    "pyproject.toml": "python",
+    "requirements.txt": "python",
+}
+ROUTE_CALL_RE = re.compile(
+    r"Route::(?P<method>get|post|put|patch|delete|options|any)\s*"
+    r"\(\s*['\"](?P<uri>[^'\"]+)['\"]\s*,\s*(?P<handler>.*?)\)\s*"
+    r"(?:->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\))?",
+    re.IGNORECASE | re.DOTALL,
+)
+LARAVEL_HANDLER_RE = re.compile(
+    r"\[\s*(?P<class>[A-Za-z0-9_\\\\]+)::class\s*,\s*['\"](?P<method>[A-Za-z0-9_]+)['\"]\s*\]"
+)
 
 
 def _safe_relpath(path: str) -> str:
@@ -156,6 +189,172 @@ def _skip_file_reason(path: Path, rel: str, ignore_spec=None) -> str | None:
     if ignore_spec is not None and ignore_spec.match_file(rel):
         return "gitignored"
     return None
+
+
+def _language_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    return LANGUAGE_SUFFIXES.get(suffix, "other")
+
+
+def _language_counts(files: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for item in files:
+        language = _language_for_path(str(item.get("path") or ""))
+        current = counts.setdefault(language, {"files": 0, "bytes": 0})
+        current["files"] += 1
+        current["bytes"] += int(item.get("bytes") or 0)
+    return {key: counts[key] for key in sorted(counts)}
+
+
+def _dependency_packages_from_json(path: Path, manager: str) -> list[str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    packages: set[str] = set()
+    if manager == "composer":
+        for section in ("require", "require-dev"):
+            values = data.get(section)
+            if isinstance(values, dict):
+                packages.update(str(name) for name in values if str(name).lower() != "php")
+    elif manager == "npm":
+        for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+            values = data.get(section)
+            if isinstance(values, dict):
+                packages.update(str(name) for name in values)
+    return sorted(packages)
+
+
+def _dependency_packages_from_pyproject(path: Path) -> list[str]:
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    packages: set[str] = set()
+    project = data.get("project")
+    if isinstance(project, dict):
+        dependencies = project.get("dependencies")
+        if isinstance(dependencies, list):
+            packages.update(str(dep).split(";", 1)[0].split("[", 1)[0].split("=", 1)[0].strip() for dep in dependencies)
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            for values in optional.values():
+                if isinstance(values, list):
+                    packages.update(str(dep).split(";", 1)[0].split("[", 1)[0].split("=", 1)[0].strip() for dep in values)
+    tool = data.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    if isinstance(poetry, dict):
+        for section in ("dependencies", "dev-dependencies"):
+            values = poetry.get(section)
+            if isinstance(values, dict):
+                packages.update(str(name) for name in values if str(name).lower() != "python")
+    return sorted(pkg for pkg in packages if pkg)
+
+
+def _dependency_packages_from_requirements(path: Path) -> list[str]:
+    packages: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        clean = line.strip()
+        if not clean or clean.startswith("#") or clean.startswith(("-", "git+")):
+            continue
+        packages.add(re.split(r"[<>=~!;\[]", clean, maxsplit=1)[0].strip())
+    return sorted(pkg for pkg in packages if pkg)
+
+
+def _dependency_manifests(root: Path, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    for item in files:
+        rel = str(item.get("path") or "")
+        name = Path(rel).name
+        manager = DEPENDENCY_MANIFESTS.get(name)
+        if manager is None:
+            continue
+        path = root / rel
+        try:
+            if name in {"composer.json", "package.json"}:
+                packages = _dependency_packages_from_json(path, manager)
+            elif name == "pyproject.toml":
+                packages = _dependency_packages_from_pyproject(path)
+            else:
+                packages = _dependency_packages_from_requirements(path)
+        except Exception:
+            packages = []
+        manifests.append({"manager": manager, "path": rel, "packages": packages[:200]})
+    return sorted(manifests, key=lambda item: (item["manager"], item["path"]))
+
+
+def _normalize_laravel_handler(raw: str) -> str:
+    compact = " ".join(str(raw or "").split())
+    match = LARAVEL_HANDLER_RE.search(compact)
+    if match:
+        class_name = match.group("class").split("\\")[-1]
+        return f"{class_name}@{match.group('method')}"
+    return compact[:160]
+
+
+def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, str]]:
+    routes: list[dict[str, str]] = []
+    for item in files:
+        rel = str(item.get("path") or "")
+        if not (rel.startswith("routes/") and rel.endswith(".php")):
+            continue
+        try:
+            content, truncated, _digest = _read_text_bounded(root / rel, 256_000)
+        except OSError:
+            continue
+        if truncated:
+            continue
+        for match in ROUTE_CALL_RE.finditer(content):
+            route = {
+                "method": match.group("method").upper(),
+                "uri": match.group("uri"),
+                "handler": _normalize_laravel_handler(match.group("handler")),
+                "path": rel,
+            }
+            name = match.group("name")
+            if name:
+                route["name"] = name
+            routes.append(route)
+            if len(routes) >= max_routes:
+                return routes
+    return routes
+
+
+def _database_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
+    migrations = sorted(
+        str(item.get("path") or "")
+        for item in files
+        if str(item.get("path") or "").startswith("database/migrations/")
+    )
+    return {"migrations": migrations[:500], "migration_count": len(migrations)}
+
+
+def _project_index_summary(index: dict[str, Any]) -> str:
+    route_bits = [
+        f"{route['method']} {route['uri']} -> {route.get('handler', '')}".strip()
+        for route in index.get("routes", [])[:5]
+    ]
+    package_bits: list[str] = []
+    for manifest in index.get("dependency_manifests", [])[:4]:
+        packages = manifest.get("packages") or []
+        if packages:
+            package_bits.extend(str(pkg) for pkg in packages[:5])
+    migration_count = int((index.get("database") or {}).get("migration_count") or 0)
+    parts = [
+        f"routes: {', '.join(route_bits) or 'none'}",
+        f"dependencies: {', '.join(package_bits) or 'none'}",
+        f"migrations: {migration_count}",
+    ]
+    return "Project index; " + "; ".join(parts)
+
+
+def _build_project_index(root: Path, files: list[dict[str, Any]]) -> dict[str, Any]:
+    index = {
+        "schema": "hades.project_index.v1",
+        "source_schema": "hades.git_tree.v1",
+        "root": root.name,
+        "language_counts": _language_counts(files),
+        "routes": _laravel_routes(root, files),
+        "dependency_manifests": _dependency_manifests(root, files),
+        "database": _database_summary(files),
+        "raw_source_included": False,
+    }
+    index["summary"] = _project_index_summary(index)
+    return index
 
 
 def _execute_read_files(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
@@ -271,13 +470,20 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
                 "sha256": digest,
             }
         )
+    project_index = _build_project_index(workspace_root, files)
     return {
         "status": "completed",
-        "summary": f"Collected {len(files)} git tree entries.",
+        "summary": (
+            f"Collected {len(files)} git tree entries; "
+            f"indexed {len(project_index['routes'])} route(s), "
+            f"{len(project_index['dependency_manifests'])} dependency manifest(s)."
+        ),
         "artifact": {
             "schema": "hades.git_tree.v1",
             "root": workspace_root.name,
             "files": files,
+            "project_index": project_index,
+            "summary": project_index["summary"],
             "omitted": omitted,
             "truncated": truncated,
             "redactions": len(omitted),

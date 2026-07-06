@@ -308,6 +308,60 @@ Verifiche locali:
 - `.venv/bin/python -m py_compile hermes_cli/hades_backend_client.py plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`:
   passato.
 
+## Esecuzione project awareness slice - 2026-07-06
+
+Stato: completata la slice su qualita' note, indicizzazione progetto e timeout
+live-recall.
+
+Backend remoto:
+
+- Branch remoto: `fase-2`.
+- Commit remoto: `317bb69 feat: index Hades project artifacts in memory search`,
+  follow-up del commit `98a1f63`.
+- `GET /api/hades/v1/memory/search` ora accetta anche `domain=artifacts` e,
+  con `domain=all`, include gli artifact indicizzati del workspace linked.
+- `MemorySearchController` legge `hades_agent_artifacts`, costruisce summary
+  bounded dagli artifact `hades.git_tree.v1` con `project_index`, e restituisce
+  risultati domain `artifacts` senza raw source.
+- `MemoryImportService` mette in quarantena entry raw chunk
+  (`file_chunk`, `source_chunk`, `hades.backend_wiki.file_chunk.v1`,
+  `chunk_index`, `chunk_count`) come `raw_chunk_quarantined`, senza creare
+  proposte di memoria. Questo separa source evidence da note/facts verificati.
+
+Integrazione Hades locale:
+
+- Live memory search nel provider `hades_backend` usa timeout di 2 secondi via
+  `runtime.client_from_config(timeout=2.0)`, cosi' il prefetch non blocca a
+  lungo il loop agent.
+- Il tool `hades_backend_project_memory_search` accetta `domain=artifacts`.
+- `sync_git_tree` continua a produrre `hades.git_tree.v1`, ma aggiunge
+  `project_index` metadata-only (`hades.project_index.v1`) con:
+  language counts, route Laravel, dependency manifests e migration list.
+- L'artifact mantiene `raw_source_included=false`; l'indice espone struttura e
+  provenance, non contenuto sorgente grezzo.
+
+Verifiche remote:
+
+- Test rossi confermati prima della modifica:
+  `domain=artifacts` falliva con 422; import raw chunk creava 1 proposal.
+- `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`:
+  passato, `33 tests / 306 assertions`.
+- `vendor/bin/pint --test app/Http/Controllers/Hades/MemorySearchController.php app/Services/MemoryImportService.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`:
+  passato.
+- `git diff --check`: passato.
+
+Verifiche locali:
+
+- Test rossi confermati prima della modifica:
+  live search chiamava il client senza timeout; `sync_git_tree` non esponeva
+  `project_index`; il tool locale rifiutava `domain=artifacts`.
+- `.venv/bin/python -m pytest tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato, `49 passed`.
+- `.venv/bin/python -m pytest tests/run_agent/test_run_agent.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_client.py`:
+  passato, `455 passed`.
+- `.venv/bin/python -m ruff check hermes_cli/hades_backend_jobs.py hermes_cli/hades_backend_runtime.py plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_sync_runner.py`:
+  passato.
+
 ## Migliorie emerse
 
 - [ ] Separare le tabelle Hades da `api_tokens.device_id` per supportare piu'
