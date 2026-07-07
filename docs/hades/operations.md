@@ -256,8 +256,11 @@ The quality report produces `hades.quality_report.v1` with no-codebase diagnosis
 metrics, including required evidence refs, required Hades tool calls, persisted
 diagnosis reports, forbidden source-access tool use, and diagnosis freshness
 coverage plus source-free awareness coverage. Local awareness/support status is
-included when enabled. Causal quality, stale precise-claim, undiagnosable
-awareness, or privacy regressions are blockers; local setup gaps are warnings.
+included when enabled. The report also includes local `note_backfill` metrics
+for legacy note candidates created by `backfill-note --create-proposals`.
+Causal quality, stale precise-claim, undiagnosable awareness, or privacy
+regressions are blockers; local setup gaps and note-backfill review queues are
+warnings.
 The `--no-codebase-eval` file may contain normalized `runs` or `trajectory_runs`
 that point to saved `.json`/`.jsonl` trajectories, so release gates can evaluate
 real agent runs without hand-transcribing every tool call.
@@ -350,7 +353,10 @@ command assigns stable fingerprints to extracted facts and skips local duplicate
 proposals on repeated runs; raw chunks remain outside automatic recall. Inspect
 `quality_grade`, `quality_issues`, and `promotion_state` before creating
 proposals from legacy material. Backend sync submits those proposals for review
-without turning them into project memory automatically.
+without turning them into project memory automatically. Run `hades backend
+quality-report --record` after backfill work; pending/submitted candidates,
+rejected candidates, and missing evidence refs appear in the `note_backfill`
+metric and action queue.
 
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, existing evidence

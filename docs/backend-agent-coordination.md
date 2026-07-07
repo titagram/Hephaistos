@@ -3542,6 +3542,38 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione note backfill quality gate - 2026-07-07
+
+Stato: completata una tranche locale P1-7 sulla qualita' delle note e sulla
+governance del backfill.
+
+Agent locale:
+
+- `hades backend quality-report` include ora metriche `note_backfill` costruite
+  dalla coda locale `memory_proposals`.
+- Le proposal `note_backfill_candidate` pendenti o `submitted` generano action
+  `review_note_backfill_candidates` e lasciano il report in `attention`.
+- Proposal refused/conflicted e proposal senza evidence refs generano action
+  dedicate, cosi' i raw chunk trasformabili non restano invisibili ai gate
+  periodici.
+- Nessun raw chunk viene promosso automaticamente: il cambiamento e' di
+  osservabilita'/governance della review, non di auto-recall.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_note_quality.py tests/test_docs_hades_mvp.py`
+  passato: `24 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_quality_report.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_note_quality.py`
+  passato; `py_compile hermes_cli/hades_quality_report.py hermes_cli/hades_backend_cmd.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Trend storico remoto/lungo periodo della qualita' note; il report locale ora
+  espone il dato, ma non lo aggrega ancora lato backend.
+
 ## Esecuzione guided bug intake desktop Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-1.

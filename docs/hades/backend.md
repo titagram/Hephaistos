@@ -213,6 +213,11 @@ pending memory proposals for backend review. After sync, note backfill
 proposals are treated as submitted locally but remain pending in the backend;
 they are not auto-created as project memory.
 
+`hades backend quality-report` includes local `note_backfill` metrics for these
+proposals. Pending or submitted candidates keep the report in `attention` until
+review closes; refused or conflicted proposals and missing evidence refs are
+also surfaced in the action queue.
+
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop
 reporting it as needing review.

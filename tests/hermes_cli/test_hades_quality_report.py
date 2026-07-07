@@ -37,6 +37,63 @@ def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
     assert report["action_queue"] == []
 
 
+def test_note_backfill_quality_report_counts_review_candidates():
+    from hermes_cli.hades_quality_report import build_hades_quality_report, build_note_backfill_quality_report
+
+    note_backfill = build_note_backfill_quality_report(
+        [
+            SimpleNamespace(
+                intent="note_backfill_candidate",
+                status="submitted",
+                provenance={
+                    "source": "hades_note_quality",
+                    "evidence_ref": {
+                        "schema": "hades.backend_wiki.file_chunk.v1",
+                        "sha256": "abc123",
+                    },
+                },
+            ),
+            SimpleNamespace(
+                intent="create_memory",
+                status="pending",
+                provenance={"source": "manual"},
+            ),
+        ]
+    )
+    report = build_hades_quality_report(note_backfill_report=note_backfill, generated_at=12345)
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert note_backfill["total"] == 1
+    assert note_backfill["by_status"] == {"submitted": 1}
+    assert note_backfill["pending_review_count"] == 1
+    assert note_backfill["evidence_ref_coverage"] == 1.0
+    assert report["status"] == "attention"
+    assert actions["review_note_backfill_candidates"]["count"] == 1
+    assert "repair_note_backfill_evidence_refs" not in actions
+
+
+def test_note_backfill_quality_report_flags_rejected_or_incomplete_candidates():
+    from hermes_cli.hades_quality_report import build_hades_quality_report, build_note_backfill_quality_report
+
+    note_backfill = build_note_backfill_quality_report(
+        [
+            {
+                "intent": "note_backfill_candidate",
+                "status": "conflicted",
+                "provenance": {"source": "hades_note_quality"},
+            }
+        ]
+    )
+    report = build_hades_quality_report(note_backfill_report=note_backfill)
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert note_backfill["rejected_count"] == 1
+    assert note_backfill["missing_evidence_ref_count"] == 1
+    assert note_backfill["evidence_ref_coverage"] == 0.0
+    assert actions["acknowledge_rejected_note_backfill"]["count"] == 1
+    assert actions["repair_note_backfill_evidence_refs"]["count"] == 1
+
+
 def test_quality_report_blocks_forbidden_source_access_regressions():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisRun,
@@ -183,6 +240,49 @@ def test_backend_quality_report_command_emits_json_for_fixture(monkeypatch, tmp_
     assert payload["status"] == "passed"
     assert payload["metrics"]["no_codebase"]["total"] == 7
     assert payload["action_queue"] == []
+
+
+def test_backend_quality_report_includes_pending_note_backfill_proposals(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing() as conn:
+        db.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="note_backfill_candidate",
+            summary="Controller.php handles 3 taxonomy routes.",
+            provenance={
+                "source": "hades_note_quality",
+                "evidence_ref": {
+                    "schema": "hades.backend_wiki.file_chunk.v1",
+                    "sha256": "abc123",
+                },
+            },
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(FIXTURE_PATH),
+            skip_local_status=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    actions = {action["id"]: action for action in payload["action_queue"]}
+
+    assert rc == 0
+    assert payload["status"] == "attention"
+    assert payload["metrics"]["note_backfill"]["total"] == 1
+    assert payload["metrics"]["note_backfill"]["by_status"] == {"pending": 1}
+    assert payload["metrics"]["note_backfill"]["pending_review_count"] == 1
+    assert payload["metrics"]["note_backfill"]["evidence_ref_coverage"] == 1.0
+    assert actions["review_note_backfill_candidates"]["severity"] == "warning"
 
 
 def test_backend_quality_report_command_accepts_trajectory_runs(monkeypatch, tmp_path, capsys):

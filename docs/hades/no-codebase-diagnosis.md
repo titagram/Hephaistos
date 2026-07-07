@@ -151,6 +151,9 @@ diagnosis persistence.
 
 The quality report records blocker/warning actions locally. A failed report
 should block claims that the project is ready for source-free diagnosis.
+Reports in `attention` can still be technically usable, but open
+`note_backfill` actions mean legacy raw-note candidates have not been fully
+reviewed or repaired yet.
 
 ## Recover Common Blockers
 

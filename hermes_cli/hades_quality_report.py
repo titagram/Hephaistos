@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import time
-from typing import Any
+from typing import Any, Iterable
 
 
 def build_hades_quality_report(
     *,
     no_codebase_report: dict[str, Any] | None = None,
     support_report: dict[str, Any] | None = None,
+    note_backfill_report: dict[str, Any] | None = None,
     generated_at: int | None = None,
 ) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
@@ -35,6 +37,10 @@ def build_hades_quality_report(
         }
         actions.extend(_support_actions(support_report))
 
+    if note_backfill_report is not None:
+        metrics["note_backfill"] = note_backfill_report
+        actions.extend(_note_backfill_actions(note_backfill_report))
+
     blocker_count = sum(1 for action in actions if action["severity"] == "blocker")
     warning_count = sum(1 for action in actions if action["severity"] == "warning")
     status = "failed" if blocker_count else ("attention" if warning_count else "passed")
@@ -49,6 +55,25 @@ def build_hades_quality_report(
             "warnings": warning_count,
             "actions": len(actions),
         },
+    }
+
+
+def build_note_backfill_quality_report(proposals: Iterable[Any]) -> dict[str, Any]:
+    note_proposals = [_proposal_projection(proposal) for proposal in proposals]
+    note_proposals = [proposal for proposal in note_proposals if _is_note_backfill_candidate(proposal)]
+    by_status = Counter(proposal["status"] for proposal in note_proposals)
+    pending_review_count = sum(by_status.get(status, 0) for status in ("pending", "submitted"))
+    rejected_count = sum(by_status.get(status, 0) for status in ("refused", "conflicted"))
+    evidence_ready_count = sum(1 for proposal in note_proposals if _has_backfill_evidence_ref(proposal))
+    missing_evidence_count = len(note_proposals) - evidence_ready_count
+    return {
+        "schema": "hades.note_backfill_quality.v1",
+        "total": len(note_proposals),
+        "by_status": dict(sorted(by_status.items())),
+        "pending_review_count": pending_review_count,
+        "rejected_count": rejected_count,
+        "evidence_ref_coverage": (evidence_ready_count / len(note_proposals)) if note_proposals else 1.0,
+        "missing_evidence_ref_count": missing_evidence_count,
     }
 
 
@@ -105,6 +130,41 @@ def _no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     return actions
 
 
+def _note_backfill_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    pending_review_count = int(report.get("pending_review_count") or 0)
+    if pending_review_count > 0:
+        actions.append(
+            _action(
+                "review_note_backfill_candidates",
+                "warning",
+                "Review note backfill candidates before relying on old raw notes.",
+                count=pending_review_count,
+            )
+        )
+    rejected_count = int(report.get("rejected_count") or 0)
+    if rejected_count > 0:
+        actions.append(
+            _action(
+                "acknowledge_rejected_note_backfill",
+                "warning",
+                "Acknowledge refused or conflicted note backfill proposals after review.",
+                count=rejected_count,
+            )
+        )
+    missing_evidence_count = int(report.get("missing_evidence_ref_count") or 0)
+    if missing_evidence_count > 0:
+        actions.append(
+            _action(
+                "repair_note_backfill_evidence_refs",
+                "warning",
+                "Note backfill proposals without evidence refs must be regenerated or manually repaired.",
+                count=missing_evidence_count,
+            )
+        )
+    return actions
+
+
 def _support_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if not report.get("configured"):
@@ -122,6 +182,37 @@ def _support_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     if report.get("degraded"):
         actions.append(_action("resolve_backend_degraded_state", "warning", "Backend status is degraded locally."))
     return actions
+
+
+def _proposal_projection(proposal: Any) -> dict[str, Any]:
+    if isinstance(proposal, dict):
+        return {
+            "intent": str(proposal.get("intent") or ""),
+            "status": str(proposal.get("status") or "unknown"),
+            "provenance": proposal.get("provenance") if isinstance(proposal.get("provenance"), dict) else {},
+        }
+    return {
+        "intent": str(getattr(proposal, "intent", "") or ""),
+        "status": str(getattr(proposal, "status", "") or "unknown"),
+        "provenance": getattr(proposal, "provenance", {}) if isinstance(getattr(proposal, "provenance", {}), dict) else {},
+    }
+
+
+def _is_note_backfill_candidate(proposal: dict[str, Any]) -> bool:
+    provenance = proposal.get("provenance") if isinstance(proposal.get("provenance"), dict) else {}
+    return proposal.get("intent") == "note_backfill_candidate" or provenance.get("source") == "hades_note_quality"
+
+
+def _has_backfill_evidence_ref(proposal: dict[str, Any]) -> bool:
+    provenance = proposal.get("provenance") if isinstance(proposal.get("provenance"), dict) else {}
+    evidence_ref = provenance.get("evidence_ref")
+    if not isinstance(evidence_ref, dict):
+        candidate_fact = provenance.get("candidate_fact")
+        if isinstance(candidate_fact, dict):
+            evidence_ref = candidate_fact.get("evidence_ref")
+    if not isinstance(evidence_ref, dict):
+        return False
+    return bool(evidence_ref.get("schema") and evidence_ref.get("sha256"))
 
 
 def _action(action_id: str, severity: str, message: str, **extra: Any) -> dict[str, Any]:
