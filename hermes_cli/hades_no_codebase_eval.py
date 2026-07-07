@@ -387,7 +387,15 @@ def _tool_names(values: Iterable[Any]) -> list[str]:
     names: list[str] = []
     for value in values:
         if isinstance(value, Mapping):
-            name = value.get("name") or value.get("tool") or value.get("tool_name")
+            function = value.get("function")
+            function_name = function.get("name") if isinstance(function, Mapping) else None
+            name = (
+                value.get("name")
+                or value.get("tool")
+                or value.get("tool_name")
+                or value.get("recipient_name")
+                or function_name
+            )
         else:
             name = value
         text = str(name or "").strip()
@@ -399,10 +407,26 @@ def _tool_names(values: Iterable[Any]) -> list[str]:
 def _forbidden_tool_calls(tool_calls: Iterable[str]) -> list[str]:
     forbidden: list[str] = []
     for name in tool_calls:
-        normalized = str(name).strip().lower()
-        if normalized in FORBIDDEN_NO_CODEBASE_TOOLS:
+        if any(fragment in FORBIDDEN_NO_CODEBASE_TOOLS for fragment in _tool_name_fragments(name)):
             forbidden.append(str(name))
     return forbidden
+
+
+def _tool_name_fragments(name: str) -> tuple[str, ...]:
+    normalized = str(name).strip().lower()
+    if not normalized:
+        return ()
+    fragments = {normalized}
+    pending = [normalized]
+    for separator in (".", "::", ":", "/", "\\", "__", " "):
+        next_pending: list[str] = []
+        for item in pending:
+            parts = [part for part in item.split(separator) if part]
+            if len(parts) > 1:
+                fragments.update(parts)
+                next_pending.extend(parts)
+        pending.extend(next_pending)
+    return tuple(fragments)
 
 
 def _required_tools_in_order(required: Sequence[str], actual: Sequence[str]) -> bool:

@@ -69,6 +69,51 @@ def test_hades_no_codebase_eval_fails_on_source_file_tool_access():
     assert failed[0]["failures"] == ["diagnosis used forbidden source-access tools"]
 
 
+def test_hades_no_codebase_eval_detects_namespaced_real_trajectory_tool_shapes(tmp_path):
+    from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
+
+    fixture = tmp_path / "eval.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "schema": "hades.no_codebase_eval.v1",
+                "fixtures": [
+                    {
+                        "id": "real_trajectory_shape",
+                        "title": "Real trajectory shape",
+                        "expected_root_cause_id": None,
+                        "expected_confidence": "insufficient",
+                        "requires_persisted_report": False,
+                    }
+                ],
+                "runs": [
+                    {
+                        "fixture_id": "real_trajectory_shape",
+                        "root_cause_id": None,
+                        "confidence": "insufficient",
+                        "tool_calls": [
+                            {"function": {"name": "functions.exec_command"}},
+                            {"recipient_name": "mcp__filesystem__read_file"},
+                            "terminal.run",
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(fixture)
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+
+    assert report["status"] == "failed"
+    assert report["no_codebase_violations"] == [
+        {"fixture_id": "real_trajectory_shape", "tool": "functions.exec_command"},
+        {"fixture_id": "real_trajectory_shape", "tool": "mcp__filesystem__read_file"},
+        {"fixture_id": "real_trajectory_shape", "tool": "terminal.run"},
+    ]
+
+
 def test_hades_no_codebase_eval_fails_when_hades_tools_are_out_of_order():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisRun,

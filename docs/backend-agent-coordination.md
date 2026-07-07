@@ -4393,6 +4393,35 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione no-codebase evaluator namespaced tools - 2026-07-07
+
+Stato: completata una tranche locale P0-7/P0-6.
+
+Agent locale:
+
+- `hermes_cli/hades_no_codebase_eval.py` estrae ora tool call anche da shape
+  realistiche di traiettoria: `function.name` e `recipient_name`, oltre a
+  `name`, `tool` e `tool_name`.
+- Il gate no-codebase rileva source/shell tool vietati anche se namespaced o
+  MCP-style, per esempio `functions.exec_command`,
+  `mcp__filesystem__read_file` e `terminal.run`.
+- Questo riduce un falso negativo critico: un eval poteva bloccare `read_file`
+  bare ma non un tool equivalente registrato con namespace.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `7 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_no_codebase_eval.py tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato; `py_compile` sugli stessi file passato.
+
+Resta fuori da questa tranche:
+
+- Ingestione automatica di trajectory JSON reali da sessioni/agent run; questa
+  tranche rafforza il parser/gate usato dalla fixture loader esistente.
+
 ## Esecuzione no-codebase feature test backend - 2026-07-07
 
 Stato: completate prime tranche remote P0-7.
