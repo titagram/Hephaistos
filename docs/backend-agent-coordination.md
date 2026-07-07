@@ -2488,6 +2488,10 @@ Agent locale:
 - `hades_quality_report` espone `freshness_coverage` e produce il blocker
   `repair_freshness_coverage` quando un run preciso usa evidence stale o la
   freshness non corrisponde alla fixture.
+- `.github/workflows/tests.yml` ora include il job dedicato `Hades no-codebase
+  quality gate`, che esegue il comando reale
+  `hades backend quality-report --no-codebase-eval ... --skip-local-status
+  --json` e fallisce se lo status non e' `passed`.
 
 Verifiche eseguite:
 
@@ -2502,4 +2506,3 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - Feature tests remoti no-codebase con SQLite in-memory.
-- CI workflow dedicato leggero che esegue quality-report come gate separato.

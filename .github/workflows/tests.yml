@@ -120,6 +120,47 @@ jobs:
           path: test_durations.json
           retention-days: 1
 
+  hades-no-codebase-quality:
+    name: Hades no-codebase quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra dev
+
+      - name: Run Hades no-codebase quality report
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          hades backend quality-report \
+            --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json \
+            --skip-local-status \
+            --json | tee hades-quality-report.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("hades-quality-report.json").read_text())
+          if payload.get("status") != "passed":
+              raise SystemExit(json.dumps(payload.get("action_queue", []), indent=2))
+          PY
+
   # Merge per-slice duration data into a single cache, so future runs
   # (including PRs) get balanced slicing.
   save-durations:
