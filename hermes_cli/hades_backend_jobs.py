@@ -106,6 +106,7 @@ ROUTE_CALL_RE = re.compile(
 LARAVEL_HANDLER_RE = re.compile(
     r"\[\s*(?P<class>[A-Za-z0-9_\\\\]+)::class\s*,\s*['\"](?P<method>[A-Za-z0-9_]+)['\"]\s*\]"
 )
+PHP_LOG_LEVEL_PATTERN = r"debug|info|notice|warn|warning|error|critical|alert|emergency"
 PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
 PHP_USE_RE = re.compile(
     r"^\s*use\s+(?P<class>[A-Za-z0-9_\\]+)(?:\s+as\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?\s*;",
@@ -134,6 +135,25 @@ PHP_QUOTED_VALUE_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
 PHP_MODEL_TABLE_RE = re.compile(r"\bprotected\s+\$table\s*=\s*['\"](?P<table>[^'\"]+)['\"]", re.MULTILINE)
 PHP_CONFIG_RE = re.compile(r"\bconfig\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
 PHP_ENV_RE = re.compile(r"\benv\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
+PHP_LOG_STATIC_RE = re.compile(
+    rf"(?<![A-Za-z0-9_\\])(?P<logger>\\?(?:[A-Za-z_][A-Za-z0-9_]*\\)*Log|Logger)\s*::\s*"
+    rf"(?P<level>{PHP_LOG_LEVEL_PATTERN})\s*\(\s*(?P<quote>['\"])(?P<message>(?:\\.|(?!(?P=quote)).)*?)(?P=quote)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+PHP_LOG_INSTANCE_RE = re.compile(
+    rf"(?P<logger>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
+    rf"(?P<level>{PHP_LOG_LEVEL_PATTERN})\s*\(\s*(?P<quote>['\"])(?P<message>(?:\\.|(?!(?P=quote)).)*?)(?P=quote)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+PHP_LOGGER_CHAIN_RE = re.compile(
+    rf"\blogger\s*\(\s*\)\s*->\s*(?P<level>{PHP_LOG_LEVEL_PATTERN})\s*\(\s*"
+    r"(?P<quote>['\"])(?P<message>(?:\\.|(?!(?P=quote)).)*?)(?P=quote)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+PHP_LOGGER_HELPER_RE = re.compile(
+    r"\blogger\s*\(\s*(?P<quote>['\"])(?P<message>(?:\\.|(?!(?P=quote)).)*?)(?P=quote)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
 PHP_GATE_POLICY_RE = re.compile(
     r"\bGate::policy\s*\(\s*(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*,\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
     re.MULTILINE,
@@ -796,6 +816,25 @@ def _php_short_name(name: str) -> str:
 
 def _php_context_id(class_info: dict[str, Any] | None, rel: str) -> str:
     return str(class_info["name"]) if class_info else rel
+
+
+def _php_method_context_id(source: str, classes: list[dict[str, Any]], offset: int, rel: str) -> str:
+    class_info = _class_context(classes, offset)
+    if class_info is None:
+        return rel
+    class_offset = int(class_info["offset"])
+    method_name = ""
+    for match in PHP_METHOD_RE.finditer(source):
+        if match.start() < class_offset:
+            continue
+        if match.start() > offset:
+            break
+        method_class = _class_context(classes, match.start())
+        if method_class and method_class.get("name") == class_info.get("name"):
+            method_name = match.group("name")
+    if method_name:
+        return f"{_php_short_name(str(class_info['name']))}@{method_name}"
+    return _php_context_id(class_info, rel)
 
 
 def _php_route_id(route: dict[str, Any]) -> str:
@@ -1663,6 +1702,7 @@ def _php_graph_summary(
     edges: list[dict[str, Any]],
     database: dict[str, Any] | None = None,
     tests: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
 ) -> str:
     role_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -1671,7 +1711,8 @@ def _php_graph_summary(
     roles = ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
     test_count = int((tests or {}).get("file_count") or 0)
-    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {roles or 'roles:none'}"
+    log_count = int((logs or {}).get("event_count") or 0)
+    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; logs:{log_count}; {roles or 'roles:none'}"
 
 
 def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
@@ -1714,6 +1755,65 @@ def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], 
     return truncated
 
 
+def _append_php_log_events(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    log_events: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    patterns: tuple[tuple[re.Pattern[str], str], ...] = (
+        (PHP_LOG_STATIC_RE, ""),
+        (PHP_LOG_INSTANCE_RE, ""),
+        (PHP_LOGGER_CHAIN_RE, ""),
+        (PHP_LOGGER_HELPER_RE, "info"),
+    )
+    for pattern, default_level in patterns:
+        for match in pattern.finditer(source):
+            if len(log_events) >= MAX_LOG_EVENTS:
+                truncated = True
+                break
+            level = (match.groupdict().get("level") or default_level or "info").lower()
+            if level == "warn":
+                level = "warning"
+            message = redact_secret(match.group("message") or "")
+            logger = match.groupdict().get("logger") or "logger"
+            context = _php_method_context_id(source, classes, match.start(), rel)
+            payload = {
+                "context": context,
+                "logger": logger.strip("\\"),
+                "level": level,
+                "path": rel,
+                "line": _line_number(source, match.start()),
+                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest() if message else "",
+                "message_length": len(message) if message else 0,
+            }
+            log_event = {key: value for key, value in payload.items() if value not in ("", None, 0)}
+            log_id_payload = json.dumps(log_event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            log_id = hashlib.sha256(log_id_payload).hexdigest()[:16]
+            log_event = {"id": f"log:{log_id}", **log_event}
+            log_events.append(log_event)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "emits_log",
+                    "from": context,
+                    "to": log_event["id"],
+                    "level": log_event.get("level"),
+                    "logger": log_event.get("logger"),
+                    "path": rel,
+                    "line": log_event.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+        if truncated and len(log_events) >= MAX_LOG_EVENTS:
+            break
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -1731,6 +1831,7 @@ def _build_php_graph(
     edges: list[dict[str, Any]] = []
     database = _database_summary(file_refs)
     database["tables"] = []
+    log_events: list[dict[str, Any]] = []
     truncated = _php_route_edges(routes, edges, max_edges=max_edges) or truncated
 
     for path in php_files:
@@ -1820,6 +1921,7 @@ def _build_php_graph(
                 ) or truncated
 
         classes.sort(key=lambda item: int(item["offset"]))
+        truncated = _append_php_log_events(source, rel, classes, edges, log_events, max_edges=max_edges) or truncated
 
         doctrine_table_by_class = {class_name: info["table"] for class_name, info in doctrine_tables.items()}
         for class_info in classes:
@@ -2367,6 +2469,13 @@ def _build_php_graph(
         max_file_bytes=max_file_bytes,
     )
     truncated = truncated or tests_truncated
+    logs = {
+        "schema": "hades.log_map.v1",
+        "event_count": len(log_events),
+        "events": log_events[:MAX_LOG_EVENTS],
+        "truncated": len(log_events) > MAX_LOG_EVENTS,
+        "raw_source_included": False,
+    }
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",
@@ -2377,6 +2486,7 @@ def _build_php_graph(
         "edges": edges,
         "database": database,
         "tests": tests,
+        "logs": logs,
         "summary": "",
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges,
@@ -2384,7 +2494,7 @@ def _build_php_graph(
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _php_graph_summary(routes, symbols, edges, database, tests)
+    graph["summary"] = _php_graph_summary(routes, symbols, edges, database, tests, logs)
     return graph
 
 

@@ -442,11 +442,11 @@ available. PHP, TypeScript, and Python graph artifacts include a `tests` map
 for recognized test files plus `test_covers_symbol`, `test_covers_route`, and
 `test_imports` edges, while keeping test source bodies out of the artifact. All
 Python graph artifacts also include AST-derived `imports` and `calls` edges
-from handlers/functions/methods to imported services or called symbols. Python
-and Node/TypeScript artifacts additionally include a metadata-only `logs` map
-for logging calls, with level/logger/context/path/line and a redacted message
-hash instead of the raw message. All artifact jobs report omission reasons
-instead of following path escapes or failing the whole sync.
+from handlers/functions/methods to imported services or called symbols. PHP,
+Python, and Node/TypeScript artifacts additionally include a metadata-only
+`logs` map for logging calls, with level/logger/context/path/line and a
+redacted message hash instead of the raw message. All artifact jobs report
+omission reasons instead of following path escapes or failing the whole sync.
 
 `read_source_slice` is intentionally policy-gated/manual-review source access:
 it reads only a bounded line window, redacts likely secrets, uploads

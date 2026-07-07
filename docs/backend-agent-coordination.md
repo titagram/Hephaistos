@@ -3637,8 +3637,8 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Log map PHP/TS e correlazione automatica con runtime log evidence; questa
-  tranche prepara il nodo/edge model senza importare log raw in memory.
+- Log map PHP e correlazione automatica con runtime log evidence; questa
+  tranche prepara il nodo/edge model Python senza importare log raw in memory.
 
 ## Esecuzione TypeScript log map graph - 2026-07-07
 
@@ -3667,8 +3667,39 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Log map PHP e correlazione automatica con runtime log evidence; questa
-  tranche resta source-free e metadata-only.
+- Correlazione automatica con runtime log evidence; questa tranche resta
+  source-free e metadata-only.
+
+## Esecuzione PHP log map graph - 2026-07-07
+
+Stato: completata una tranche locale P2-2 sulla log map metadata-only per
+PHP/Laravel.
+
+Agent locale:
+
+- Il graph `hades.php_graph.v1` include `logs.schema=hades.log_map.v1` per
+  `Log::level(...)`, logger PSR su variabile/proprieta',
+  `logger()->level(...)` e `logger(...)`.
+- Ogni evento conserva context, logger, level, path, line, lunghezza e SHA-256
+  del messaggio redatto; non viene salvato il template raw.
+- Il graph aggiunge edge `emits_log` dal metodo PHP quando riconoscibile, o dal
+  contesto classe/file in fallback, al nodo `log:<hash>`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Correlazione automatica con runtime log evidence; questa tranche resta
+  source-free e metadata-only.
 
 ## Esecuzione note backfill quality gate - 2026-07-07
 

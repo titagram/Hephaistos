@@ -572,12 +572,14 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Models\\Order;\n"
         "use App\\Services\\OrderService;\n"
         "use Illuminate\\Support\\Facades\\DB;\n"
+        "use Illuminate\\Support\\Facades\\Log;\n"
         "class OrderController extends Controller {\n"
         "    public function __construct(OrderService $orders) {}\n"
         "    public function show(StoreOrderRequest $request, Order $order) {\n"
         "        $request->validate(['status' => 'required|string']);\n"
         "        config('services.orders.cache');\n"
         "        env('ORDER_DEBUG');\n"
+        "        Log::warning('order payment gateway degraded');\n"
         "        SyncOrderJob::dispatch($order->id);\n"
         "        event(new OrderPlaced($order));\n"
         "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
@@ -769,7 +771,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 50},
+            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 80},
         },
         workspace_root=workspace,
     )
@@ -779,6 +781,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
     tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    log_events = {item["context"]: item for item in artifact["logs"]["events"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.php_graph.v1"
@@ -840,6 +843,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
     assert ("env_ref", "App\\Http\\Controllers\\OrderController", "env:ORDER_DEBUG") in edges
+    assert ("emits_log", "OrderController@show", log_events["OrderController@show"]["id"]) in edges
     assert (
         "migration_table",
         "database/migrations/2026_01_01_000000_create_orders_table.php",
@@ -868,6 +872,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
             "handler": "App\\Broadcasting\\OrderChannel",
         }
     ]
+    assert artifact["logs"]["schema"] == "hades.log_map.v1"
+    assert artifact["logs"]["event_count"] == 1
+    assert log_events["OrderController@show"]["level"] == "warning"
+    assert log_events["OrderController@show"]["logger"] == "Log"
+    assert len(log_events["OrderController@show"]["message_sha256"]) == 64
     assert "Route::get" not in str(artifact)
     assert "return $this->belongsTo" not in str(artifact)
     assert "return OrderService::format" not in str(artifact)
@@ -877,6 +886,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "Broadcast::channel" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
+    assert "order payment gateway degraded" not in str(artifact)
     assert "$request->validate" not in str(artifact)
     assert "DB::table" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
