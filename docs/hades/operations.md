@@ -259,15 +259,23 @@ headers, extract lightweight stack frames when possible, and upload
 `failing_test` or `log_excerpt` evidence to the linked backend workspace.
 
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
-or follow the same order manually: project awareness status, bug evidence
-search, graph search, minimal source slice fetch, then a persisted structured
-diagnosis report with evidence refs and confidence.
+or follow the same order manually: project awareness status, existing evidence
+pack search, bug evidence search, graph search, minimal source slice fetch,
+evidence pack create, then a persisted structured diagnosis report with
+evidence refs and confidence.
 
 Use `hades_backend_graph_search` to find candidate graph artifacts by text, then
 `hades_backend_graph_traverse` when you know a starting route, URI, class,
 method, file, or symbol and need bounded call-path context. Traversal results
 carry freshness and artifact provenance and should be cited before making exact
 route/controller/service claims without local source access.
+
+Use `hades_backend_evidence_pack_search` before rebuilding an investigation
+that may already have a current pack. Use `hades_backend_evidence_pack_create`
+after collecting bug evidence refs, graph refs, and source slice ids. Evidence
+packs are source-free bundles: they store refs and bounded structured payload,
+not raw repository dumps, and the backend rejects unredacted secrets or payloads
+over the safety limit.
 
 After the diagnosis is verified by a passing regression test or explicit user
 confirmation, promote it with the service-gated

@@ -2339,3 +2339,55 @@ Resta fuori da questa tranche:
 - DB query runtime (`DB::`, query builder) e viste Blade.
 - Graph traversal specializzato per table/config/policy oltre agli edge gia'
   persistiti.
+
+## Esecuzione evidence pack Hades - 2026-07-07
+
+Stato: completata una tranche P0-5 del piano "Bug Root Cause Awareness".
+
+Backend remoto:
+
+- Commit remoto: `2a4b282 feat: add Hades evidence packs`.
+- Nuova tabella `hades_evidence_packs` con project, workspace binding, bug
+  report opzionale, evidence refs, graph refs, source slice ids, payload
+  bounded, sha256, redactions, retention class e head commit.
+- Nuovo controller `EvidencePackController`:
+  - `POST /api/hades/v1/evidence-packs`;
+  - `GET /api/hades/v1/evidence-packs`.
+- `HadesEvidencePolicy` rifiuta evidence pack oltre 96 KB o con segreti non
+  redatti (`evidence_pack_payload_too_large`,
+  `unredacted_secret_detected`).
+- Project awareness espone `coverage.evidence_packs`.
+- Health, capabilities e OpenAPI remoto dichiarano la nuova route.
+
+Agent locale:
+
+- `HadesBackendClient` espone `create_evidence_pack` e `evidence_packs`.
+- Il provider memoria Hades espone i tool service-gated:
+  `hades_backend_evidence_pack_search` e
+  `hades_backend_evidence_pack_create`.
+- La skill `hades-bug-diagnosis` ora cerca evidence pack esistenti prima di
+  ricostruire evidence e salva un pack quando refs e source slice ids sono
+  raccolti.
+- Docs operative/backend/runbook/OpenAPI aggiornati.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `70 passed`.
+- Locale lint/docs:
+  `ruff check` su client/provider/test Hades passato; `py_compile` su client e
+  provider passato; `scripts/docs_audit.py` passato: `docs audit passed: 18
+  required docs checked`.
+- Remoto:
+  `vendor/bin/pint --test ...` passato su 8 file.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `51 passed`.
+- Remoto route list include `POST|GET /api/hades/v1/evidence-packs`.
+
+Resta fuori da questa tranche:
+
+- Evidence pack builder automatico a partire da un bug report.
+- UI/dashboard dedicata per leggere e revisionare pack.
+- FTS/vector ranking dedicato per evidence packs.

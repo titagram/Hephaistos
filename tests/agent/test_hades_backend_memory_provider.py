@@ -122,6 +122,8 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
         "hades_backend_graph_search",
         "hades_backend_graph_traverse",
         "hades_backend_source_slice_fetch",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_evidence_pack_create",
         "hades_backend_project_awareness_status",
         "hades_backend_diagnosis_report_create",
         "hades_backend_resolved_bug_promote",
@@ -717,6 +719,196 @@ def test_hades_backend_source_slice_fetch_tool_requires_scope(monkeypatch, tmp_p
     result = json.loads(provider.handle_tool_call("hades_backend_source_slice_fetch", {}))
 
     assert result["error"].startswith("Provide at least one")
+
+
+def test_hades_backend_evidence_pack_search_tool_prefers_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def evidence_packs(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "evidence_pack_search_v1",
+                "etag": "evidence_pack_search_v1",
+                "query": payload["query"],
+                "bug_report_id": payload["bug_report_id"],
+                "count": 1,
+                "candidate_count": 1,
+                "truncated": False,
+                "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                "server_time": "2026-07-07T12:00:00Z",
+                "items": [
+                    {
+                        "id": "pack_1",
+                        "bug_report_id": "bug_1",
+                        "title": "Order route evidence pack",
+                        "summary": "Stack trace, graph edge, and source slice point to OrderController.",
+                        "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                        "graph_refs": [{"type": "route_handler", "to": "OrderController@show"}],
+                        "source_slice_ids": ["slice_1"],
+                        "payload": {"next_verification": "Run focused test"},
+                        "sha256": "c" * 64,
+                        "redactions": 1,
+                        "retention_class": "diagnosis_evidence",
+                        "head_commit": "abc123",
+                        "updated_at": "2026-07-07T11:59:00Z",
+                        "score": 33,
+                        "version": "evidence_pack_1",
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_evidence_pack_search",
+            {"query": "OrderController", "bug_report_id": "bug_1", "limit": 5},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is False
+    assert result["backend_version"] == "evidence_pack_search_v1"
+    assert result["freshness"]["workspace_head_commit"] == "abc123"
+    assert result["items"][0]["id"] == "pack_1"
+    assert result["items"][0]["source_slice_ids"] == ["slice_1"]
+    assert result["items"][0]["payload"]["next_verification"] == "Run focused test"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "id": None,
+            "query": "OrderController",
+            "bug_report_id": "bug_1",
+            "limit": 5,
+        }
+    ]
+    assert fake.closed == 1
+    assert timeouts == [2.0]
+
+
+def test_hades_backend_evidence_pack_search_tool_requires_scope(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(provider.handle_tool_call("hades_backend_evidence_pack_search", {}))
+
+    assert result["error"].startswith("Provide at least one")
+
+
+def test_hades_backend_evidence_pack_create_tool_persists_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def create_evidence_pack(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "server_time": "2026-07-07T12:00:00Z",
+                "evidence_pack": {
+                    "id": "pack_1",
+                    "bug_report_id": payload["bug_report_id"],
+                    "title": payload["title"],
+                    "summary": payload["summary"],
+                    "evidence_refs": payload["evidence_refs"],
+                    "graph_refs": payload["graph_refs"],
+                    "source_slice_ids": payload["source_slice_ids"],
+                    "payload": payload["payload"],
+                    "head_commit": payload["head_commit"],
+                    "redactions": payload["redactions"],
+                    "retention_class": "diagnosis_evidence",
+                    "sha256": "d" * 64,
+                    "updated_at": "2026-07-07T11:59:00Z",
+                    "version": "evidence_pack_1",
+                },
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_evidence_pack_create",
+            {
+                "bug_report_id": "bug_1",
+                "title": "Order route evidence pack",
+                "summary": "Stack trace, graph edge, and source slice point to OrderController.",
+                "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                "graph_refs": [{"type": "route_handler", "to": "OrderController@show"}],
+                "source_slice_ids": ["slice_1"],
+                "payload": {"next_verification": "Run focused test"},
+                "head_commit": "abc123",
+                "redactions": 2,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["evidence_pack"]["id"] == "pack_1"
+    assert result["evidence_pack"]["source_slice_ids"] == ["slice_1"]
+    assert result["evidence_pack"]["payload"]["next_verification"] == "Run focused test"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "bug_report_id": "bug_1",
+            "title": "Order route evidence pack",
+            "summary": "Stack trace, graph edge, and source slice point to OrderController.",
+            "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+            "graph_refs": [{"type": "route_handler", "to": "OrderController@show"}],
+            "source_slice_ids": ["slice_1"],
+            "payload": {"next_verification": "Run focused test"},
+            "head_commit": "abc123",
+            "redactions": 2,
+        }
+    ]
+    assert fake.closed == 1
+    assert timeouts == [2.0]
+
+
+def test_hades_backend_evidence_pack_create_tool_requires_title(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_evidence_pack_create",
+            {"summary": "Missing title."},
+        )
+    )
+
+    assert result["error"] == "Missing required parameter: title"
 
 
 def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkeypatch, tmp_path):

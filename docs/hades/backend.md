@@ -43,6 +43,8 @@ The Hades v1 backend exposes:
 - `GET /api/hades/v1/bug-reports/{bug_report_id}`
 - `POST /api/hades/v1/bug-evidence`
 - `GET /api/hades/v1/bug-evidence/search`
+- `POST /api/hades/v1/evidence-packs`
+- `GET /api/hades/v1/evidence-packs`
 
 Each item is scoped to the authenticated project and linked workspace binding.
 Evidence carries a kind, bounded summary/payload, source, sha256, redaction
@@ -52,10 +54,12 @@ automatic memory recall.
 
 The backend refuses content-bearing diagnosis data that is too large or appears
 to contain unredacted credentials. The current safety baseline caps bug evidence
-payloads at 64 KB, source slices at 64 KB, and diagnosis report payloads at 32
-KB. Rejected payloads return a structured error such as
+payloads at 64 KB, source slices at 64 KB, diagnosis report payloads at 32 KB,
+and evidence packs at 96 KB. Rejected payloads return a structured error such
+as
 `unredacted_secret_detected`, `evidence_payload_too_large`,
-`source_slice_too_large`, or `diagnosis_payload_too_large`.
+`source_slice_too_large`, `evidence_pack_payload_too_large`, or
+`diagnosis_payload_too_large`.
 
 ## Project Awareness
 

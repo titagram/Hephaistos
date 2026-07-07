@@ -29,6 +29,8 @@ BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
 GRAPH_SEARCH_TOOL_NAME = "hades_backend_graph_search"
 GRAPH_TRAVERSE_TOOL_NAME = "hades_backend_graph_traverse"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
+EVIDENCE_PACK_SEARCH_TOOL_NAME = "hades_backend_evidence_pack_search"
+EVIDENCE_PACK_CREATE_TOOL_NAME = "hades_backend_evidence_pack_create"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 DIAGNOSIS_REPORT_CREATE_TOOL_NAME = "hades_backend_diagnosis_report_create"
 RESOLVED_BUG_PROMOTE_TOOL_NAME = "hades_backend_resolved_bug_promote"
@@ -284,6 +286,103 @@ SOURCE_SLICE_FETCH_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+EVIDENCE_PACK_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": EVIDENCE_PACK_SEARCH_TOOL_NAME,
+    "description": (
+        "Search persisted Hades evidence packs for this linked workspace. "
+        "Evidence packs aggregate bug evidence refs, graph refs, and source "
+        "slice ids into a bounded source-free diagnosis bundle. Use this after "
+        "project awareness and before making root-cause claims when a prior "
+        "pack may already contain the necessary evidence. Results are live "
+        "backend data; there is no local cache fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Optional exact evidence pack id.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional text to match pack title, summary, refs, or bounded payload.",
+            },
+            "bug_report_id": {
+                "type": "string",
+                "description": "Optional Hades bug report id to scope pack search.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": TOOL_RESULT_LIMIT,
+                "default": 5,
+                "description": "Maximum number of evidence packs to return.",
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
+EVIDENCE_PACK_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": EVIDENCE_PACK_CREATE_TOOL_NAME,
+    "description": (
+        "Persist a bounded Hades evidence pack for this linked workspace after "
+        "collecting bug evidence, graph refs, and source slice ids. Use this to "
+        "preserve the evidence bundle that supports a source-free diagnosis; do "
+        "not include raw project dumps or unredacted secrets."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "bug_report_id": {
+                "type": "string",
+                "description": "Optional Hades bug report id this evidence pack belongs to.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Short evidence pack title.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "Bounded summary of what this evidence pack proves or still lacks.",
+            },
+            "evidence_refs": {
+                "type": "array",
+                "description": "Refs to bug evidence items, source slices, graph artifacts, tests, or logs.",
+                "items": {"type": "object", "additionalProperties": True},
+            },
+            "graph_refs": {
+                "type": "array",
+                "description": "Route, symbol, graph node, graph edge, table, config, or artifact refs.",
+                "items": {"type": "object", "additionalProperties": True},
+            },
+            "source_slice_ids": {
+                "type": "array",
+                "description": "Stored source slice ids included by reference.",
+                "items": {"type": "string"},
+            },
+            "payload": {
+                "type": "object",
+                "description": "Optional bounded structured bundle detail.",
+                "additionalProperties": True,
+            },
+            "head_commit": {
+                "type": "string",
+                "description": "Optional workspace HEAD commit represented by this evidence pack.",
+            },
+            "redactions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000,
+                "default": 0,
+                "description": "Number of redactions applied to pack payload/evidence.",
+            },
+        },
+        "required": ["title", "summary"],
+        "additionalProperties": False,
+    },
+}
+
 PROJECT_AWARENESS_STATUS_TOOL_SCHEMA: Dict[str, Any] = {
     "name": PROJECT_AWARENESS_STATUS_TOOL_NAME,
     "description": (
@@ -453,8 +552,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "Use recalled project memory as background context; the Hades "
             "backend remains the authoritative source of shared memory. "
             "Automatic recall is compact and excludes raw source/wiki chunks; "
-            "search project memory, bug evidence, or project awareness status "
-            "explicitly when exact evidence or diagnosis readiness is needed."
+            "search project memory, bug evidence, evidence packs, or project "
+            "awareness status explicitly when exact evidence or diagnosis "
+            "readiness is needed."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -533,12 +633,18 @@ class HadesBackendMemoryProvider(MemoryProvider):
             GRAPH_SEARCH_TOOL_SCHEMA,
             GRAPH_TRAVERSE_TOOL_SCHEMA,
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
+            EVIDENCE_PACK_SEARCH_TOOL_SCHEMA,
+            EVIDENCE_PACK_CREATE_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
             DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA,
             RESOLVED_BUG_PROMOTE_TOOL_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == EVIDENCE_PACK_CREATE_TOOL_NAME:
+            return self._handle_evidence_pack_create(args)
+        if tool_name == EVIDENCE_PACK_SEARCH_TOOL_NAME:
+            return self._handle_evidence_pack_search(args)
         if tool_name == RESOLVED_BUG_PROMOTE_TOOL_NAME:
             return self._handle_resolved_bug_promote(args)
         if tool_name == DIAGNOSIS_REPORT_CREATE_TOOL_NAME:
@@ -839,6 +945,116 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "message": "Hades backend source slice live fetch is unavailable.",
             "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
             "items": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_evidence_pack_search(self, args: Dict[str, Any]) -> str:
+        pack_id = str(args.get("id") or "").strip()
+        query = str(args.get("query") or "").strip()
+        bug_report_id = str(args.get("bug_report_id") or "").strip()
+        limit = _bounded_int(args.get("limit"), default=5, minimum=1, maximum=TOOL_RESULT_LIMIT)
+        if not any((pack_id, query, bug_report_id)):
+            return tool_error("Provide at least one of id, query, or bug_report_id.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so evidence packs are unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "items": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_evidence_pack_search(
+            pack_id=pack_id,
+            query=query,
+            bug_report_id=bug_report_id,
+            limit=limit,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_evidence_packs(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend evidence pack live search is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "items": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_evidence_pack_create(self, args: Dict[str, Any]) -> str:
+        title = str(args.get("title") or "").strip()
+        if not title:
+            return tool_error("Missing required parameter: title")
+        summary = str(args.get("summary") or "").strip()
+        if not summary:
+            return tool_error("Missing required parameter: summary")
+
+        evidence_refs = args.get("evidence_refs")
+        if evidence_refs is None:
+            evidence_refs = []
+        if not isinstance(evidence_refs, list):
+            return tool_error("Parameter evidence_refs must be an array when provided.")
+        graph_refs = args.get("graph_refs")
+        if graph_refs is None:
+            graph_refs = []
+        if not isinstance(graph_refs, list):
+            return tool_error("Parameter graph_refs must be an array when provided.")
+        source_slice_ids = _string_list(args.get("source_slice_ids"))
+        payload = args.get("payload")
+        if payload is not None and not isinstance(payload, dict):
+            return tool_error("Parameter payload must be an object when provided.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so evidence packs cannot be saved."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                }
+            )
+
+        backend_result, backend_error = self._backend_evidence_pack_create(
+            bug_report_id=str(args.get("bug_report_id") or "").strip(),
+            title=title,
+            summary=summary,
+            evidence_refs=evidence_refs,
+            graph_refs=graph_refs,
+            source_slice_ids=source_slice_ids,
+            payload=payload,
+            head_commit=str(args.get("head_commit") or "").strip(),
+            redactions=_bounded_int(args.get("redactions"), default=0, minimum=0, maximum=100_000),
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_evidence_pack_create(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend evidence pack create is unavailable.",
+            "actions": ["Run `hades backend status` and retry after backend connectivity is healthy."],
         }
         if backend_error:
             result["backend_live_error"] = backend_error
@@ -1152,6 +1368,74 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     symbol=symbol or None,
                     line=line or None,
                     limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_evidence_pack_search(
+        self,
+        *,
+        pack_id: str,
+        query: str,
+        bug_report_id: str,
+        limit: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.evidence_packs(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    id=pack_id or None,
+                    query=query or None,
+                    bug_report_id=bug_report_id or None,
+                    limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_evidence_pack_create(
+        self,
+        *,
+        bug_report_id: str,
+        title: str,
+        summary: str,
+        evidence_refs: list[Any],
+        graph_refs: list[Any],
+        source_slice_ids: list[str],
+        payload: dict[str, Any] | None,
+        head_commit: str,
+        redactions: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.create_evidence_pack(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    bug_report_id=bug_report_id or None,
+                    title=title,
+                    summary=summary,
+                    evidence_refs=evidence_refs,
+                    graph_refs=graph_refs,
+                    source_slice_ids=source_slice_ids,
+                    payload=payload,
+                    head_commit=head_commit or None,
+                    redactions=redactions,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -1763,6 +2047,72 @@ def _tool_result_from_backend_source_slices(response: dict[str, Any]) -> dict[st
     freshness = response.get("freshness")
     if isinstance(freshness, dict):
         result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _evidence_pack_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": _item_id(item),
+        "bug_report_id": item.get("bug_report_id"),
+        "title": _compact_text(item.get("title"), max_chars=500),
+        "summary": _compact_text(item.get("summary"), max_chars=1200),
+        "evidence_refs": item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else [],
+        "graph_refs": item.get("graph_refs") if isinstance(item.get("graph_refs"), list) else [],
+        "source_slice_ids": item.get("source_slice_ids") if isinstance(item.get("source_slice_ids"), list) else [],
+        "payload": _bounded_payload(item.get("payload")),
+        "sha256": item.get("sha256"),
+        "redactions": item.get("redactions"),
+        "retention_class": item.get("retention_class"),
+        "head_commit": item.get("head_commit"),
+        "updated_at": item.get("updated_at"),
+        "version": item.get("version"),
+        "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_evidence_packs(response: dict[str, Any]) -> dict[str, Any]:
+    items = [_evidence_pack_item_from_backend(item) for item in _backend_items(response)]
+    count = _bounded_int(response.get("count"), default=len(items), minimum=0, maximum=1_000_000)
+    candidate_count = _bounded_int(
+        response.get("candidate_count"),
+        default=count,
+        minimum=0,
+        maximum=1_000_000,
+    )
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "backend_version": response.get("version"),
+        "backend_etag": response.get("etag"),
+        "query": response.get("query", ""),
+        "bug_report_id": response.get("bug_report_id"),
+        "searched_cache_only": False,
+        "count": count,
+        "candidate_count": candidate_count,
+        "truncated": bool(response.get("truncated")),
+        "server_time": response.get("server_time"),
+        "items": items,
+    }
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_evidence_pack_create(response: dict[str, Any]) -> dict[str, Any]:
+    pack = response.get("evidence_pack")
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "server_time": response.get("server_time"),
+    }
+    if isinstance(pack, dict):
+        result["evidence_pack"] = _evidence_pack_item_from_backend(pack)
+    else:
+        result["evidence_pack"] = {}
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 
