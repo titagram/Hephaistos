@@ -136,6 +136,15 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "method",
+                "name": "SyncOrdersCommand@handle",
+                "class": "App\\Console\\Commands\\SyncOrdersCommand",
+                "method": "handle",
+                "role": "artisan_command",
+                "path": "app/Console/Commands/SyncOrdersCommand.php",
+                "line": 6,
+            },
+            {
                 "kind": "class",
                 "name": "App\\Exceptions\\OrderLockedException",
                 "short_name": "OrderLockedException",
@@ -524,6 +533,59 @@ def _php_graph_artifact():
                 "line": 4,
                 "source_path": "app/Http/Controllers/OrderController.php",
                 "source_line": 41,
+            },
+            {
+                "kind": "artisan_command",
+                "from": "App\\Console\\Commands\\SyncOrdersCommand",
+                "to": "command:orders:sync",
+                "path": "app/Console/Commands/SyncOrdersCommand.php",
+                "line": 5,
+            },
+            {
+                "kind": "artisan_command_method",
+                "from": "command:orders:sync",
+                "to": "SyncOrdersCommand@handle",
+                "command_class": "App\\Console\\Commands\\SyncOrdersCommand",
+                "command_method": "handle",
+                "path": "app/Console/Commands/SyncOrdersCommand.php",
+                "line": 5,
+            },
+            {
+                "kind": "scheduled_command",
+                "from": "App\\Console\\Kernel",
+                "to": "command:orders:sync",
+                "cadence": "hourly",
+                "path": "app/Console/Kernel.php",
+                "line": 6,
+            },
+            {
+                "kind": "scheduled_command_method",
+                "from": "App\\Console\\Kernel",
+                "to": "SyncOrdersCommand@handle",
+                "command": "command:orders:sync",
+                "command_class": "App\\Console\\Commands\\SyncOrdersCommand",
+                "command_method": "handle",
+                "cadence": "hourly",
+                "path": "app/Console/Kernel.php",
+                "line": 6,
+            },
+            {
+                "kind": "scheduled_job",
+                "from": "App\\Console\\Kernel",
+                "to": "App\\Jobs\\SyncOrderJob",
+                "cadence": "daily",
+                "path": "app/Console/Kernel.php",
+                "line": 7,
+            },
+            {
+                "kind": "scheduled_job_method",
+                "from": "App\\Console\\Kernel",
+                "to": "SyncOrderJob@handle",
+                "job_class": "App\\Jobs\\SyncOrderJob",
+                "job_method": "handle",
+                "cadence": "daily",
+                "path": "app/Console/Kernel.php",
+                "line": 7,
             },
             {
                 "kind": "emits_event",
@@ -2584,6 +2646,102 @@ def test_hades_backend_graph_search_finds_local_job_dispatch_method_edges(monkey
         and "dispatch_method=dispatch" in item["summary"]
         for item in result["items"]
     )
+
+
+def test_hades_backend_graph_search_finds_local_scheduled_handle_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "schedule orders sync handle hourly daily", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "scheduled_command_method"
+        and ref["to"] == "SyncOrdersCommand@handle"
+        and ref["provenance"]["command"] == "command:orders:sync"
+        and ref["provenance"]["cadence"] == "hourly"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "scheduled_job_method"
+        and ref["to"] == "SyncOrderJob@handle"
+        and ref["provenance"]["job_class"] == "App\\Jobs\\SyncOrderJob"
+        and ref["provenance"]["cadence"] == "daily"
+        for ref in graph_refs
+    )
+    assert any(
+        "command=command:orders:sync" in item["summary"]
+        and "cadence=hourly" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_traverse_finds_local_scheduled_handle_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "App\\Console\\Kernel", "direction": "out", "max_depth": 1, "limit": 20},
+        )
+    )
+
+    node_ids = {node["id"] for node in result["nodes"]}
+    edge_kinds = {edge["kind"] for edge in result["edges"]}
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert {"App\\Console\\Kernel", "SyncOrdersCommand@handle", "SyncOrderJob@handle"} <= node_ids
+    assert {"scheduled_command_method", "scheduled_job_method"} <= edge_kinds
 
 
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):

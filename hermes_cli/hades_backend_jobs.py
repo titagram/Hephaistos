@@ -3384,6 +3384,57 @@ def _php_policy_index(
     return policy_by_model
 
 
+def _php_command_method_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    php_method_symbols: dict[tuple[str, str], str],
+    max_file_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    commands: dict[str, dict[str, Any]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            fqcn = _php_fqcn(namespace, match.group("name"))
+            extends = match.group("extends") or ""
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            classes.append(
+                {
+                    "name": fqcn,
+                    "role": _php_role(rel, fqcn, extends_fqcn),
+                    "offset": match.start(),
+                }
+            )
+        for match in PHP_COMMAND_SIGNATURE_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            command_name = _php_command_name(match.group("signature"))
+            if not class_info or not command_name:
+                continue
+            command_class = str(class_info.get("name") or "")
+            command_method = php_method_symbols.get((command_class, "handle"), "")
+            if command_class and command_method:
+                commands[command_name] = {
+                    "command_class": command_class,
+                    "command_method": command_method,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+    return commands
+
+
 def _php_event_listener_method_index(
     workspace_root: Path,
     php_files: list[Path],
@@ -4128,6 +4179,12 @@ def _build_php_graph(
     php_method_symbols = _php_method_symbol_index(
         workspace_root,
         php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    command_methods_by_name = _php_command_method_index(
+        workspace_root,
+        php_files,
+        php_method_symbols=php_method_symbols,
         max_file_bytes=max_file_bytes,
     )
     event_listener_methods_by_event = _php_event_listener_method_index(
@@ -5121,48 +5178,101 @@ def _build_php_graph(
             command_name = _php_command_name(match.group("signature"))
             if class_info is None or not command_name:
                 continue
+            command_class = str(class_info["name"])
+            command_method_symbol = php_method_symbols.get((command_class, "handle"), "")
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "artisan_command",
-                    "from": class_info["name"],
+                    "from": command_class,
                     "to": f"command:{command_name}",
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+            if command_method_symbol:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "artisan_command_method",
+                        "from": f"command:{command_name}",
+                        "to": command_method_symbol,
+                        "command_class": command_class,
+                        "command_method": "handle",
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_SCHEDULE_COMMAND_RE.finditer(source):
             class_info = _class_context(classes, match.start())
             command_name = _php_command_name(match.group("command"))
+            cadence = _php_schedule_cadence(match.group("chain"))
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "scheduled_command",
                     "from": _php_context_id(class_info, rel),
                     "to": f"command:{command_name}",
-                    "cadence": _php_schedule_cadence(match.group("chain")),
+                    "cadence": cadence,
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+            command_info = command_methods_by_name.get(command_name, {})
+            command_method_symbol = str(command_info.get("command_method") or "")
+            if command_method_symbol:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "scheduled_command_method",
+                        "from": _php_context_id(class_info, rel),
+                        "to": command_method_symbol,
+                        "command": f"command:{command_name}",
+                        "command_class": command_info.get("command_class"),
+                        "command_method": "handle",
+                        "cadence": cadence,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_SCHEDULE_JOB_RE.finditer(source):
             class_info = _class_context(classes, match.start())
+            job_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
+            cadence = _php_schedule_cadence(match.group("chain"))
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "scheduled_job",
                     "from": _php_context_id(class_info, rel),
-                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
-                    "cadence": _php_schedule_cadence(match.group("chain")),
+                    "to": job_class,
+                    "cadence": cadence,
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+            job_method_symbol = php_method_symbols.get((job_class, "handle"), "")
+            if job_method_symbol:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "scheduled_job_method",
+                        "from": _php_context_id(class_info, rel),
+                        "to": job_method_symbol,
+                        "job_class": job_class,
+                        "job_method": "handle",
+                        "cadence": cadence,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for table_pattern in (PHP_DB_TABLE_RE, PHP_QUERY_FROM_RE, PHP_QUERY_JOIN_RE):
             for match in table_pattern.finditer(source):

@@ -962,6 +962,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "Order@customer") in symbols
     assert ("method", "SyncOrderJob@handle") in symbols
     assert ("method", "SendOrderReceipt@handle") in symbols
+    assert ("method", "SyncOrdersCommand@handle") in symbols
     assert ("method", "OrderPolicy@view") in symbols
     assert ("method", "OrderService@format") in symbols
     assert ("method", "OrderResource@toArray") in symbols
@@ -1302,8 +1303,32 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "listener_line": 13,
     } in artifact["edges"]
     assert ("artisan_command", "App\\Console\\Commands\\SyncOrdersCommand", "command:orders:sync") in edges
+    assert ("artisan_command_method", "command:orders:sync", "SyncOrdersCommand@handle") in edges
     assert ("scheduled_command", "App\\Console\\Kernel", "command:orders:sync") in edges
+    assert ("scheduled_command_method", "App\\Console\\Kernel", "SyncOrdersCommand@handle") in edges
     assert ("scheduled_job", "App\\Console\\Kernel", "App\\Jobs\\SyncOrderJob") in edges
+    assert ("scheduled_job_method", "App\\Console\\Kernel", "SyncOrderJob@handle") in edges
+    assert {
+        "kind": "scheduled_command_method",
+        "from": "App\\Console\\Kernel",
+        "to": "SyncOrdersCommand@handle",
+        "command": "command:orders:sync",
+        "command_class": "App\\Console\\Commands\\SyncOrdersCommand",
+        "command_method": "handle",
+        "cadence": "hourly",
+        "path": "app/Console/Kernel.php",
+        "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "scheduled_job_method",
+        "from": "App\\Console\\Kernel",
+        "to": "SyncOrderJob@handle",
+        "job_class": "App\\Jobs\\SyncOrderJob",
+        "job_method": "handle",
+        "cadence": "daily",
+        "path": "app/Console/Kernel.php",
+        "line": 7,
+    } in artifact["edges"]
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:orders") in edges
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
     assert ("query_table", "OrderController@show", "table:orders") in edges
