@@ -621,6 +621,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
         "        DB::table('orders')->where('status', 'pending')->update(['status' => 'paid']);\n"
         "        Order::where('status', 'paid')->first();\n"
+        "        Order::where('status', 'pending')->update(['status' => 'paid']);\n"
         "        OrderService::format($order);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
@@ -902,6 +903,28 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "access": "write",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 20,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_read",
+        "from": "OrderController@show",
+        "to": "table:orders",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "model": "App\\Models\\Order",
+        "query_method": "first",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 21,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:update",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "model": "App\\Models\\Order",
+        "operation": "update",
+        "access": "write",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 22,
     } in artifact["edges"]
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges

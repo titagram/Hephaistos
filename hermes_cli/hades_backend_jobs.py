@@ -204,6 +204,7 @@ PHP_QUERY_FROM_RE = re.compile(r"->from\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_JOIN_RE = re.compile(r"->(?P<method>join|leftJoin|rightJoin|crossJoin)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_CHAIN_CALL_RE = re.compile(r"->(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PHP_QUERY_READ_TERMINALS = {
+    "all",
     "chunk",
     "count",
     "cursor",
@@ -211,6 +212,7 @@ PHP_QUERY_READ_TERMINALS = {
     "exists",
     "find",
     "first",
+    "firstorfail",
     "get",
     "lazy",
     "paginate",
@@ -219,14 +221,18 @@ PHP_QUERY_READ_TERMINALS = {
     "value",
 }
 PHP_QUERY_WRITE_TERMINALS = {
+    "create",
     "decrement",
     "delete",
+    "firstorcreate",
+    "forcecreate",
     "increment",
     "insert",
     "insertgetid",
     "insertorignore",
     "truncate",
     "update",
+    "updateorcreate",
     "updateorinsert",
     "upsert",
 }
@@ -238,12 +244,17 @@ PHP_QUERY_SHAPE_METHODS = {
     "limit",
     "orderby",
     "offset",
+    "query",
     "select",
+    "with",
 }
 PHP_QUERY_FILTER_METHODS = {
+    "doesnthave",
+    "has",
     "orwhere",
     "where",
     "wherebetween",
+    "wherehas",
     "wherein",
     "wherenotbetween",
     "wherenotin",
@@ -315,13 +326,20 @@ PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
     "create",
+    "delete",
     "doesntHave",
+    "exists",
     "find",
     "first",
     "firstOrFail",
+    "firstOrCreate",
+    "get",
     "has",
+    "pluck",
     "query",
     "update",
+    "updateOrCreate",
+    "value",
     "where",
     "whereHas",
     "with",
@@ -2237,6 +2255,129 @@ def _append_php_query_builder_edges(
     return truncated
 
 
+def _php_laravel_model_table_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, str]:
+    model_tables: dict[str, str] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        model_classes: list[str] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            if _php_role(rel, fqcn, _php_fqcn_resolved(namespace, extends, uses) if extends else "") == "model":
+                model_classes.append(fqcn)
+        if not model_classes:
+            continue
+        table_match = PHP_MODEL_TABLE_RE.search(source)
+        explicit_table = table_match.group("table") if table_match else ""
+        for fqcn in model_classes:
+            model_tables[fqcn] = explicit_table or f"{_snake_name(_php_short_name(fqcn))}s"
+    return model_tables
+
+
+def _php_model_table_for_class(resolved_class: str, model_table_by_class: dict[str, str]) -> str:
+    table = model_table_by_class.get(resolved_class)
+    if table:
+        return table
+    if "\\Models\\" in resolved_class or resolved_class.startswith("App\\Models\\"):
+        return f"{_snake_name(_php_short_name(resolved_class))}s"
+    return ""
+
+
+def _append_php_eloquent_query_builder_edges(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    match: re.Match[str],
+    *,
+    resolved_class: str,
+    method_name: str,
+    table: str,
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    truncated = False
+    class_info = _class_context(classes, match.start())
+    context = _php_context_id(class_info, rel)
+    operations: list[dict[str, Any]] = []
+    normalized = method_name.lower()
+    if normalized in PHP_QUERY_TRACKED_METHODS or method_name in PHP_ELOQUENT_QUERY_METHODS:
+        operations.append(
+            {
+                "method": method_name,
+                "table": table,
+                "access": _php_query_operation_access(method_name),
+                "offset": match.start("method"),
+            }
+        )
+    operations.extend(_php_query_chain_operations(source, match.end(), table))
+    for operation in operations:
+        operation_name = str(operation["method"])
+        operation_table = str(operation["table"])
+        access = str(operation["access"])
+        offset = int(operation["offset"])
+        operation_edge = {
+            "kind": "query_operation",
+            "from": context,
+            "to": f"query:{operation_table}:{operation_name}",
+            "table": operation_table,
+            "model": resolved_class,
+            "operation": operation_name,
+            "access": access,
+            "path": rel,
+            "line": _line_number(source, offset),
+        }
+        truncated = not _edge_append(edges, operation_edge, max_edges=max_edges) or truncated
+        truncated = not _append_php_method_context_edge(
+            source,
+            rel,
+            classes,
+            offset,
+            edges,
+            operation_edge,
+            max_edges=max_edges,
+        ) or truncated
+        if access not in {"read", "write"}:
+            continue
+        access_edge = {
+            "kind": f"query_{access}",
+            "from": context,
+            "to": f"table:{operation_table}",
+            "model": resolved_class,
+            "query_method": operation_name,
+            "path": rel,
+            "line": _line_number(source, offset),
+        }
+        truncated = not _edge_append(edges, access_edge, max_edges=max_edges) or truncated
+        truncated = not _append_php_method_context_edge(
+            source,
+            rel,
+            classes,
+            offset,
+            edges,
+            access_edge,
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2249,6 +2390,11 @@ def _build_php_graph(
 ) -> dict[str, Any]:
     php_files = [path for path in candidates if path.suffix.lower() == ".php"]
     file_refs = [{"path": path.relative_to(workspace_root).as_posix()} for path in php_files]
+    model_table_by_class = _php_laravel_model_table_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
     routes = _laravel_routes(workspace_root, file_refs)
     middleware_catalog = _laravel_middleware_catalog(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
@@ -2639,6 +2785,19 @@ def _build_php_graph(
                     query_edge,
                     max_edges=max_edges,
                 ) or truncated
+                model_table = _php_model_table_for_class(resolved_class, model_table_by_class)
+                if model_table:
+                    truncated = _append_php_eloquent_query_builder_edges(
+                        source,
+                        rel,
+                        classes,
+                        match,
+                        resolved_class=resolved_class,
+                        method_name=method_name,
+                        table=model_table,
+                        edges=edges,
+                        max_edges=max_edges,
+                    ) or truncated
 
         for match in PHP_GATE_POLICY_RE.finditer(source):
             truncated = not _edge_append(
