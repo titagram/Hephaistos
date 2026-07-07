@@ -2860,6 +2860,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "abort_helper",
         "call_type",
         "target_method",
+        "exception_class",
+        "exception_short_name",
         "field",
         "mutation_stage",
         "mutation_path",

@@ -98,6 +98,14 @@ def _php_graph_artifact():
                 "line": 5,
             },
             {
+                "kind": "class",
+                "name": "App\\Exceptions\\OrderLockedException",
+                "short_name": "OrderLockedException",
+                "role": "php_class",
+                "path": "app/Exceptions/OrderLockedException.php",
+                "line": 3,
+            },
+            {
                 "kind": "blade_view",
                 "name": "view:orders.show",
                 "view": "orders.show",
@@ -368,6 +376,15 @@ def _php_graph_artifact():
                 "target_method": "format",
                 "path": "app/Http/Controllers/OrderController.php",
                 "line": 46,
+            },
+            {
+                "kind": "throws_exception",
+                "from": "OrderService@format",
+                "to": "App\\Exceptions\\OrderLockedException",
+                "exception_class": "App\\Exceptions\\OrderLockedException",
+                "exception_short_name": "OrderLockedException",
+                "path": "app/Services/OrderService.php",
+                "line": 5,
             },
             {
                 "kind": "view_ref",
@@ -1478,6 +1495,54 @@ def test_hades_backend_graph_search_finds_local_property_method_call_edges(monke
     )
 
 
+def test_hades_backend_graph_search_finds_local_exception_throw_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderLockedException throws service", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "throws_exception"
+        and ref["from"] == "OrderService@format"
+        and ref["to"] == "App\\Exceptions\\OrderLockedException"
+        for ref in graph_refs
+    )
+    assert any(
+        "exception_class=App\\Exceptions\\OrderLockedException" in item["summary"]
+        and "exception_short_name=OrderLockedException" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
@@ -2249,11 +2314,12 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
         "route:orders.show",
         "OrderController@show",
         "OrderService@format",
+        "App\\Exceptions\\OrderLockedException",
         "view:orders.show",
         "view:layouts.app",
         "component:alert",
     } <= node_ids
-    assert {"route_handler", "calls_method", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
+    assert {"route_handler", "calls_method", "throws_exception", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
     assert result["provenance"]["artifacts"][0]["origin"] == "memory_cache"
 
 

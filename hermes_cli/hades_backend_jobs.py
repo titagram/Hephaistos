@@ -232,6 +232,7 @@ PHP_EVENT_FUNCTION_RE = re.compile(r"\bevent\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Z
 PHP_EVENT_DISPATCH_RE = re.compile(
     r"\b(?:Event::dispatch|event)\s*\(\s*(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::class"
 )
+PHP_THROW_NEW_RE = re.compile(r"\bthrow\s+new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(")
 PHP_COMMAND_SIGNATURE_RE = re.compile(r"\bprotected\s+\$signature\s*=\s*['\"](?P<signature>[^'\"]+)['\"]")
 PHP_SCHEDULE_COMMAND_RE = re.compile(
     r"\$schedule->command\s*\(\s*['\"](?P<command>[^'\"]+)['\"]\s*\)(?P<chain>(?:\s*->[A-Za-z_][A-Za-z0-9_]*\([^)]*\))*)",
@@ -3560,6 +3561,73 @@ def _append_php_instance_method_call_edges(
     return truncated
 
 
+def _php_throw_exceptions_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+    namespace: str,
+    uses: dict[str, str],
+) -> list[dict[str, Any]]:
+    exceptions: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for match in PHP_THROW_NEW_RE.finditer(method_body):
+        exception_class = _php_fqcn_resolved(namespace, str(match.group("class") or ""), uses)
+        if not exception_class:
+            continue
+        line = _line_number(source, method_body_offset + match.start())
+        key = (exception_class, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        exceptions.append(
+            {
+                "exception_class": exception_class,
+                "exception_short_name": _php_short_name(exception_class),
+                "line": line,
+            }
+        )
+    return exceptions
+
+
+def _append_php_route_throw_exception_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    exceptions: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not exceptions:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for exception in exceptions:
+            exception_class = str(exception.get("exception_class") or "")
+            if not exception_class:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_throws_exception",
+                    "from": route_ref,
+                    "to": exception_class,
+                    "handler": method_symbol,
+                    "exception_class": exception_class,
+                    "exception_short_name": exception.get("exception_short_name"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": exception.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -4069,6 +4137,38 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 http_aborts,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            thrown_exceptions = _php_throw_exceptions_for_method(
+                source,
+                method_body,
+                method_body_offset,
+                namespace,
+                uses,
+            )
+            for exception in thrown_exceptions:
+                exception_class = str(exception.get("exception_class") or "")
+                if not exception_class:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "throws_exception",
+                        "from": method_symbol,
+                        "to": exception_class,
+                        "exception_class": exception_class,
+                        "exception_short_name": exception.get("exception_short_name"),
+                        "path": rel,
+                        "line": exception.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_throw_exception_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                thrown_exceptions,
                 edges,
                 max_edges=max_edges,
             ) or truncated

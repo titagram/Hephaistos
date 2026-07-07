@@ -574,6 +574,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Contracts").mkdir(parents=True)
     (workspace / "app" / "Observers").mkdir(parents=True)
     (workspace / "app" / "Broadcasting").mkdir(parents=True)
+    (workspace / "app" / "Exceptions").mkdir(parents=True)
     (workspace / "database" / "migrations").mkdir(parents=True)
     (workspace / "resources" / "views" / "orders" / "partials").mkdir(parents=True)
     (workspace / "resources" / "views" / "layouts").mkdir(parents=True)
@@ -784,9 +785,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Services" / "OrderService.php").write_text(
         "<?php\n"
         "namespace App\\Services;\n"
+        "use App\\Exceptions\\OrderLockedException;\n"
         "class OrderService {\n"
-        "    public static function format($order) { return ['id' => $order->id]; }\n"
+        "    public static function format($order) { throw new OrderLockedException(); }\n"
         "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Exceptions" / "OrderLockedException.php").write_text(
+        "<?php\n"
+        "namespace App\\Exceptions;\n"
+        "class OrderLockedException extends \\RuntimeException {}\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Contracts" / "OrderFormatter.php").write_text(
@@ -924,6 +932,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Models\\Order") in symbols
     assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
+    assert ("class", "App\\Exceptions\\OrderLockedException") in symbols
     assert ("class", "App\\Http\\Requests\\StoreOrderRequest") in symbols
     assert ("class", "App\\Http\\Resources\\OrderResource") in symbols
     assert ("class", "App\\Http\\Middleware\\Authenticate") in symbols
@@ -997,6 +1006,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_authorization_table", "route:orders.show", "table:orders") in edges
     assert ("http_abort", "OrderController@show", "http_status:403") in edges
     assert ("route_http_abort", "route:orders.show", "http_status:403") in edges
+    assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
         "from": "route:orders.show",
@@ -1081,6 +1091,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "target_method": "format",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 28,
+    } in artifact["edges"]
+    assert {
+        "kind": "throws_exception",
+        "from": "OrderService@format",
+        "to": "App\\Exceptions\\OrderLockedException",
+        "exception_class": "App\\Exceptions\\OrderLockedException",
+        "exception_short_name": "OrderLockedException",
+        "path": "app/Services/OrderService.php",
+        "line": 5,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",
@@ -1409,6 +1428,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "$formatter->format" not in str(artifact)
     assert "$this->orders->format" not in str(artifact)
     assert "private OrderService" not in str(artifact)
+    assert "throw new" not in str(artifact)
+    assert "OrderLockedException();" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)
     assert "Order::observe" not in str(artifact)
