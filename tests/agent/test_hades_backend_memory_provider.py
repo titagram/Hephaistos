@@ -2270,6 +2270,90 @@ def test_hades_backend_graph_search_finds_local_outbound_http_call_edges(monkeyp
     )
 
 
+def test_hades_backend_graph_search_finds_local_storage_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "storage_access",
+                "from": "OrderController@show",
+                "to": "storage_path:s3:orders/export.csv",
+                "storage_disk": "s3",
+                "storage_path": "orders/export.csv",
+                "storage_operation": "write",
+                "storage_method": "storage_put",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 47,
+            },
+            {
+                "kind": "route_storage_access",
+                "from": "route:orders.show",
+                "to": "storage_path:s3:orders/export.csv",
+                "handler": "OrderController@show",
+                "storage_disk": "s3",
+                "storage_path": "orders/export.csv",
+                "storage_operation": "write",
+                "storage_method": "storage_put",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 47,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders storage s3 export write", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_storage_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "storage_path:s3:orders/export.csv"
+        and ref["provenance"]["storage_disk"] == "s3"
+        and ref["provenance"]["storage_path"] == "orders/export.csv"
+        and ref["provenance"]["storage_operation"] == "write"
+        for ref in graph_refs
+    )
+    assert any(
+        "storage_disk=s3" in item["summary"]
+        and "storage_path=orders/export.csv" in item["summary"]
+        and "storage_operation=write" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

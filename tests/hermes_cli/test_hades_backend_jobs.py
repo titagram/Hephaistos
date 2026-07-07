@@ -675,6 +675,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        \\Illuminate\\Support\\Facades\\Cache::remember('orders.summary', 60, fn () => 'cached');\n"
         "        session()->flash('orders.notice', 'Order queued');\n"
         "        \\Illuminate\\Support\\Facades\\Http::post('https://api.example.test/orders/sync?token=secret', ['status' => 'paid']);\n"
+        "        \\Illuminate\\Support\\Facades\\Storage::disk('s3')->put('orders/export.csv', 'secret csv payload');\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1075,6 +1076,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_session_access", "route:orders.show", "session_key:orders.notice") in edges
     assert ("outbound_http_call", "OrderController@show", "http_endpoint:api.example.test/orders/sync") in edges
     assert ("route_outbound_http_call", "route:orders.show", "http_endpoint:api.example.test/orders/sync") in edges
+    assert ("storage_access", "OrderController@show", "storage_path:s3:orders/export.csv") in edges
+    assert ("route_storage_access", "route:orders.show", "storage_path:s3:orders/export.csv") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1255,6 +1258,33 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 33,
+    } in artifact["edges"]
+    assert {
+        "kind": "storage_access",
+        "from": "OrderController@show",
+        "to": "storage_path:s3:orders/export.csv",
+        "storage_disk": "s3",
+        "storage_path": "orders/export.csv",
+        "storage_operation": "write",
+        "storage_method": "storage_put",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 34,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_storage_access",
+        "from": "route:orders.show",
+        "to": "storage_path:s3:orders/export.csv",
+        "handler": "OrderController@show",
+        "storage_disk": "s3",
+        "storage_path": "orders/export.csv",
+        "storage_operation": "write",
+        "storage_method": "storage_put",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 34,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1776,6 +1806,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "Order queued" not in str(artifact)
     assert "token=secret" not in str(artifact)
     assert "https://api.example.test/orders/sync?token=secret" not in str(artifact)
+    assert "secret csv payload" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)

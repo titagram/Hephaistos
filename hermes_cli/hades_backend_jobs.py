@@ -271,6 +271,15 @@ PHP_HTTP_FACADE_CHAIN_RE = re.compile(
     r"\s*->\s*(?P<method>get|post|put|patch|delete|head|send)\s*\(",
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
+PHP_STORAGE_FACADE_RE = re.compile(
+    r"\bStorage::(?P<method>get|put|prepend|append|exists|missing|delete|url|temporaryUrl|path|download|files|allFiles|directories|makeDirectory|deleteDirectory)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_STORAGE_DISK_CHAIN_RE = re.compile(
+    r"\bStorage::(?P<selector>disk|cloud)\s*\((?P<selector_args>[^)]*)\)\s*->\s*"
+    r"(?P<method>get|put|prepend|append|exists|missing|delete|url|temporaryUrl|path|download|files|allFiles|directories|makeDirectory|deleteDirectory)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -4541,6 +4550,157 @@ def _append_php_route_outbound_http_call_edges(
     return truncated
 
 
+def _php_storage_operation(method: str) -> str:
+    normalized = method.lower()
+    if normalized in {"put", "prepend", "append", "makedirectory"}:
+        return "write"
+    if normalized in {"delete", "deletedirectory"}:
+        return "delete"
+    if normalized in {"exists", "missing"}:
+        return "check"
+    if normalized in {"files", "allfiles", "directories"}:
+        return "list"
+    if normalized in {"url", "temporaryurl", "path"}:
+        return "resolve"
+    return "read"
+
+
+def _php_storage_path_literal(raw: str) -> str:
+    literal = _php_quoted_literal(raw)
+    if not literal or len(literal) > 256:
+        return ""
+    if "$" in literal or "{" in literal or "}" in literal:
+        return ""
+    return literal.strip("/")
+
+
+def _php_storage_access_from_args(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    storage_method: str,
+    storage_disk: str,
+    args: str,
+) -> dict[str, Any] | None:
+    parts = _split_top_level_items(args)
+    storage_path = _php_storage_path_literal(parts[0][0]) if parts else ""
+    if not storage_path:
+        return None
+    method = storage_method.lower()
+    return {
+        "storage_disk": storage_disk or "default",
+        "storage_path": storage_path,
+        "storage_operation": _php_storage_operation(method.removeprefix("storage_")),
+        "storage_method": storage_method,
+        "line": _line_number(source, method_body_offset + relative_call_start),
+    }
+
+
+def _php_storage_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, int]] = set()
+
+    def append_access(access: dict[str, Any] | None) -> None:
+        if access is None:
+            return
+        key = (
+            str(access.get("storage_disk") or ""),
+            str(access.get("storage_path") or ""),
+            str(access.get("storage_operation") or ""),
+            str(access.get("storage_method") or ""),
+            int(access.get("line") or 0),
+        )
+        if not key[0] or not key[1] or key in seen:
+            return
+        seen.add(key)
+        accesses.append(access)
+
+    for match in PHP_STORAGE_DISK_CHAIN_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        selector = str(match.group("selector") or "").lower()
+        selector_args = str(match.group("selector_args") or "")
+        storage_disk = _php_quoted_literal(selector_args) if selector == "disk" else "cloud"
+        method = str(match.group("method") or "").lower()
+        append_access(
+            _php_storage_access_from_args(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                storage_method=f"storage_{method}",
+                storage_disk=storage_disk or "dynamic",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+
+    for match in PHP_STORAGE_FACADE_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        method = str(match.group("method") or "").lower()
+        append_access(
+            _php_storage_access_from_args(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                storage_method=f"storage_{method}",
+                storage_disk="default",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_storage_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            storage_path = str(access.get("storage_path") or "")
+            storage_disk = str(access.get("storage_disk") or "default")
+            if not storage_path:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_storage_access",
+                    "from": route_ref,
+                    "to": f"storage_path:{storage_disk}:{storage_path}",
+                    "handler": method_symbol,
+                    "storage_disk": storage_disk,
+                    "storage_path": storage_path,
+                    "storage_operation": access.get("storage_operation"),
+                    "storage_method": access.get("storage_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -5671,6 +5831,35 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 outbound_http_calls,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            storage_accesses = _php_storage_accesses_for_method(source, method_body, method_body_offset)
+            for access in storage_accesses:
+                storage_path = str(access.get("storage_path") or "")
+                storage_disk = str(access.get("storage_disk") or "default")
+                if not storage_path:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "storage_access",
+                        "from": method_symbol,
+                        "to": f"storage_path:{storage_disk}:{storage_path}",
+                        "storage_disk": storage_disk,
+                        "storage_path": storage_path,
+                        "storage_operation": access.get("storage_operation"),
+                        "storage_method": access.get("storage_method"),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_storage_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                storage_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated
