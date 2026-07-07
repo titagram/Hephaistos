@@ -86,18 +86,9 @@ qrcode==7.4.2
 [edge-tts]
 edge-tts==7.2.7
 
-[exa]
-exa-py==2.10.2
-
-[fal]
-fal-client==0.13.1
-
 [feishu]
 lark-oapi==1.5.3
 qrcode==7.4.2
-
-[firecrawl]
-firecrawl-py==4.17.0
 
 [google]
 google-api-python-client==2.194.0

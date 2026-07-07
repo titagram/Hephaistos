@@ -65,6 +65,7 @@ def _no_codebase_metrics(report: dict[str, Any]) -> dict[str, Any]:
         "freshness_coverage": float(report.get("freshness_coverage") or 0.0),
         "awareness_coverage": float(report.get("awareness_coverage") or 0.0),
         "tool_coverage": float(report.get("tool_coverage") or 0.0),
+        "tool_order_coverage": float(report.get("tool_order_coverage") or 0.0),
         "persistence_coverage": float(report.get("persistence_coverage") or 0.0),
         "no_codebase_violations": len(report.get("no_codebase_violations") or []),
     }
@@ -96,6 +97,7 @@ def _no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
         ("freshness_coverage", "repair_freshness_coverage", "Diagnosis freshness did not match the fixture or precise claims used stale evidence."),
         ("awareness_coverage", "repair_awareness_coverage", "Diagnosis awareness did not prove the project is source-free diagnosable for precise claims."),
         ("tool_coverage", "repair_hades_tool_coverage", "Required Hades retrieval tools were not used by diagnosis runs."),
+        ("tool_order_coverage", "repair_hades_tool_order", "Required Hades retrieval tools were not used in the diagnosis workflow order."),
         ("persistence_coverage", "repair_diagnosis_report_persistence", "Diagnosis reports were not persisted for every required fixture."),
     ):
         if float(report.get(key) or 0.0) < 1.0:

@@ -92,6 +92,7 @@ class NoCodebaseEvaluationReport:
     freshness_coverage: float
     awareness_coverage: float
     tool_coverage: float
+    tool_order_coverage: float
     persistence_coverage: float
     no_codebase_violations: tuple[dict[str, str], ...] = ()
     results: tuple[NoCodebaseFixtureResult, ...] = ()
@@ -113,6 +114,7 @@ class NoCodebaseEvaluationReport:
             "freshness_coverage": self.freshness_coverage,
             "awareness_coverage": self.awareness_coverage,
             "tool_coverage": self.tool_coverage,
+            "tool_order_coverage": self.tool_order_coverage,
             "persistence_coverage": self.persistence_coverage,
             "no_codebase_violations": list(self.no_codebase_violations),
             "results": [
@@ -161,6 +163,8 @@ def evaluate_no_codebase_diagnoses(
     awareness_hits = 0
     tool_checks = 0
     tool_hits = 0
+    tool_order_checks = 0
+    tool_order_hits = 0
     persistence_checks = 0
     persistence_hits = 0
 
@@ -242,6 +246,12 @@ def evaluate_no_codebase_diagnoses(
         tool_hits += len(required_tools.intersection(actual_tools))
         if not required_tools.issubset(actual_tools):
             failures.append("required Hades tool calls missing")
+        elif fixture.required_tool_calls:
+            tool_order_checks += 1
+            if _required_tools_in_order(fixture.required_tool_calls, run.tool_calls):
+                tool_order_hits += 1
+            else:
+                failures.append("required Hades tool calls out of order")
 
         if fixture.requires_persisted_report:
             persistence_checks += 1
@@ -292,6 +302,7 @@ def evaluate_no_codebase_diagnoses(
         freshness_coverage=_ratio(freshness_hits, freshness_checks),
         awareness_coverage=_ratio(awareness_hits, awareness_checks),
         tool_coverage=_ratio(tool_hits, tool_checks),
+        tool_order_coverage=_ratio(tool_order_hits, tool_order_checks),
         persistence_coverage=_ratio(persistence_hits, persistence_checks),
         no_codebase_violations=tuple(violations),
         results=tuple(results),
@@ -392,6 +403,18 @@ def _forbidden_tool_calls(tool_calls: Iterable[str]) -> list[str]:
         if normalized in FORBIDDEN_NO_CODEBASE_TOOLS:
             forbidden.append(str(name))
     return forbidden
+
+
+def _required_tools_in_order(required: Sequence[str], actual: Sequence[str]) -> bool:
+    if not required:
+        return True
+    next_index = 0
+    for tool_name in actual:
+        if tool_name == required[next_index]:
+            next_index += 1
+            if next_index == len(required):
+                return True
+    return False
 
 
 def _ratio(numerator: int, denominator: int) -> float:

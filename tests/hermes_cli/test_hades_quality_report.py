@@ -32,6 +32,7 @@ def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
     assert report["metrics"]["no_codebase"]["accuracy"] == 1.0
     assert report["metrics"]["no_codebase"]["freshness_coverage"] == 1.0
     assert report["metrics"]["no_codebase"]["awareness_coverage"] == 1.0
+    assert report["metrics"]["no_codebase"]["tool_order_coverage"] == 1.0
     assert report["metrics"]["support"]["awareness_status"] == "ready"
     assert report["action_queue"] == []
 
@@ -97,6 +98,38 @@ def test_quality_report_blocks_stale_precise_diagnosis_regressions():
     assert report["status"] == "failed"
     assert report["metrics"]["no_codebase"]["freshness_coverage"] < 1.0
     assert actions["repair_freshness_coverage"]["severity"] == "blocker"
+
+
+def test_quality_report_blocks_hades_tool_order_regressions():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+        load_no_codebase_eval_fixture,
+    )
+    from hermes_cli.hades_quality_report import build_hades_quality_report
+
+    fixtures, runs = load_no_codebase_eval_fixture(FIXTURE_PATH)
+    first = runs[0]
+    runs[0] = NoCodebaseDiagnosisRun(
+        fixture_id=first.fixture_id,
+        root_cause_id=first.root_cause_id,
+        confidence=first.confidence,
+        freshness_status=first.freshness_status,
+        diagnosable_without_source=first.diagnosable_without_source,
+        evidence_refs=first.evidence_refs,
+        tool_calls=first.tool_calls[1:] + first.tool_calls[:1],
+        missing_evidence=first.missing_evidence,
+        persisted_report=first.persisted_report,
+    )
+
+    no_codebase = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+    report = build_hades_quality_report(no_codebase_report=no_codebase)
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert report["status"] == "failed"
+    assert report["metrics"]["no_codebase"]["tool_coverage"] == 1.0
+    assert report["metrics"]["no_codebase"]["tool_order_coverage"] < 1.0
+    assert actions["repair_hades_tool_order"]["severity"] == "blocker"
 
 
 def test_quality_report_blocks_undiagnosable_awareness_regressions():

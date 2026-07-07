@@ -31,6 +31,7 @@ def test_hades_no_codebase_eval_suite_reports_accuracy_and_coverage():
     assert payload["freshness_coverage"] == 1.0
     assert payload["awareness_coverage"] == 1.0
     assert payload["tool_coverage"] == 1.0
+    assert payload["tool_order_coverage"] == 1.0
     assert payload["persistence_coverage"] == 1.0
     assert payload["no_codebase_violations"] == []
     assert json.loads(json.dumps(payload)) == payload
@@ -66,6 +67,37 @@ def test_hades_no_codebase_eval_fails_on_source_file_tool_access():
     ]
     failed = [result for result in report["results"] if not result["passed"]]
     assert failed[0]["failures"] == ["diagnosis used forbidden source-access tools"]
+
+
+def test_hades_no_codebase_eval_fails_when_hades_tools_are_out_of_order():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+        load_no_codebase_eval_fixture,
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(FIXTURE_PATH)
+    first = runs[0]
+    runs[0] = NoCodebaseDiagnosisRun(
+        fixture_id=first.fixture_id,
+        root_cause_id=first.root_cause_id,
+        confidence=first.confidence,
+        freshness_status=first.freshness_status,
+        diagnosable_without_source=first.diagnosable_without_source,
+        evidence_refs=first.evidence_refs,
+        tool_calls=first.tool_calls[1:] + first.tool_calls[:1],
+        missing_evidence=first.missing_evidence,
+        persisted_report=first.persisted_report,
+    )
+
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+    failed = [result for result in report["results"] if not result["passed"]]
+
+    assert report["status"] == "failed"
+    assert report["tool_coverage"] == 1.0
+    assert report["tool_order_coverage"] < 1.0
+    assert failed[0]["fixture_id"] == "laravel_service_dependency_null"
+    assert failed[0]["failures"] == ["required Hades tool calls out of order"]
 
 
 def test_hades_no_codebase_eval_blocks_precise_claim_when_evidence_is_missing():

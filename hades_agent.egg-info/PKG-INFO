@@ -38,14 +38,8 @@ Requires-Dist: Pillow==12.2.0
 Requires-Dist: concurrent-log-handler==0.9.29; sys_platform == "win32"
 Provides-Extra: anthropic
 Requires-Dist: anthropic==0.87.0; extra == "anthropic"
-Provides-Extra: exa
-Requires-Dist: exa-py==2.10.2; extra == "exa"
-Provides-Extra: firecrawl
-Requires-Dist: firecrawl-py==4.17.0; extra == "firecrawl"
 Provides-Extra: parallel-web
 Requires-Dist: parallel-web==0.4.2; extra == "parallel-web"
-Provides-Extra: fal
-Requires-Dist: fal-client==0.13.1; extra == "fal"
 Provides-Extra: edge-tts
 Requires-Dist: edge-tts==7.2.7; extra == "edge-tts"
 Provides-Extra: modal
@@ -216,13 +210,13 @@ Run this in PowerShell:
 iex (irm https://hades-agent.local/install.ps1)
 ```
 
-The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hades uses this bundled Git Bash to run shell commands.
+The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and PortableGit** (unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hades uses this bundled Git Bash to run shell commands.
 
-If you already have Git installed, the installer detects it and uses that instead. Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
+If you already have Git installed, the installer detects it and uses that instead. Otherwise PortableGit is downloaded into the Hades-managed compatibility storage root — it won't touch or interfere with any system Git.
 
 > **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hades-agent.local/docs/getting-started/termux). On Termux, Hades installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
 >
-> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.
+> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install data remains under the compatibility path `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.
 
 After installation:
 
@@ -281,6 +275,13 @@ hades claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
 hades update       # Update to the latest version
 hades doctor       # Diagnose any issues
 ```
+
+Backend MVP support runbooks live in
+[`docs/hades/launch.md`](docs/hades/launch.md) and
+[`docs/hades/support-runbook.md`](docs/hades/support-runbook.md). The launch
+guide covers install, backend bootstrap, privacy, verification, and safe
+troubleshooting; the support runbook lists recovery actions and what not to
+send in support logs.
 
 📖 **[Full documentation →](https://hades-agent.local/docs/)**
 
