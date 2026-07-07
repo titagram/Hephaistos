@@ -118,6 +118,15 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "method",
+                "name": "SendOrderReceipt@handle",
+                "class": "App\\Listeners\\SendOrderReceipt",
+                "method": "handle",
+                "role": "listener",
+                "path": "app/Listeners/SendOrderReceipt.php",
+                "line": 4,
+            },
+            {
                 "kind": "class",
                 "name": "App\\Exceptions\\OrderLockedException",
                 "short_name": "OrderLockedException",
@@ -474,6 +483,56 @@ def _php_graph_artifact():
                 "line": 5,
                 "source_path": "app/Http/Controllers/InvoiceController.php",
                 "source_line": 7,
+            },
+            {
+                "kind": "emits_event",
+                "from": "OrderController@show",
+                "to": "App\\Events\\OrderPlaced",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "event_listener",
+                "from": "App\\Events\\OrderPlaced",
+                "to": "App\\Listeners\\SendOrderReceipt",
+                "path": "app/Providers/AuthServiceProvider.php",
+                "line": 13,
+            },
+            {
+                "kind": "event_listener_method",
+                "from": "App\\Events\\OrderPlaced",
+                "to": "SendOrderReceipt@handle",
+                "listener_class": "App\\Listeners\\SendOrderReceipt",
+                "listener_method": "handle",
+                "path": "app/Providers/AuthServiceProvider.php",
+                "line": 13,
+            },
+            {
+                "kind": "emits_event_listener",
+                "from": "OrderController@show",
+                "to": "SendOrderReceipt@handle",
+                "event_class": "App\\Events\\OrderPlaced",
+                "listener_class": "App\\Listeners\\SendOrderReceipt",
+                "listener_path": "app/Providers/AuthServiceProvider.php",
+                "listener_line": 13,
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "route_emits_event_listener",
+                "from": "route:orders.show",
+                "to": "SendOrderReceipt@handle",
+                "handler": "OrderController@show",
+                "event_class": "App\\Events\\OrderPlaced",
+                "listener_class": "App\\Listeners\\SendOrderReceipt",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 42,
+                "listener_path": "app/Providers/AuthServiceProvider.php",
+                "listener_line": 13,
             },
             {
                 "kind": "view_ref",
@@ -2386,6 +2445,56 @@ def test_hades_backend_graph_search_finds_local_policy_mapping_edges(monkeypatch
     )
 
 
+def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders OrderPlaced SendOrderReceipt listener", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_emits_event_listener"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "SendOrderReceipt@handle"
+        and ref["provenance"]["event_class"] == "App\\Events\\OrderPlaced"
+        and ref["provenance"]["listener_class"] == "App\\Listeners\\SendOrderReceipt"
+        for ref in graph_refs
+    )
+    assert any(
+        "event_class=App\\Events\\OrderPlaced" in item["summary"]
+        and "listener_class=App\\Listeners\\SendOrderReceipt" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     timeouts = []
@@ -2494,7 +2603,7 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_traverse",
-            {"start": "route:orders.show", "direction": "out", "max_depth": 3, "limit": 40},
+            {"start": "route:orders.show", "direction": "out", "max_depth": 3, "limit": 50},
         )
     )
 
@@ -2512,13 +2621,22 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     assert {
         "route:orders.show",
         "OrderController@show",
-        "OrderService@format",
-        "App\\Exceptions\\OrderLockedException",
-        "view:orders.show",
-        "view:layouts.app",
-        "component:alert",
-    } <= node_ids
-    assert {"route_handler", "calls_method", "throws_exception", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
+            "OrderService@format",
+            "SendOrderReceipt@handle",
+            "App\\Exceptions\\OrderLockedException",
+            "view:orders.show",
+            "view:layouts.app",
+            "component:alert",
+        } <= node_ids
+    assert {
+        "route_handler",
+        "calls_method",
+        "throws_exception",
+        "route_emits_event_listener",
+        "view_ref",
+        "blade_extends",
+        "blade_component",
+    } <= edge_kinds
     assert result["provenance"]["artifacts"][0]["origin"] == "memory_cache"
 
 

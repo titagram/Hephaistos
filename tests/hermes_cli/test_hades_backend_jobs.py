@@ -960,6 +960,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
+    assert ("method", "SendOrderReceipt@handle") in symbols
     assert ("method", "OrderPolicy@view") in symbols
     assert ("method", "OrderService@format") in symbols
     assert ("method", "OrderResource@toArray") in symbols
@@ -1263,6 +1264,25 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("emits_event", "App\\Http\\Controllers\\OrderController", "App\\Events\\OrderPlaced") in edges
     assert ("emits_event", "OrderController@show", "App\\Events\\OrderPlaced") in edges
     assert ("event_listener", "App\\Events\\OrderPlaced", "App\\Listeners\\SendOrderReceipt") in edges
+    assert ("event_listener_method", "App\\Events\\OrderPlaced", "SendOrderReceipt@handle") in edges
+    assert ("emits_event_listener", "OrderController@show", "SendOrderReceipt@handle") in edges
+    assert ("route_emits_event_listener", "route:orders.show", "SendOrderReceipt@handle") in edges
+    assert {
+        "kind": "route_emits_event_listener",
+        "from": "route:orders.show",
+        "to": "SendOrderReceipt@handle",
+        "handler": "OrderController@show",
+        "event_class": "App\\Events\\OrderPlaced",
+        "listener_class": "App\\Listeners\\SendOrderReceipt",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 19,
+        "listener_path": "app/Providers/AuthServiceProvider.php",
+        "listener_line": 13,
+    } in artifact["edges"]
     assert ("artisan_command", "App\\Console\\Commands\\SyncOrdersCommand", "command:orders:sync") in edges
     assert ("scheduled_command", "App\\Console\\Kernel", "command:orders:sync") in edges
     assert ("scheduled_job", "App\\Console\\Kernel", "App\\Jobs\\SyncOrderJob") in edges

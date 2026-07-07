@@ -3382,6 +3382,49 @@ def _php_policy_index(
     return policy_by_model
 
 
+def _php_event_listener_method_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    php_method_symbols: dict[tuple[str, str], str],
+    max_file_bytes: int,
+) -> dict[str, list[dict[str, Any]]]:
+    listener_methods_by_event: dict[str, list[dict[str, Any]]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        for match in PHP_LISTEN_ARRAY_RE.finditer(source):
+            event_class = _php_fqcn_resolved(namespace, match.group("event"), uses)
+            if not event_class:
+                continue
+            line = _line_number(source, match.start())
+            for listener_match in PHP_CLASS_CONST_RE.finditer(match.group("listeners")):
+                listener_class = _php_fqcn_resolved(namespace, listener_match.group("class"), uses)
+                listener_method_symbol = php_method_symbols.get((listener_class, "handle"), "")
+                if not listener_method_symbol:
+                    continue
+                listener_methods_by_event.setdefault(event_class, []).append(
+                    {
+                        "listener_class": listener_class,
+                        "listener_method": listener_method_symbol,
+                        "listener_path": rel,
+                        "listener_line": line,
+                    }
+                )
+    return listener_methods_by_event
+
+
 def _append_php_route_form_request_input_mutation_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3782,6 +3825,68 @@ def _append_php_route_throw_exception_edges(
     return truncated
 
 
+def _append_php_emitted_event_listener_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    source_line: int,
+    *,
+    event_class: str,
+    listener_methods: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    if not method_symbol or not event_class or not listener_methods:
+        return False
+    truncated = False
+    for listener in listener_methods:
+        listener_method = str(listener.get("listener_method") or "")
+        listener_class = str(listener.get("listener_class") or "")
+        if not listener_method:
+            continue
+        payload = {
+            "event_class": event_class,
+            "listener_class": listener_class,
+            "listener_path": listener.get("listener_path"),
+            "listener_line": listener.get("listener_line"),
+            "path": rel,
+            "line": source_line,
+        }
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "emits_event_listener",
+                "from": method_symbol,
+                "to": listener_method,
+                **payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+        for route in routes_by_handler.get(method_symbol) or []:
+            route_ref = f"route:{_php_route_id(route)}"
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_emits_event_listener",
+                    "from": route_ref,
+                    "to": listener_method,
+                    "handler": method_symbol,
+                    "event_class": event_class,
+                    "listener_class": listener_class,
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": source_line,
+                    "listener_path": listener.get("listener_path"),
+                    "listener_line": listener.get("listener_line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3965,6 +4070,12 @@ def _build_php_graph(
     php_method_symbols = _php_method_symbol_index(
         workspace_root,
         php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    event_listener_methods_by_event = _php_event_listener_method_index(
+        workspace_root,
+        php_files,
+        php_method_symbols=php_method_symbols,
         max_file_bytes=max_file_bytes,
     )
     policy_by_model = _php_policy_index(
@@ -4851,17 +4962,33 @@ def _build_php_graph(
         for match in PHP_LISTEN_ARRAY_RE.finditer(source):
             event_class = _php_fqcn_resolved(namespace, match.group("event"), uses)
             for listener_match in PHP_CLASS_CONST_RE.finditer(match.group("listeners")):
+                listener_class = _php_fqcn_resolved(namespace, listener_match.group("class"), uses)
                 truncated = not _edge_append(
                     edges,
                     {
                         "kind": "event_listener",
                         "from": event_class,
-                        "to": _php_fqcn_resolved(namespace, listener_match.group("class"), uses),
+                        "to": listener_class,
                         "path": rel,
                         "line": _line_number(source, match.start()),
                     },
                     max_edges=max_edges,
                 ) or truncated
+                listener_method_symbol = php_method_symbols.get((listener_class, "handle"), "")
+                if listener_method_symbol:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "event_listener_method",
+                            "from": event_class,
+                            "to": listener_method_symbol,
+                            "listener_class": listener_class,
+                            "listener_method": "handle",
+                            "path": rel,
+                            "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
 
         for match in PHP_DISPATCH_JOB_RE.finditer(source):
             class_info = _class_context(classes, match.start())
@@ -4886,10 +5013,11 @@ def _build_php_graph(
         for event_pattern in (PHP_EVENT_FUNCTION_RE, PHP_EVENT_DISPATCH_RE):
             for match in event_pattern.finditer(source):
                 class_info = _class_context(classes, match.start())
+                event_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
                 edge = {
                     "kind": "emits_event",
                     "from": _php_context_id(class_info, rel),
-                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                    "to": event_class,
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 }
@@ -4901,6 +5029,17 @@ def _build_php_graph(
                     match.start(),
                     edges,
                     edge,
+                    max_edges=max_edges,
+                ) or truncated
+                method_context = _php_method_context_id(source, classes, match.start(), rel)
+                truncated = _append_php_emitted_event_listener_edges(
+                    routes_by_handler,
+                    method_context,
+                    rel,
+                    _line_number(source, match.start()),
+                    event_class=event_class,
+                    listener_methods=event_listener_methods_by_event.get(event_class, []),
+                    edges=edges,
                     max_edges=max_edges,
                 ) or truncated
 
