@@ -167,6 +167,23 @@ PHP_SCHEDULE_CADENCE_RE = re.compile(r"->(?P<cadence>[A-Za-z_][A-Za-z0-9_]*)\s*\
 PHP_DB_TABLE_RE = re.compile(r"\bDB::table\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_FROM_RE = re.compile(r"->from\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_JOIN_RE = re.compile(r"->(?P<method>join|leftJoin|rightJoin|crossJoin)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_CONTAINER_BIND_RE = re.compile(
+    r"(?:\$this->app->|app\(\)->|App::)(?P<method>bind|singleton|scoped|instance)\s*"
+    r"\(\s*(?P<abstract>\\?[A-Za-z0-9_\\]+)::class\s*,\s*"
+    r"(?P<concrete>\\?[A-Za-z0-9_\\]+)::class",
+    re.MULTILINE,
+)
+PHP_OBSERVER_RE = re.compile(
+    r"(?P<model>\\?[A-Za-z0-9_\\]+)::observe\s*\(\s*(?P<observer>\\?[A-Za-z0-9_\\]+)::class\s*\)",
+    re.MULTILINE,
+)
+PHP_VIEW_FUNCTION_RE = re.compile(r"\bview\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
+PHP_VIEW_MAKE_RE = re.compile(r"\bView::make\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
+PHP_INERTIA_RENDER_RE = re.compile(r"\bInertia::render\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
+PHP_BROADCAST_CHANNEL_RE = re.compile(
+    r"\bBroadcast::channel\s*\(\s*['\"](?P<channel>[^'\"]+)['\"]\s*,\s*(?P<handler>.*?)\)",
+    re.DOTALL,
+)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1121,11 +1138,24 @@ def _build_php_graph(
                 truncated = True
             for param_match in PHP_TYPED_PARAM_RE.finditer(match.group("params") or ""):
                 param_class = _php_fqcn_resolved(namespace, param_match.group("class"), uses)
-                if _php_short_name(param_class).endswith("Request"):
+                param_short = _php_short_name(param_class)
+                if param_short.endswith("Request"):
                     truncated = not _edge_append(
                         edges,
                         {
                             "kind": "uses_form_request",
+                            "from": method_symbol,
+                            "to": param_class,
+                            "path": rel,
+                            "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+                else:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "uses_dependency",
                             "from": method_symbol,
                             "to": param_class,
                             "path": rel,
@@ -1188,7 +1218,20 @@ def _build_php_graph(
         for match in PHP_STATIC_CALL_RE.finditer(source):
             class_name = match.group("class")
             method_name = match.group("method")
-            if _php_short_name(class_name) in {"self", "static", "parent", "Route", "Schema", "Gate", "DB"}:
+            if _php_short_name(class_name) in {
+                "self",
+                "static",
+                "parent",
+                "Route",
+                "Schema",
+                "Gate",
+                "DB",
+                "Broadcast",
+                "View",
+                "Inertia",
+            }:
+                continue
+            if method_name == "observe":
                 continue
             class_info = _class_context(classes, match.start())
             resolved_class = _php_fqcn_resolved(namespace, class_name, uses)
@@ -1223,6 +1266,33 @@ def _build_php_graph(
                     "kind": "policy_for",
                     "from": _php_fqcn(namespace, match.group("model")),
                     "to": _php_fqcn(namespace, match.group("policy")),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_CONTAINER_BIND_RE.finditer(source):
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "container_binding",
+                    "from": _php_fqcn_resolved(namespace, match.group("abstract"), uses),
+                    "to": _php_fqcn_resolved(namespace, match.group("concrete"), uses),
+                    "binding": match.group("method"),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_OBSERVER_RE.finditer(source):
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "observed_by",
+                    "from": _php_fqcn_resolved(namespace, match.group("model"), uses),
+                    "to": _php_fqcn_resolved(namespace, match.group("observer"), uses),
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
@@ -1334,6 +1404,39 @@ def _build_php_graph(
                 if "method" in match.groupdict():
                     edge["query_method"] = match.group("method")
                 truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+
+        for kind, pattern, prefix in (
+            ("view_ref", PHP_VIEW_FUNCTION_RE, "view"),
+            ("view_ref", PHP_VIEW_MAKE_RE, "view"),
+            ("inertia_view", PHP_INERTIA_RENDER_RE, "inertia"),
+        ):
+            for match in pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": kind,
+                        "from": _php_context_id(class_info, rel),
+                        "to": f"{prefix}:{match.group('view')}",
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
+        for match in PHP_BROADCAST_CHANNEL_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            handler_match = PHP_CLASS_CONST_RE.search(match.group("handler") or "")
+            edge = {
+                "kind": "broadcast_channel",
+                "from": _php_context_id(class_info, rel),
+                "to": f"broadcast:{match.group('channel')}",
+                "path": rel,
+                "line": _line_number(source, match.start()),
+            }
+            if handler_match:
+                edge["handler"] = _php_fqcn_resolved(namespace, handler_match.group("class"), uses)
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
 
         for kind, pattern, prefix in (
             ("config_ref", PHP_CONFIG_RE, "config"),

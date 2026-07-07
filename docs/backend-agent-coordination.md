@@ -2557,6 +2557,38 @@ Resta fuori da questa tranche:
 - Query builder avanzato oltre a table/from/join e principali Eloquent static
   query calls.
 
+## Esecuzione PHP graph Laravel service edges Hades - 2026-07-07
+
+Stato: completata una tranche P0-4 locale del piano "Bug Root Cause Awareness".
+
+Agent locale:
+
+- `hades.php_graph.v1` aggiunge edge metadata-only per dependency injection da
+  type hints, container bindings, model observers, view/Inertia refs e broadcast
+  channels.
+- I nuovi edge non salvano source raw: restano path, linee, simboli, view key,
+  channel name e handler FQCN quando presente.
+- `Order::observe(...)` non viene piu' duplicato come `static_call`: il graph
+  conserva l'edge piu' causale `observed_by`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `14 passed`.
+- Locale sync runner:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `37 passed`.
+
+Resta fuori da questa tranche:
+
+- Parser PHP/Laravel AST reale invece di pattern conservativi.
+- Blade template dependency graph oltre ai view refs.
+- Query builder avanzato oltre ai casi gia' coperti.
+
 ## Esecuzione no-codebase freshness eval Hades - 2026-07-07
 
 Stato: completata una tranche P0-7 locale del piano "Bug Root Cause Awareness".

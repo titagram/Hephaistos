@@ -311,12 +311,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Policies").mkdir(parents=True)
     (workspace / "app" / "Providers").mkdir(parents=True)
     (workspace / "app" / "Services").mkdir(parents=True)
+    (workspace / "app" / "Contracts").mkdir(parents=True)
+    (workspace / "app" / "Observers").mkdir(parents=True)
+    (workspace / "app" / "Broadcasting").mkdir(parents=True)
     (workspace / "database" / "migrations").mkdir(parents=True)
     (workspace / "routes" / "web.php").write_text(
         "<?php\n"
         "use App\\Http\\Controllers\\OrderController;\n"
         "Route::get('/orders/{order}', [OrderController::class, 'show'])"
         "->middleware(['auth', 'verified'])->name('orders.show');\n",
+        encoding="utf-8",
+    )
+    (workspace / "routes" / "channels.php").write_text(
+        "<?php\n"
+        "use App\\Broadcasting\\OrderChannel;\n"
+        "use Illuminate\\Support\\Facades\\Broadcast;\n"
+        "Broadcast::channel('orders.{order}', OrderChannel::class);\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Http" / "Controllers" / "OrderController.php").write_text(
@@ -329,6 +339,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Services\\OrderService;\n"
         "use Illuminate\\Support\\Facades\\DB;\n"
         "class OrderController extends Controller {\n"
+        "    public function __construct(OrderService $orders) {}\n"
         "    public function show(StoreOrderRequest $request, Order $order) {\n"
         "        $request->validate(['status' => 'required|string']);\n"
         "        config('services.orders.cache');\n"
@@ -337,7 +348,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        event(new OrderPlaced($order));\n"
         "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
         "        Order::where('status', 'paid')->first();\n"
-        "        return OrderService::format($order);\n"
+        "        OrderService::format($order);\n"
+        "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -417,6 +429,26 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "}\n",
         encoding="utf-8",
     )
+    (workspace / "app" / "Contracts" / "OrderFormatter.php").write_text(
+        "<?php\n"
+        "namespace App\\Contracts;\n"
+        "interface OrderFormatter {}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Observers" / "OrderObserver.php").write_text(
+        "<?php\n"
+        "namespace App\\Observers;\n"
+        "class OrderObserver {\n"
+        "    public function updated($order) {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Broadcasting" / "OrderChannel.php").write_text(
+        "<?php\n"
+        "namespace App\\Broadcasting;\n"
+        "class OrderChannel {}\n",
+        encoding="utf-8",
+    )
     (workspace / "app" / "Policies" / "OrderPolicy.php").write_text(
         "<?php\n"
         "namespace App\\Policies;\n"
@@ -428,12 +460,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Providers" / "AuthServiceProvider.php").write_text(
         "<?php\n"
         "namespace App\\Providers;\n"
+        "use App\\Contracts\\OrderFormatter;\n"
         "use App\\Events\\OrderPlaced;\n"
         "use App\\Listeners\\SendOrderReceipt;\n"
+        "use App\\Models\\Order;\n"
+        "use App\\Observers\\OrderObserver;\n"
+        "use App\\Services\\OrderService;\n"
         "use Illuminate\\Support\\Facades\\Gate;\n"
         "class AuthServiceProvider {\n"
         "    protected $listen = [OrderPlaced::class => [SendOrderReceipt::class]];\n"
+        "    public function register() {\n"
+        "        $this->app->singleton(OrderFormatter::class, OrderService::class);\n"
+        "    }\n"
         "    public function boot() {\n"
+        "        Order::observe(OrderObserver::class);\n"
         "        Gate::policy(\\App\\Models\\Order::class, \\App\\Policies\\OrderPolicy::class);\n"
         "    }\n"
         "}\n",
@@ -485,7 +525,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Events\\OrderPlaced") in symbols
     assert ("class", "App\\Listeners\\SendOrderReceipt") in symbols
     assert ("class", "App\\Console\\Commands\\SyncOrdersCommand") in symbols
+    assert ("interface", "App\\Contracts\\OrderFormatter") in symbols
+    assert ("class", "App\\Observers\\OrderObserver") in symbols
+    assert ("class", "App\\Broadcasting\\OrderChannel") in symbols
     assert ("table", "table:orders") in symbols
+    assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
@@ -494,6 +538,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
     assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
+    assert ("uses_dependency", "OrderController@__construct", "App\\Services\\OrderService") in edges
+    assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
     assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
@@ -505,8 +551,12 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:orders") in edges
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
+    assert ("view_ref", "App\\Http\\Controllers\\OrderController", "view:orders.show") in edges
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
+    assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
+    assert ("observed_by", "App\\Models\\Order", "App\\Observers\\OrderObserver") in edges
+    assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
     assert ("env_ref", "App\\Http\\Controllers\\OrderController", "env:ORDER_DEBUG") in edges
     assert (
@@ -526,9 +576,24 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
             "line": 8,
         }
     ]
+    broadcast_edges = [edge for edge in artifact["edges"] if edge["kind"] == "broadcast_channel"]
+    assert broadcast_edges == [
+        {
+            "kind": "broadcast_channel",
+            "from": "routes/channels.php",
+            "to": "broadcast:orders.{order}",
+            "path": "routes/channels.php",
+            "line": 4,
+            "handler": "App\\Broadcasting\\OrderChannel",
+        }
+    ]
     assert "Route::get" not in str(artifact)
     assert "return $this->belongsTo" not in str(artifact)
     assert "return OrderService::format" not in str(artifact)
+    assert "return view('orders.show'" not in str(artifact)
+    assert "$this->app->singleton" not in str(artifact)
+    assert "Order::observe" not in str(artifact)
+    assert "Broadcast::channel" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
     assert "$request->validate" not in str(artifact)
