@@ -70,6 +70,15 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     quality_report.add_argument("--skip-local-status", action="store_true", help="Do not include local backend support status")
     quality_report.add_argument("--record", action="store_true", help="Store this report as the latest local Hades quality snapshot")
     quality_report.add_argument("--json", action="store_true", help="Emit machine-readable quality report JSON")
+    schedule_quality = sub.add_parser(
+        "schedule-quality",
+        help="Create or update a recurring Hades quality-report cron job",
+    )
+    schedule_quality.add_argument("--schedule", default="0 8 * * *", help="Cron schedule or interval; default daily at 08:00")
+    schedule_quality.add_argument("--name", default="Hades backend quality report", help="Cron job name")
+    schedule_quality.add_argument("--deliver", default="local", help="Cron delivery target")
+    schedule_quality.add_argument("--no-codebase-eval", default=None, help="Optional no-codebase diagnosis eval fixture JSON")
+    schedule_quality.add_argument("--json", action="store_true", help="Emit machine-readable schedule result")
     privacy_export = sub.add_parser("privacy-export", help="Export backend diagnosis/evidence data for the current workspace")
     privacy_export.add_argument(
         "--include-content",
@@ -344,6 +353,116 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
         for action in report["action_queue"]:
             print(f"  Action:   [{action['severity']}] {action['id']} - {action['message']}")
     return 1 if report["status"] == "failed" else 0
+
+
+QUALITY_REPORT_CRON_SCRIPT_NAME = "hades_backend_quality_report.py"
+QUALITY_REPORT_CRON_PROMPT = "Record the Hades backend quality report."
+
+
+def _quality_report_eval_path(value: str | None) -> str | None:
+    clean = str(value or "").strip()
+    if not clean:
+        return None
+    path = Path(clean).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"no-codebase eval fixture not found: {path}")
+    return str(path.resolve())
+
+
+def _write_quality_report_cron_script(*, no_codebase_eval: str | None) -> Path:
+    from hermes_constants import get_hermes_home
+
+    scripts_dir = get_hermes_home() / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    script_path = scripts_dir / QUALITY_REPORT_CRON_SCRIPT_NAME
+    eval_path = _quality_report_eval_path(no_codebase_eval)
+    script = f"""from types import SimpleNamespace
+
+from hermes_cli.hades_backend_cmd import hades_backend_command
+
+
+args = SimpleNamespace(
+    backend_action="quality-report",
+    no_codebase_eval={json.dumps(eval_path)},
+    skip_local_status=False,
+    record=True,
+    json=True,
+)
+
+raise SystemExit(hades_backend_command(args))
+"""
+    script_path.write_text(script, encoding="utf-8")
+    try:
+        script_path.chmod(0o600)
+    except OSError:
+        pass
+    return script_path
+
+
+def _cmd_schedule_quality(args: argparse.Namespace) -> int:
+    try:
+        script_path = _write_quality_report_cron_script(
+            no_codebase_eval=getattr(args, "no_codebase_eval", None),
+        )
+        from cron.jobs import create_job, list_jobs, update_job
+
+        name = str(getattr(args, "name", None) or "Hades backend quality report").strip()
+        schedule = str(getattr(args, "schedule", None) or "0 8 * * *").strip()
+        deliver = str(getattr(args, "deliver", None) or "local").strip() or "local"
+        existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
+        if existing:
+            job = update_job(
+                existing["id"],
+                {
+                    "name": name,
+                    "prompt": QUALITY_REPORT_CRON_PROMPT,
+                    "schedule": schedule,
+                    "deliver": deliver,
+                    "script": script_path.name,
+                    "no_agent": True,
+                    "enabled": True,
+                    "state": "scheduled",
+                    "paused_at": None,
+                    "paused_reason": None,
+                    "attach_to_session": False,
+                },
+            )
+            action = "updated"
+        else:
+            job = create_job(
+                prompt=QUALITY_REPORT_CRON_PROMPT,
+                schedule=schedule,
+                name=name,
+                deliver=deliver,
+                script=script_path.name,
+                no_agent=True,
+                attach_to_session=False,
+            )
+            action = "created"
+        if job is None:
+            raise RuntimeError(f"failed to create or update cron job {name!r}")
+    except Exception as exc:
+        print(f"Hades backend schedule-quality: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    result = {
+        "status": action,
+        "job_id": job["id"],
+        "name": job["name"],
+        "schedule": job.get("schedule_display"),
+        "next_run_at": job.get("next_run_at"),
+        "script": str(script_path),
+        "deliver": job.get("deliver"),
+        "no_agent": bool(job.get("no_agent")),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"Hades quality cron {action}: {job['name']} ({job['id']})")
+        print(f"  Schedule: {job.get('schedule_display')}")
+        print(f"  Next run: {job.get('next_run_at') or 'not scheduled'}")
+        print(f"  Script:   {script_path}")
+    return 0
 
 
 def _record_quality_report_snapshot(conn, report: dict[str, Any]) -> None:
@@ -1603,6 +1722,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_support_report(args)
     if action == "quality-report":
         return _cmd_quality_report(args)
+    if action == "schedule-quality":
+        return _cmd_schedule_quality(args)
     if action == "privacy-export":
         return _cmd_privacy_export(args)
     if action == "privacy-delete":
@@ -1640,7 +1761,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

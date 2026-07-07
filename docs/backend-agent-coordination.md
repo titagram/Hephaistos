@@ -3581,6 +3581,40 @@ Resta fuori da questa tranche:
 - Wizard desktop.
 - Upload file dal dashboard.
 
+## Esecuzione scheduled quality audit Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-5.
+
+Agent locale:
+
+- Nuovo comando `hades backend schedule-quality`.
+- Il comando scrive `HERMES_HOME/scripts/hades_backend_quality_report.py`.
+- Lo script esegue `hades backend quality-report --record --json` tramite
+  `hades_backend_command`, quindi registra lo snapshot locale e aggiorna la
+  history senza passare da un prompt modello.
+- Il comando crea o aggiorna in modo idempotente un job cron no-agent con nome
+  stabile `Hades backend quality report`.
+- Opzioni: `--schedule`, `--name`, `--deliver`, `--no-codebase-eval`, `--json`.
+- Se il quality report fallisce, il processo cron fallisce: la regressione resta
+  visibile anche nel sistema cron, oltre che nello status Hades.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m py_compile hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m ruff check hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `28 passed`.
+
+Resta fuori da questa tranche:
+
+- Scheduler/reporting remoto centralizzato.
+- Trend lunghi in dashboard.
+
 ## Esecuzione dashboard bug-intake privacy preview Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-1.

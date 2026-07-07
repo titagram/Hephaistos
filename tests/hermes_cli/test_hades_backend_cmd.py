@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -225,6 +226,63 @@ def test_backend_benchmark_command_emits_json(capsys):
     assert payload["schema"] == "hades.backend_benchmark.v1"
     assert payload["status"] == "passed"
     assert [case["name"] for case in payload["cases"]] == ["medium_code_graph", "large_code_graph"]
+
+
+def test_backend_schedule_quality_creates_and_updates_cron_job(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import cron.jobs as cron_jobs
+    import hermes_cli.hades_backend_cmd as cmd
+
+    monkeypatch.setattr(cron_jobs, "CRON_DIR", tmp_path / "cron")
+    monkeypatch.setattr(cron_jobs, "JOBS_FILE", tmp_path / "cron" / "jobs.json")
+    monkeypatch.setattr(cron_jobs, "OUTPUT_DIR", tmp_path / "cron" / "output")
+
+    fixture = tmp_path / "no_codebase.json"
+    fixture.write_text('{"fixtures": [], "runs": []}', encoding="utf-8")
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="schedule-quality",
+            schedule="0 7 * * *",
+            name="Hades backend quality report",
+            deliver="local",
+            no_codebase_eval=str(fixture),
+            json=True,
+        )
+    )
+    created = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert created["status"] == "created"
+    assert created["no_agent"] is True
+    script_path = Path(created["script"])
+    assert script_path.exists()
+    script = script_path.read_text(encoding="utf-8")
+    assert "backend_action=\"quality-report\"" in script
+    assert str(fixture.resolve()) in script
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="schedule-quality",
+            schedule="every 2h",
+            name="Hades backend quality report",
+            deliver="local",
+            no_codebase_eval=str(fixture),
+            json=True,
+        )
+    )
+    updated = json.loads(capsys.readouterr().out)
+    jobs = cron_jobs.list_jobs(include_disabled=True)
+
+    assert rc == 0
+    assert updated["status"] == "updated"
+    assert updated["job_id"] == created["job_id"]
+    assert len(jobs) == 1
+    assert jobs[0]["no_agent"] is True
+    assert jobs[0]["script"] == "hades_backend_quality_report.py"
+    assert jobs[0]["schedule"]["kind"] == "interval"
+    assert jobs[0]["schedule"]["minutes"] == 120
 
 
 def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
