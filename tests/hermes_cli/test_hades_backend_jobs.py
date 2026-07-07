@@ -301,14 +301,22 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     (tmp_path / "project").mkdir()
     (tmp_path / "app" / "api.py").write_text(
         "from fastapi import APIRouter, FastAPI\n"
+        "from app.services import OrderService\n"
         "app = FastAPI()\n"
         "router = APIRouter(prefix='/api')\n"
         "@router.get('/orders/{order_id}', name='orders-show')\n"
         "async def show_order(order_id: int):\n"
-        "    return {'id': order_id}\n"
+        "    service = OrderService()\n"
+        "    return service.load(order_id)\n"
         "@app.post('/health')\n"
         "def health():\n"
         "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "services.py").write_text(
+        "class OrderService:\n"
+        "    def load(self, order_id):\n"
+        "        return {'id': order_id}\n",
         encoding="utf-8",
     )
     (tmp_path / "project" / "urls.py").write_text(
@@ -377,11 +385,15 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert ("function", "show_order", "app/api.py") in symbols
     assert ("function", "order_detail", "app/views.py") in symbols
     assert ("class", "OrderCreateView", "app/views.py") in symbols
+    assert ("class", "OrderService", "app/services.py") in symbols
     assert ("class", "Customer", "app/models.py") in symbols
     assert ("class", "Order", "app/models.py") in symbols
+    assert ("imports", "app/api.py", "app.services.OrderService") in edges
     assert ("route_handler", "route:orders-show", "show_order") in edges
     assert ("route_handler", "route:orders-detail", "views.order_detail") in edges
     assert ("route_handler", "route:orders-create", "views.OrderCreateView.as_view") in edges
+    assert ("calls", "show_order", "app.services.OrderService") in edges
+    assert ("calls", "show_order", "service.load") in edges
     assert ("model_table", "Customer", "table:customers") in edges
     assert ("model_table", "Order", "table:orders") in edges
     assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
@@ -403,6 +415,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
             "line": 7,
         }
     ]
+    assert "return service.load" not in str(artifact)
     assert "return {'id': order_id}" not in str(artifact)
     assert "urlpatterns" not in str(artifact)
     assert "models.ForeignKey" not in str(artifact)

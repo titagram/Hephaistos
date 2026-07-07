@@ -196,6 +196,9 @@ so backend search can answer structure questions without loading source chunks.
 Graph artifacts also include a source-free `tests` map for recognized test
 files, with test framework, case names/lines, target candidates, and edges from
 `test:<path>` nodes to already-indexed routes, symbols, and imports.
+Python web graphs include AST-derived `imports` and `calls` edges so handlers
+can be connected to service/repository/client calls without storing function
+bodies or arguments.
 Before sending a large artifact, the local sync can call
 `/api/hades/v1/artifacts/lookup` with project, workspace binding, schema, and
 sha256. A positive lookup means the backend already has the same artifact for

@@ -3578,6 +3578,37 @@ Resta fuori da questa tranche:
 - Log map strutturata e parser AST piu' profondi; questa tranche collega gia'
   test->route/symbol/import ma non estrae stack/log assertion semantics.
 
+## Esecuzione Python AST import/call graph - 2026-07-07
+
+Stato: completata una tranche locale P2-2 sui parser strutturati.
+
+Agent locale:
+
+- `populate_backend_ast` per Python aggiunge edge source-free `imports` usando
+  `ast.Import` / `ast.ImportFrom`.
+- Il graph Python aggiunge edge source-free `calls` da funzioni e metodi verso
+  callable chiamati, con risoluzione semplice degli alias importati.
+- La fixture FastAPI/Django ora dimostra il collegamento
+  `show_order -> app.services.OrderService -> service.load`, senza salvare
+  corpo funzione o argomenti.
+- La test map resta separata dai simboli applicativi.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `65 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Risoluzione type-aware/data-flow e call graph intermodulo profondo; questa
+  tranche e' volutamente conservativa e metadata-only.
+
 ## Esecuzione note backfill quality gate - 2026-07-07
 
 Stato: completata una tranche locale P1-7 sulla qualita' delle note e sulla

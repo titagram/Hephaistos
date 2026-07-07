@@ -2467,6 +2467,106 @@ def _py_route_id(route: dict[str, Any]) -> str:
     return str(route.get("name") or f"{route.get('method', '')} {route.get('path', '')}".strip())
 
 
+def _py_import_target(module: str, name: str, level: int = 0) -> str:
+    prefix = "." * max(0, level)
+    if module and name:
+        return f"{prefix}{module}.{name}"
+    return f"{prefix}{module or name}".strip(".") or prefix
+
+
+def _py_import_aliases_and_edges(
+    tree: ast.AST,
+    rel: str,
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> tuple[dict[str, str], bool]:
+    aliases: dict[str, str] = {}
+    truncated = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                target = alias.name
+                local = alias.asname or alias.name.split(".", 1)[0]
+                aliases[local] = target
+                truncated = not _edge_append(
+                    edges,
+                    {"kind": "imports", "from": rel, "to": target, "path": rel, "line": node.lineno},
+                    max_edges=max_edges,
+                ) or truncated
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                target = _py_import_target(module, alias.name, node.level)
+                local = alias.asname or alias.name
+                aliases[local] = target
+                truncated = not _edge_append(
+                    edges,
+                    {"kind": "imports", "from": rel, "to": target, "path": rel, "line": node.lineno},
+                    max_edges=max_edges,
+                ) or truncated
+    return aliases, truncated
+
+
+def _py_resolve_call_name(call_name: str, imports: dict[str, str]) -> str:
+    if not call_name:
+        return ""
+    head, separator, tail = call_name.partition(".")
+    target = imports.get(head)
+    if not target:
+        return call_name
+    return f"{target}{separator}{tail}" if separator else target
+
+
+def _py_callable_contexts(tree: ast.AST) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    contexts: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    body = getattr(tree, "body", [])
+    for item in body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            contexts.append((item.name, item))
+        elif isinstance(item, ast.ClassDef):
+            for child in item.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    contexts.append((f"{item.name}.{child.name}", child))
+    return contexts
+
+
+def _append_python_call_edges(
+    tree: ast.AST,
+    rel: str,
+    imports: dict[str, str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    for context, node in _py_callable_contexts(tree):
+        seen_calls: set[tuple[str, int]] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            call_name = _py_resolve_call_name(_py_dotted_name(child.func), imports)
+            if not call_name or call_name in {context, "super"}:
+                continue
+            line = getattr(child, "lineno", getattr(node, "lineno", 0))
+            key = (call_name, line)
+            if key in seen_calls:
+                continue
+            seen_calls.add(key)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "calls",
+                    "from": context,
+                    "to": call_name,
+                    "path": rel,
+                    "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _snake_name(name: str) -> str:
     return re.sub(r"(?<!^)([A-Z])", r"_\1", name).lower()
 
@@ -3537,6 +3637,8 @@ def _build_python_artifact(
             omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
             continue
 
+        py_imports, import_truncated = _py_import_aliases_and_edges(tree, rel, edges, max_edges=max_edges)
+        truncated = truncated or import_truncated
         router_prefixes: dict[str, str] = {}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
@@ -3727,6 +3829,7 @@ def _build_python_artifact(
                 max_edges=max_edges,
             ) or truncated
 
+        truncated = _append_python_call_edges(tree, rel, py_imports, edges, max_edges=max_edges) or truncated
         if len(symbols) >= max_symbols:
             break
 
