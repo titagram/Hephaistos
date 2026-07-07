@@ -18,7 +18,9 @@ from tools.registry import tool_error, tool_result
 
 
 PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
-LIVE_SEARCH_TIMEOUT_SECONDS = 2.0
+LIVE_SEARCH_TIMEOUT_SECONDS = 1.0
+SOURCE_SLICE_FETCH_TIMEOUT_SECONDS = 1.5
+LIVE_WRITE_TIMEOUT_SECONDS = 2.0
 CREATE_ACTIONS = {"add", "create"}
 UPDATE_ACTIONS = {"replace", "update"}
 DELETE_ACTIONS = {"remove", "delete"}
@@ -1385,7 +1387,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            client = runtime.client_from_config(timeout=SOURCE_SLICE_FETCH_TIMEOUT_SECONDS)
             try:
                 response = client.source_slices(
                     project_id=self._binding.project_id,
@@ -1450,7 +1452,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            client = runtime.client_from_config(timeout=LIVE_WRITE_TIMEOUT_SECONDS)
             try:
                 response = client.create_evidence_pack(
                     project_id=self._binding.project_id,
@@ -1489,7 +1491,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            client = runtime.client_from_config(timeout=LIVE_WRITE_TIMEOUT_SECONDS)
             try:
                 response = client.create_diagnosis_report(
                     project_id=self._binding.project_id,
@@ -1527,7 +1529,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            client = runtime.client_from_config(timeout=LIVE_WRITE_TIMEOUT_SECONDS)
             try:
                 response = client.promote_diagnosis_report(
                     diagnosis_report_id,

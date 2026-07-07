@@ -146,6 +146,12 @@ diagnosis reports when this status is not source-free diagnosable; save `low`
 or `insufficient` until current graph, bug evidence, and source-slice coverage
 exist.
 
+Agent live Hades tools are intentionally fail-fast. Lookup/status/search paths
+use a 1 second backend timeout, source-slice fetch uses 1.5 seconds, and
+write/create/promote paths use 2 seconds. When a live lookup times out or the
+backend is unavailable, the tool must return an explicit degraded/unavailable
+state instead of silently treating cache or generic memory as current evidence.
+
 ## Lifecycle And Cleanup
 
 Local Hades backend state has explicit retention classes:

@@ -330,8 +330,8 @@ Backend remoto:
 
 Integrazione Hades locale:
 
-- Live memory search nel provider `hades_backend` usa timeout di 2 secondi via
-  `runtime.client_from_config(timeout=2.0)`, cosi' il prefetch non blocca a
+- Live memory search nel provider `hades_backend` usa timeout di 1 secondo via
+  `runtime.client_from_config(timeout=1.0)`, cosi' il prefetch non blocca a
   lungo il loop agent.
 - Il tool `hades_backend_project_memory_search` accetta `domain=artifacts`.
 - `sync_git_tree` continua a produrre `hades.git_tree.v1`, ma aggiunge
@@ -1524,7 +1524,7 @@ Integrazione Hades locale:
   `create_bug_evidence()` e `bug_evidence_search()`.
 - Il provider memoria `hades_backend` espone il nuovo tool service-gated
   `hades_backend_bug_evidence_search`.
-- Il tool usa timeout live di 2 secondi e non ha cache fallback, per evitare che
+- Il tool usa timeout live di 1 secondo e non ha cache fallback, per evitare che
   bug evidence stale venga trattata come autorevole.
 - I payload evidence vengono restituiti bounded; se superano budget, il tool
   produce excerpt marcato `truncated`.
@@ -1575,7 +1575,7 @@ Integrazione Hades locale:
 - `HadesBackendClient` espone `project_awareness_status()`.
 - Il provider memoria `hades_backend` espone il nuovo tool service-gated
   `hades_backend_project_awareness_status`.
-- Il tool usa timeout live di 2 secondi e non ha cache fallback, come bug
+- Il tool usa timeout live di 1 secondo e non ha cache fallback, come bug
   evidence.
 - `hades backend sync` arricchisce gli artifact caricati con
   `head_commit`, `indexed_head_commit` e `workspace_head_commit` dal binding
@@ -1682,7 +1682,7 @@ Integrazione Hades locale:
   `head_commit` del binding locale quando disponibile.
 - `HadesBackendClient` espone `create_source_slice()` e `source_slices()`.
 - Provider memoria espone `hades_backend_source_slice_fetch`, live-only con
-  timeout breve e senza cache fallback.
+  timeout dedicato di 1.5 secondi e senza cache fallback.
 - Fixture OpenAPI e docs operative aggiornate.
 
 Verifiche eseguite:
@@ -1949,7 +1949,7 @@ Agent locale:
 
 - `HadesBackendClient.promote_diagnosis_report()`.
 - Nuovo tool provider `hades_backend_resolved_bug_promote`.
-- Il tool usa timeout live di 2 secondi, rifiuta status di verifica non
+- Il tool usa timeout write live di 2 secondi, rifiuta status di verifica non
   supportati e degrada a `unmapped_project` se la directory non e' linkata.
 - Memory search locale espone `kind`, `stale` e `stale_reason`, e il fallback
   cache assegna priorita' ai `resolved_bug`.
@@ -1996,7 +1996,7 @@ Agent locale:
 
 - `HadesBackendClient.graph_traverse()`.
 - Nuovo tool provider `hades_backend_graph_traverse`.
-- Tool live-only con timeout 2 secondi; degrada a `unmapped_project` senza
+- Tool live-only con timeout lookup di 1 secondo; degrada a `unmapped_project` senza
   workspace linkata.
 - Output compatto con nodes/edges, freshness e provenance.
 
@@ -2586,6 +2586,33 @@ Verifiche eseguite:
   `ruff check hermes_cli/hades_no_codebase_eval.py hermes_cli/hades_quality_report.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
   passato; `py_compile hermes_cli/hades_no_codebase_eval.py
   hermes_cli/hades_quality_report.py` passato.
+
+Resta fuori da questa tranche:
+
+- Valutazione remota end-to-end con modello/agent reale invece di solo API
+  contract backend.
+
+## Esecuzione Hades agent timeout budgets - 2026-07-07
+
+Stato: completata una tranche locale P0-6.
+
+Agent locale:
+
+- Il provider `hades_backend` distingue i timeout live per classe di operazione:
+  lookup/status/search/traversal a 1 secondo, source-slice fetch a 1.5 secondi,
+  write/create/promote a 2 secondi.
+- Restano live-only e senza fallback cache autorevole i tool di bug evidence,
+  graph traversal, source slice, evidence pack, diagnosis report, resolved bug e
+  project awareness.
+- Il comportamento desiderato in caso di timeout e' degradare esplicitamente a
+  backend unavailable/unmapped invece di bloccare il loop agent o presentare
+  memoria generica come evidenza corrente.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `31 passed`.
 
 Resta fuori da questa tranche:
 

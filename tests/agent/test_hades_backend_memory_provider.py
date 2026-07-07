@@ -454,7 +454,7 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
         }
     ]
     assert fake.closed == 1
-    assert timeouts == [2.0]
+    assert timeouts == [1.0]
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):
@@ -490,7 +490,7 @@ def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_pa
         {"query": "Hades routes"},
     )
 
-    assert timeouts == [2.0]
+    assert timeouts == [1.0]
 
 
 def test_hades_backend_bug_evidence_search_tool_prefers_live_backend(monkeypatch, tmp_path):
@@ -617,11 +617,12 @@ def test_hades_backend_bug_evidence_search_tool_uses_short_timeout(monkeypatch, 
         {"query": "stack trace"},
     )
 
-    assert timeouts == [2.0]
+    assert timeouts == [1.0]
 
 
 def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
 
     class FakeClient:
         def __init__(self):
@@ -675,7 +676,11 @@ def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch,
     fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
 
     result = json.loads(
         provider.handle_tool_call(
@@ -711,6 +716,7 @@ def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch,
         }
     ]
     assert fake.closed == 1
+    assert timeouts == [1.5]
 
 
 def test_hades_backend_source_slice_fetch_tool_requires_scope(monkeypatch, tmp_path):
@@ -802,7 +808,7 @@ def test_hades_backend_evidence_pack_search_tool_prefers_live_backend(monkeypatc
         }
     ]
     assert fake.closed == 1
-    assert timeouts == [2.0]
+    assert timeouts == [1.0]
 
 
 def test_hades_backend_evidence_pack_search_tool_requires_scope(monkeypatch, tmp_path):
@@ -1265,7 +1271,7 @@ def test_hades_backend_project_awareness_status_tool_uses_short_timeout(monkeypa
 
     provider.handle_tool_call("hades_backend_project_awareness_status", {})
 
-    assert timeouts == [2.0]
+    assert timeouts == [1.0]
 
 
 def test_hades_backend_memory_search_tool_allows_artifacts_domain(monkeypatch, tmp_path):
