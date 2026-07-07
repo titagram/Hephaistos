@@ -474,6 +474,8 @@ def _php_graph_artifact():
                 "call_type": "instance",
                 "receiver": "formatter",
                 "target_method": "format",
+                "abstract_class": "App\\Contracts\\OrderFormatter",
+                "binding": "singleton",
                 "path": "app/Http/Controllers/OrderController.php",
                 "line": 45,
             },
@@ -1770,12 +1772,16 @@ def test_hades_backend_graph_search_finds_local_instance_method_call_edges(monke
         and ref["to"] == "OrderService@format"
         and ref["provenance"]["call_type"] == "instance"
         and ref["provenance"]["receiver"] == "formatter"
+        and ref["provenance"]["abstract_class"] == "App\\Contracts\\OrderFormatter"
+        and ref["provenance"]["binding"] == "singleton"
         for ref in graph_refs
     )
     assert any(
         "call_type=instance" in item["summary"]
         and "target_method=format" in item["summary"]
         and "receiver=formatter" in item["summary"]
+        and "abstract_class=App\\Contracts\\OrderFormatter" in item["summary"]
+        and "binding=singleton" in item["summary"]
         for item in result["items"]
     )
 

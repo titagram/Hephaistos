@@ -645,7 +645,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Illuminate\\Support\\Facades\\Log;\n"
         "class OrderController extends Controller {\n"
         "    public function __construct(private OrderService $orders) {}\n"
-        "    public function show(StoreOrderRequest $request, Order $order, OrderService $formatter) {\n"
+        "    public function show(StoreOrderRequest $request, Order $order, \\App\\Contracts\\OrderFormatter $formatter) {\n"
         "        $this->authorize('view', $order);\n"
         "        $request->validate(['status' => 'required|string']);\n"
         "        config('services.orders.cache');\n"
@@ -1016,7 +1016,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("calls_method", "OrderController@show", "OrderService@format") in edges
     assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("uses_dependency", "OrderController@__construct", "App\\Services\\OrderService") in edges
-    assert ("uses_dependency", "OrderController@show", "App\\Services\\OrderService") in edges
+    assert ("uses_dependency", "OrderController@show", "App\\Contracts\\OrderFormatter") in edges
     assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
     assert ("route_model_binding", "route:orders.show", "App\\Models\\Order") in edges
     assert ("route_model_table", "route:orders.show", "table:orders") in edges
@@ -1130,6 +1130,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "call_type": "instance",
         "receiver": "formatter",
         "target_method": "format",
+        "abstract_class": "App\\Contracts\\OrderFormatter",
+        "binding": "singleton",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 27,
     } in artifact["edges"]

@@ -3406,6 +3406,40 @@ def _php_policy_index(
     return policy_by_model
 
 
+def _php_container_binding_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    bindings: dict[str, dict[str, Any]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        for match in PHP_CONTAINER_BIND_RE.finditer(source):
+            abstract_class = _php_fqcn_resolved(namespace, match.group("abstract"), uses)
+            concrete_class = _php_fqcn_resolved(namespace, match.group("concrete"), uses)
+            if abstract_class and concrete_class:
+                bindings[abstract_class] = {
+                    "concrete_class": concrete_class,
+                    "binding": match.group("method"),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+    return bindings
+
+
 def _php_command_method_index(
     workspace_root: Path,
     php_files: list[Path],
@@ -3793,6 +3827,7 @@ def _append_php_instance_method_call_edges(
     class_property_types: dict[str, str],
     typed_params: dict[str, str],
     php_method_symbols: dict[tuple[str, str], str],
+    container_bindings: dict[str, dict[str, Any]],
     edges: list[dict[str, Any]],
     *,
     max_edges: int,
@@ -3816,6 +3851,17 @@ def _append_php_instance_method_call_edges(
             continue
         target_method = str(match.group("method") or "")
         target_method_symbol = php_method_symbols.get((target_class, target_method))
+        binding_info: dict[str, Any] = {}
+        abstract_class = ""
+        if not target_method_symbol:
+            binding_info = container_bindings.get(target_class, {})
+            concrete_class = str(binding_info.get("concrete_class") or "")
+            if concrete_class:
+                concrete_method_symbol = php_method_symbols.get((concrete_class, target_method))
+                if concrete_method_symbol:
+                    abstract_class = target_class
+                    target_class = concrete_class
+                    target_method_symbol = concrete_method_symbol
         if not target_method_symbol:
             continue
         call_edge = {
@@ -3829,6 +3875,9 @@ def _append_php_instance_method_call_edges(
             "path": rel,
             "line": _line_number(source, method_body_offset + match.start()),
         }
+        if abstract_class:
+            call_edge["abstract_class"] = abstract_class
+            call_edge["binding"] = binding_info.get("binding")
         truncated = not _edge_append(edges, call_edge, max_edges=max_edges) or truncated
     return truncated
 
@@ -4325,6 +4374,11 @@ def _build_php_graph(
         max_file_bytes=max_file_bytes,
     )
     php_method_symbols = _php_method_symbol_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    container_bindings_by_abstract = _php_container_binding_index(
         workspace_root,
         php_files,
         max_file_bytes=max_file_bytes,
@@ -4870,6 +4924,7 @@ def _build_php_graph(
                 property_types_by_class.get(fqcn, {}),
                 typed_params,
                 php_method_symbols,
+                container_bindings_by_abstract,
                 edges,
                 max_edges=max_edges,
             ) or truncated

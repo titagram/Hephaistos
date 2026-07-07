@@ -5883,3 +5883,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel container-bound service call graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per DI/container causal awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` costruisce un indice dei container binding Laravel
+  `abstract -> concrete` da `$this->app->bind/singleton/scoped/instance`,
+  `app()->...` e `App::...`.
+- Quando una instance/property call su parametro o proprieta' tipizzata non
+  trova il metodo sull'abstract, il graph prova il concreto bindato e aggiunge
+  `calls_method` verso il metodo reale se indicizzato.
+- Il payload dell'edge salva `abstract_class`, concrete `target_class`, binding
+  type, receiver, target method e path/line; non conserva container runtime
+  state, argomenti o corpo metodo.
+- Il fallback locale di `hades_backend_graph_search` espone abstract/binding
+  metadata, cosi' una diagnosi source-free puo' attraversare interfacce DI fino
+  al service concreto.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/search:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_instance_method_call_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `95 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
