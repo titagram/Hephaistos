@@ -1955,3 +1955,44 @@ Resta fuori da questa tranche:
 - FTS/vector search per evidence testuale.
 - Filtri strutturati dedicati per commit/symbol su bug evidence.
 - Traversal verso migration/log oltre agli edge gia' presenti nel graph artifact.
+
+## Esecuzione awareness status locale Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-5 del piano "Observability And Diagnosis
+Quality SLOs".
+
+Agent locale:
+
+- `hades backend status --json` include ora `awareness` top-level.
+- Ogni binding include `awareness.status`, `diagnosable_without_source`,
+  `coverage` per memory cache, project artifacts, source slices, bug evidence e
+  `quality.missing`.
+- Il payload e' conservativo: senza bug evidence nota, source slices, artifact
+  index e memory cache, una diagnosi senza source code resta `partial` e
+  `diagnosable_without_source=false`.
+- Se un profilo ha piu' workspace binding, i contatori dell'ultima sync restano
+  `aggregate` e non rendono pronto nessun binding specifico.
+- Lo status locale non fa chiamate backend live; resta un segnale operativo
+  locale. Il tool/API `project_awareness_status` resta la fonte live per
+  freshness backend.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_mvp_smoke.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_web_api.py tests/test_docs_hades_mvp.py`
+  passato: `44 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_status.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_mvp_smoke.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/docs_audit.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_backend_status.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Dashboard trend e ultimi failure.
+- Metriche aggregate su diagnosis confidence distribution.
+- Log strutturati per ogni tool diagnosis con evidence refs usati.

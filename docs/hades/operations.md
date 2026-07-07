@@ -60,6 +60,11 @@ linked backend workspace and the per-profile backoff window is due. The
 piggyback run is asynchronous, quiet, and fail-open: chat continues even if the
 backend is offline. Repeated failures are recorded in local sync state and
 surface as a degraded backend action in `hades backend status --json`.
+The same JSON payload also exposes local `awareness` health per workspace
+binding. Use it as the local readiness view for memory cache, artifact upload,
+source-slice upload, and bug-evidence availability before attempting
+source-free diagnosis. It does not perform live backend calls; for backend
+freshness and coverage, use the project-awareness tool/API below.
 
 ## Bug Evidence
 

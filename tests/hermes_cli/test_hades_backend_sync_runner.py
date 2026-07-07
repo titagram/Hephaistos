@@ -754,6 +754,208 @@ def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch
     ]
 
 
+def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    payload = load_backend_status_payload()
+    binding_awareness = payload["bindings"][0]["awareness"]
+
+    assert payload["awareness"] == {
+        "status": "partial",
+        "bindings": 1,
+        "ready_bindings": 0,
+        "partial_bindings": 1,
+        "degraded_bindings": 0,
+        "diagnosable_without_source_bindings": 0,
+    }
+    assert payload["bindings"][0]["head_commit"] == "abc123"
+    assert binding_awareness["status"] == "partial"
+    assert binding_awareness["diagnosable_without_source"] is False
+    assert binding_awareness["coverage"]["memory_cache"]["status"] == "missing"
+    assert binding_awareness["coverage"]["project_artifacts"]["status"] == "missing"
+    assert binding_awareness["coverage"]["source_slices"]["status"] == "missing"
+    assert binding_awareness["coverage"]["bug_evidence"]["status"] == "unknown"
+    assert binding_awareness["quality"]["confidence"] == "incomplete"
+    assert binding_awareness["quality"]["missing"] == [
+        "shared_memory_cache",
+        "project_artifact_index",
+        "source_slice_index",
+        "bug_evidence",
+    ]
+    assert payload["actions"] == [
+        "Project awareness is incomplete; inspect `awareness` before source-free diagnosis."
+    ]
+
+
+def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.replace_memory_cache(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            version="mem_v1",
+            items=[{"kind": "resolved_bug", "summary": "Known login regression"}],
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "memory_snapshots": 1,
+                "artifacts_uploaded": 1,
+                "artifact_errors": 0,
+                "source_slices_uploaded": 2,
+                "source_slice_errors": 0,
+                "bug_evidence_items": 1,
+                "proposal_errors": 0,
+            },
+        )
+
+    payload = load_backend_status_payload()
+    binding_awareness = payload["bindings"][0]["awareness"]
+
+    assert payload["awareness"] == {
+        "status": "ready",
+        "bindings": 1,
+        "ready_bindings": 1,
+        "partial_bindings": 0,
+        "degraded_bindings": 0,
+        "diagnosable_without_source_bindings": 1,
+    }
+    assert payload["actions"] == []
+    assert binding_awareness["status"] == "ready"
+    assert binding_awareness["diagnosable_without_source"] is True
+    assert binding_awareness["coverage"]["memory_cache"]["items"] == 1
+    assert binding_awareness["coverage"]["memory_cache"]["version"] == "mem_v1"
+    assert binding_awareness["coverage"]["project_artifacts"]["uploaded_last_sync"] == 1
+    assert binding_awareness["coverage"]["source_slices"]["uploaded_last_sync"] == 2
+    assert binding_awareness["coverage"]["bug_evidence"]["items_last_sync"] == 1
+    assert binding_awareness["quality"]["confidence"] == "ready"
+    assert binding_awareness["quality"]["missing"] == []
+
+
+def test_backend_status_keeps_multi_binding_aggregate_summary_partial(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        for index in range(2):
+            workspace = tmp_path / f"repo_{index}"
+            workspace.mkdir()
+            workspace_binding_id = f"wb_{index}"
+            hdb.upsert_workspace_binding(
+                conn,
+                project_id="proj_1",
+                agent_id="agent_1",
+                local_project_id=f"p_local_{index}",
+                workspace_fingerprint=f"wf_{index}",
+                display_path=f"~/repo_{index}",
+                repo_root=str(workspace),
+                git_remote_display="",
+                git_remote_hash="",
+                head_commit="abc123",
+                backend_workspace_binding_id=workspace_binding_id,
+            )
+            hdb.replace_memory_cache(
+                conn,
+                project_id="proj_1",
+                workspace_binding_id=workspace_binding_id,
+                version="mem_v1",
+                items=[{"summary": f"memory {index}"}],
+            )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "artifacts_uploaded": 2,
+                "artifact_errors": 0,
+                "source_slices_uploaded": 2,
+                "source_slice_errors": 0,
+                "bug_evidence_items": 2,
+                "proposal_errors": 0,
+            },
+        )
+
+    payload = load_backend_status_payload()
+
+    assert payload["awareness"]["status"] == "partial"
+    assert payload["awareness"]["diagnosable_without_source_bindings"] == 0
+    assert {binding["awareness"]["quality"]["summary_scope"] for binding in payload["bindings"]} == {"aggregate"}
+    assert all(not binding["awareness"]["diagnosable_without_source"] for binding in payload["bindings"])
+    assert all(binding["awareness"]["coverage"]["project_artifacts"]["status"] == "aggregate" for binding in payload["bindings"])
+    assert all("project_artifact_index" in binding["awareness"]["quality"]["missing"] for binding in payload["bindings"])
+
+
 def test_manual_sync_success_clears_background_backoff_state(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

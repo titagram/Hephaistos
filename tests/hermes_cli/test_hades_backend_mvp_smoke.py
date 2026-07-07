@@ -131,6 +131,8 @@ def test_hades_backend_mvp_smoke_no_network(monkeypatch, tmp_path):
         "proposal_errors": 0,
         "artifacts_uploaded": 1,
         "artifact_errors": 0,
+        "source_slices_uploaded": 0,
+        "source_slice_errors": 0,
         "inbox_events": 1,
     }
     assert job is not None

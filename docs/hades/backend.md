@@ -110,8 +110,16 @@ hades backend proposals
 hades backend ack-proposal <proposal_id>
 ```
 
-The JSON status includes job counts, proposal counts, sync state, and actions
-for waiting jobs, refused proposals, and degraded sync state.
+The JSON status includes job counts, proposal counts, sync state, local
+`awareness` health, and actions for waiting jobs, refused proposals, degraded
+sync state, and incomplete local project awareness. Each binding includes
+coverage for memory cache, project artifacts, source slices, and bug evidence.
+`diagnosable_without_source` is intentionally conservative: it is false until
+the local profile has a linked workspace, cached memory, uploaded project
+artifacts, uploaded source slices, known bug evidence, and no recorded sync
+errors.
+When a profile has multiple workspace bindings, last-sync counters are marked
+as aggregate and do not make any single binding source-free diagnosable.
 
 `jobs` defaults to `waiting_confirmation` work. `approve-job` executes a stored
 waiting job in the linked workspace, submits the result or artifact metadata,
