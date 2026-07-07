@@ -2103,6 +2103,34 @@ Resta fuori da questa tranche:
 - Bug case detail con evidence timeline, graph path e source slices.
 - Controlli UI completi per source/evidence policy e diagnosis promotion.
 
+## Esecuzione dashboard diagnosis quality Hades - 2026-07-07
+
+Stato: completata una tranche P1-4/P1-5 per rendere visibile in dashboard la
+qualita' della diagnosi source-free.
+
+Frontend locale:
+
+- `web/src/pages/BackendPage.tsx` mostra ora il pannello "Diagnosis quality"
+  nella pagina backend.
+- Il pannello deriva tutto da `HadesBackendStatus`: binding source-free ready,
+  binding bloccati, distribuzione `quality.confidence`, missing evidence
+  aggregata, ultimo segnale di qualita' e next gate operativo.
+- La card non introduce nuovi endpoint e non duplica la chat: rende leggibile lo
+  stato gia' prodotto dal backend/status locale.
+
+Verifiche eseguite:
+
+- Locale:
+  `npm run --prefix web typecheck`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Trend storici e drill-down sugli ultimi failure.
+- Pagina bug case con evidence timeline, graph path, source slices e diagnosis
+  report detail.
+- Controlli UI completi per source/evidence policy e diagnosis promotion.
+
 ## Esecuzione identity domains Hades - 2026-07-07
 
 Stato: completata la prima tranche P1-6 del piano "Multi-Device Identity And

@@ -146,6 +146,11 @@ diagnosis reports when this status is not source-free diagnosable; save `low`
 or `insufficient` until current graph, bug evidence, and source-slice coverage
 exist.
 
+The dashboard backend page surfaces the same local readiness picture in the
+`Diagnosis quality` panel: source-free ready bindings, blocked bindings,
+confidence distribution, current missing-evidence blockers, latest quality
+signal, and the next gate to repair before trusting source-free diagnosis.
+
 Agent live Hades tools are intentionally fail-fast. Lookup/status/search paths
 use a 1 second backend timeout, source-slice fetch uses 1.5 seconds, and
 write/create/promote paths use 2 seconds. When a live lookup times out or the
@@ -234,6 +239,8 @@ diagnosis reports, forbidden source-access tool use, and diagnosis freshness
 coverage plus source-free awareness coverage. Local awareness/support status is
 included when enabled. Causal quality, stale precise-claim, undiagnosable
 awareness, or privacy regressions are blockers; local setup gaps are warnings.
+Use the dashboard `Diagnosis quality` panel for the current workspace snapshot;
+use `quality-report` for release gates and periodic governance.
 
 ## Note Backfill
 

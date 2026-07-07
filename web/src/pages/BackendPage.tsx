@@ -66,9 +66,26 @@ function valueLabel(value: unknown): string {
 
 function statusTone(status?: string | null): "success" | "warning" | "destructive" | "secondary" | "outline" {
   if (!status) return "outline";
-  if (["linked", "completed", "accepted", "ok", "present", "ready", "success"].includes(status)) return "success";
-  if (["waiting_confirmation", "pending", "partial", "aggregate", "missing", "unknown", "unmapped", "unlinked", "expired"].includes(status)) return "warning";
-  if (["failed", "refused", "conflicted", "degraded", "error"].includes(status)) return "destructive";
+  if (["linked", "completed", "accepted", "ok", "present", "ready", "success", "high"].includes(status)) return "success";
+  if (
+    [
+      "waiting_confirmation",
+      "pending",
+      "partial",
+      "aggregate",
+      "missing",
+      "unknown",
+      "unmapped",
+      "unlinked",
+      "expired",
+      "incomplete",
+      "medium",
+      "low",
+      "stale",
+      "blocked",
+    ].includes(status)
+  ) return "warning";
+  if (["failed", "refused", "conflicted", "degraded", "error", "insufficient"].includes(status)) return "destructive";
   return "secondary";
 }
 
@@ -88,6 +105,37 @@ function awarenessReadyCount(status: HadesBackendStatus): string {
   const awareness = status.awareness;
   if (!awareness) return "0/0";
   return `${awareness.diagnosable_without_source_bindings}/${awareness.bindings}`;
+}
+
+function qualityMissing(status: HadesBackendStatus): string[] {
+  return Array.from(
+    new Set(
+      status.bindings.flatMap((binding) =>
+        Array.isArray(binding.awareness?.quality?.missing) ? binding.awareness.quality.missing : [],
+      ),
+    ),
+  ).sort();
+}
+
+function qualityConfidenceCounts(status: HadesBackendStatus): Record<string, number> {
+  return status.bindings.reduce<Record<string, number>>((counts, binding) => {
+    if (!binding.awareness) return counts;
+    const confidence = binding.awareness.quality?.confidence || "unknown";
+    counts[confidence] = Number(counts[confidence] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function latestQualityUpdate(status: HadesBackendStatus): number | null {
+  const timestamps = status.bindings
+    .map((binding) => binding.awareness?.quality?.last_sync_summary_updated_at)
+    .filter((value): value is number => typeof value === "number" && value > 0);
+  return timestamps.length ? Math.max(...timestamps) : null;
+}
+
+function sourceFreeReadyCount(status: HadesBackendStatus): number {
+  return status.awareness?.diagnosable_without_source_bindings
+    ?? status.bindings.filter((binding) => Boolean(binding.awareness?.diagnosable_without_source)).length;
 }
 
 function Metric({
@@ -182,13 +230,7 @@ function AwarenessCoverage({ awareness }: { awareness: HadesBackendBindingAwaren
 function AwarenessPanel({ status }: { status: HadesBackendStatus }) {
   const awareness = status.awareness;
   if (!awareness) return null;
-  const missing = Array.from(
-    new Set(
-      status.bindings.flatMap((binding) =>
-        Array.isArray(binding.awareness?.quality?.missing) ? binding.awareness.quality.missing : [],
-      ),
-    ),
-  );
+  const missing = qualityMissing(status);
   return (
     <Card>
       <CardContent className="grid gap-4 py-4">
@@ -224,6 +266,90 @@ function AwarenessPanel({ status }: { status: HadesBackendStatus }) {
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DiagnosisQualityPanel({ status }: { status: HadesBackendStatus }) {
+  const total = status.awareness?.bindings ?? status.bindings.length;
+  const ready = sourceFreeReadyCount(status);
+  const blocked = Math.max(0, total - ready);
+  const missing = qualityMissing(status);
+  const confidenceCounts = qualityConfidenceCounts(status);
+  const latest = latestQualityUpdate(status) ?? status.sync.last_summary_updated_at;
+  const qualitySignals = recordTotal(confidenceCounts);
+  const panelStatus = !status.configured
+    ? "not configured"
+    : total === 0
+      ? "unmapped"
+      : blocked > 0
+        ? "blocked"
+        : "ready";
+  const nextGate = !status.configured
+    ? "Run hades backend bootstrap"
+    : total === 0
+      ? "Link a workspace with hades project link"
+      : missing.length > 0
+        ? `Repair ${titleLabel(missing[0])}`
+        : blocked > 0
+          ? "Refresh project awareness"
+          : "Ready for source-free diagnosis";
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Brain className="h-4 w-4" />
+            Diagnosis quality
+          </H2>
+          <Badge tone={statusTone(panelStatus)}>{panelStatus}</Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Source-free ready</div>
+            <div className="mt-1 text-lg font-semibold">{ready}/{total}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Blocked bindings</div>
+            <div className="mt-1 text-lg font-semibold">{blocked}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Confidence signals</div>
+            <div className="mt-1 text-lg font-semibold">{qualitySignals}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Latest quality signal</div>
+            <div className="mt-1 text-lg font-semibold">{formatAgo(latest)}</div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Next gate</div>
+            <div className="mt-1 text-sm font-medium">{nextGate}</div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="border border-border bg-background/40 px-3 py-2">
+              <div className="mb-2 text-xs uppercase text-muted-foreground">Confidence</div>
+              <CountList counts={confidenceCounts} />
+            </div>
+            <div className="border border-border bg-background/40 px-3 py-2">
+              <div className="mb-2 text-xs uppercase text-muted-foreground">Missing evidence</div>
+              {missing.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {missing.map((item) => (
+                    <Badge tone="warning" key={item}>{titleLabel(item)}</Badge>
+                  ))}
+                </div>
+              ) : (
+                <Badge tone="success">no blockers</Badge>
+              )}
+            </div>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -514,6 +640,7 @@ export default function BackendPage() {
       </div>
 
       <AwarenessPanel status={status} />
+      <DiagnosisQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />
 
       {status.actions.length > 0 && (
