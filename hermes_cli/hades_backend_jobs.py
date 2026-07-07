@@ -209,6 +209,7 @@ PHP_VALIDATE_ARRAY_RE = re.compile(
 )
 PHP_ARRAY_FIELD_KEY_RE = re.compile(r"['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>")
 PHP_THIS_INPUT_MUTATION_RE = re.compile(r"\$this->(?P<operation>merge|replace)\s*\(", re.MULTILINE)
+PHP_ABORT_HELPER_RE = re.compile(r"\babort(?P<suffix>_if|_unless)?\s*\(", re.IGNORECASE | re.MULTILINE)
 PHP_LISTEN_ARRAY_RE = re.compile(
     r"(?P<event>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*\[(?P<listeners>.*?)\]",
     re.DOTALL,
@@ -3328,6 +3329,84 @@ def _append_php_route_form_request_authorization_edges(
     return truncated
 
 
+def _php_http_aborts_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    aborts: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for match in PHP_ABORT_HELPER_RE.finditer(method_body):
+        suffix = str(match.group("suffix") or "").lower()
+        helper = f"abort{suffix}"
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        args = source[open_abs + 1 : close_abs]
+        parts = _split_top_level_items(args)
+        status_index = 0 if helper == "abort" else 1
+        if len(parts) <= status_index:
+            continue
+        status_raw = parts[status_index][0].strip()
+        status_match = re.fullmatch(r"[1-5][0-9]{2}", status_raw)
+        if not status_match:
+            continue
+        status_code = int(status_match.group(0))
+        line = _line_number(source, method_body_offset + match.start())
+        key = (helper, status_code, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        aborts.append(
+            {
+                "status_code": status_code,
+                "abort_helper": helper,
+                "line": line,
+            }
+        )
+    return aborts
+
+
+def _append_php_route_http_abort_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    aborts: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not aborts:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for http_abort in aborts:
+            status_code = http_abort.get("status_code")
+            if not status_code:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_http_abort",
+                    "from": route_ref,
+                    "to": f"http_status:{status_code}",
+                    "handler": method_symbol,
+                    "status_code": status_code,
+                    "abort_helper": http_abort.get("abort_helper"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": http_abort.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3807,6 +3886,32 @@ def _build_php_graph(
                     max_edges=max_edges,
                 ) or truncated
             method_body, method_body_offset = _php_method_body_slice(source, match)
+            http_aborts = _php_http_aborts_for_method(source, method_body, method_body_offset)
+            for http_abort in http_aborts:
+                status_code = http_abort.get("status_code")
+                if not status_code:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "http_abort",
+                        "from": method_symbol,
+                        "to": f"http_status:{status_code}",
+                        "status_code": status_code,
+                        "abort_helper": http_abort.get("abort_helper"),
+                        "path": rel,
+                        "line": http_abort.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_http_abort_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                http_aborts,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
             if class_info.get("role") == "api_resource" and method_name == "toArray":
                 resource_model, resource_table = _php_resource_table_for_class(fqcn, model_table_by_class)
                 for field_info in _php_array_field_keys(source, method_body, method_body_offset):

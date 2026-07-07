@@ -306,6 +306,29 @@ def _php_graph_artifact():
                 "source_line": 13,
             },
             {
+                "kind": "http_abort",
+                "from": "OrderController@show",
+                "to": "http_status:403",
+                "status_code": 403,
+                "abort_helper": "abort_if",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 44,
+            },
+            {
+                "kind": "route_http_abort",
+                "from": "route:orders.show",
+                "to": "http_status:403",
+                "handler": "OrderController@show",
+                "status_code": 403,
+                "abort_helper": "abort_if",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 44,
+            },
+            {
                 "kind": "view_ref",
                 "from": "OrderController@show",
                 "to": "view:orders.show",
@@ -1806,6 +1829,56 @@ def test_hades_backend_graph_search_finds_local_form_request_input_mutation_edge
         "field=status" in item["summary"]
         and "operation=merge" in item["summary"]
         and "mutation_stage=prepare_for_validation" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_http_abort_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "route abort_if 403", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_http_abort"
+        and ref["to"] == "http_status:403"
+        and ref["provenance"]["status_code"] == 403
+        and ref["provenance"]["abort_helper"] == "abort_if"
+        for ref in graph_refs
+    )
+    assert any(
+        "status_code=403" in item["summary"]
+        and "abort_helper=abort_if" in item["summary"]
+        and "source_path=app/Http/Controllers/OrderController.php" in item["summary"]
         for item in result["items"]
     )
 

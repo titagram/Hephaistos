@@ -657,6 +657,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        Order::recent()->first();\n"
         "        App\\Http\\Resources\\OrderResource::make($order);\n"
         "        OrderService::format($order);\n"
+        "        abort_if($order->status === 'archived', 403);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -988,6 +989,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_authorization", "route:orders.show", "ability:view") in edges
     assert ("route_authorization_model", "route:orders.show", "App\\Models\\Order") in edges
     assert ("route_authorization_table", "route:orders.show", "table:orders") in edges
+    assert ("http_abort", "OrderController@show", "http_status:403") in edges
+    assert ("route_http_abort", "route:orders.show", "http_status:403") in edges
     assert {
         "kind": "route_model_binding",
         "from": "route:orders.show",
@@ -1016,6 +1019,29 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 13,
+    } in artifact["edges"]
+    assert {
+        "kind": "http_abort",
+        "from": "OrderController@show",
+        "to": "http_status:403",
+        "status_code": 403,
+        "abort_helper": "abort_if",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 27,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_http_abort",
+        "from": "route:orders.show",
+        "to": "http_status:403",
+        "handler": "OrderController@show",
+        "status_code": 403,
+        "abort_helper": "abort_if",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 27,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",
