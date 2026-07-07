@@ -625,6 +625,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        DB::table('orders')->where('status', 'pending')->update(['status' => 'paid']);\n"
         "        Order::where('status', 'paid')->first();\n"
         "        Order::where('status', 'pending')->update(['status' => 'paid']);\n"
+        "        Order::recent()->first();\n"
         "        OrderService::format($order);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
@@ -712,6 +713,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    }\n"
         "    public function customer() {\n"
         "        return $this->belongsTo(Customer::class);\n"
+        "    }\n"
+        "    public function scopeRecent($query) {\n"
+        "        return $query->latest();\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -1030,6 +1034,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_guarded", "App\\Models\\Order", "table:orders.internal_note") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert ("model_scope", "App\\Models\\Order", "scope:App\\Models\\Order.recent") in edges
+    assert ("scope_method", "scope:App\\Models\\Order.recent", "Order@scopeRecent") in edges
+    assert ("eloquent_scope_call", "App\\Http\\Controllers\\OrderController", "scope:App\\Models\\Order.recent") in edges
+    assert ("eloquent_scope_call", "OrderController@show", "scope:App\\Models\\Order.recent") in edges
     assert {
         "kind": "model_cast",
         "from": "App\\Models\\Order",
@@ -1049,6 +1057,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "table": "orders",
         "path": "app/Models/Order.php",
         "line": 10,
+    } in artifact["edges"]
+    assert {
+        "kind": "eloquent_scope_call",
+        "from": "OrderController@show",
+        "to": "scope:App\\Models\\Order.recent",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "scope": "recent",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 24,
     } in artifact["edges"]
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
@@ -1112,6 +1131,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "protected $guarded" not in str(artifact)
     assert "protected $casts" not in str(artifact)
     assert "return ['customer_id'" not in str(artifact)
+    assert "return $query->latest" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
     assert "middlewareAliases" not in str(artifact)
     assert "middlewareGroups" not in str(artifact)

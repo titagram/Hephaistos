@@ -286,6 +286,34 @@ def _php_graph_artifact():
                 "path": "app/Models/Order.php",
                 "line": 8,
             },
+            {
+                "kind": "model_scope",
+                "from": "App\\Models\\Order",
+                "to": "scope:App\\Models\\Order.recent",
+                "scope": "recent",
+                "method": "scopeRecent",
+                "path": "app/Models/Order.php",
+                "line": 15,
+            },
+            {
+                "kind": "scope_method",
+                "from": "scope:App\\Models\\Order.recent",
+                "to": "Order@scopeRecent",
+                "scope": "recent",
+                "model": "App\\Models\\Order",
+                "path": "app/Models/Order.php",
+                "line": 15,
+            },
+            {
+                "kind": "eloquent_scope_call",
+                "from": "OrderController@show",
+                "to": "scope:App\\Models\\Order.recent",
+                "scope": "recent",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 50,
+            },
         ],
         "tests": {
             "schema": "hades.test_map.v1",
@@ -1095,6 +1123,56 @@ def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch
     )
     assert any("field=status" in item["summary"] for item in result["items"])
     assert any("cast_type=string" in item["summary"] for item in result["items"])
+
+
+def test_hades_backend_graph_search_finds_local_model_scope_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "Order recent scope", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_scope"
+        and ref["to"] == "scope:App\\Models\\Order.recent"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "eloquent_scope_call"
+        and ref["from"] == "OrderController@show"
+        and ref["provenance"]["scope"] == "recent"
+        for ref in graph_refs
+    )
+    assert any("scope=recent" in item["summary"] for item in result["items"])
 
 
 def test_hades_backend_graph_search_finds_local_route_model_bindings(monkeypatch, tmp_path):

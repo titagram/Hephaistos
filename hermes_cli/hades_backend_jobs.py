@@ -2403,6 +2403,59 @@ def _php_model_table_for_class(resolved_class: str, model_table_by_class: dict[s
     return ""
 
 
+def _php_scope_name(method_name: str) -> str:
+    if not method_name.startswith("scope") or len(method_name) <= len("scope"):
+        return ""
+    suffix = method_name[len("scope") :]
+    if not suffix or not suffix[0].isupper():
+        return ""
+    return suffix[:1].lower() + suffix[1:]
+
+
+def _php_model_scope_id(model_class: str, scope_name: str) -> str:
+    return f"scope:{model_class}.{scope_name}"
+
+
+def _php_laravel_model_scope_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, set[str]]:
+    model_scopes: dict[str, set[str]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            role = _php_role(rel, fqcn, extends_fqcn)
+            classes.append({"name": fqcn, "role": role, "offset": match.start()})
+        classes.sort(key=lambda item: int(item["offset"]))
+        for match in PHP_METHOD_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            if class_info is None or class_info.get("role") != "model":
+                continue
+            scope_name = _php_scope_name(match.group("name"))
+            if scope_name:
+                model_scopes.setdefault(str(class_info["name"]), set()).add(scope_name)
+    return model_scopes
+
+
 def _php_array_string_values(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
     values: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2892,6 +2945,11 @@ def _build_php_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
+    model_scope_by_class = _php_laravel_model_scope_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
     form_request_validation_by_class = _php_form_request_validation_index(
         workspace_root,
         php_files,
@@ -3133,6 +3191,35 @@ def _build_php_graph(
                 )
             else:
                 truncated = True
+            scope_name = _php_scope_name(method_name)
+            if class_info.get("role") == "model" and scope_name:
+                scope_id = _php_model_scope_id(fqcn, scope_name)
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "model_scope",
+                        "from": fqcn,
+                        "to": scope_id,
+                        "scope": scope_name,
+                        "method": method_name,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "scope_method",
+                        "from": scope_id,
+                        "to": method_symbol,
+                        "scope": scope_name,
+                        "model": fqcn,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
             typed_params: dict[str, str] = {}
             for param_match in PHP_TYPED_PARAM_RE.finditer(match.group("params") or ""):
                 param_name = str(param_match.group("name") or "")
@@ -3338,6 +3425,41 @@ def _build_php_graph(
                 edge,
                 max_edges=max_edges,
             ) or truncated
+            model_scopes = model_scope_by_class.get(resolved_class) or set()
+            if method_name in model_scopes:
+                model_table = _php_model_table_for_class(resolved_class, model_table_by_class)
+                scope_edge = {
+                    "kind": "eloquent_scope_call",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": _php_model_scope_id(resolved_class, method_name),
+                    "scope": method_name,
+                    "model": resolved_class,
+                    "table": model_table,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, scope_edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    scope_edge,
+                    max_edges=max_edges,
+                ) or truncated
+                if model_table:
+                    truncated = _append_php_eloquent_query_builder_edges(
+                        source,
+                        rel,
+                        classes,
+                        match,
+                        resolved_class=resolved_class,
+                        method_name=method_name,
+                        table=model_table,
+                        edges=edges,
+                        max_edges=max_edges,
+                    ) or truncated
             if method_name in PHP_ELOQUENT_QUERY_METHODS and _php_short_name(resolved_class) != "DB":
                 query_edge = {
                     "kind": "eloquent_query",
