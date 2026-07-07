@@ -139,6 +139,10 @@ state that limitation and gather/index the missing evidence before claiming a
 precise cause. A successful `hades backend sync` sends artifact HEAD metadata
 from the linked workspace binding so the backend can clear stale artifact
 warnings when the index matches the current checkout.
+The backend and local diagnosis tool both reject high/medium confidence
+diagnosis reports when this status is not source-free diagnosable; save `low`
+or `insufficient` until current graph, bug evidence, and source-slice coverage
+exist.
 
 ## Lifecycle And Cleanup
 
@@ -292,10 +296,11 @@ evidence refs and confidence.
 
 The backend and local provider enforce a hard gate for precise persisted
 diagnoses: `high` or `medium` confidence reports require non-empty
-`evidence_refs` and `freshness.status=current`. Otherwise the request is
-rejected with `diagnosis_evidence_refs_required` or
-`diagnosis_freshness_not_current`; save a `low` or `insufficient` report when
-the evidence is incomplete or stale.
+`evidence_refs`, `freshness.status=current`, and
+`awareness.diagnosable_without_source=true`. Otherwise the request is rejected
+with `diagnosis_evidence_refs_required`, `diagnosis_freshness_not_current`, or
+`diagnosis_awareness_not_diagnosable`; save a `low` or `insufficient` report
+when the evidence is incomplete or stale.
 
 Use `hades_backend_graph_search` to find candidate graph artifacts by text, then
 `hades_backend_graph_traverse` when you know a starting route, URI, class,

@@ -447,6 +447,14 @@ DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
                 "description": "Freshness and commit comparison used by the diagnosis.",
                 "additionalProperties": True,
             },
+            "awareness": {
+                "type": "object",
+                "description": (
+                    "Project awareness status used by the diagnosis. High/medium "
+                    "confidence requires diagnosable_without_source=true."
+                ),
+                "additionalProperties": True,
+            },
             "payload": {
                 "type": "object",
                 "description": "Optional bounded structured diagnosis detail.",
@@ -766,6 +774,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
         freshness = args.get("freshness")
         if freshness is not None and not isinstance(freshness, dict):
             return tool_error("Parameter freshness must be an object when provided.")
+        awareness = args.get("awareness")
+        if awareness is not None and not isinstance(awareness, dict):
+            return tool_error("Parameter awareness must be an object when provided.")
         payload = args.get("payload")
         if payload is not None and not isinstance(payload, dict):
             return tool_error("Parameter payload must be an object when provided.")
@@ -780,6 +791,11 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 return tool_error(
                     "High/medium confidence diagnosis reports require freshness.status=current.",
                     freshness_status=freshness_status or "missing",
+                )
+            if not bool((awareness or {}).get("diagnosable_without_source")):
+                return tool_error(
+                    "High/medium confidence diagnosis reports require awareness.diagnosable_without_source=true.",
+                    diagnosable_without_source=bool((awareness or {}).get("diagnosable_without_source")),
                 )
 
         if self._binding is None:

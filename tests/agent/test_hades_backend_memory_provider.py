@@ -969,6 +969,7 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
                     {"type": "source_slice", "id": "slice_1"},
                 ],
                 "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                "awareness": {"diagnosable_without_source": True},
                 "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
                 "redactions": 2,
             },
@@ -1051,6 +1052,29 @@ def test_hades_backend_diagnosis_report_create_tool_requires_evidence_for_precis
 
     assert result["error"] == "High/medium confidence diagnosis reports require evidence_refs."
     assert result["required_for_confidence"] == "medium"
+
+
+def test_hades_backend_diagnosis_report_create_tool_blocks_incomplete_awareness(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "confidence": "high",
+                "root_cause": "OrderController dereferences a nullable relation.",
+                "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                "freshness": {"status": "current"},
+                "awareness": {"diagnosable_without_source": False},
+            },
+        )
+    )
+
+    assert result["error"] == (
+        "High/medium confidence diagnosis reports require "
+        "awareness.diagnosable_without_source=true."
+    )
+    assert result["diagnosable_without_source"] is False
 
 
 def test_hades_backend_resolved_bug_promote_tool_persists_live_backend(monkeypatch, tmp_path):
