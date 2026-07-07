@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 
+def _decode_compressed_artifact_payload(payload):
+    import base64
+    import gzip
+    import json
+
+    raw = gzip.decompress(base64.b64decode(payload["artifact_compressed"].encode("ascii")))
+    return json.loads(raw.decode("utf-8"))
+
+
 def test_sync_runner_logs_redacted_backend_errors(monkeypatch, tmp_path, caplog):
     import logging
 
@@ -504,6 +513,140 @@ def test_sync_runner_uploads_code_graph_artifacts(monkeypatch, tmp_path):
     assert skipped == 0
     assert client.uploads[0]["schema"] == "hades.code_graph.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
+
+
+def test_sync_runner_compresses_large_artifact_uploads(monkeypatch, tmp_path):
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": "artifact_code_graph"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="d" * 40,
+        status="active",
+    )
+    symbols = [
+        {"kind": "component", "name": f"OrderComponent{i}", "path": "app/orders/page.tsx", "line": i}
+        for i in range(2500)
+    ]
+
+    uploaded, errors, skipped = _upload_job_artifact(
+        client,
+        agent,
+        binding,
+        "job_large_code_graph",
+        {
+            "artifact": {
+                "schema": "hades.code_graph.v1",
+                "framework": "nextjs",
+                "routes": [],
+                "symbols": symbols,
+                "edges": [],
+                "truncated": False,
+                "redactions": 0,
+                "raw_source_included": False,
+            }
+        },
+    )
+
+    assert uploaded == 1
+    assert errors == 0
+    assert skipped == 0
+    assert len(client.uploads) == 1
+    payload = client.uploads[0]
+    assert "artifact" not in payload
+    assert payload["artifact_encoding"] == "gzip+base64"
+    assert payload["artifact_compressed_bytes"] < payload["artifact_uncompressed_bytes"]
+    decoded = _decode_compressed_artifact_payload(payload)
+    assert decoded["schema"] == "hades.code_graph.v1"
+    assert decoded["indexed_head_commit"] == "d" * 40
+    assert len(decoded["symbols"]) == 2500
+
+
+def test_sync_runner_retries_raw_when_compressed_artifact_upload_is_rejected(monkeypatch, tmp_path):
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            if payload.get("artifact_encoding") == "gzip+base64":
+                raise RuntimeError("validation failed")
+            return {"artifact": {"id": "artifact_code_graph"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="e" * 40,
+        status="active",
+    )
+    result = {
+        "artifact": {
+            "schema": "hades.code_graph.v1",
+            "framework": "nextjs",
+            "routes": [],
+            "symbols": [
+                {"kind": "component", "name": f"OrderComponent{i}", "path": "app/orders/page.tsx", "line": i}
+                for i in range(2500)
+            ],
+            "edges": [],
+            "truncated": False,
+            "redactions": 0,
+            "raw_source_included": False,
+        }
+    }
+
+    assert _upload_job_artifact(client, agent, binding, "job_large_code_graph", result) == (1, 0, 0)
+    assert len(client.uploads) == 2
+    assert client.uploads[0]["artifact_encoding"] == "gzip+base64"
+    assert client.uploads[1]["artifact"]["indexed_head_commit"] == "e" * 40
 
 
 def test_sync_runner_skips_unchanged_artifact_uploads(monkeypatch, tmp_path):

@@ -2729,6 +2729,59 @@ Resta fuori da questa tranche:
 - Delta-upload backend effettivo.
 - Compressione payload artifact e benchmark dataset medio/grande.
 
+## Esecuzione compressed artifact upload Hades - 2026-07-07
+
+Stato: completata una quarta tranche P2-3 local+backend.
+
+Agent locale:
+
+- `_artifact_upload_fields` serializza l'artifact JSON in forma canonica e,
+  sopra 64 KB, usa `gzip+base64` solo se il risultato e' piu' piccolo del raw.
+- `_upload_job_artifact` invia `artifact_encoding`,
+  `artifact_compressed`, dimensioni raw/compresse e
+  `artifact_uncompressed_sha256`; il campo `sha256` continua a rappresentare
+  l'hash canonico usato per dedup/cache.
+- Se un backend rifiuta il payload compresso, l'agent ritenta lo stesso upload
+  in formato raw e logga `hades_compression_fallback_raw`.
+- I log artifact includono `hades_compressed`, byte originali, byte compressi e
+  delta file-level gia' introdotto nella tranche precedente.
+
+Backend remoto:
+
+- `ArtifactController` accetta artifact raw o compressi con
+  `artifact_encoding=gzip+base64`.
+- Il backend decodifica base64/gzip, verifica dimensioni e sha256 del JSON
+  non compresso quando presenti, valida che il JSON sia un oggetto, e archivia
+  il payload decodificato nello stesso campo JSON degli artifact raw.
+- Il contratto di storage resta invariato per search e awareness: la
+  compressione e' solo trasporto client/backend.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_sync_runner.py::test_sync_runner_compresses_large_artifact_uploads tests/hermes_cli/test_hades_backend_sync_runner.py::test_sync_runner_retries_raw_when_compressed_artifact_upload_is_rejected tests/hermes_cli/test_hades_backend_sync_runner.py::test_sync_runner_records_file_level_artifact_delta`
+  passato: `3 passed`.
+- Locale aggregato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `26 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_sync.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato; `.venv/bin/python -m py_compile hermes_cli/hades_backend_sync.py`
+  passato.
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM5MvpCompletionTest.php --filter=compressed`
+  passato: `1 passed (8 assertions)`.
+- Remoto aggregato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `60 passed (713 assertions)`.
+
+Resta fuori da questa tranche:
+
+- Delta-upload backend effettivo basato sul manifest per-file.
+- Benchmark dataset medio/grande con soglie automatiche.
+- Eventuale compressione/chunking dedicata per source slices se il volume reale
+  lo richiede.
+
 ## Esecuzione support runbook Hades - 2026-07-07
 
 Stato: completata la prima tranche locale P2-4 del piano "Documentation,

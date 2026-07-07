@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+import gzip
 import hashlib
 import json
 import logging
@@ -30,6 +32,7 @@ class BackgroundSyncDecision:
 
 BACKGROUND_SYNC_STATE_KEY = "background_sync"
 ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
+ARTIFACT_COMPRESSION_MIN_BYTES = 64 * 1024
 _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
@@ -456,6 +459,27 @@ def _artifact_payload_hash(artifact_payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _artifact_upload_fields(artifact_payload: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    encoded = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if len(encoded) < ARTIFACT_COMPRESSION_MIN_BYTES:
+        return {"artifact": artifact_payload}, {"compressed": False, "original_bytes": len(encoded), "compressed_bytes": 0}
+
+    compressed = gzip.compress(encoded)
+    if len(compressed) >= len(encoded):
+        return {"artifact": artifact_payload}, {"compressed": False, "original_bytes": len(encoded), "compressed_bytes": len(compressed)}
+
+    return (
+        {
+            "artifact_encoding": "gzip+base64",
+            "artifact_compressed": base64.b64encode(compressed).decode("ascii"),
+            "artifact_uncompressed_sha256": hashlib.sha256(encoded).hexdigest(),
+            "artifact_uncompressed_bytes": len(encoded),
+            "artifact_compressed_bytes": len(compressed),
+        },
+        {"compressed": True, "original_bytes": len(encoded), "compressed_bytes": len(compressed)},
+    )
+
+
 def _artifact_file_manifest(artifact_payload: dict[str, object]) -> dict[str, object]:
     path_items: dict[str, list[str]] = {}
 
@@ -554,16 +578,38 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
         )
         return (0, 0, 1)
     try:
-        client.upload_artifact(
-            project_id=binding.project_id,
-            agent_id=agent.agent_id,
-            workspace_binding_id=binding.backend_workspace_binding_id,
-            job_id=job_id,
-            schema=schema,
-            artifact=artifact_payload,
-            truncated=bool(artifact_payload.get("truncated", False)),
-            redactions=int(artifact_payload.get("redactions", 0) or 0),
-        )
+        artifact_fields, compression = _artifact_upload_fields(artifact_payload)
+        upload_payload = {
+            "project_id": binding.project_id,
+            "agent_id": agent.agent_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "job_id": job_id,
+            "schema": schema,
+            **artifact_fields,
+            "sha256": payload_hash,
+            "truncated": bool(artifact_payload.get("truncated", False)),
+            "redactions": int(artifact_payload.get("redactions", 0) or 0),
+        }
+        try:
+            client.upload_artifact(**upload_payload)
+        except AttributeError:
+            raise
+        except Exception:
+            if not compression.get("compressed"):
+                raise
+            upload_payload = {
+                "project_id": binding.project_id,
+                "agent_id": agent.agent_id,
+                "workspace_binding_id": binding.backend_workspace_binding_id,
+                "job_id": job_id,
+                "schema": schema,
+                "artifact": artifact_payload,
+                "sha256": payload_hash,
+                "truncated": bool(artifact_payload.get("truncated", False)),
+                "redactions": int(artifact_payload.get("redactions", 0) or 0),
+            }
+            client.upload_artifact(**upload_payload)
+            compression = {**compression, "fallback_raw": True}
         logger.info(
             "hades_backend.artifact.uploaded",
             extra={
@@ -576,6 +622,10 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                 "hades_redactions": int(artifact_payload.get("redactions", 0) or 0),
                 "hades_file_count": int(file_manifest.get("count") or 0),
                 "hades_file_delta": file_delta,
+                "hades_compressed": bool(compression.get("compressed")),
+                "hades_compression_fallback_raw": bool(compression.get("fallback_raw")),
+                "hades_original_bytes": int(compression.get("original_bytes") or 0),
+                "hades_compressed_bytes": int(compression.get("compressed_bytes") or 0),
             },
         )
         with db.connect_closing() as conn:
