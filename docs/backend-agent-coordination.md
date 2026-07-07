@@ -2209,3 +2209,33 @@ Resta fuori da questa tranche:
 - Parser strutturati profondi per JS/TS oltre al primo graph regex-bounded.
 - Search/traversal semantico piu' profondo su graph JS/TS oltre al summary
   artifact e al traversal generico gia' disponibile.
+
+## Esecuzione performance/storage controls Hades - 2026-07-07
+
+Stato: completata la prima tranche locale P2-3 del piano "Performance, Cost
+And Storage Controls".
+
+Agent locale:
+
+- `_upload_job_artifact` calcola un hash canonico dell'artifact dopo
+  l'arricchimento con `head_commit`/`indexed_head_commit`.
+- La cache vive in `hades_backend.db` `sync_state` con chiave per workspace
+  binding, schema e HEAD commit; se l'artifact e' identico viene loggato
+  `artifact.skipped` e non viene ricaricato al backend.
+- Il summary sync include `artifacts_skipped`; la CLI mostra il totale
+  artifact upload+skip, mentre lo status espone `skipped_unchanged_last_sync`.
+- L'awareness locale considera gli artifact invariati come copertura presente,
+  evitando falsi `project_artifact_index` missing quando la sync risparmia un
+  upload duplicato.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_mvp_smoke.py`
+  passato: `23 passed`.
+
+Resta fuori da questa tranche:
+
+- Indexing incrementale file-level invece di rigenerare graph/tree completi.
+- Compressione payload artifact e benchmark dataset medio/grande.
+- Retention/cleanup dedicata delle chiavi cache di workspace non piu' linkati.

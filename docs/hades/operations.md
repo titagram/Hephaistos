@@ -65,6 +65,11 @@ binding. Use it as the local readiness view for memory cache, artifact upload,
 source-slice upload, and bug-evidence availability before attempting
 source-free diagnosis. It does not perform live backend calls; for backend
 freshness and coverage, use the project-awareness tool/API below.
+Artifact upload is content-addressed locally per workspace binding, schema, and
+HEAD commit. If `sync_git_tree` or `populate_backend_ast` produces the same
+artifact twice, Hades logs `artifact.skipped`, records
+`artifacts_skipped`/`skipped_unchanged_last_sync`, and avoids a duplicate
+backend upload while keeping local awareness coverage present.
 Its `identity` section separates local profile memory, portable backend project
 memory, and local workspace binding state so a new device can distinguish
 shared project recall from source/index freshness that must be established on
@@ -211,7 +216,7 @@ Useful event names:
 
 - `sync.start`, `sync.complete`, `sync.skipped`
 - `sync.error`, `sync.client_error`
-- `artifact.uploaded`
+- `artifact.uploaded`, `artifact.skipped`
 - `worker.start`, `worker.claimed`, `worker.completed`, `worker.failed`
 - `doctor_report.submitted`, `doctor_report.failed`
 

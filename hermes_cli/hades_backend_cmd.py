@@ -460,7 +460,8 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         f"waiting {summary.get('waiting', 0)}, failed {summary.get('failed', 0)}, "
         f"skipped {summary.get('skipped', 0)}, expired {summary.get('expired', 0)}, "
         f"memory {summary.get('memory_snapshots', 0)}, proposals {summary.get('proposals_synced', 0)}, "
-        f"artifacts {summary.get('artifacts_uploaded', 0)}, inbox {summary.get('inbox_events', 0)}"
+        f"artifacts {summary.get('artifacts_uploaded', 0) + summary.get('artifacts_skipped', 0)}, "
+        f"inbox {summary.get('inbox_events', 0)}"
     )
     return result.exit_code
 

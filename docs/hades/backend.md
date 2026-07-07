@@ -121,6 +121,10 @@ coverage for memory cache, project artifacts, source slices, and bug evidence.
 the local profile has a linked workspace, cached memory, uploaded project
 artifacts, uploaded source slices, known bug evidence, and no recorded sync
 errors.
+If a project artifact is unchanged, sync may skip re-uploading it and report
+`skipped_unchanged_last_sync`; that still counts as project artifact coverage
+because the backend already has the content-addressed artifact for the same
+workspace/schema/head.
 When a profile has multiple workspace bindings, last-sync counters are marked
 as aggregate and do not make any single binding source-free diagnosable.
 The same payload includes `identity` to separate local profile memory,

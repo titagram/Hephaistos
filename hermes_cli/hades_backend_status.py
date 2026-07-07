@@ -256,6 +256,8 @@ def _binding_awareness_payload(
 ) -> dict[str, Any]:
     memory_items = len(getattr(memory_cache, "items", []) or [])
     artifacts_uploaded = _count(last_summary, "artifacts_uploaded")
+    artifacts_skipped = _count(last_summary, "artifacts_skipped")
+    artifact_items = artifacts_uploaded + artifacts_skipped
     artifact_errors = _count(last_summary, "artifact_errors")
     source_slices_uploaded = _count(last_summary, "source_slices_uploaded")
     source_slice_errors = _count(last_summary, "source_slice_errors")
@@ -272,7 +274,7 @@ def _binding_awareness_payload(
         missing.append("workspace_link")
     if memory_items == 0:
         missing.append("shared_memory_cache")
-    if artifacts_uploaded == 0 or not is_binding_scoped:
+    if artifact_items == 0 or not is_binding_scoped:
         missing.append("project_artifact_index")
     if source_slices_uploaded == 0 or not is_binding_scoped:
         missing.append("source_slice_index")
@@ -301,8 +303,9 @@ def _binding_awareness_payload(
                 "updated_at": getattr(memory_cache, "updated_at", None),
             },
             "project_artifacts": {
-                "status": _coverage_status(artifacts_uploaded, summary_scope),
+                "status": _coverage_status(artifact_items, summary_scope),
                 "uploaded_last_sync": artifacts_uploaded,
+                "skipped_unchanged_last_sync": artifacts_skipped,
                 "errors_last_sync": artifact_errors,
             },
             "source_slices": {

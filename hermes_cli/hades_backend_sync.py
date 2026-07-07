@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -27,6 +29,7 @@ class BackgroundSyncDecision:
 
 
 BACKGROUND_SYNC_STATE_KEY = "background_sync"
+ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
 _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
@@ -104,7 +107,7 @@ def run_backend_sync(
 
     pulled = completed = waiting = failed = skipped = 0
     memory_snapshots = proposals_synced = proposal_errors = 0
-    artifacts_uploaded = artifact_errors = source_slices_uploaded = source_slice_errors = inbox_events = 0
+    artifacts_uploaded = artifact_errors = artifacts_skipped = source_slices_uploaded = source_slice_errors = inbox_events = 0
     sync_errors = 0
     expired = 0
 
@@ -216,10 +219,11 @@ def run_backend_sync(
                 with db.connect_closing() as conn:
                     db.update_job_status(conn, jid, final_status, result=result)
                 if final_status == "completed":
-                    uploaded, upload_failed = _upload_job_artifact(client, agent, binding, jid, result)
+                    uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, agent, binding, jid, result)
                     slices_uploaded, slices_failed = _upload_job_source_slice(client, agent, binding, jid, result)
                     artifacts_uploaded += uploaded
                     artifact_errors += upload_failed
+                    artifacts_skipped += upload_skipped
                     source_slices_uploaded += slices_uploaded
                     source_slice_errors += slices_failed
                     sync_errors += upload_failed
@@ -253,6 +257,7 @@ def run_backend_sync(
         "proposals_synced": proposals_synced,
         "proposal_errors": proposal_errors,
         "artifacts_uploaded": artifacts_uploaded,
+        "artifacts_skipped": artifacts_skipped,
         "artifact_errors": artifact_errors,
         "source_slices_uploaded": source_slices_uploaded,
         "source_slice_errors": source_slice_errors,
@@ -440,19 +445,49 @@ def _record_sync_error(binding: db.WorkspaceBinding, message: str) -> None:
         )
 
 
-def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int]:
+def _artifact_upload_cache_key(binding: db.WorkspaceBinding, schema: str) -> str:
+    return f"{ARTIFACT_UPLOAD_CACHE_PREFIX}:{binding.backend_workspace_binding_id}:{schema}"
+
+
+def _artifact_payload_hash(artifact_payload: dict[str, object]) -> str:
+    encoded = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int, int]:
     artifact = result.get("artifact") if isinstance(result, dict) else None
     if not isinstance(artifact, dict):
-        return (0, 0)
+        return (0, 0, 0)
     schema = str(artifact.get("schema") or "").strip()
     if schema not in {"hades.git_tree.v1", "hades.symbols.v1", "hades.php_graph.v1", "hades.code_graph.v1"}:
-        return (0, 0)
+        return (0, 0, 0)
     artifact_payload = dict(artifact)
     head_commit = str(binding.head_commit or "").strip()
     if head_commit:
         artifact_payload.setdefault("head_commit", head_commit)
         artifact_payload.setdefault("indexed_head_commit", head_commit)
         artifact_payload.setdefault("workspace_head_commit", head_commit)
+    payload_hash = _artifact_payload_hash(artifact_payload)
+    cache_key = _artifact_upload_cache_key(binding, schema)
+    with db.connect_closing() as conn:
+        cached = db.get_sync_state(conn, cache_key) or {}
+    if (
+        str(cached.get("sha256") or "") == payload_hash
+        and str(cached.get("head_commit") or "") == head_commit
+        and str(cached.get("schema") or "") == schema
+    ):
+        logger.info(
+            "hades_backend.artifact.skipped",
+            extra={
+                "hades_event": "artifact.skipped",
+                "hades_project_id": binding.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                "hades_job_id": job_id,
+                "hades_schema": schema,
+                "hades_reason": "unchanged",
+            },
+        )
+        return (0, 0, 1)
     try:
         client.upload_artifact(
             project_id=binding.project_id,
@@ -476,12 +511,23 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                 "hades_redactions": int(artifact_payload.get("redactions", 0) or 0),
             },
         )
-        return (1, 0)
+        with db.connect_closing() as conn:
+            db.record_sync_state(
+                conn,
+                cache_key,
+                {
+                    "schema": schema,
+                    "sha256": payload_hash,
+                    "head_commit": head_commit,
+                    "job_id": job_id,
+                },
+            )
+        return (1, 0, 0)
     except AttributeError:
-        return (0, 0)
+        return (0, 0, 0)
     except Exception as exc:
         _record_sync_error(binding, f"artifact upload failed: {exc}")
-        return (0, 1)
+        return (0, 1, 0)
 
 
 def _upload_job_source_slice(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int]:

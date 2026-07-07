@@ -130,6 +130,7 @@ def test_hades_backend_mvp_smoke_no_network(monkeypatch, tmp_path):
         "proposals_synced": 1,
         "proposal_errors": 0,
         "artifacts_uploaded": 1,
+        "artifacts_skipped": 0,
         "artifact_errors": 0,
         "source_slices_uploaded": 0,
         "source_slice_errors": 0,

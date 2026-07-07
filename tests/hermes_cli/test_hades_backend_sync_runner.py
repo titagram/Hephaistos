@@ -382,9 +382,11 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     assert events[0].event_type == "proposal.reviewed"
 
 
-def test_sync_runner_uploads_php_graph_artifacts():
+def test_sync_runner_uploads_php_graph_artifacts(monkeypatch, tmp_path):
     from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
     from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     class FakeClient:
         def __init__(self):
@@ -417,7 +419,7 @@ def test_sync_runner_uploads_php_graph_artifacts():
         status="active",
     )
 
-    uploaded, redactions = _upload_job_artifact(
+    uploaded, errors, skipped = _upload_job_artifact(
         client,
         agent,
         binding,
@@ -436,14 +438,17 @@ def test_sync_runner_uploads_php_graph_artifacts():
     )
 
     assert uploaded == 1
-    assert redactions == 0
+    assert errors == 0
+    assert skipped == 0
     assert client.uploads[0]["schema"] == "hades.php_graph.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
 
 
-def test_sync_runner_uploads_code_graph_artifacts():
+def test_sync_runner_uploads_code_graph_artifacts(monkeypatch, tmp_path):
     from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
     from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     class FakeClient:
         def __init__(self):
@@ -476,7 +481,7 @@ def test_sync_runner_uploads_code_graph_artifacts():
         status="active",
     )
 
-    uploaded, redactions = _upload_job_artifact(
+    uploaded, errors, skipped = _upload_job_artifact(
         client,
         agent,
         binding,
@@ -495,9 +500,67 @@ def test_sync_runner_uploads_code_graph_artifacts():
     )
 
     assert uploaded == 1
-    assert redactions == 0
+    assert errors == 0
+    assert skipped == 0
     assert client.uploads[0]["schema"] == "hades.code_graph.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
+
+
+def test_sync_runner_skips_unchanged_artifact_uploads(monkeypatch, tmp_path):
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="b" * 40,
+        status="active",
+    )
+    result = {
+        "artifact": {
+            "schema": "hades.code_graph.v1",
+            "framework": "nextjs",
+            "routes": [{"method": "GET", "path": "/api/orders"}],
+            "symbols": [{"kind": "component", "name": "OrdersPage"}],
+            "edges": [],
+            "truncated": False,
+            "redactions": 0,
+            "raw_source_included": False,
+        }
+    }
+
+    first = _upload_job_artifact(client, agent, binding, "job_code_graph_1", result)
+    second = _upload_job_artifact(client, agent, binding, "job_code_graph_2", result)
+
+    assert first == (1, 0, 0)
+    assert second == (0, 0, 1)
+    assert len(client.uploads) == 1
 
 
 def test_sync_runner_uploads_source_slices():
@@ -933,6 +996,7 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
             {
                 "memory_snapshots": 1,
                 "artifacts_uploaded": 1,
+                "artifacts_skipped": 0,
                 "artifact_errors": 0,
                 "source_slices_uploaded": 2,
                 "source_slice_errors": 0,
@@ -958,12 +1022,75 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
     assert binding_awareness["coverage"]["memory_cache"]["items"] == 1
     assert binding_awareness["coverage"]["memory_cache"]["version"] == "mem_v1"
     assert binding_awareness["coverage"]["project_artifacts"]["uploaded_last_sync"] == 1
+    assert binding_awareness["coverage"]["project_artifacts"]["skipped_unchanged_last_sync"] == 0
     assert binding_awareness["coverage"]["source_slices"]["uploaded_last_sync"] == 2
     assert binding_awareness["coverage"]["bug_evidence"]["items_last_sync"] == 1
     assert binding_awareness["quality"]["confidence"] == "ready"
     assert binding_awareness["quality"]["missing"] == []
     assert payload["identity"]["project_memory"]["cached_items"] == 1
     assert payload["identity"]["workspace_binding"]["source_free_ready"] == 1
+
+
+def test_backend_status_treats_unchanged_artifact_skips_as_project_artifact_coverage(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.replace_memory_cache(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            version="mem_v1",
+            items=[{"kind": "resolved_bug", "summary": "Known login regression"}],
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "memory_snapshots": 1,
+                "artifacts_uploaded": 0,
+                "artifacts_skipped": 1,
+                "artifact_errors": 0,
+                "source_slices_uploaded": 1,
+                "source_slice_errors": 0,
+                "bug_evidence_items": 1,
+                "proposal_errors": 0,
+            },
+        )
+
+    payload = load_backend_status_payload()
+    coverage = payload["bindings"][0]["awareness"]["coverage"]["project_artifacts"]
+
+    assert coverage["status"] == "present"
+    assert coverage["uploaded_last_sync"] == 0
+    assert coverage["skipped_unchanged_last_sync"] == 1
+    assert payload["bindings"][0]["awareness"]["diagnosable_without_source"] is True
 
 
 def test_backend_status_keeps_multi_binding_aggregate_summary_partial(monkeypatch, tmp_path):
