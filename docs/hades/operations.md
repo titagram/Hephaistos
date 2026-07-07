@@ -73,7 +73,9 @@ backend upload while keeping local awareness coverage present.
 Its `identity` section separates local profile memory, portable backend project
 memory, and local workspace binding state so a new device can distinguish
 shared project recall from source/index freshness that must be established on
-that device.
+that device. The same section includes `login_recovery.recommended_next_action`
+for the current device, such as linking the workspace, running backend sync, or
+capturing evidence/source slices before source-free diagnosis.
 
 ## Bug Evidence
 

@@ -581,6 +581,20 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
     ]
 
 
+def test_backend_status_text_prints_identity_next_step(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="status", json=False))
+    output = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Next identity step:" in output
+    assert "Run `hades backend sync`" in output
+    assert "before source-free diagnosis" in output
+
+
 def test_backend_support_report_json_redacts_paths_and_secrets(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

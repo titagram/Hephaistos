@@ -952,7 +952,60 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
     assert identity["workspace_binding"]["scope"] == "local_workspace"
     assert identity["workspace_binding"]["current_workspace_binding_id"] == "wb_1"
     assert identity["workspace_binding"]["current_display_path"] == "~/repo"
+    assert identity["workspace_binding"]["current_status"] == "partial"
+    assert identity["workspace_binding"]["current_source_free_ready"] is False
     assert identity["workspace_binding"]["linked_bindings"] == 1
+    assert identity["login_recovery"] == {
+        "can_use_project_memory_without_old_device": True,
+        "current_workspace_mapped": True,
+        "source_free_diagnosis_ready": False,
+        "requires_workspace_binding_for_indexing": True,
+        "recommended_next_action": (
+            "Run `hades backend sync`, then capture current bug evidence and source slices "
+            "before source-free diagnosis."
+        ),
+    }
+
+
+def test_backend_status_explains_new_device_without_current_workspace_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "unmapped"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="new-device",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+
+    monkeypatch.chdir(workspace)
+    payload = load_backend_status_payload()
+    identity = payload["identity"]
+
+    assert payload["awareness"]["status"] == "unmapped"
+    assert identity["project_memory"]["available"] is True
+    assert identity["project_memory"]["portable_between_devices"] is True
+    assert identity["workspace_binding"]["current_workspace_binding_id"] is None
+    assert identity["workspace_binding"]["current_status"] == "unmapped"
+    assert identity["login_recovery"] == {
+        "can_use_project_memory_without_old_device": True,
+        "current_workspace_mapped": False,
+        "source_free_diagnosis_ready": False,
+        "requires_workspace_binding_for_indexing": True,
+        "recommended_next_action": (
+            "Link this workspace with `hades backend bootstrap ...` or "
+            "`hades project link <project>`, then run `hades backend sync`."
+        ),
+    }
 
 
 def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp_path):
@@ -1009,6 +1062,7 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
             },
         )
 
+    monkeypatch.chdir(workspace)
     payload = load_backend_status_payload()
     binding_awareness = payload["bindings"][0]["awareness"]
 
@@ -1033,6 +1087,15 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
     assert binding_awareness["quality"]["missing"] == []
     assert payload["identity"]["project_memory"]["cached_items"] == 1
     assert payload["identity"]["workspace_binding"]["source_free_ready"] == 1
+    assert payload["identity"]["workspace_binding"]["current_status"] == "ready"
+    assert payload["identity"]["workspace_binding"]["current_source_free_ready"] is True
+    assert payload["identity"]["login_recovery"] == {
+        "can_use_project_memory_without_old_device": True,
+        "current_workspace_mapped": True,
+        "source_free_diagnosis_ready": True,
+        "requires_workspace_binding_for_indexing": False,
+        "recommended_next_action": "Project memory and source-free diagnosis are ready on this device.",
+    }
 
 
 def test_backend_status_treats_unchanged_artifact_skips_as_project_artifact_coverage(monkeypatch, tmp_path):

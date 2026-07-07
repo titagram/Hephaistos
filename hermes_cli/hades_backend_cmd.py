@@ -208,6 +208,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     personal_memory = identity.get("personal_memory") if isinstance(identity.get("personal_memory"), dict) else {}
     project_memory = identity.get("project_memory") if isinstance(identity.get("project_memory"), dict) else {}
     workspace_binding = identity.get("workspace_binding") if isinstance(identity.get("workspace_binding"), dict) else {}
+    login_recovery = identity.get("login_recovery") if isinstance(identity.get("login_recovery"), dict) else {}
     if identity:
         print(
             "  Personal memory: "
@@ -223,6 +224,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "  Workspace scope: "
             f"{workspace_binding.get('linked_bindings', 0)}/{workspace_binding.get('total_bindings', 0)} linked"
         )
+        if login_recovery.get("recommended_next_action"):
+            print(f"  Next identity step: {login_recovery['recommended_next_action']}")
     if payload["job_counts"]:
         print(f"  Jobs:    {payload['job_counts']}")
     if payload["proposal_counts"]:

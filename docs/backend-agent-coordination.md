@@ -2592,6 +2592,38 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione multi-device identity recovery Hades - 2026-07-07
+
+Stato: completata una tranche locale P1-6.
+
+Agent locale:
+
+- `hades backend status --json` mantiene la separazione `identity` fra
+  personal memory locale, project memory portabile e workspace binding locale.
+- Nuovo blocco `identity.login_recovery`:
+  `can_use_project_memory_without_old_device`, `current_workspace_mapped`,
+  `source_free_diagnosis_ready`, `requires_workspace_binding_for_indexing` e
+  `recommended_next_action`.
+- `identity.workspace_binding` espone anche `current_status` e
+  `current_source_free_ready`.
+- L'output testuale di `hades backend status` stampa `Next identity step`, cosi'
+  un device nuovo o un workspace non pronto mostra direttamente link/sync/evidence
+  come prossimo passo.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato nella tranche finale.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_status.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato; `py_compile` sugli stessi moduli passato.
+
+Resta fuori da questa tranche:
+
+- Onboarding remoto/dashboard per generare e visualizzare il recovery flow senza
+  CLI.
+
 ## Esecuzione no-codebase awareness quality gate Hades - 2026-07-07
 
 Stato: completata una tranche locale P0-6/P1-5/P2-5.

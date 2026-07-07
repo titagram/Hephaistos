@@ -157,7 +157,10 @@ as aggregate and do not make any single binding source-free diagnosable.
 The same payload includes `identity` to separate local profile memory,
 backend project memory, and the current local workspace binding. Project memory
 is portable across devices once the backend agent is configured; local profile
-memory and workspace freshness remain device-local.
+memory and workspace freshness remain device-local. `identity.login_recovery`
+adds a current-device next action so a newly logged-in device can see whether it
+can use backend project memory immediately, needs to link the current
+workspace, or must sync/capture evidence before source-free diagnosis.
 
 `jobs` defaults to `waiting_confirmation` work. `approve-job` executes a stored
 waiting job in the linked workspace, submits the result or artifact metadata,

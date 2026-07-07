@@ -252,6 +252,12 @@ def _identity_payload(
     )
     current_binding = _current_binding_payload(linked_bindings)
     project_id = getattr(agent, "project_id", None) if agent is not None else None
+    current_awareness = current_binding.get("awareness") if isinstance(current_binding, dict) else {}
+    current_source_free_ready = bool(
+        isinstance(current_awareness, dict)
+        and current_awareness.get("diagnosable_without_source")
+    )
+    current_status = current_awareness.get("status") if isinstance(current_awareness, dict) else None
     return {
         "personal_memory": {
             "scope": "local_profile",
@@ -272,7 +278,20 @@ def _identity_payload(
             "linked_bindings": len(linked_bindings),
             "current_workspace_binding_id": current_binding.get("workspace_binding_id") if current_binding else None,
             "current_display_path": current_binding.get("display_path") if current_binding else None,
+            "current_status": current_status or "unmapped",
+            "current_source_free_ready": current_source_free_ready,
             "source_free_ready": awareness.get("diagnosable_without_source_bindings", 0),
+        },
+        "login_recovery": {
+            "can_use_project_memory_without_old_device": agent is not None,
+            "current_workspace_mapped": current_binding is not None,
+            "source_free_diagnosis_ready": current_source_free_ready,
+            "requires_workspace_binding_for_indexing": not current_source_free_ready,
+            "recommended_next_action": _identity_next_action(
+                configured=agent is not None,
+                current_binding=current_binding,
+                current_source_free_ready=current_source_free_ready,
+            ),
         },
     }
 
@@ -296,6 +315,21 @@ def _current_binding_payload(bindings: list[dict[str, Any]]) -> dict[str, Any] |
             matches.append((len(str(repo_root)), binding))
     matches.sort(key=lambda item: item[0], reverse=True)
     return matches[0][1] if matches else None
+
+
+def _identity_next_action(
+    *,
+    configured: bool,
+    current_binding: dict[str, Any] | None,
+    current_source_free_ready: bool,
+) -> str:
+    if not configured:
+        return "Run `hades backend bootstrap ...` with a project bootstrap token on this device."
+    if current_binding is None:
+        return "Link this workspace with `hades backend bootstrap ...` or `hades project link <project>`, then run `hades backend sync`."
+    if not current_source_free_ready:
+        return "Run `hades backend sync`, then capture current bug evidence and source slices before source-free diagnosis."
+    return "Project memory and source-free diagnosis are ready on this device."
 
 
 def _count(source: dict[str, Any] | None, key: str) -> int:
