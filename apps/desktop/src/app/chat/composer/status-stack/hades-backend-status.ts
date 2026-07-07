@@ -1,5 +1,10 @@
 export interface HadesBackendStatusPayload {
   actions?: unknown
+  awareness?: {
+    status?: unknown
+    diagnosable_without_source_bindings?: unknown
+    bindings?: unknown
+  }
   configured?: unknown
   degraded?: unknown
   inbox_counts?: Record<string, unknown>
@@ -39,9 +44,12 @@ export function summarizeHadesBackendStatus(
   const proposalCounts = payload.proposal_counts
   const inboxCounts = payload.inbox_counts
   const lastError = payload.sync?.last_error
+  const awarenessStatus = typeof payload.awareness?.status === 'string' ? payload.awareness.status : null
   const waiting = count(jobCounts, 'waiting_confirmation')
   const refused = count(proposalCounts, 'refused') + count(proposalCounts, 'conflicted')
   const unread = count(inboxCounts, 'unread')
+  const diagnosableBindings = count(payload.awareness, 'diagnosable_without_source_bindings')
+  const bindingCount = count(payload.awareness, 'bindings')
 
   const actions = Array.isArray(payload.actions)
     ? payload.actions.filter((item): item is string => typeof item === 'string')
@@ -65,6 +73,14 @@ export function summarizeHadesBackendStatus(
     parts.push('sync error')
   }
 
+  if (awarenessStatus && ['partial', 'degraded', 'unmapped'].includes(awarenessStatus)) {
+    parts.push(
+      bindingCount
+        ? `awareness ${awarenessStatus} (${diagnosableBindings}/${bindingCount} source-free ready)`
+        : `awareness ${awarenessStatus}`
+    )
+  }
+
   if (!payload.degraded && parts.length === 0 && actions.length === 0) {
     return null
   }
@@ -72,6 +88,6 @@ export function summarizeHadesBackendStatus(
   return {
     detail: (actions[0] ?? parts.join(' · ')) || 'Backend needs attention',
     label: 'Hades backend',
-    tone: lastError ? 'danger' : 'warning'
+    tone: lastError || awarenessStatus === 'degraded' ? 'danger' : 'warning'
   }
 }

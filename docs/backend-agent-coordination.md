@@ -1996,3 +1996,41 @@ Resta fuori da questa tranche:
 - Dashboard trend e ultimi failure.
 - Metriche aggregate su diagnosis confidence distribution.
 - Log strutturati per ogni tool diagnosis con evidence refs usati.
+
+## Esecuzione dashboard/desktop awareness Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-4 del piano "Dashboard And Desktop
+Investigation Surfaces".
+
+Frontend locale:
+
+- `web/src/pages/BackendPage.tsx` mostra una sezione "Project awareness" con
+  stato top-level, binding source-free ready, ready/partial/degraded bindings e
+  missing evidence aggregata.
+- Ogni workspace linked mostra ora awareness status, commit HEAD locale e
+  coverage per memory cache, project artifacts, source slices e bug evidence.
+- `web/src/lib/api.ts` tipizza il nuovo payload `awareness`.
+- `apps/desktop/src/app/chat/composer/status-stack/hades-backend-status.ts`
+  sintetizza awareness `partial`, `degraded` e `unmapped` nel warning compatto
+  del composer anche quando non arriva un'action testuale.
+
+Verifiche eseguite:
+
+- Locale:
+  `npm --prefix web run typecheck`
+  passato.
+- Locale:
+  `npm exec vitest run apps/desktop/src/app/chat/composer/status-stack/hades-backend-status.test.ts`
+  passato: `1 passed`, `4 passed`.
+- Locale:
+  `npm exec eslint -- --max-warnings=0 src/pages/BackendPage.tsx src/lib/api.ts`
+  eseguito da `web/`, passato.
+- Nota: `npm --prefix web run lint -- --max-warnings=0 src/pages/BackendPage.tsx src/lib/api.ts`
+  invoca `eslint .` dal package script e fallisce su errori preesistenti fuori
+  scope in componenti/pagine non modificate.
+
+Resta fuori da questa tranche:
+
+- Trend storici e ultimi failure in dashboard.
+- Bug case detail con evidence timeline, graph path e source slices.
+- Controlli UI completi per source/evidence policy e diagnosis promotion.

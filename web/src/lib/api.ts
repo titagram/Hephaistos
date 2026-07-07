@@ -1639,13 +1639,51 @@ export interface HadesBackendAgent {
   capabilities: string[];
 }
 
+export interface HadesBackendAwarenessSummary {
+  status: string;
+  bindings: number;
+  ready_bindings: number;
+  partial_bindings: number;
+  degraded_bindings: number;
+  diagnosable_without_source_bindings: number;
+}
+
+export interface HadesBackendCoverageItem {
+  status: string;
+  items?: number;
+  version?: string | null;
+  updated_at?: number | null;
+  uploaded_last_sync?: number;
+  errors_last_sync?: number;
+  items_last_sync?: number;
+}
+
+export interface HadesBackendBindingAwareness {
+  status: string;
+  diagnosable_without_source: boolean;
+  coverage: {
+    memory_cache?: HadesBackendCoverageItem;
+    project_artifacts?: HadesBackendCoverageItem;
+    source_slices?: HadesBackendCoverageItem;
+    bug_evidence?: HadesBackendCoverageItem;
+  };
+  quality: {
+    confidence: string;
+    missing: string[];
+    summary_scope?: string;
+    last_sync_summary_updated_at?: number | null;
+  };
+}
+
 export interface HadesBackendBinding {
   workspace_fingerprint: string | null;
   workspace_binding_id: string | null;
   project_id: string | null;
   local_project_id: string | null;
   display_path: string | null;
+  head_commit?: string | null;
   status: string | null;
+  awareness?: HadesBackendBindingAwareness;
 }
 
 export interface HadesBackendSyncState {
@@ -1661,6 +1699,7 @@ export interface HadesBackendStatus {
   configured: boolean;
   agent: HadesBackendAgent | null;
   bindings: HadesBackendBinding[];
+  awareness?: HadesBackendAwarenessSummary;
   job_counts: Record<string, number>;
   proposal_counts: Record<string, number>;
   inbox_counts: Record<string, number>;

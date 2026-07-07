@@ -46,4 +46,22 @@ describe('summarizeHadesBackendStatus', () => {
       tone: 'danger'
     })
   })
+
+  it('summarizes incomplete project awareness', () => {
+    expect(
+      summarizeHadesBackendStatus({
+        awareness: {
+          bindings: 2,
+          diagnosable_without_source_bindings: 0,
+          status: 'partial'
+        },
+        configured: true,
+        degraded: false
+      })
+    ).toEqual({
+      detail: 'awareness partial (0/2 source-free ready)',
+      label: 'Hades backend',
+      tone: 'warning'
+    })
+  })
 })

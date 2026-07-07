@@ -25,6 +25,8 @@ import { api } from "@/lib/api";
 import type {
   HadesBackendActionResponse,
   HadesBackendBinding,
+  HadesBackendBindingAwareness,
+  HadesBackendCoverageItem,
   HadesBackendJob,
   HadesBackendMemoryProposal,
   HadesBackendStatus,
@@ -64,10 +66,28 @@ function valueLabel(value: unknown): string {
 
 function statusTone(status?: string | null): "success" | "warning" | "destructive" | "secondary" | "outline" {
   if (!status) return "outline";
-  if (["linked", "completed", "accepted", "ok", "success"].includes(status)) return "success";
-  if (["waiting_confirmation", "pending", "degraded", "expired"].includes(status)) return "warning";
-  if (["failed", "refused", "conflicted", "error"].includes(status)) return "destructive";
+  if (["linked", "completed", "accepted", "ok", "present", "ready", "success"].includes(status)) return "success";
+  if (["waiting_confirmation", "pending", "partial", "aggregate", "missing", "unknown", "unmapped", "unlinked", "expired"].includes(status)) return "warning";
+  if (["failed", "refused", "conflicted", "degraded", "error"].includes(status)) return "destructive";
   return "secondary";
+}
+
+function titleLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function coverageValue(item?: HadesBackendCoverageItem): string {
+  if (!item) return "0";
+  if (typeof item.items === "number") return String(item.items);
+  if (typeof item.uploaded_last_sync === "number") return String(item.uploaded_last_sync);
+  if (typeof item.items_last_sync === "number") return String(item.items_last_sync);
+  return "0";
+}
+
+function awarenessReadyCount(status: HadesBackendStatus): string {
+  const awareness = status.awareness;
+  if (!awareness) return "0/0";
+  return `${awareness.diagnosable_without_source_bindings}/${awareness.bindings}`;
 }
 
 function Metric({
@@ -114,6 +134,7 @@ function CountList({ counts }: { counts: Record<string, number> }) {
 }
 
 function BindingRow({ binding }: { binding: HadesBackendBinding }) {
+  const awareness = binding.awareness;
   return (
     <div className="grid gap-2 border-t border-border py-3 first:border-t-0 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -121,12 +142,90 @@ function BindingRow({ binding }: { binding: HadesBackendBinding }) {
           {binding.display_path || "Linked workspace"}
         </span>
         <Badge tone={statusTone(binding.status)}>{binding.status || "unknown"}</Badge>
+        {awareness && <Badge tone={statusTone(awareness.status)}>awareness {awareness.status}</Badge>}
       </div>
       <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
         <span className="truncate font-mono">project {binding.project_id || "unknown"}</span>
         <span className="truncate font-mono">binding {binding.workspace_binding_id || "local only"}</span>
       </div>
+      {binding.head_commit && (
+        <div className="truncate font-mono text-xs text-muted-foreground">head {binding.head_commit}</div>
+      )}
+      {awareness && <AwarenessCoverage awareness={awareness} />}
     </div>
+  );
+}
+
+function AwarenessCoverage({ awareness }: { awareness: HadesBackendBindingAwareness }) {
+  const coverage = awareness.coverage ?? {};
+  const items: Array<[string, HadesBackendCoverageItem | undefined]> = [
+    ["Memory", coverage.memory_cache],
+    ["Artifacts", coverage.project_artifacts],
+    ["Source slices", coverage.source_slices],
+    ["Bug evidence", coverage.bug_evidence],
+  ];
+  return (
+    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      {items.map(([label, item]) => (
+        <div className="border border-border bg-background/40 px-2.5 py-2" key={label}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate text-xs text-muted-foreground">{label}</span>
+            <Badge tone={statusTone(item?.status)}>{item?.status || "unknown"}</Badge>
+          </div>
+          <div className="mt-1 font-mono text-sm font-semibold">{coverageValue(item)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AwarenessPanel({ status }: { status: HadesBackendStatus }) {
+  const awareness = status.awareness;
+  if (!awareness) return null;
+  const missing = Array.from(
+    new Set(
+      status.bindings.flatMap((binding) =>
+        Array.isArray(binding.awareness?.quality?.missing) ? binding.awareness.quality.missing : [],
+      ),
+    ),
+  );
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Database className="h-4 w-4" />
+            Project awareness
+          </H2>
+          <Badge tone={statusTone(awareness.status)}>{awareness.status}</Badge>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Source-free ready</div>
+            <div className="mt-1 text-lg font-semibold">{awarenessReadyCount(status)}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Ready bindings</div>
+            <div className="mt-1 text-lg font-semibold">{awareness.ready_bindings}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Partial bindings</div>
+            <div className="mt-1 text-lg font-semibold">{awareness.partial_bindings}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Degraded bindings</div>
+            <div className="mt-1 text-lg font-semibold">{awareness.degraded_bindings}</div>
+          </div>
+        </div>
+        {missing.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {missing.map((item) => (
+              <Badge tone="warning" key={item}>{titleLabel(item)}</Badge>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -352,6 +451,8 @@ export default function BackendPage() {
         <Metric icon={Brain} label="Proposals" value={proposalTotal} tone={count(status.proposal_counts, "refused") || count(status.proposal_counts, "conflicted") ? "warning" : "secondary"} />
         <Metric icon={Inbox} label="Inbox unread" value={`${inboxUnread}/${inboxTotal}`} tone={inboxUnread ? "warning" : "secondary"} />
       </div>
+
+      <AwarenessPanel status={status} />
 
       {status.actions.length > 0 && (
         <Card>
