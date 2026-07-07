@@ -287,6 +287,36 @@ def _php_graph_artifact():
                 "line": 8,
             },
             {
+                "kind": "model_hidden",
+                "from": "App\\Models\\Order",
+                "to": "table:orders.internal_note",
+                "field": "internal_note",
+                "property": "hidden",
+                "table": "orders",
+                "path": "app/Models/Order.php",
+                "line": 9,
+            },
+            {
+                "kind": "model_visible",
+                "from": "App\\Models\\Order",
+                "to": "table:orders.display_status",
+                "field": "display_status",
+                "property": "visible",
+                "table": "orders",
+                "path": "app/Models/Order.php",
+                "line": 10,
+            },
+            {
+                "kind": "model_appended_attribute",
+                "from": "App\\Models\\Order",
+                "to": "model_attribute:App\\Models\\Order.display_status",
+                "field": "display_status",
+                "property": "appends",
+                "table": "orders",
+                "path": "app/Models/Order.php",
+                "line": 11,
+            },
+            {
                 "kind": "model_accessor",
                 "from": "App\\Models\\Order",
                 "to": "table:orders.display_status",
@@ -1250,6 +1280,57 @@ def test_hades_backend_graph_search_finds_local_model_attribute_edges(monkeypatc
     assert any("attribute_style=attribute_object" in item["summary"] for item in result["items"])
 
 
+def test_hades_backend_graph_search_finds_local_model_serialization_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "display status appends hidden serialization", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_appended_attribute"
+        and ref["to"] == "model_attribute:App\\Models\\Order.display_status"
+        and ref["provenance"]["property"] == "appends"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_hidden"
+        and ref["to"] == "table:orders.internal_note"
+        for ref in graph_refs
+    )
+    assert any("property=appends" in item["summary"] for item in result["items"])
+    assert any("field=display_status" in item["summary"] for item in result["items"])
+
+
 def test_hades_backend_graph_search_finds_local_route_model_bindings(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
@@ -1504,7 +1585,7 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_traverse",
-            {"start": "route:orders.show", "direction": "out", "max_depth": 3, "limit": 20},
+            {"start": "route:orders.show", "direction": "out", "max_depth": 3, "limit": 40},
         )
     )
 

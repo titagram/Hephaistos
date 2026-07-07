@@ -156,7 +156,7 @@ PHP_ARRAY_ENTRY_LIST_RE = re.compile(
 PHP_CLASS_CONST_RE = re.compile(r"(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class")
 PHP_MODEL_TABLE_RE = re.compile(r"\bprotected\s+\$table\s*=\s*['\"](?P<table>[^'\"]+)['\"]", re.MULTILINE)
 PHP_MODEL_LIST_PROPERTY_RE = re.compile(
-    r"\bprotected\s+(?:array\s+)?\$(?P<property>fillable|guarded)\s*=\s*\[(?P<body>.*?)\]\s*;",
+    r"\bprotected\s+(?:array\s+)?\$(?P<property>fillable|guarded|hidden|visible|appends)\s*=\s*\[(?P<body>.*?)\]\s*;",
     re.DOTALL | re.MULTILINE,
 )
 PHP_MODEL_CASTS_PROPERTY_RE = re.compile(
@@ -2570,6 +2570,18 @@ def _php_model_field_target(model_class: str, table: str, field: str) -> str:
     return f"model_field:{model_class}.{field}"
 
 
+def _php_model_list_property_target(model_class: str, table: str, property_name: str, field: str) -> str:
+    if property_name == "appends":
+        return f"model_attribute:{model_class}.{field}"
+    return _php_model_field_target(model_class, table, field)
+
+
+def _php_model_list_property_kind(property_name: str) -> str:
+    if property_name == "appends":
+        return "model_appended_attribute"
+    return f"model_{property_name}"
+
+
 def _php_model_metadata_classes(classes: list[dict[str, Any]], offset: int) -> list[dict[str, Any]]:
     class_info = _class_context(classes, offset)
     if class_info and class_info.get("role") == "model":
@@ -2598,10 +2610,11 @@ def _append_php_model_metadata_edges(
                 truncated = not _edge_append(
                     edges,
                     {
-                        "kind": f"model_{property_name}",
+                        "kind": _php_model_list_property_kind(property_name),
                         "from": model_class,
-                        "to": _php_model_field_target(model_class, table, field),
+                        "to": _php_model_list_property_target(model_class, table, property_name, field),
                         "field": field,
+                        "property": property_name,
                         "table": table if field != "*" else "",
                         "path": rel,
                         "line": field_info["line"],

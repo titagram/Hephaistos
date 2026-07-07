@@ -5229,3 +5229,40 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Eloquent serialization metadata graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per serialization awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` indicizza ora i metadata Eloquent `$hidden`,
+  `$visible` e `$appends` sui model Laravel.
+- Il graph aggiunge edge `model_hidden`, `model_visible` e
+  `model_appended_attribute`, con `property` e `field` espliciti.
+- Gli `$appends` puntano a `model_attribute:<model>.<field>` invece che a
+  `table:<table>.<field>`, cosi' il graph distingue attributi virtuali da
+  colonne DB.
+- Il fallback locale di `hades_backend_graph_search` mostra `property=...` nei
+  summary edge, utile per diagnosticare campi JSON mancanti, nascosti o
+  aggiunti senza leggere il model source.
+- Il payload non conserva array raw o sorgente del model.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_model_serialization_edges`
+  passato: `1 passed`.
+- Locale regressione traversal:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_traverse_falls_back_to_local_graph_cache`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `76 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

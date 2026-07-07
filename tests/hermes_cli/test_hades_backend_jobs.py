@@ -708,6 +708,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    protected $table = 'orders';\n"
         "    protected $fillable = ['customer_id', 'status'];\n"
         "    protected $guarded = ['internal_note'];\n"
+        "    protected $hidden = ['internal_note'];\n"
+        "    protected $visible = ['id', 'status', 'display_status'];\n"
+        "    protected $appends = ['display_status'];\n"
         "    protected $casts = ['status' => 'string'];\n"
         "    public function casts(): array {\n"
         "        return ['customer_id' => 'integer'];\n"
@@ -1042,8 +1045,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_fillable", "App\\Models\\Order", "table:orders.customer_id") in edges
     assert ("model_fillable", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_guarded", "App\\Models\\Order", "table:orders.internal_note") in edges
+    assert ("model_hidden", "App\\Models\\Order", "table:orders.internal_note") in edges
+    assert ("model_visible", "App\\Models\\Order", "table:orders.status") in edges
+    assert ("model_visible", "App\\Models\\Order", "table:orders.display_status") in edges
+    assert ("model_appended_attribute", "App\\Models\\Order", "model_attribute:App\\Models\\Order.display_status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert {
+        "kind": "model_appended_attribute",
+        "from": "App\\Models\\Order",
+        "to": "model_attribute:App\\Models\\Order.display_status",
+        "field": "display_status",
+        "property": "appends",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 11,
+    } in artifact["edges"]
     assert ("model_accessor", "App\\Models\\Order", "table:orders.display_status") in edges
     assert ("model_accessor", "App\\Models\\Order", "table:orders.normalized_status") in edges
     assert ("model_mutator", "App\\Models\\Order", "table:orders.normalized_status") in edges
@@ -1059,7 +1076,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "cast_type": "string",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 9,
+        "line": 12,
     } in artifact["edges"]
     assert {
         "kind": "model_cast",
@@ -1069,7 +1086,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "cast_type": "integer",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 11,
+        "line": 14,
     } in artifact["edges"]
     assert {
         "kind": "model_accessor",
@@ -1081,7 +1098,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "attribute_method": "getDisplayStatusAttribute",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 13,
+        "line": 16,
     } in artifact["edges"]
     assert {
         "kind": "model_mutator",
@@ -1093,7 +1110,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "attribute_method": "normalizedStatus",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 16,
+        "line": 19,
     } in artifact["edges"]
     assert {
         "kind": "eloquent_scope_call",
@@ -1166,6 +1183,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "DB::table" not in str(artifact)
     assert "protected $fillable" not in str(artifact)
     assert "protected $guarded" not in str(artifact)
+    assert "protected $hidden" not in str(artifact)
+    assert "protected $visible" not in str(artifact)
+    assert "protected $appends" not in str(artifact)
     assert "protected $casts" not in str(artifact)
     assert "return ['customer_id'" not in str(artifact)
     assert "strtoupper" not in str(artifact)
