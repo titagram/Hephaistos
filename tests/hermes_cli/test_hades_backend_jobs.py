@@ -26,6 +26,18 @@ def test_php_validation_database_rule_refs_keep_only_sanitized_identifiers():
     ]
 
 
+def test_php_top_level_array_field_keys_ignores_nested_keys():
+    from hermes_cli.hades_backend_jobs import _php_top_level_array_field_keys
+
+    source = "$this->merge(['filters' => ['status' => 'paid'], 'status' => 'paid']);"
+    args_start = source.index("(") + 1
+    args = source[args_start : source.rindex(")")]
+
+    fields = _php_top_level_array_field_keys(source, args, args_start)
+
+    assert [field["field"] for field in fields] == ["filters", "status"]
+
+
 def test_read_files_job_redacts_and_bounds_payload(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -682,6 +694,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        return ['customer_id' => 'required|integer|exists:customers,id', 'status' => 'required|string'];\n"
         "    }\n"
         "    public function authorize(): bool { return false; }\n"
+        "    public function prepareForValidation(): void {\n"
+        "        $this->merge(['status' => strtolower($this->input('status')), 'customer_id' => (int) $this->customer_id]);\n"
+        "    }\n"
         "}\n",
         encoding="utf-8",
     )
@@ -933,6 +948,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "Order@customer") in symbols
     assert ("method", "OrderResource@toArray") in symbols
     assert ("method", "StoreOrderRequest@authorize") in symbols
+    assert ("method", "StoreOrderRequest@prepareForValidation") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
     assert ("route_handler", "route:invoices.index", "InvoiceController@index") in edges
     assert ("route_handler", "route:invoices.show", "InvoiceController@show") in edges
@@ -961,6 +977,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_uses_form_request", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("request_authorization", "App\\Http\\Requests\\StoreOrderRequest", "authorization:form_request") in edges
     assert ("route_request_authorization", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
+    assert ("request_input_mutation", "App\\Http\\Requests\\StoreOrderRequest", "request_field:status") in edges
+    assert ("route_request_input_mutation", "route:orders.show", "request_field:status") in edges
     assert ("route_request_validation", "route:orders.show", "validation:customer_id") in edges
     assert ("route_request_validation", "route:orders.show", "validation:status") in edges
     assert ("route_validation_database_rule", "route:orders.show", "table:customers.id") in edges
@@ -1051,6 +1069,35 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "authorization_result": "deny",
         "authorization_path": "app/Http/Requests/StoreOrderRequest.php",
         "authorization_line": 8,
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+    } in artifact["edges"]
+    assert {
+        "kind": "request_input_mutation",
+        "from": "App\\Http\\Requests\\StoreOrderRequest",
+        "to": "request_field:status",
+        "field": "status",
+        "operation": "merge",
+        "mutation_stage": "prepare_for_validation",
+        "mutation_path": "app/Http/Requests/StoreOrderRequest.php",
+        "mutation_line": 10,
+        "path": "app/Http/Requests/StoreOrderRequest.php",
+        "line": 10,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_request_input_mutation",
+        "from": "route:orders.show",
+        "to": "request_field:customer_id",
+        "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+        "handler": "OrderController@show",
+        "param": "request",
+        "field": "customer_id",
+        "operation": "merge",
+        "mutation_stage": "prepare_for_validation",
+        "mutation_path": "app/Http/Requests/StoreOrderRequest.php",
+        "mutation_line": 10,
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",

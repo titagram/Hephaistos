@@ -5434,3 +5434,39 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel FormRequest input mutation graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per FormRequest input mutation
+awareness metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` rileva mutazioni input in
+  `prepareForValidation()` e `passedValidation()` quando usano
+  `$this->merge([...])` o `$this->replace([...])`.
+- Il parser estrae solo chiavi top-level dell'array passato a `merge/replace`,
+  evitando di trattare nested keys come campi request principali.
+- Il graph aggiunge `request_input_mutation` dal FormRequest e
+  `route_request_input_mutation` dalla route che usa quel FormRequest.
+- Il payload salva solo `field`, operazione `merge`/`replace`, stage
+  (`prepare_for_validation`/`passed_validation`) e path/line; non conserva
+  valori calcolati o corpo metodo.
+- Il fallback locale di `hades_backend_graph_search` mostra `field=...`,
+  `operation=...` e `mutation_stage=...`, utile per diagnosticare input
+  normalizzati o riscritti prima della validation/controller.
+
+Verifiche eseguite:
+
+- Locale mirato helper/graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_php_top_level_array_field_keys_ignores_nested_keys tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `2 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_form_request_input_mutation_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `83 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

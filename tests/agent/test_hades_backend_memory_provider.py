@@ -199,6 +199,35 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "request_input_mutation",
+                "from": "App\\Http\\Requests\\StoreOrderRequest",
+                "to": "request_field:status",
+                "field": "status",
+                "operation": "merge",
+                "mutation_stage": "prepare_for_validation",
+                "mutation_path": "app/Http/Requests/StoreOrderRequest.php",
+                "mutation_line": 10,
+                "path": "app/Http/Requests/StoreOrderRequest.php",
+                "line": 10,
+            },
+            {
+                "kind": "route_request_input_mutation",
+                "from": "route:orders.show",
+                "to": "request_field:status",
+                "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+                "handler": "OrderController@show",
+                "param": "request",
+                "field": "status",
+                "operation": "merge",
+                "mutation_stage": "prepare_for_validation",
+                "mutation_path": "app/Http/Requests/StoreOrderRequest.php",
+                "mutation_line": 10,
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
                 "kind": "route_request_validation",
                 "from": "route:orders.show",
                 "to": "validation:customer_id",
@@ -1728,6 +1757,55 @@ def test_hades_backend_graph_search_finds_local_form_request_authorization_edges
     assert any(
         "authorization_result=deny" in item["summary"]
         and "authorization_path=app/Http/Requests/StoreOrderRequest.php" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_form_request_input_mutation_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "prepareForValidation status merge request", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_request_input_mutation"
+        and ref["to"] == "request_field:status"
+        and ref["provenance"]["mutation_stage"] == "prepare_for_validation"
+        for ref in graph_refs
+    )
+    assert any(
+        "field=status" in item["summary"]
+        and "operation=merge" in item["summary"]
+        and "mutation_stage=prepare_for_validation" in item["summary"]
         for item in result["items"]
     )
 

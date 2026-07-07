@@ -208,6 +208,7 @@ PHP_VALIDATE_ARRAY_RE = re.compile(
     re.DOTALL,
 )
 PHP_ARRAY_FIELD_KEY_RE = re.compile(r"['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>")
+PHP_THIS_INPUT_MUTATION_RE = re.compile(r"\$this->(?P<operation>merge|replace)\s*\(", re.MULTILINE)
 PHP_LISTEN_ARRAY_RE = re.compile(
     r"(?P<event>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*\[(?P<listeners>.*?)\]",
     re.DOTALL,
@@ -1422,6 +1423,29 @@ def _php_array_field_keys(source: str, body: str, base_offset: int) -> list[dict
             continue
         seen.add(field)
         fields.append({"field": field, "line": _line_number(source, base_offset + match.start())})
+    return fields
+
+
+def _php_top_level_array_field_keys(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
+    open_index = body.find("[")
+    if open_index == -1:
+        return []
+    open_abs = base_offset + open_index
+    close_abs = _balanced_end(source, open_abs, "[", "]")
+    if close_abs == -1:
+        return []
+    array_body = source[open_abs + 1 : close_abs]
+    fields: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item, item_offset in _split_top_level_items(array_body):
+        match = re.match(r"\s*['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>", item)
+        if not match:
+            continue
+        field = match.group("field")
+        if field in seen:
+            continue
+        seen.add(field)
+        fields.append({"field": field, "line": _line_number(source, open_abs + 1 + item_offset + match.start())})
     return fields
 
 
@@ -3138,6 +3162,137 @@ def _php_form_request_authorization_index(
     return authorizations
 
 
+def _php_form_request_input_mutations_for_method(
+    source: str,
+    method_match: re.Match[str],
+    *,
+    mutation_stage: str,
+) -> list[dict[str, Any]]:
+    method_body, method_body_offset = _php_method_body_slice(source, method_match)
+    mutations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for mutation_match in PHP_THIS_INPUT_MUTATION_RE.finditer(method_body):
+        operation = str(mutation_match.group("operation") or "")
+        open_abs = method_body_offset + mutation_match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        args = source[open_abs + 1 : close_abs]
+        for field_info in _php_top_level_array_field_keys(source, args, open_abs + 1):
+            field = str(field_info.get("field") or "")
+            key = (mutation_stage, operation, field)
+            if not field or key in seen:
+                continue
+            seen.add(key)
+            mutations.append(
+                {
+                    "field": field,
+                    "operation": operation,
+                    "mutation_stage": mutation_stage,
+                    "line": field_info["line"],
+                }
+            )
+    return mutations
+
+
+def _php_form_request_input_mutation_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, list[dict[str, Any]]]:
+    mutations_by_class: dict[str, list[dict[str, Any]]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            role = _php_role(rel, fqcn, extends_fqcn)
+            classes.append({"name": fqcn, "role": role, "offset": match.start()})
+        for method_match in PHP_METHOD_RE.finditer(source):
+            method_name = method_match.group("name")
+            stage_by_method = {
+                "prepareForValidation": "prepare_for_validation",
+                "passedValidation": "passed_validation",
+            }
+            mutation_stage = stage_by_method.get(method_name)
+            if not mutation_stage:
+                continue
+            class_info = _class_context(classes, method_match.start())
+            if not class_info or class_info.get("role") != "form_request":
+                continue
+            mutations = _php_form_request_input_mutations_for_method(
+                source,
+                method_match,
+                mutation_stage=mutation_stage,
+            )
+            for mutation in mutations:
+                mutations_by_class.setdefault(str(class_info["name"]), []).append(
+                    {
+                        **mutation,
+                        "path": rel,
+                    }
+                )
+    return mutations_by_class
+
+
+def _append_php_route_form_request_input_mutation_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    param_name: str,
+    request_class: str,
+    mutations: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not mutations:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        for mutation in mutations:
+            field = str(mutation.get("field") or "")
+            if not field:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_request_input_mutation",
+                    "from": f"route:{_php_route_id(route)}",
+                    "to": f"request_field:{field}",
+                    "request_class": request_class,
+                    "handler": method_symbol,
+                    "param": param_name,
+                    "field": field,
+                    "operation": mutation.get("operation"),
+                    "mutation_stage": mutation.get("mutation_stage"),
+                    "mutation_path": mutation.get("path"),
+                    "mutation_line": mutation.get("line"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _append_php_route_form_request_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3316,6 +3471,11 @@ def _build_php_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
+    form_request_input_mutations_by_class = _php_form_request_input_mutation_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
     routes = _laravel_routes(workspace_root, file_refs)
     routes_by_handler: dict[str, list[dict[str, Any]]] = {}
     for route in routes:
@@ -3464,6 +3624,26 @@ def _build_php_graph(
                             "authorization_line": authorization.get("line"),
                             "path": rel,
                             "line": authorization.get("line"),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+                for mutation in form_request_input_mutations_by_class.get(fqcn) or []:
+                    field = str(mutation.get("field") or "")
+                    if not field:
+                        continue
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "request_input_mutation",
+                            "from": fqcn,
+                            "to": f"request_field:{field}",
+                            "field": field,
+                            "operation": mutation.get("operation"),
+                            "mutation_stage": mutation.get("mutation_stage"),
+                            "mutation_path": mutation.get("path"),
+                            "mutation_line": mutation.get("line"),
+                            "path": rel,
+                            "line": mutation.get("line"),
                         },
                         max_edges=max_edges,
                     ) or truncated
@@ -3690,6 +3870,15 @@ def _build_php_graph(
                         str(param_match.group("name") or ""),
                         param_class,
                         form_request_authorization_by_class.get(param_class),
+                        edges,
+                        max_edges=max_edges,
+                    ) or truncated
+                    truncated = _append_php_route_form_request_input_mutation_edges(
+                        routes_by_handler,
+                        method_symbol,
+                        str(param_match.group("name") or ""),
+                        param_class,
+                        form_request_input_mutations_by_class.get(param_class) or [],
                         edges,
                         max_edges=max_edges,
                     ) or truncated
