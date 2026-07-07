@@ -155,11 +155,30 @@ Local Hades backend state has explicit retention classes:
 | Local Persephone inbox events | 30 days after receipt | `hades doctor cleanup --stale-inbox` |
 | Artifact payloads | Not retained locally after upload | Backend artifact retention policy |
 | Doctor reports | Not retained locally after explicit submit | Backend doctor-report retention policy |
+| Backend bug evidence, source slices, evidence packs, diagnosis reports | Backend workspace scoped policy | `hades backend privacy-export`, `hades backend privacy-delete`, `hades backend retention-cleanup` |
 
 Cleanup is dry-run by default. Add `--yes` to remove rows and
 `--retention-days <days>` to override the selected local retention window for a
 one-off maintenance run. `--all` includes non-expired selected candidates, but
 does not delete active jobs or unreviewed refused/conflicted proposals.
+
+Backend privacy cleanup is also dry-run first:
+
+```bash
+hades backend privacy-export --json
+hades backend privacy-export --include-content --json
+hades backend privacy-delete --json
+hades backend privacy-delete --yes --json
+hades backend retention-cleanup --retention-days 30 --json
+hades backend retention-cleanup --retention-days 30 --yes --json
+```
+
+`privacy-export` defaults to metadata-only so support can inspect counts and
+ids without dumping redacted source slices, evidence payloads, or diagnosis
+text. `privacy-delete` removes only the current linked workspace's Hades bug
+reports, evidence items, source slices, evidence packs, and diagnosis reports.
+`retention-cleanup` removes only scoped rows older than the requested retention
+window.
 
 ## MVP Smoke
 

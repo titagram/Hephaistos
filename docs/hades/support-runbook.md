@@ -17,6 +17,18 @@ Use `hades backend status --json` for local debugging. For support tickets,
 prefer `hades backend support-report --json`: it keeps setup, sync, awareness,
 and action fields, but removes local absolute paths and secrets.
 
+For Hades diagnosis/evidence support, ask for metadata-only counts first:
+
+```bash
+hades backend privacy-export --json
+```
+
+Do not request `hades backend privacy-export --include-content --json` unless a
+maintainer has confirmed the user consent, project policy, and a secure sharing
+channel. Use `hades backend privacy-delete --json` and
+`hades backend retention-cleanup --retention-days <days> --json` as dry-runs
+before any destructive action.
+
 If the backend is configured and the user explicitly agrees, ask them to submit
 the compact backend report:
 
@@ -45,6 +57,7 @@ Do not ask users to send:
 | Proposal refused or conflicted | `hades backend proposals`; `hades backend status --json` | Proposal status `refused` or `conflicted` with backend reason | Review reason, then `hades backend ack-proposal <proposal_id>` to silence local review state | Backend refused a proposal that should be accepted according to project policy |
 | Artifact too large or truncated | `hades backend sync`; `hades logs --level WARNING --session latest` | `artifact.uploaded` with truncation/redaction counts, or upload failure warning | Lower requested scope or rerun with smaller backend job budgets; do not ask for raw source upload | Backend needs a schema or budget change to ingest normal project size |
 | Evidence rejected by safety policy | `hades logs --level WARNING --session latest`; backend response error code | `unredacted_secret_detected`, `evidence_payload_too_large`, `source_slice_too_large`, `evidence_pack_payload_too_large`, `diagnosis_payload_too_large`, `diagnosis_evidence_refs_required`, or `diagnosis_freshness_not_current` | Redact tokens/cookies/passwords/private keys, reduce payload size, fetch a smaller source slice, or downgrade confidence until current freshness and evidence refs exist; do not ask the user to share the raw rejected payload | Redacted bounded payload is still rejected or the rejection blocks an otherwise valid diagnosis workflow |
+| User requests evidence export or deletion | `hades backend privacy-export --json`; `hades backend privacy-delete --json`; `hades backend retention-cleanup --retention-days <days> --json` | Scoped counts by Hades table, dry-run mode true unless `--yes` was passed | Export metadata first; for deletion, confirm project/workspace and rerun with `--yes` only after explicit user approval | Counts include unexpected project/workspace data or confirmed deletion fails |
 | Docker permissions | `docker compose ps`; `docker compose logs --tail=100 dashboard`; `hades doctor` inside the container | Files in `~/.hermes` owned by the wrong UID/GID or dashboard cannot write logs/state | Start with `HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d`; keep dashboard bound to `127.0.0.1` unless auth is configured | State ownership remains broken after UID/GID remap or operator needs public reverse-proxy support |
 | Windows PATH issue | PowerShell: `where.exe hades`; `hades doctor` | `hades` not found or doctor reports missing/wrong command link | Open a new terminal after install; rerun the PowerShell installer; check `%LOCALAPPDATA%\hermes` remains on PATH | Native Windows install cannot create or repair the command shim |
 | Desktop/backend version mismatch | `hades version`; desktop About/version screen; `hades doctor` | Desktop starts an older backend command, `serve` fallback, or mismatched CLI/package version | Run `hades update`, restart the desktop app, and rerun `hades doctor` | Desktop still launches an old managed runtime after update/restart |

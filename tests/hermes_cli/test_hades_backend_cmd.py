@@ -4,6 +4,40 @@ import json
 from types import SimpleNamespace
 
 
+def _seed_current_backend_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+    return workspace
+
+
 def test_backend_setup_registers_agent_and_persists_derived_token(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -598,6 +632,120 @@ def test_backend_support_report_json_redacts_paths_and_secrets(monkeypatch, tmp_
     assert "super-secret-token" not in output
     assert str(workspace) not in output
     assert ".env" not in output
+
+
+def test_backend_privacy_export_defaults_to_metadata_only(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def privacy_export(self, **payload):
+            self.calls.append(payload)
+            return {
+                "include_content": payload["include_content"],
+                "counts": {"bug_reports": 1, "source_slices": 1},
+                "collections": {"source_slices": [{"id": "slice_1"}]},
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(backend_action="privacy-export", include_content=False, json=True)
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["include_content"] is False
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "include_content": False,
+        }
+    ]
+    assert fake.closed == 1
+
+
+def test_backend_privacy_delete_is_dry_run_unless_confirmed(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def privacy_delete(self, **payload):
+            self.calls.append(payload)
+            return {"dry_run": payload["dry_run"], "would_delete": {"hades_bug_reports": 2}}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(backend_action="privacy-delete", yes=False, json=True)
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["dry_run"] is True
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "dry_run": True,
+            "confirm": False,
+        }
+    ]
+
+
+def test_backend_retention_cleanup_requires_yes_for_confirmed_delete(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def privacy_retention_cleanup(self, **payload):
+            self.calls.append(payload)
+            return {"dry_run": payload["dry_run"], "deleted": {"hades_source_slices": 1}}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(backend_action="retention-cleanup", retention_days=30, yes=True, json=True)
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["dry_run"] is False
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "retention_days": 30,
+            "dry_run": False,
+            "confirm": True,
+        }
+    ]
 
 
 def test_backend_jobs_json_lists_waiting_jobs(monkeypatch, tmp_path, capsys):

@@ -64,6 +64,20 @@ High or medium confidence diagnosis reports are also rejected unless
 `freshness.status=current` and `evidence_refs` is non-empty; failures return
 `diagnosis_freshness_not_current` or `diagnosis_evidence_refs_required`.
 
+Privacy and retention controls are explicit and workspace scoped. The backend
+exposes:
+
+- `GET /api/hades/v1/privacy/export`
+- `POST /api/hades/v1/privacy/delete`
+- `POST /api/hades/v1/privacy/retention-cleanup`
+
+All three require the authenticated agent, project id, and linked
+`workspace_binding_id`. Export can omit content fields with
+`include_content=false`; the local CLI does this by default through
+`hades backend privacy-export --json`. Delete and retention cleanup are dry-run
+by default and require `confirm=true` backend-side; the CLI sends that only when
+the user passes `--yes`.
+
 ## Project Awareness
 
 The backend exposes `GET /api/hades/v1/project-awareness/status` for a linked

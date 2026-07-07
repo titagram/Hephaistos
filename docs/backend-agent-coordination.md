@@ -1823,7 +1823,68 @@ Verifiche eseguite:
 Resta fuori da questa slice:
 
 - Dashboard policy UI prima di abilitare source slices.
-- Delete/export project/user e retention cleanup backend.
+- Delete/export project/user oltre lo scope workspace e dashboard policy UI.
+
+## Esecuzione privacy/export/retention Hades - 2026-07-07
+
+Stato: completata la tranche P0-8 workspace-scoped per export, delete e
+retention cleanup di dati Hades content-bearing.
+
+Backend remoto:
+
+- Commit remoto `d383c4f feat: add Hades privacy retention controls`.
+- Nuovo controller `App\Http\Controllers\Hades\DataPrivacyController`.
+- Nuove route autenticate:
+  - `GET /api/hades/v1/privacy/export`;
+  - `POST /api/hades/v1/privacy/delete`;
+  - `POST /api/hades/v1/privacy/retention-cleanup`.
+- Tutte le route verificano `project_id`, `workspace_binding_id`, agent token e
+  binding linked nello stesso scope.
+- Export restituisce collezioni e conteggi per bug reports, bug evidence,
+  source slices, evidence packs e diagnosis reports; `include_content=false`
+  omette i campi content-bearing.
+- Delete e retention cleanup sono dry-run per default e richiedono
+  `confirm=true` quando `dry_run=false`.
+
+Integrazione locale:
+
+- `HadesBackendClient` espone `privacy_export`, `privacy_delete` e
+  `privacy_retention_cleanup`.
+- Nuovi comandi:
+  - `hades backend privacy-export --json`;
+  - `hades backend privacy-delete --json`;
+  - `hades backend retention-cleanup --retention-days <days> --json`.
+- Il CLI usa il workspace binding corrente, exporta metadata-only per default
+  e invia `confirm=true` solo con `--yes`.
+- OpenAPI locale e docs operative/runbook aggiornati.
+
+Verifiche eseguite:
+
+- Remoto:
+  `php -l app/Http/Controllers/Hades/DataPrivacyController.php` passato.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/DataPrivacyController.php routes/api.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato dopo formattazione.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `31 passed / 393 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `55 passed / 612 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_client.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `60 passed`.
+- Locale lint/contract:
+  `json.tool` su OpenAPI, `py_compile` e `ruff check` sui file client/CLI/test
+  passati.
+
+Resta fuori da questa tranche:
+
+- Export/delete project-wide o user-wide oltre allo scope workspace linked.
+- Audit event dedicati senza payload raw.
+- Dashboard policy UI e controlli review per source/evidence retention.
 
 ## Esecuzione runtime/test evidence ingestion Hades - 2026-07-07
 

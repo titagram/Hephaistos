@@ -245,6 +245,15 @@ class HadesBackendClient:
     def evidence_packs(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "evidence-packs", params=payload)
 
+    def privacy_export(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "privacy/export", params=payload)
+
+    def privacy_delete(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "privacy/delete", json_body=payload)
+
+    def privacy_retention_cleanup(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "privacy/retention-cleanup", json_body=payload)
+
     def submit_doctor_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "doctor/reports", json_body=payload)
 

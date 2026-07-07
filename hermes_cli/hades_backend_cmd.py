@@ -62,6 +62,23 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     quality_report.add_argument("--no-codebase-eval", default=None, help="Path to a no-codebase diagnosis eval fixture JSON")
     quality_report.add_argument("--skip-local-status", action="store_true", help="Do not include local backend support status")
     quality_report.add_argument("--json", action="store_true", help="Emit machine-readable quality report JSON")
+    privacy_export = sub.add_parser("privacy-export", help="Export backend diagnosis/evidence data for the current workspace")
+    privacy_export.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Include redacted source slices, evidence payloads, and diagnosis text in JSON output",
+    )
+    privacy_export.add_argument("--json", action="store_true", help="Emit machine-readable export JSON")
+    privacy_delete = sub.add_parser("privacy-delete", help="Dry-run or delete backend diagnosis/evidence data for the current workspace")
+    privacy_delete.add_argument("--yes", action="store_true", help="Actually delete scoped backend data; default is dry-run")
+    privacy_delete.add_argument("--json", action="store_true", help="Emit machine-readable delete JSON")
+    retention_cleanup = sub.add_parser(
+        "retention-cleanup",
+        help="Dry-run or delete scoped backend diagnosis/evidence data older than the retention window",
+    )
+    retention_cleanup.add_argument("--retention-days", type=int, required=True, help="Delete rows older than this many days")
+    retention_cleanup.add_argument("--yes", action="store_true", help="Actually delete expired scoped data; default is dry-run")
+    retention_cleanup.add_argument("--json", action="store_true", help="Emit machine-readable cleanup JSON")
     profiles = sub.add_parser("profiles", help="Show curated local-only Hades coordination profiles")
     profiles.add_argument("--json", action="store_true", help="Emit machine-readable profile JSON")
     worker = sub.add_parser("worker", help="Process one batch of local plugin work items")
@@ -284,6 +301,118 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
         for action in report["action_queue"]:
             print(f"  Action:   [{action['severity']}] {action['id']} - {action['message']}")
     return 1 if report["status"] == "failed" else 0
+
+
+def _cmd_privacy_export(args: argparse.Namespace) -> int:
+    try:
+        _agent, binding = _current_workspace_binding()
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_export(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                include_content=bool(getattr(args, "include_content", False)),
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend privacy-export: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(response, sort_keys=True))
+        return 0
+
+    print("Hades backend privacy export")
+    print(f"  Project:   {binding.project_id}")
+    print(f"  Workspace: {binding.backend_workspace_binding_id}")
+    print(f"  Content:   {'included' if response.get('include_content') else 'metadata only'}")
+    for key, value in _privacy_counts(response, "counts").items():
+        print(f"  {key}: {value}")
+    return 0
+
+
+def _cmd_privacy_delete(args: argparse.Namespace) -> int:
+    dry_run = not bool(getattr(args, "yes", False))
+    try:
+        _agent, binding = _current_workspace_binding()
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_delete(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                dry_run=dry_run,
+                confirm=not dry_run,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend privacy-delete: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(response, sort_keys=True))
+        return 0
+
+    print("Hades backend privacy delete")
+    print(f"  Project:   {binding.project_id}")
+    print(f"  Workspace: {binding.backend_workspace_binding_id}")
+    print(f"  Mode:      {'dry-run' if dry_run else 'confirmed delete'}")
+    key = "would_delete" if dry_run else "deleted"
+    for table, value in _privacy_counts(response, key).items():
+        print(f"  {table}: {value}")
+    return 0
+
+
+def _cmd_retention_cleanup(args: argparse.Namespace) -> int:
+    dry_run = not bool(getattr(args, "yes", False))
+    try:
+        _agent, binding = _current_workspace_binding()
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_retention_cleanup(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                retention_days=int(getattr(args, "retention_days")),
+                dry_run=dry_run,
+                confirm=not dry_run,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend retention-cleanup: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(response, sort_keys=True))
+        return 0
+
+    print("Hades backend retention cleanup")
+    print(f"  Project:        {binding.project_id}")
+    print(f"  Workspace:      {binding.backend_workspace_binding_id}")
+    print(f"  Retention days: {response.get('retention_days', getattr(args, 'retention_days'))}")
+    print(f"  Mode:           {'dry-run' if dry_run else 'confirmed delete'}")
+    key = "would_delete" if dry_run else "deleted"
+    for table, value in _privacy_counts(response, key).items():
+        print(f"  {table}: {value}")
+    return 0
+
+
+def _privacy_counts(response: dict[str, Any], key: str) -> dict[str, Any]:
+    counts = response.get(key)
+    return counts if isinstance(counts, dict) else {}
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -952,6 +1081,12 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_support_report(args)
     if action == "quality-report":
         return _cmd_quality_report(args)
+    if action == "privacy-export":
+        return _cmd_privacy_export(args)
+    if action == "privacy-delete":
+        return _cmd_privacy_delete(args)
+    if action == "retention-cleanup":
+        return _cmd_retention_cleanup(args)
     if action == "profiles":
         return _cmd_profiles(args)
     if action == "worker":
@@ -977,7 +1112,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
         file=sys.stderr,
     )
     return 0
