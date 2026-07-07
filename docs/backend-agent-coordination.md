@@ -3311,6 +3311,40 @@ Resta fuori da questa tranche:
 - FTS/vector/rerank backend per evidence testuale e query cross-domain.
 - Freshness deploy-aware distinta dal solo commit indicizzato.
 
+## Esecuzione Hades memory search ranking backend - 2026-07-07
+
+Stato: completata una tranche backend P1-3.
+
+Backend remoto:
+
+- `MemorySearchController::score()` non usa piu' solo phrase + token count
+  piatto.
+- Il ranking ora pesa i campi (`summary`, payload, kind, source, agent key),
+  conta occorrenze bounded, premia match multi-token completi e aggiunge un
+  density bonus: a parita' di token, una nota breve e precisa batte una nota
+  lunga e rumorosa anche se quest'ultima e' piu' recente.
+- Il filtro DB resta LIKE-based per compatibilita' e assenza di migrazioni; la
+  modifica e' un rerank deterministico in memoria sui candidati bounded.
+
+Verifiche eseguite:
+
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php --filter=concise`
+  passato: `1 passed (7 assertions)`.
+- Remoto syntax:
+  `php -l app/Http/Controllers/Hades/MemorySearchController.php`
+  passato nel container app.
+- Remoto aggregato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `62 passed (736 assertions)`.
+
+Resta fuori da questa tranche:
+
+- FTS/vector backend reale per dataset grandi e query cross-domain.
+- Benchmark dataset medio/grande con soglie automatiche.
+- Rerank condiviso per bug evidence/source slices/evidence packs oltre al
+  memory search controller.
+
 ## Esecuzione Hades memory kind filter - 2026-07-07
 
 Stato: completata una tranche P1-3 locale.
