@@ -251,6 +251,16 @@ PHP_SESSION_FACADE_RE = re.compile(
     r"\bSession::(?P<method>get|put|flash|forget|has|pull|remove)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_CACHE_HELPER_RE = re.compile(r"\bcache\s*\(", re.IGNORECASE | re.MULTILINE)
+PHP_CACHE_CHAIN_RE = re.compile(
+    r"\bcache\s*\(\s*\)\s*->\s*"
+    r"(?P<method>get|put|add|forever|remember|rememberForever|forget|has|pull|increment|decrement)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_CACHE_FACADE_RE = re.compile(
+    r"\bCache::(?P<method>get|put|add|forever|remember|rememberForever|forget|has|pull|increment|decrement)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -4176,6 +4186,190 @@ def _append_php_route_session_access_edges(
     return truncated
 
 
+def _php_cache_operation(method: str) -> str:
+    normalized = method.lower()
+    if normalized in {"put", "add", "forever", "increment", "decrement"}:
+        return "write"
+    if normalized in {"remember", "rememberforever"}:
+        return "read_write"
+    if normalized == "forget":
+        return "delete"
+    if normalized == "pull":
+        return "read_delete"
+    if normalized == "has":
+        return "check"
+    return "read"
+
+
+def _php_cache_ttl_present(method: str, parts: list[tuple[str, int]]) -> bool:
+    normalized = method.lower()
+    if normalized in {"put", "add", "remember"}:
+        return len(parts) > 1
+    return False
+
+
+def _php_cache_access_items(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    cache_method: str,
+    args: str,
+) -> list[dict[str, Any]]:
+    line = _line_number(source, method_body_offset + relative_call_start)
+    parts = _split_top_level_items(args)
+    method = cache_method.lower()
+    items: list[dict[str, Any]] = []
+    if method == "cache_helper":
+        stripped = args.strip()
+        if stripped.startswith("["):
+            for field_match in PHP_ARRAY_FIELD_KEY_RE.finditer(stripped):
+                cache_key = str(field_match.group("field") or "")
+                if not cache_key:
+                    continue
+                items.append(
+                    {
+                        "cache_key": cache_key,
+                        "cache_operation": "write",
+                        "cache_method": cache_method,
+                        "cache_ttl_present": False,
+                        "line": line,
+                    }
+                )
+            return items
+        cache_key = _php_quoted_literal(parts[0][0]) if parts else ""
+        if cache_key:
+            items.append(
+                {
+                    "cache_key": cache_key,
+                    "cache_operation": "read",
+                    "cache_method": cache_method,
+                    "cache_ttl_present": False,
+                    "line": line,
+                }
+            )
+        return items
+
+    cache_key = _php_quoted_literal(parts[0][0]) if parts else ""
+    if not cache_key:
+        return []
+    base_method = method.removeprefix("cache_")
+    items.append(
+        {
+            "cache_key": cache_key,
+            "cache_operation": _php_cache_operation(base_method),
+            "cache_method": cache_method,
+            "cache_ttl_present": _php_cache_ttl_present(base_method, parts),
+            "line": line,
+        }
+    )
+    return items
+
+
+def _php_cache_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, bool, int]] = set()
+
+    def append_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("cache_key") or ""),
+                str(item.get("cache_operation") or ""),
+                str(item.get("cache_method") or ""),
+                bool(item.get("cache_ttl_present")),
+                int(item.get("line") or 0),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            accesses.append(item)
+
+    for pattern in (PHP_CACHE_CHAIN_RE, PHP_CACHE_FACADE_RE):
+        for match in pattern.finditer(method_body):
+            open_abs = method_body_offset + match.end() - 1
+            close_abs = _balanced_end(source, open_abs, "(", ")")
+            if close_abs == -1:
+                continue
+            method = str(match.group("method") or "").lower()
+            append_items(
+                _php_cache_access_items(
+                    source=source,
+                    method_body_offset=method_body_offset,
+                    relative_call_start=match.start(),
+                    cache_method=f"cache_{method}",
+                    args=source[open_abs + 1 : close_abs],
+                )
+            )
+
+    for match in PHP_CACHE_HELPER_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        chain_preview = source[close_abs + 1 : close_abs + 24]
+        if re.match(
+            r"\s*->\s*(?:get|put|add|forever|remember|rememberForever|forget|has|pull|increment|decrement)\s*\(",
+            chain_preview,
+            re.IGNORECASE,
+        ):
+            continue
+        append_items(
+            _php_cache_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                cache_method="cache_helper",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_cache_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            cache_key = str(access.get("cache_key") or "")
+            if not cache_key:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_cache_access",
+                    "from": route_ref,
+                    "to": f"cache_key:{cache_key}",
+                    "handler": method_symbol,
+                    "cache_key": cache_key,
+                    "cache_operation": access.get("cache_operation"),
+                    "cache_method": access.get("cache_method"),
+                    "cache_ttl_present": bool(access.get("cache_ttl_present")),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -5248,6 +5442,34 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 session_accesses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            cache_accesses = _php_cache_accesses_for_method(source, method_body, method_body_offset)
+            for access in cache_accesses:
+                cache_key = str(access.get("cache_key") or "")
+                if not cache_key:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "cache_access",
+                        "from": method_symbol,
+                        "to": f"cache_key:{cache_key}",
+                        "cache_key": cache_key,
+                        "cache_operation": access.get("cache_operation"),
+                        "cache_method": access.get("cache_method"),
+                        "cache_ttl_present": bool(access.get("cache_ttl_present")),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_cache_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                cache_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated

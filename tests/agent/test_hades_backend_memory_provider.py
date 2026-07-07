@@ -2098,6 +2098,90 @@ def test_hades_backend_graph_search_finds_local_session_access_edges(monkeypatch
     )
 
 
+def test_hades_backend_graph_search_finds_local_cache_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "cache_access",
+                "from": "OrderController@show",
+                "to": "cache_key:orders.summary",
+                "cache_key": "orders.summary",
+                "cache_operation": "read_write",
+                "cache_method": "cache_remember",
+                "cache_ttl_present": True,
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 45,
+            },
+            {
+                "kind": "route_cache_access",
+                "from": "route:orders.show",
+                "to": "cache_key:orders.summary",
+                "handler": "OrderController@show",
+                "cache_key": "orders.summary",
+                "cache_operation": "read_write",
+                "cache_method": "cache_remember",
+                "cache_ttl_present": True,
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 45,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders cache remember orders.summary", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_cache_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "cache_key:orders.summary"
+        and ref["provenance"]["cache_key"] == "orders.summary"
+        and ref["provenance"]["cache_operation"] == "read_write"
+        and ref["provenance"]["cache_ttl_present"] is True
+        for ref in graph_refs
+    )
+    assert any(
+        "cache_key=orders.summary" in item["summary"]
+        and "cache_operation=read_write" in item["summary"]
+        and "cache_ttl_present=True" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
