@@ -47,6 +47,13 @@ count, retention class, and occurrence timestamp. This data is searchable by the
 agent through a service-gated provider tool and is not injected into ordinary
 automatic memory recall.
 
+The backend refuses content-bearing diagnosis data that is too large or appears
+to contain unredacted credentials. The current safety baseline caps bug evidence
+payloads at 64 KB, source slices at 64 KB, and diagnosis report payloads at 32
+KB. Rejected payloads return a structured error such as
+`unredacted_secret_detected`, `evidence_payload_too_large`,
+`source_slice_too_large`, or `diagnosis_payload_too_large`.
+
 ## Project Awareness
 
 The backend exposes `GET /api/hades/v1/project-awareness/status` for a linked

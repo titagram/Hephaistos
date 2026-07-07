@@ -90,6 +90,17 @@ once the workflow reaches either a supported root cause or a useful
 insufficient-evidence result. Reports carry confidence, root cause, runtime
 mechanism, evidence refs, freshness, bounded payload, and redaction count.
 
+The backend enforces a shared evidence safety policy before storing
+content-bearing diagnosis data:
+
+- bug evidence payloads are capped at 64 KB and rejected when they contain
+  unredacted bearer tokens, API keys, cookies, passwords, private keys, or
+  obvious secret assignments;
+- source slices are capped at 64 KB, must be bounded by the line-window policy,
+  and are rejected if redaction failed to remove secrets;
+- diagnosis report payloads are capped at 32 KB and are also checked for
+  unredacted secrets.
+
 ## Project Awareness Gate
 
 Use `hades_backend_project_awareness_status` from the agent, or the backend API

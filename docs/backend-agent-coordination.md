@@ -1791,3 +1791,36 @@ Resta fuori da questa slice:
 
 - Feature tests remoti P0-7 con SQLite in-memory.
 - CI gate dedicato lightweight.
+
+## Esecuzione evidence safety policy Hades - 2026-07-07
+
+Stato: avviata la slice P0-8 del piano "Bug Root Cause Awareness".
+
+Integrazione backend remota:
+
+- Commit remoto `a110d52 feat: enforce Hades evidence safety policy`.
+- Nuovo service `App\Services\Hades\HadesEvidencePolicy`.
+- `POST /api/hades/v1/bug-evidence` rifiuta payload oltre 64 KB e contenuti
+  con bearer token, API key, cookie, password, private key o secret assignment
+  non redatti.
+- `POST /api/hades/v1/source-slices` rifiuta source slice oltre 64 KB o ancora
+  contenenti segreti non redatti.
+- `POST /api/hades/v1/diagnosis-reports` rifiuta payload oltre 32 KB e root
+  cause/mechanism/payload con segreti non redatti.
+
+Verifiche eseguite:
+
+- Remoto:
+  `vendor/bin/pint --test app/Services/Hades/HadesEvidencePolicy.php app/Http/Controllers/Hades/BugEvidenceController.php app/Http/Controllers/Hades/SourceSliceController.php app/Http/Controllers/Hades/DiagnosisReportController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `21 passed / 243 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `45 passed / 459 assertions`.
+
+Resta fuori da questa slice:
+
+- Dashboard policy UI prima di abilitare source slices.
+- Delete/export project/user e retention cleanup backend.
