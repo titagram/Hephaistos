@@ -3586,6 +3586,27 @@ Verifiche eseguite:
   `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato.
 
+## Esecuzione dashboard policy controls - 2026-07-07
+
+Stato: completata una tranche locale P1-4 sulla dashboard backend.
+
+Modifiche locali:
+
+- Nuovo pannello `Policy controls` in `web/src/pages/BackendPage.tsx`.
+- Mostra coverage source slices e bug evidence per binding.
+- Mostra policy blockers derivati da missing evidence/source/policy.
+- Porta in primo piano i backend jobs di source/evidence/artifact/indexing e
+  riusa le azioni dashboard approve/refuse gia' esistenti.
+
+Verifiche eseguite:
+
+- Web typecheck: `npm run typecheck` in `web/` passato.
+- Web lint mirato: `npx eslint src/pages/BackendPage.tsx --max-warnings=0`
+  passato.
+- `npm run lint -- --max-warnings=0 src/pages/BackendPage.tsx` fallisce
+  perche' lo script linta tutto `web/` e intercetta errori preesistenti in file
+  non toccati; il file modificato passa con ESLint diretto.
+
 ## Esecuzione no-codebase tool order gate Hades - 2026-07-07
 
 Stato: completata tranche locale P0-6/P0-7/P1-5.

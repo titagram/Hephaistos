@@ -11,6 +11,7 @@ import {
   Play,
   RefreshCw,
   Server,
+  ShieldCheck,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -137,6 +138,32 @@ function latestQualityUpdate(status: HadesBackendStatus): number | null {
 function sourceFreeReadyCount(status: HadesBackendStatus): number {
   return status.awareness?.diagnosable_without_source_bindings
     ?? status.bindings.filter((binding) => Boolean(binding.awareness?.diagnosable_without_source)).length;
+}
+
+function coverageReady(status: HadesBackendStatus, key: "source_slices" | "bug_evidence"): number {
+  return status.bindings.filter((binding) => {
+    const coverage = binding.awareness?.coverage?.[key];
+    return ["current", "present", "ready"].includes(coverage?.status || "");
+  }).length;
+}
+
+function policyMissing(status: HadesBackendStatus): string[] {
+  return qualityMissing(status).filter((item) => {
+    const lower = item.toLowerCase();
+    return lower.includes("source") || lower.includes("evidence") || lower.includes("policy");
+  });
+}
+
+function isPolicyJob(job: HadesBackendJob): boolean {
+  const text = [job.capability, job.status, ...job.payload_keys].join(" ").toLowerCase();
+  return (
+    text.includes("source") ||
+    text.includes("evidence") ||
+    text.includes("artifact") ||
+    text.includes("index") ||
+    text.includes("read_files") ||
+    text.includes("populate_backend_ast")
+  );
 }
 
 function reportSummaryValue(summary: Record<string, number> | undefined, key: string): number {
@@ -475,6 +502,140 @@ function GovernanceQualityPanel({ status }: { status: HadesBackendStatus }) {
   );
 }
 
+type ReviewActionRunner = (
+  key: string,
+  action: () => Promise<HadesBackendActionResponse>,
+  success: string,
+) => Promise<void>;
+
+function PolicyControlsPanel({
+  status,
+  jobs,
+  busyAction,
+  runReviewAction,
+}: {
+  status: HadesBackendStatus;
+  jobs: HadesBackendJob[];
+  busyAction: string | null;
+  runReviewAction: ReviewActionRunner;
+}) {
+  const total = status.awareness?.bindings ?? status.bindings.length;
+  const sourceReady = coverageReady(status, "source_slices");
+  const evidenceReady = coverageReady(status, "bug_evidence");
+  const missing = policyMissing(status);
+  const policyJobs = jobs.filter(isPolicyJob);
+  const waiting = policyJobs.filter((job) => job.status === "waiting_confirmation");
+  const panelStatus = waiting.length > 0 || missing.length > 0 ? "attention" : "ready";
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <ShieldCheck className="h-4 w-4" />
+            Policy controls
+          </H2>
+          <Badge tone={statusTone(panelStatus)}>{panelStatus}</Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Source slices</div>
+            <div className="mt-1 text-lg font-semibold">{sourceReady}/{total}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Bug evidence</div>
+            <div className="mt-1 text-lg font-semibold">{evidenceReady}/{total}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Policy reviews</div>
+            <div className="mt-1 text-lg font-semibold">{waiting.length}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Policy blockers</div>
+            <div className="mt-1 text-lg font-semibold">{missing.length}</div>
+          </div>
+        </div>
+
+        {missing.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {missing.map((item) => (
+              <Badge tone="warning" key={item}>{titleLabel(item)}</Badge>
+            ))}
+          </div>
+        )}
+
+        {waiting.length > 0 ? (
+          <div className="grid gap-2">
+            {waiting.slice(0, 4).map((job) => (
+              <div className="border border-border bg-background/40 px-3 py-3" key={job.job_id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      <span className="truncate">{job.capability}</span>
+                      <Badge tone={statusTone(job.status)}>{job.status}</Badge>
+                    </div>
+                    <ReviewMeta>
+                      {job.job_id} / {job.workspace_binding_id}
+                    </ReviewMeta>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      size="sm"
+                      prefix={
+                        busyAction === `job:${job.job_id}:approve` ? (
+                          <Spinner />
+                        ) : (
+                          <Play className="h-4 w-4" />
+                        )
+                      }
+                      disabled={busyAction !== null}
+                      onClick={() =>
+                        void runReviewAction(
+                          `job:${job.job_id}:approve`,
+                          () => api.approveHadesBackendJob(job.job_id),
+                          "Backend job approved",
+                        )
+                      }
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      prefix={
+                        busyAction === `job:${job.job_id}:refuse` ? (
+                          <Spinner />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )
+                      }
+                      disabled={busyAction !== null}
+                      onClick={() =>
+                        void runReviewAction(
+                          `job:${job.job_id}:refuse`,
+                          () => api.refuseHadesBackendJob(job.job_id),
+                          "Backend job refused",
+                        )
+                      }
+                    >
+                      Refuse
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="border border-dashed border-border px-3 py-4 text-sm text-muted-foreground">
+            No source or evidence policy reviews
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function IdentityRecoveryPanel({ status }: { status: HadesBackendStatus }) {
   const identity = status.identity;
   if (!identity) return null;
@@ -761,6 +922,12 @@ export default function BackendPage() {
 
       <AwarenessPanel status={status} />
       <DiagnosisQualityPanel status={status} />
+      <PolicyControlsPanel
+        status={status}
+        jobs={jobs}
+        busyAction={busyAction}
+        runReviewAction={runReviewAction}
+      />
       <GovernanceQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />
 
