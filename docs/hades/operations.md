@@ -113,7 +113,10 @@ from a linked workspace. Optional `--steps`, `--expected`, `--actual`,
 `--severity`, and `--environment` fields are stored in a bounded
 `hades.bug_intake.v1` payload. Repeat `--test-output <file>` and `--log <file>`
 to attach redacted `failing_test` and `log_excerpt` evidence to the created bug
-report.
+report. Add `--deploy-commit <sha>` when the affected environment may be
+running a different version from the indexed workspace; Hades stores a
+`deploy_version` evidence item and marks `mismatch=true` when the deployed
+commit differs from the linked workspace head.
 
 Diagnosis outcomes should be persisted with
 `hades_backend_diagnosis_report_create` / `POST /api/hades/v1/diagnosis-reports`
@@ -317,11 +320,15 @@ bug evidence before asking for a root cause:
 ```bash
 hades backend ingest-test ./phpunit.log --bug-report-id <bug-report-id>
 hades backend ingest-log ./storage/logs/laravel.log --bug-report-id <bug-report-id>
+hades backend ingest-deploy --deploy-commit <deployed-sha> --bug-report-id <bug-report-id>
 ```
 
-Both commands read a bounded excerpt, redact likely tokens/API keys/bearer
-headers, extract lightweight stack frames when possible, and upload
-`failing_test` or `log_excerpt` evidence to the linked backend workspace.
+`ingest-test` and `ingest-log` read a bounded excerpt, redact likely
+tokens/API keys/bearer headers, extract lightweight stack frames when possible,
+and upload `failing_test` or `log_excerpt` evidence to the linked backend
+workspace. `ingest-deploy` uploads a `hades.deploy_version.v1` payload with the
+deployed commit, the indexed workspace head when known, and an explicit mismatch
+flag.
 
 For legacy raw chunk notes, use `hades backend backfill-note <file> --json`
 first. Add `--create-proposals` only after reviewing the candidate facts. The

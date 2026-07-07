@@ -1253,6 +1253,92 @@ def test_backend_ingest_log_uploads_redacted_runtime_log_evidence(monkeypatch, t
     assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(payload)
 
 
+def test_backend_ingest_deploy_uploads_mismatch_evidence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    workspace_head = "a" * 40
+    deployed = "b" * 40
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit=workspace_head,
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.evidence = []
+            self.closed = 0
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": "ev_deploy_1"}}
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="ingest-deploy",
+            bug_report_id="bug_1",
+            deploy_commit=deployed,
+            environment="production",
+            json=True,
+            source=None,
+            workspace_head=None,
+        )
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    payload = fake.evidence[0]
+
+    assert rc == 0
+    assert result["evidence_id"] == "ev_deploy_1"
+    assert result["mismatch"] is True
+    assert payload["kind"] == "deploy_version"
+    assert payload["retention_class"] == "runtime_evidence"
+    assert payload["summary"].startswith("Deploy commit mismatch")
+    assert payload["payload"] == {
+        "schema": "hades.deploy_version.v1",
+        "source": "deploy",
+        "environment": "production",
+        "deploy_commit": deployed,
+        "deploy_commit_short": "b" * 12,
+        "workspace_head_commit": workspace_head,
+        "workspace_head_commit_short": "a" * 12,
+        "mismatch": True,
+    }
+    assert fake.closed == 1
+
+
 def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     workspace = tmp_path / "repo"
@@ -1292,7 +1378,7 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
             repo_root=str(workspace),
             git_remote_display="",
             git_remote_hash="",
-            head_commit="",
+            head_commit="a" * 40,
             backend_workspace_binding_id="wb_1",
         )
 
@@ -1320,6 +1406,8 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
         SimpleNamespace(
             actual="HTTP 500",
             backend_action="bug-intake",
+            deploy_commit="b" * 40,
+            deploy_source=None,
             environment="staging",
             expected="HTTP 200",
             json=True,
@@ -1329,19 +1417,22 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
             symptom="Opening order detail returns HTTP 500",
             test_output=[str(test_output)],
             title="Order detail 500",
+            workspace_head=None,
         )
     )
     result = json.loads(capsys.readouterr().out)
 
     assert rc == 0
     assert result["bug_report_id"] == "bug_1"
-    assert result["evidence_ids"] == ["ev_1", "ev_2"]
+    assert result["evidence_ids"] == ["ev_1", "ev_2", "ev_3"]
     assert fake.closed == 1
     assert fake.reports[0]["title"] == "Order detail 500"
     assert fake.reports[0]["payload"]["schema"] == "hades.bug_intake.v1"
     assert fake.reports[0]["payload"]["steps"] == "Open /orders/1"
-    assert [item["kind"] for item in fake.evidence] == ["failing_test", "log_excerpt"]
+    assert [item["kind"] for item in fake.evidence] == ["failing_test", "log_excerpt", "deploy_version"]
     assert all(item["bug_report_id"] == "bug_1" for item in fake.evidence)
+    assert fake.evidence[2]["payload"]["mismatch"] is True
+    assert fake.evidence[2]["payload"]["environment"] == "staging"
     assert "sk-live-secretvalue12345" not in json.dumps(fake.evidence)
     assert "secretvalue12345" not in json.dumps(fake.evidence)
 

@@ -1910,6 +1910,17 @@ Integrazione locale:
   schema payload (`hades.test_output.v1` o `hades.runtime_log_excerpt.v1`) e
   provano a estrarre frame `file:line`.
 
+Follow-up locale completato:
+
+- Nuovo subcommand `hades backend ingest-deploy --deploy-commit <sha>`.
+- `bug-intake` accetta `--deploy-commit` e allega automaticamente evidence
+  `kind=deploy_version` al bug report creato.
+- Payload `hades.deploy_version.v1`: conserva commit deployato, workspace head
+  indicizzato, environment/source e `mismatch=true|false|null`.
+- Summary cercabile: in caso di divergenza inizia con `Deploy commit mismatch`,
+  cosi' una diagnosi senza source code puo' rilevare che sta guardando una
+  fotografia progetto diversa da quella deployata.
+
 Verifiche eseguite:
 
 - Locale:

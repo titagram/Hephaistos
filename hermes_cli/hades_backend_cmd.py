@@ -121,6 +121,13 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     ingest_log.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
     ingest_log.add_argument("--source", default=None, help="Evidence source label")
     ingest_log.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
+    ingest_deploy = sub.add_parser("ingest-deploy", help="Upload deployed-version context as Hades bug evidence")
+    ingest_deploy.add_argument("--deploy-commit", required=True, help="Commit currently deployed in the affected environment")
+    ingest_deploy.add_argument("--workspace-head", default=None, help="Indexed workspace commit; defaults to the linked workspace head")
+    ingest_deploy.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
+    ingest_deploy.add_argument("--environment", default=None, help="Affected environment label")
+    ingest_deploy.add_argument("--source", default=None, help="Evidence source label")
+    ingest_deploy.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
     bug_intake = sub.add_parser("bug-intake", help="Create a structured Hades bug report with optional evidence files")
     bug_intake.add_argument("--title", required=True, help="Short bug title")
     bug_intake.add_argument("--symptom", required=True, help="Observed symptom")
@@ -131,6 +138,9 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     bug_intake.add_argument("--environment", default=None, help="Environment or deploy context")
     bug_intake.add_argument("--test-output", action="append", default=None, help="Failing test output file; repeatable")
     bug_intake.add_argument("--log", action="append", default=None, help="Runtime log file; repeatable")
+    bug_intake.add_argument("--deploy-commit", default=None, help="Commit currently deployed in the affected environment")
+    bug_intake.add_argument("--workspace-head", default=None, help="Indexed workspace commit; defaults to the linked workspace head")
+    bug_intake.add_argument("--deploy-source", default=None, help="Source label for deploy-version evidence")
     bug_intake.add_argument("--json", action="store_true", help="Emit machine-readable intake result")
     backfill_note = sub.add_parser("backfill-note", help="Preview note-quality backfill for a raw chunk or note file")
     backfill_note.add_argument("file", help="Path to a raw chunk or note file")
@@ -879,6 +889,62 @@ def _stack_frames(text: str) -> list[dict[str, Any]]:
     return frames
 
 
+def _clean_commit(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _short_commit(value: str | None) -> str:
+    clean = _clean_commit(value)
+    return clean[:12] if clean else "unknown"
+
+
+def _commit_mismatch(deploy_commit: str, workspace_head_commit: str) -> bool | None:
+    deploy = _clean_commit(deploy_commit)
+    workspace = _clean_commit(workspace_head_commit)
+    if not deploy or not workspace:
+        return None
+    return deploy.lower() != workspace.lower()
+
+
+def _deploy_version_summary(
+    *,
+    deploy_commit: str,
+    workspace_head_commit: str,
+    environment: str | None,
+) -> str:
+    env = f" ({environment})" if environment else ""
+    mismatch = _commit_mismatch(deploy_commit, workspace_head_commit)
+    if mismatch is True:
+        return (
+            "Deploy commit mismatch"
+            f"{env}: deploy {_short_commit(deploy_commit)} != indexed workspace {_short_commit(workspace_head_commit)}"
+        )
+    if mismatch is False:
+        return f"Deploy commit matches indexed workspace{env}: {_short_commit(deploy_commit)}"
+    if _clean_commit(workspace_head_commit):
+        return f"Deploy commit unknown{env}; indexed workspace is {_short_commit(workspace_head_commit)}"
+    return f"Deploy commit {_short_commit(deploy_commit)}{env}; indexed workspace commit unknown"
+
+
+def _deploy_version_payload(
+    *,
+    deploy_commit: str,
+    workspace_head_commit: str,
+    environment: str | None,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "hades.deploy_version.v1",
+        "source": source,
+        "environment": environment,
+        "deploy_commit": _clean_commit(deploy_commit) or None,
+        "deploy_commit_short": _short_commit(deploy_commit),
+        "workspace_head_commit": _clean_commit(workspace_head_commit) or None,
+        "workspace_head_commit_short": _short_commit(workspace_head_commit),
+        "mismatch": _commit_mismatch(deploy_commit, workspace_head_commit),
+    }
+
+
 def _evidence_payload(kind: str, text: str, source: str, truncated: bool) -> dict[str, Any]:
     if kind == "failing_test":
         return {
@@ -954,6 +1020,96 @@ def _cmd_ingest_test(args: argparse.Namespace) -> int:
 
 def _cmd_ingest_log(args: argparse.Namespace) -> int:
     return _cmd_ingest_evidence(args, kind="log_excerpt", retention_class="log_excerpt")
+
+
+def _create_deploy_version_evidence(
+    client: object,
+    binding: db.WorkspaceBinding,
+    *,
+    bug_report_id: str | None,
+    deploy_commit: str,
+    workspace_head_commit: str | None,
+    environment: str | None,
+    source: str,
+) -> str | None:
+    deploy_commit = _clean_commit(deploy_commit)
+    if not deploy_commit:
+        raise ValueError("deploy commit is required")
+    workspace_head_commit = _clean_commit(workspace_head_commit or binding.head_commit)
+    payload = _deploy_version_payload(
+        deploy_commit=deploy_commit,
+        workspace_head_commit=workspace_head_commit,
+        environment=environment,
+        source=source,
+    )
+    response = client.create_bug_evidence(
+        project_id=binding.project_id,
+        workspace_binding_id=binding.backend_workspace_binding_id,
+        bug_report_id=bug_report_id,
+        kind="deploy_version",
+        summary=_deploy_version_summary(
+            deploy_commit=deploy_commit,
+            workspace_head_commit=workspace_head_commit,
+            environment=environment,
+        ),
+        payload=payload,
+        source=source,
+        redactions=0,
+        retention_class="runtime_evidence",
+    )
+    evidence = response.get("evidence") if isinstance(response.get("evidence"), dict) else response
+    return str(evidence.get("id")) if isinstance(evidence, dict) and evidence.get("id") else None
+
+
+def _cmd_ingest_deploy(args: argparse.Namespace) -> int:
+    try:
+        _agent, binding = _current_workspace_binding()
+        deploy_commit = _clean_commit(getattr(args, "deploy_commit", None))
+        workspace_head_commit = _clean_commit(getattr(args, "workspace_head", None) or binding.head_commit)
+        source = str(getattr(args, "source", None) or "deploy")
+        environment = getattr(args, "environment", None)
+
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            evidence_id = _create_deploy_version_evidence(
+                client,
+                binding,
+                bug_report_id=getattr(args, "bug_report_id", None) or None,
+                deploy_commit=deploy_commit,
+                workspace_head_commit=workspace_head_commit,
+                environment=environment,
+                source=source,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend ingest deploy: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    result = {
+        "status": "ok",
+        "kind": "deploy_version",
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "evidence_id": evidence_id,
+        "deploy_commit": deploy_commit,
+        "workspace_head_commit": workspace_head_commit or None,
+        "mismatch": _commit_mismatch(deploy_commit, workspace_head_commit),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        suffix = "unknown"
+        if result["mismatch"] is True:
+            suffix = f"mismatch deploy {_short_commit(deploy_commit)} != workspace {_short_commit(workspace_head_commit)}"
+        elif result["mismatch"] is False:
+            suffix = f"matches {_short_commit(deploy_commit)}"
+        print(f"Hades bug evidence stored: {evidence_id or 'created'} (deploy_version, {suffix})")
+    return 0
 
 
 def _cmd_backfill_note(args: argparse.Namespace) -> int:
@@ -1133,6 +1289,18 @@ def _cmd_bug_intake(args: argparse.Namespace) -> int:
                         retention_class="log_excerpt",
                     )
                 )
+            if getattr(args, "deploy_commit", None):
+                evidence_ids.append(
+                    _create_deploy_version_evidence(
+                        client,
+                        binding,
+                        bug_report_id=bug_report_id,
+                        deploy_commit=str(args.deploy_commit),
+                        workspace_head_commit=getattr(args, "workspace_head", None) or binding.head_commit,
+                        environment=getattr(args, "environment", None),
+                        source=str(getattr(args, "deploy_source", None) or "deploy"),
+                    )
+                )
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1231,6 +1399,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_ingest_test(args)
     if action == "ingest-log":
         return _cmd_ingest_log(args)
+    if action == "ingest-deploy":
+        return _cmd_ingest_deploy(args)
     if action == "bug-intake":
         return _cmd_bug_intake(args)
     if action == "backfill-note":
@@ -1240,7 +1410,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0
