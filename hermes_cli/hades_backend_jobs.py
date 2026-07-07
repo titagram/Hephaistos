@@ -3086,6 +3086,93 @@ def _php_method_body_slice(source: str, method_match: re.Match[str]) -> tuple[st
     return source[start:end], start
 
 
+def _php_form_request_authorization_result(source: str, method_match: re.Match[str]) -> str:
+    method_body, _offset = _php_method_body_slice(source, method_match)
+    if re.search(r"\breturn\s+false\s*;", method_body):
+        return "deny"
+    if re.search(r"\breturn\s+true\s*;", method_body):
+        return "allow"
+    return "dynamic"
+
+
+def _php_form_request_authorization_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    authorizations: dict[str, dict[str, Any]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            role = _php_role(rel, fqcn, extends_fqcn)
+            classes.append({"name": fqcn, "role": role, "offset": match.start()})
+        for method_match in PHP_METHOD_RE.finditer(source):
+            if method_match.group("name") != "authorize":
+                continue
+            class_info = _class_context(classes, method_match.start())
+            if not class_info or class_info.get("role") != "form_request":
+                continue
+            authorizations[str(class_info["name"])] = {
+                "authorization_result": _php_form_request_authorization_result(source, method_match),
+                "path": rel,
+                "line": _line_number(source, method_match.start()),
+            }
+    return authorizations
+
+
+def _append_php_route_form_request_authorization_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    param_name: str,
+    request_class: str,
+    authorization: dict[str, Any] | None,
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not authorization:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_request_authorization",
+                "from": f"route:{_php_route_id(route)}",
+                "to": request_class,
+                "handler": method_symbol,
+                "param": param_name,
+                "authorization_result": authorization.get("authorization_result"),
+                "authorization_path": authorization.get("path"),
+                "authorization_line": authorization.get("line"),
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3224,6 +3311,11 @@ def _build_php_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
+    form_request_authorization_by_class = _php_form_request_authorization_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
     routes = _laravel_routes(workspace_root, file_refs)
     routes_by_handler: dict[str, list[dict[str, Any]]] = {}
     for route in routes:
@@ -3355,6 +3447,23 @@ def _build_php_graph(
                             "model": resource_model,
                             "path": rel,
                             "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+            if role == "form_request":
+                authorization = form_request_authorization_by_class.get(fqcn)
+                if authorization:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "request_authorization",
+                            "from": fqcn,
+                            "to": "authorization:form_request",
+                            "authorization_result": authorization.get("authorization_result"),
+                            "authorization_path": authorization.get("path"),
+                            "authorization_line": authorization.get("line"),
+                            "path": rel,
+                            "line": authorization.get("line"),
                         },
                         max_edges=max_edges,
                     ) or truncated
@@ -3572,6 +3681,15 @@ def _build_php_graph(
                         str(param_match.group("name") or ""),
                         param_class,
                         form_request_validation_by_class.get(param_class) or [],
+                        edges,
+                        max_edges=max_edges,
+                    ) or truncated
+                    truncated = _append_php_route_form_request_authorization_edges(
+                        routes_by_handler,
+                        method_symbol,
+                        str(param_match.group("name") or ""),
+                        param_class,
+                        form_request_authorization_by_class.get(param_class),
                         edges,
                         max_edges=max_edges,
                     ) or truncated

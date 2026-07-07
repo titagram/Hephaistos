@@ -681,6 +681,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    public function rules(): array {\n"
         "        return ['customer_id' => 'required|integer|exists:customers,id', 'status' => 'required|string'];\n"
         "    }\n"
+        "    public function authorize(): bool { return false; }\n"
         "}\n",
         encoding="utf-8",
     )
@@ -876,7 +877,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 60, "max_symbols": 90, "max_edges": 300},
+            "payload": {"max_files": 60, "max_symbols": 90, "max_edges": 360},
         },
         workspace_root=workspace,
     )
@@ -931,6 +932,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("method", "OrderResource@toArray") in symbols
+    assert ("method", "StoreOrderRequest@authorize") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
     assert ("route_handler", "route:invoices.index", "InvoiceController@index") in edges
     assert ("route_handler", "route:invoices.show", "InvoiceController@show") in edges
@@ -957,6 +959,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_model_binding", "route:orders.show", "App\\Models\\Order") in edges
     assert ("route_model_table", "route:orders.show", "table:orders") in edges
     assert ("route_uses_form_request", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
+    assert ("request_authorization", "App\\Http\\Requests\\StoreOrderRequest", "authorization:form_request") in edges
+    assert ("route_request_authorization", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("route_request_validation", "route:orders.show", "validation:customer_id") in edges
     assert ("route_request_validation", "route:orders.show", "validation:status") in edges
     assert ("route_validation_database_rule", "route:orders.show", "table:customers.id") in edges
@@ -1027,6 +1031,30 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "path": "routes/web.php",
         "line": 4,
         "column": "id",
+    } in artifact["edges"]
+    assert {
+        "kind": "request_authorization",
+        "from": "App\\Http\\Requests\\StoreOrderRequest",
+        "to": "authorization:form_request",
+        "authorization_result": "deny",
+        "authorization_path": "app/Http/Requests/StoreOrderRequest.php",
+        "authorization_line": 8,
+        "path": "app/Http/Requests/StoreOrderRequest.php",
+        "line": 8,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_request_authorization",
+        "from": "route:orders.show",
+        "to": "App\\Http\\Requests\\StoreOrderRequest",
+        "handler": "OrderController@show",
+        "param": "request",
+        "authorization_result": "deny",
+        "authorization_path": "app/Http/Requests/StoreOrderRequest.php",
+        "authorization_line": 8,
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
     } in artifact["edges"]
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges

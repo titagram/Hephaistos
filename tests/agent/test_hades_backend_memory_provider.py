@@ -175,6 +175,30 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "request_authorization",
+                "from": "App\\Http\\Requests\\StoreOrderRequest",
+                "to": "authorization:form_request",
+                "authorization_result": "deny",
+                "authorization_path": "app/Http/Requests/StoreOrderRequest.php",
+                "authorization_line": 8,
+                "path": "app/Http/Requests/StoreOrderRequest.php",
+                "line": 8,
+            },
+            {
+                "kind": "route_request_authorization",
+                "from": "route:orders.show",
+                "to": "App\\Http\\Requests\\StoreOrderRequest",
+                "handler": "OrderController@show",
+                "param": "request",
+                "authorization_result": "deny",
+                "authorization_path": "app/Http/Requests/StoreOrderRequest.php",
+                "authorization_line": 8,
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
                 "kind": "route_request_validation",
                 "from": "route:orders.show",
                 "to": "validation:customer_id",
@@ -1656,6 +1680,54 @@ def test_hades_backend_graph_search_finds_local_validation_database_rule_edges(m
         and "rule=exists" in item["summary"]
         and "table=customers" in item["summary"]
         and "column=id" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_form_request_authorization_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "StoreOrderRequest authorize deny route 403", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_request_authorization"
+        and ref["to"] == "App\\Http\\Requests\\StoreOrderRequest"
+        and ref["provenance"]["authorization_result"] == "deny"
+        for ref in graph_refs
+    )
+    assert any(
+        "authorization_result=deny" in item["summary"]
+        and "authorization_path=app/Http/Requests/StoreOrderRequest.php" in item["summary"]
         for item in result["items"]
     )
 

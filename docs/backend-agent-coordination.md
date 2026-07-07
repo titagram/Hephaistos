@@ -5399,3 +5399,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel FormRequest authorization graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per FormRequest authorization
+awareness metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` rileva `authorize()` nei Laravel FormRequest.
+- Il graph aggiunge `request_authorization` dal FormRequest e
+  `route_request_authorization` dalla route che usa quel FormRequest.
+- Il payload salva solo risultato statico bounded `allow`/`deny` quando il
+  metodo ritorna letteralmente `true`/`false`, oppure `dynamic`, piu' path/line;
+  non conserva corpo metodo o condizioni raw.
+- Il fallback locale di `hades_backend_graph_search` mostra
+  `authorization_result=...` e `authorization_path=...`, utile per diagnosticare
+  403 che nascono prima del controller.
+- Durante la tranche e' stata corretta una regressione di indentazione nel
+  blocco class-level `api_resource_table`, verificando che i FormRequest non
+  ricevano edge API Resource.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_form_request_authorization_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `81 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
