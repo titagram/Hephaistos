@@ -1058,6 +1058,66 @@ def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_pa
     assert "@@map" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_sql_schema_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "schema.sql").write_text(
+        "CREATE TABLE customers (\n"
+        "  id INTEGER PRIMARY KEY,\n"
+        "  email VARCHAR(255) NOT NULL UNIQUE\n"
+        ");\n"
+        "CREATE TABLE orders (\n"
+        "  id INTEGER PRIMARY KEY,\n"
+        "  customer_id INTEGER NOT NULL REFERENCES customers(id),\n"
+        "  total DECIMAL(10, 2),\n"
+        "  CONSTRAINT orders_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_sql_schema",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 10, "max_edges": 10},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["language"] == "sql"
+    assert artifact["framework"] == "sql"
+    assert set(tables) == {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} >= {"id", "customer_id", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "schema.sql",
+            "line": 7,
+        },
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "schema.sql",
+            "line": 9,
+        },
+    ]
+    assert ("schema_table", "schema.sql", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert "CREATE TABLE" not in str(artifact)
+    assert "CONSTRAINT orders_customer_fk" not in str(artifact)
+
+
 def test_populate_backend_ast_omits_symlinked_python_escape(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
