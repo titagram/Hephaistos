@@ -367,6 +367,9 @@ function GovernanceQualityPanel({ status }: { status: HadesBackendStatus }) {
   const reportStatus = report?.status || "not recorded";
   const summary = report?.summary;
   const actions = Array.isArray(report?.action_queue) ? report.action_queue.slice(0, 4) : [];
+  const history = quality?.history;
+  const historyEntries = Array.isArray(history?.entries) ? history.entries.slice(0, 4) : [];
+  const latestFailure = history?.latest_failure ?? null;
   const blockers = reportSummaryValue(summary, "blockers");
   const warnings = reportSummaryValue(summary, "warnings");
   const actionCount = reportSummaryValue(summary, "actions");
@@ -424,6 +427,47 @@ function GovernanceQualityPanel({ status }: { status: HadesBackendStatus }) {
         ) : (
           <div className="border border-border bg-background/40 px-3 py-2 text-sm">
             Run `hades backend quality-report --record`
+          </div>
+        )}
+
+        {historyEntries.length > 0 && (
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+            <div className="border border-border bg-background/40 px-3 py-2">
+              <div className="mb-2 text-xs uppercase text-muted-foreground">Recent reports</div>
+              <CountList counts={history?.by_status ?? {}} />
+            </div>
+            <div className="grid gap-2">
+              {historyEntries.map((entry, index) => (
+                <div className="border border-border bg-background/40 px-3 py-2" key={`${entry.recorded_at ?? index}-${entry.status ?? "unknown"}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <Badge tone={statusTone(entry.status)}>{entry.status || "unknown"}</Badge>
+                    <span className="text-xs text-muted-foreground">{formatAgo(entry.recorded_at)}</span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                    <span>Blockers {reportSummaryValue(entry.summary, "blockers")}</span>
+                    <span>Warnings {reportSummaryValue(entry.summary, "warnings")}</span>
+                    <span>Actions {reportSummaryValue(entry.summary, "actions")}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {latestFailure && (
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs uppercase text-muted-foreground">Latest failure</div>
+              <Badge tone={statusTone(latestFailure.status)}>{latestFailure.status || "unknown"}</Badge>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {(latestFailure.action_ids || []).slice(0, 5).map((id) => (
+                <Badge tone="warning" key={id}>{id}</Badge>
+              ))}
+              {(latestFailure.action_ids || []).length === 0 && (
+                <span className="text-sm text-muted-foreground">No action ids</span>
+              )}
+            </div>
           </div>
         )}
       </CardContent>

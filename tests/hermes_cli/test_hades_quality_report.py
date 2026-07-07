@@ -205,10 +205,79 @@ def test_backend_quality_report_command_records_latest_snapshot(monkeypatch, tmp
     with db.connect_closing() as conn:
         recorded = db.get_sync_state(conn, "last_quality_report")
         recorded_at = db.get_sync_state_updated_at(conn, "last_quality_report")
+        history = db.get_sync_state(conn, "quality_report_history")
 
     assert rc == 0
     assert recorded == payload
     assert recorded_at is not None
+    assert history is not None
+    assert history["schema"] == "hades.quality_report_history.v1"
+    assert history["entries"][0]["status"] == "passed"
+    assert history["entries"][0]["summary"] == {"blockers": 0, "warnings": 0, "actions": 0}
+
+
+def test_backend_quality_report_command_records_history_for_status_drilldown(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    data["runs"][0]["tool_calls"].append("read_file")
+    failed_fixture = tmp_path / "failed-no-codebase.json"
+    failed_fixture.write_text(json.dumps(data), encoding="utf-8")
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import backend_status_payload
+
+    clean_rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(FIXTURE_PATH),
+            skip_local_status=True,
+            record=True,
+            json=True,
+        )
+    )
+    capsys.readouterr()
+    failed_rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(failed_fixture),
+            skip_local_status=True,
+            record=True,
+            json=True,
+        )
+    )
+    latest = json.loads(capsys.readouterr().out)
+
+    with db.connect_closing() as conn:
+        history = db.get_sync_state(conn, "quality_report_history")
+        history_updated_at = db.get_sync_state_updated_at(conn, "quality_report_history")
+        latest_updated_at = db.get_sync_state_updated_at(conn, "last_quality_report")
+
+    status = backend_status_payload(
+        agent=SimpleNamespace(agent_id="agent_1", project_id="proj_1", base_url="https://backend.example", label="dev", capabilities={}),
+        bindings=[],
+        job_counts={},
+        proposal_counts={},
+        inbox_counts={"total": 0, "unread": 0},
+        last_summary=None,
+        last_error=None,
+        last_quality_report=latest,
+        last_quality_report_updated_at=latest_updated_at,
+        quality_report_history=history,
+        quality_report_history_updated_at=history_updated_at,
+        now=1_000,
+    )
+
+    assert clean_rc == 0
+    assert failed_rc == 1
+    assert history is not None
+    assert [entry["status"] for entry in history["entries"]] == ["failed", "passed"]
+    quality_history = status["quality"]["history"]
+    assert quality_history["total"] == 2
+    assert quality_history["by_status"] == {"failed": 1, "passed": 1}
+    assert quality_history["latest_failure"]["status"] == "failed"
+    assert "remove_forbidden_source_access" in quality_history["latest_failure"]["action_ids"]
 
 
 def test_backend_status_flags_missing_quality_report_baseline():

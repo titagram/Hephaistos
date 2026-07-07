@@ -1728,24 +1728,47 @@ export interface HadesBackendSyncState {
   background_updated_at?: number | null;
 }
 
+export interface HadesBackendQualityAction {
+  id?: string;
+  severity?: string;
+  message?: string;
+  count?: number;
+  value?: number;
+  status?: string;
+}
+
 export interface HadesBackendQualityReport {
   schema?: string | null;
   status?: string | null;
   summary?: Record<string, number>;
   metrics?: Record<string, unknown>;
-  action_queue?: Array<{
-    id?: string;
-    severity?: string;
-    message?: string;
-    count?: number;
-    value?: number;
-    status?: string;
-  }>;
+  action_queue?: HadesBackendQualityAction[];
+}
+
+export interface HadesBackendQualityHistoryEntry {
+  generated_at?: number | null;
+  recorded_at?: number | null;
+  status?: string | null;
+  summary?: Record<string, number>;
+  action_ids?: string[];
+  action_queue?: HadesBackendQualityAction[];
+}
+
+export interface HadesBackendQualityHistory {
+  schema?: string | null;
+  updated_at?: number | null;
+  limit?: number;
+  total?: number;
+  by_status?: Record<string, number>;
+  entries?: HadesBackendQualityHistoryEntry[];
+  latest_failure?: HadesBackendQualityHistoryEntry | null;
 }
 
 export interface HadesBackendQualityState {
   last_report: HadesBackendQualityReport | null;
   last_report_updated_at?: number | null;
+  staleness?: Record<string, unknown>;
+  history?: HadesBackendQualityHistory;
 }
 
 export interface HadesBackendStatus {

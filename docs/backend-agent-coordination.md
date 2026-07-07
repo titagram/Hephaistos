@@ -3587,6 +3587,37 @@ Resta fuori da questa tranche:
   costi e variabilita' esterna; il loop Hermes, i tool esposti e la sequenza
   di dispatch sono pero' coperti localmente.
 
+## Esecuzione Hades quality history and drilldown - 2026-07-07
+
+Stato: completata tranche locale/dashboard P1-5.
+
+Agent locale e dashboard:
+
+- `hades backend quality-report --record` salva ancora `last_quality_report`,
+  ma mantiene anche `quality_report_history` in `sync_state`.
+- Lo storico e' bounded agli ultimi 10 snapshot e conserva status, summary e
+  action queue troncata.
+- `hades backend status --json` espone `quality.history` con `entries`,
+  `by_status`, `latest_failure` e action ids.
+- La dashboard backend mostra nel pannello `Governance quality` i recent report,
+  conteggi per stato e latest failure/action ids.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_quality_report.py tests/run_agent/test_run_agent.py::TestExecuteToolCalls::test_no_codebase_hades_diagnosis_runs_ordered_tool_chain`
+  passato: `11 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_cmd.py hermes_cli/hades_backend_status.py tests/hermes_cli/test_hades_quality_report.py`
+  passato; `py_compile` sugli stessi file passato.
+- Frontend:
+  `npm run --prefix web typecheck` passato.
+
+Resta fuori da questa tranche:
+
+- Storico remoto/team-wide e trend di lungo periodo; questa tranche rende
+  visibile lo storico locale registrato sul device.
+
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
 Stato: completata una tranche locale P0-6.

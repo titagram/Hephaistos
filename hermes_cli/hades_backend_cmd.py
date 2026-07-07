@@ -7,6 +7,7 @@ import json
 import platform
 import re
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -22,7 +23,12 @@ from hermes_cli.hades_backend_actions import (
     refuse_backend_job,
 )
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
-from hermes_cli.hades_backend_status import load_backend_status_payload, support_report_payload
+from hermes_cli.hades_backend_status import (
+    QUALITY_REPORT_HISTORY_KEY,
+    QUALITY_REPORT_HISTORY_LIMIT,
+    load_backend_status_payload,
+    support_report_payload,
+)
 from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
 from hermes_cli.hades_quality_report import build_hades_quality_report
 from hermes_cli import hades_backend_db as db
@@ -302,7 +308,7 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
     )
     if getattr(args, "record", False):
         with db.connect_closing() as conn:
-            db.record_sync_state(conn, "last_quality_report", report)
+            _record_quality_report_snapshot(conn, report)
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
     else:
@@ -313,6 +319,42 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
         for action in report["action_queue"]:
             print(f"  Action:   [{action['severity']}] {action['id']} - {action['message']}")
     return 1 if report["status"] == "failed" else 0
+
+
+def _record_quality_report_snapshot(conn, report: dict[str, Any]) -> None:
+    recorded_at = int(time.time())
+    db.record_sync_state(conn, "last_quality_report", report)
+    previous = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY) or {}
+    previous_entries = previous.get("entries") if isinstance(previous, dict) else []
+    entries = [_quality_history_entry(report, recorded_at)]
+    if isinstance(previous_entries, list):
+        entries.extend(entry for entry in previous_entries if isinstance(entry, dict))
+    db.record_sync_state(
+        conn,
+        QUALITY_REPORT_HISTORY_KEY,
+        {
+            "schema": "hades.quality_report_history.v1",
+            "limit": QUALITY_REPORT_HISTORY_LIMIT,
+            "entries": entries[:QUALITY_REPORT_HISTORY_LIMIT],
+        },
+    )
+
+
+def _quality_history_entry(report: dict[str, Any], recorded_at: int) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    action_queue = report.get("action_queue") if isinstance(report.get("action_queue"), list) else []
+    return {
+        "schema": report.get("schema"),
+        "generated_at": report.get("generated_at"),
+        "recorded_at": recorded_at,
+        "status": report.get("status"),
+        "summary": {
+            "blockers": int(summary.get("blockers") or 0),
+            "warnings": int(summary.get("warnings") or 0),
+            "actions": int(summary.get("actions") or 0),
+        },
+        "action_queue": [action for action in action_queue if isinstance(action, dict)][:10],
+    }
 
 
 def _cmd_privacy_export(args: argparse.Namespace) -> int:

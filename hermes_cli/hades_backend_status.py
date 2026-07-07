@@ -15,6 +15,8 @@ from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
 ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])(?:/[^\s,;:]+)+")
 WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
 QUALITY_REPORT_STALE_SECONDS = 7 * 24 * 60 * 60
+QUALITY_REPORT_HISTORY_KEY = "quality_report_history"
+QUALITY_REPORT_HISTORY_LIMIT = 10
 
 
 def load_backend_status_payload() -> dict[str, Any]:
@@ -41,10 +43,12 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_error = db.get_sync_state(conn, "last_sync_error")
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report = db.get_sync_state(conn, "last_quality_report")
+            quality_report_history = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY)
             last_summary_updated_at = db.get_sync_state_updated_at(conn, "last_sync_summary")
             last_error_updated_at = db.get_sync_state_updated_at(conn, "last_sync_error")
             background_sync_updated_at = db.get_sync_state_updated_at(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report_updated_at = db.get_sync_state_updated_at(conn, "last_quality_report")
+            quality_report_history_updated_at = db.get_sync_state_updated_at(conn, QUALITY_REPORT_HISTORY_KEY)
         else:
             bindings = []
             memory_caches = {}
@@ -55,10 +59,12 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_error = None
             background_sync = None
             last_quality_report = None
+            quality_report_history = None
             last_summary_updated_at = None
             last_error_updated_at = None
             background_sync_updated_at = None
             last_quality_report_updated_at = None
+            quality_report_history_updated_at = None
 
     return backend_status_payload(
         agent=agent,
@@ -76,6 +82,8 @@ def load_backend_status_payload() -> dict[str, Any]:
         background_sync_updated_at=background_sync_updated_at,
         last_quality_report=last_quality_report,
         last_quality_report_updated_at=last_quality_report_updated_at,
+        quality_report_history=quality_report_history,
+        quality_report_history_updated_at=quality_report_history_updated_at,
     )
 
 
@@ -182,13 +190,21 @@ def backend_status_payload(
     background_sync_updated_at: int | None = None,
     last_quality_report: dict[str, Any] | None = None,
     last_quality_report_updated_at: int | None = None,
+    quality_report_history: dict[str, Any] | None = None,
+    quality_report_history_updated_at: int | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
     refused = _count(proposal_counts, "refused") + _count(proposal_counts, "conflicted")
     waiting = _count(job_counts, "waiting_confirmation")
     background_failed = bool(background_sync and background_sync.get("status") == "failed")
-    quality_state = _quality_payload(last_quality_report, last_quality_report_updated_at, now=current_time)
+    quality_state = _quality_payload(
+        last_quality_report,
+        last_quality_report_updated_at,
+        history=quality_report_history,
+        history_updated_at=quality_report_history_updated_at,
+        now=current_time,
+    )
     quality_stale = bool(quality_state.get("staleness", {}).get("stale"))
     quality_missing = bool(quality_state.get("staleness", {}).get("missing"))
     quality_failed = bool(last_quality_report and last_quality_report.get("status") == "failed")
@@ -264,7 +280,14 @@ def backend_status_payload(
     }
 
 
-def _quality_payload(report: dict[str, Any] | None, updated_at: int | None, *, now: int | None = None) -> dict[str, Any]:
+def _quality_payload(
+    report: dict[str, Any] | None,
+    updated_at: int | None,
+    *,
+    history: dict[str, Any] | None = None,
+    history_updated_at: int | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
     age_seconds = max(0, current_time - int(updated_at or 0)) if updated_at else None
     staleness = {
@@ -273,11 +296,13 @@ def _quality_payload(report: dict[str, Any] | None, updated_at: int | None, *, n
         "age_seconds": age_seconds,
         "stale_after_seconds": QUALITY_REPORT_STALE_SECONDS,
     }
+    history_payload = _quality_history_payload(history, history_updated_at)
     if not isinstance(report, dict):
         return {
             "last_report": None,
             "last_report_updated_at": None,
             "staleness": staleness,
+            "history": history_payload,
         }
     action_queue = report.get("action_queue") if isinstance(report.get("action_queue"), list) else []
     return {
@@ -291,7 +316,67 @@ def _quality_payload(report: dict[str, Any] | None, updated_at: int | None, *, n
         },
         "last_report_updated_at": updated_at,
         "staleness": staleness,
+        "history": history_payload,
     }
+
+
+def _quality_history_payload(history: dict[str, Any] | None, updated_at: int | None) -> dict[str, Any]:
+    raw_entries = history.get("entries") if isinstance(history, dict) else []
+    entries: list[dict[str, Any]] = []
+    if isinstance(raw_entries, list):
+        for raw in raw_entries[:QUALITY_REPORT_HISTORY_LIMIT]:
+            if not isinstance(raw, dict):
+                continue
+            summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+            action_queue = raw.get("action_queue") if isinstance(raw.get("action_queue"), list) else []
+            actions = [action for action in action_queue if isinstance(action, dict)][:5]
+            action_ids = [str(action.get("id")) for action in actions if action.get("id")]
+            entries.append(
+                {
+                    "generated_at": raw.get("generated_at"),
+                    "recorded_at": raw.get("recorded_at"),
+                    "status": raw.get("status"),
+                    "summary": {
+                        "blockers": _nonnegative_int(summary.get("blockers")),
+                        "warnings": _nonnegative_int(summary.get("warnings")),
+                        "actions": _nonnegative_int(summary.get("actions")),
+                    },
+                    "action_ids": action_ids,
+                    "action_queue": actions,
+                }
+            )
+
+    by_status: dict[str, int] = {}
+    for entry in entries:
+        status = str(entry.get("status") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+    latest_failure = next(
+        (
+            entry
+            for entry in entries
+            if entry.get("status") in {"failed", "attention"}
+            or _nonnegative_int(entry.get("summary", {}).get("blockers")) > 0
+            or _nonnegative_int(entry.get("summary", {}).get("warnings")) > 0
+        ),
+        None,
+    )
+    return {
+        "schema": "hades.quality_report_history.v1",
+        "updated_at": updated_at,
+        "limit": QUALITY_REPORT_HISTORY_LIMIT,
+        "total": len(entries),
+        "by_status": by_status,
+        "entries": entries,
+        "latest_failure": latest_failure,
+    }
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def _identity_payload(
