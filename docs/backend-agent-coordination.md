@@ -3762,8 +3762,50 @@ Resta fuori da questa tranche:
 
 - FTS/vector backend vero sopra `hades_search_documents`.
 - Scheduler/cron per reindex periodico, se serve.
-- Ranking finale calcolato direttamente sul documento indicizzato invece che
-  sul record sorgente.
+
+## Esecuzione Hades search document scoring backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `d65492a feat: score Hades search documents`.
+- `HadesSearchDocumentIndexer` espone ora `matchingSourceScores()` oltre a
+  `matchingSourceIds()`.
+- Memory/wiki/artifacts/bug evidence/source slices/evidence packs usano il
+  punteggio del documento indicizzato come base di ranking quando disponibile.
+- Il vecchio scoring sui record sorgente resta fallback e complemento: se il
+  match esiste solo in `hades_search_documents`, il risultato non resta piu'
+  con score zero o basso.
+- I test materialized memory/wiki ora verificano che i candidati trovati solo
+  nel documento indicizzato abbiano score positivo.
+
+Verifiche eseguite:
+
+- Remoto syntax:
+  `php -l` su `HadesSearchDocumentIndexer`, controller search Hades toccati e
+  `HadesM3SharedMemoryTest.php` passato.
+- Remoto formatter:
+  `vendor/bin/pint --test app/Services/Hades/HadesSearchDocumentIndexer.php app/Http/Controllers/Hades/MemorySearchController.php app/Http/Controllers/Hades/BugEvidenceController.php app/Http/Controllers/Hades/SourceSliceController.php app/Http/Controllers/Hades/EvidencePackController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto mirato materialized:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php --filter=materialized`
+  passato: `3 passed / 26 assertions`.
+- Remoto no-codebase:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `3 passed / 66 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `66 passed / 788 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Public health:
+  `https://home-sweet-home.cloud/api/hades/v1/health` ha risposto HTTP 200.
+
+Resta fuori da questa tranche:
+
+- FTS/vector backend vero sopra `hades_search_documents`.
+- Scheduler/cron per reindex periodico, se serve.
 
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
