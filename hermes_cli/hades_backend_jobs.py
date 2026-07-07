@@ -258,6 +258,7 @@ NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method
 PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
 PY_DJANGO_ROUTE_FUNCS = {"path", "re_path"}
 PY_DJANGO_RELATION_FIELDS = {"ForeignKey", "OneToOneField", "ManyToManyField"}
+PY_SQLALCHEMY_COLUMN_CALLS = {"Column", "mapped_column"}
 
 
 def _safe_relpath(path: str) -> str:
@@ -2038,6 +2039,112 @@ def _py_django_model_fields(
     return columns, foreign_keys
 
 
+def _py_assign_name(item: ast.AST) -> str:
+    if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+        return item.targets[0].id
+    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+        return item.target.id
+    return ""
+
+
+def _py_assign_value(item: ast.AST) -> ast.AST | None:
+    if isinstance(item, ast.Assign):
+        return item.value
+    if isinstance(item, ast.AnnAssign):
+        return item.value
+    return None
+
+
+def _py_sqlalchemy_table_name(node: ast.ClassDef) -> str:
+    for item in node.body:
+        if not isinstance(item, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "__tablename__" for target in item.targets):
+            continue
+        table = _py_string(item.value)
+        if table:
+            return table
+    return ""
+
+
+def _py_sqlalchemy_column_type(arg: ast.AST | None) -> str:
+    if arg is None:
+        return ""
+    if isinstance(arg, ast.Call):
+        return _py_dotted_name(arg.func).split(".")[-1]
+    return _py_dotted_name(arg).split(".")[-1]
+
+
+def _py_sqlalchemy_foreign_key(call: ast.Call) -> tuple[str, str]:
+    for arg in call.args:
+        if not isinstance(arg, ast.Call) or _py_dotted_name(arg.func).split(".")[-1] != "ForeignKey" or not arg.args:
+            continue
+        target = _py_string(arg.args[0])
+        if not target:
+            continue
+        if "." in target:
+            table, column = target.split(".", 1)
+            return table, column
+        return target, ""
+    return "", ""
+
+
+def _py_sqlalchemy_column(field_name: str, value: ast.AST | None, rel: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not field_name or not isinstance(value, ast.Call):
+        return None, None
+    call_name = _py_dotted_name(value.func).split(".")[-1]
+    if call_name not in PY_SQLALCHEMY_COLUMN_CALLS:
+        return None, None
+
+    args = list(value.args)
+    column_name = field_name
+    type_arg: ast.AST | None = None
+    if args and isinstance(args[0], ast.Constant) and isinstance(args[0].value, str):
+        column_name = args[0].value
+        type_arg = args[1] if len(args) > 1 else None
+    elif args:
+        type_arg = args[0]
+
+    column = {
+        "name": column_name,
+        "field": field_name,
+        "type": _py_sqlalchemy_column_type(type_arg),
+        "path": rel,
+        "line": getattr(value, "lineno", 0),
+    }
+    for keyword in ("nullable", "unique", "index", "primary_key"):
+        keyword_value = _py_keyword_bool(value, keyword)
+        if keyword_value is not None:
+            column[keyword] = keyword_value
+
+    ref_table, ref_column = _py_sqlalchemy_foreign_key(value)
+    foreign_key = None
+    if ref_table:
+        foreign_key = {
+            "column": column_name,
+            "references_table": ref_table,
+            "references_column": ref_column,
+            "path": rel,
+            "line": column["line"],
+        }
+    return column, foreign_key
+
+
+def _py_sqlalchemy_model_fields(node: ast.ClassDef, table: str, rel: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    columns: list[dict[str, Any]] = []
+    foreign_keys: list[dict[str, Any]] = []
+    for item in node.body:
+        field_name = _py_assign_name(item)
+        column, foreign_key = _py_sqlalchemy_column(field_name, _py_assign_value(item), rel)
+        if column is None:
+            continue
+        columns.append(column)
+        if foreign_key is not None:
+            foreign_key["table"] = table
+            foreign_keys.append(foreign_key)
+    return columns, foreign_keys
+
+
 def _ts_framework(root: Path, files: list[Path], dependency_manifests: list[dict[str, Any]]) -> str:
     packages = {
         str(package)
@@ -2311,6 +2418,49 @@ def _build_python_artifact(
                                 },
                                 max_edges=max_edges,
                             ) or truncated
+                else:
+                    table = _py_sqlalchemy_table_name(node)
+                    if table:
+                        columns, foreign_keys = _py_sqlalchemy_model_fields(node, table, rel)
+                        if columns or foreign_keys:
+                            symbol["role"] = "sqlalchemy_model"
+                            database["tables"].append(
+                                {
+                                    "table": table,
+                                    "model": node.name,
+                                    "orm": "sqlalchemy",
+                                    "path": rel,
+                                    "line": node.lineno,
+                                    "columns": columns[:200],
+                                    "foreign_keys": foreign_keys[:100],
+                                }
+                            )
+                            frameworks.add("sqlalchemy")
+                            truncated = not _edge_append(
+                                edges,
+                                {
+                                    "kind": "model_table",
+                                    "from": node.name,
+                                    "to": f"table:{table}",
+                                    "framework": "sqlalchemy",
+                                    "path": rel,
+                                    "line": node.lineno,
+                                },
+                                max_edges=max_edges,
+                            ) or truncated
+                            for foreign_key in foreign_keys:
+                                truncated = not _edge_append(
+                                    edges,
+                                    {
+                                        "kind": "foreign_key",
+                                        "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                                        "to": f"table:{foreign_key['references_table']}",
+                                        "framework": "sqlalchemy",
+                                        "path": rel,
+                                        "line": foreign_key.get("line"),
+                                    },
+                                    max_edges=max_edges,
+                                ) or truncated
                 if len(symbols) < max_symbols:
                     symbols.append(symbol)
                 else:

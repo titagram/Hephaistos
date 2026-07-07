@@ -428,6 +428,61 @@ def test_populate_backend_ast_extracts_django_models_graph_without_routes(tmp_pa
     assert "models.CharField" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_sqlalchemy_schema_graph_without_routes(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "models.py").write_text(
+        "from sqlalchemy import Column, ForeignKey, Integer, Numeric, String\n"
+        "from sqlalchemy.orm import declarative_base, mapped_column\n"
+        "Base = declarative_base()\n"
+        "class Customer(Base):\n"
+        "    __tablename__ = 'customers'\n"
+        "    id = Column(Integer, primary_key=True)\n"
+        "    email = Column(String(120), unique=True, index=True)\n"
+        "class Order(Base):\n"
+        "    __tablename__ = 'orders'\n"
+        "    id = Column(Integer, primary_key=True)\n"
+        "    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)\n"
+        "    total = mapped_column(Numeric(10, 2), nullable=True)\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_sqlalchemy_models",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 10, "max_edges": 10},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["framework"] == "sqlalchemy"
+    assert artifact["routes"] == []
+    assert set(tables) >= {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} >= {"id", "customer_id", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "column": "customer_id",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "app/models.py",
+            "line": 11,
+            "table": "orders",
+        }
+    ]
+    assert ("model_table", "Order", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert "Column(" not in str(artifact)
+    assert "ForeignKey(" not in str(artifact)
+
+
 def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

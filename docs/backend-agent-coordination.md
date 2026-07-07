@@ -2431,10 +2431,43 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- SQLAlchemy, Prisma/Drizzle, Doctrine e schema SQL raw adapters.
+- Prisma/Drizzle, Doctrine e schema SQL raw adapters.
 - Resolver FK Django cross-file/cross-app completo oltre alla mappa
   model-table nello stesso file.
 - Parser AST piu' profondo per manager/queryset e migration operations Django.
+
+## Esecuzione SQLAlchemy DB graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` estrae metadata source-free da classi SQLAlchemy
+  declarative con `__tablename__`.
+- Supporta `Column(...)` e `mapped_column(...)`, con table, columns, type,
+  `nullable`, `unique`, `index`, `primary_key` e `ForeignKey("table.column")`.
+- I model-only projects SQLAlchemy ora producono `hades.code_graph.v1` con
+  `framework: sqlalchemy` quando hanno schema DB utile.
+- Gli artifact restano source-free: niente chiamate `Column(...)` o
+  `ForeignKey(...)`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_web_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_django_models_graph_without_routes tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_sqlalchemy_schema_graph_without_routes tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_symbols_without_source`
+  passato: `4 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `18 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Prisma/Drizzle, Doctrine e schema SQL raw adapters.
+- SQLAlchemy relationship graph e resolver dichiarazioni FK piu' complessi.
 
 ## Esecuzione Symfony graph Hades - 2026-07-07
 
