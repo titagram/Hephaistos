@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import tomllib
 from typing import Any
+from urllib.parse import urlsplit
 
 from hermes_cli.hades_backend_client import redact_secret
 
@@ -260,6 +261,15 @@ PHP_CACHE_CHAIN_RE = re.compile(
 PHP_CACHE_FACADE_RE = re.compile(
     r"\bCache::(?P<method>get|put|add|forever|remember|rememberForever|forget|has|pull|increment|decrement)\s*\(",
     re.IGNORECASE | re.MULTILINE,
+)
+PHP_HTTP_FACADE_RE = re.compile(
+    r"\bHttp::(?P<method>get|post|put|patch|delete|head|send)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_HTTP_FACADE_CHAIN_RE = re.compile(
+    r"\bHttp::(?P<prefix>withToken|withHeaders|acceptJson|asJson|timeout|retry|baseUrl)\s*\([^;]*?\)"
+    r"\s*->\s*(?P<method>get|post|put|patch|delete|head|send)\s*\(",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
@@ -4370,6 +4380,167 @@ def _append_php_route_cache_access_edges(
     return truncated
 
 
+def _php_http_target_from_url(raw: str) -> dict[str, Any] | None:
+    literal = _php_quoted_literal(raw)
+    if not literal:
+        return None
+    parsed = urlsplit(literal)
+    try:
+        parsed_host = parsed.hostname
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed_host:
+        return None
+    host = parsed_host.lower()
+    if parsed_port:
+        host = f"{host}:{parsed_port}"
+    path = parsed.path or ""
+    target = f"http_endpoint:{host}{path}" if path and path != "/" else f"http_host:{host}"
+    return {
+        "http_target": target,
+        "http_scheme": parsed.scheme.lower(),
+        "http_host": host,
+        "http_path": path,
+    }
+
+
+def _php_outbound_http_call_from_args(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    http_method_name: str,
+    http_call_method: str,
+    args: str,
+) -> dict[str, Any] | None:
+    parts = _split_top_level_items(args)
+    normalized_method = http_method_name.lower()
+    http_method = normalized_method.upper()
+    url_index = 0
+    if normalized_method == "send":
+        if len(parts) < 2:
+            return None
+        literal_method = _php_quoted_literal(parts[0][0])
+        if literal_method and re.fullmatch(r"[A-Za-z]+", literal_method):
+            http_method = literal_method.upper()
+        url_index = 1
+    if len(parts) <= url_index:
+        return None
+    target = _php_http_target_from_url(parts[url_index][0])
+    if target is None:
+        return None
+    return {
+        **target,
+        "http_client": "laravel_http",
+        "http_method": http_method,
+        "http_call_method": http_call_method,
+        "line": _line_number(source, method_body_offset + relative_call_start),
+    }
+
+
+def _php_outbound_http_calls_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+
+    def append_call(call: dict[str, Any] | None) -> None:
+        if call is None:
+            return
+        key = (
+            str(call.get("http_method") or ""),
+            str(call.get("http_target") or ""),
+            str(call.get("http_call_method") or ""),
+            int(call.get("line") or 0),
+        )
+        if not key[0] or not key[1] or key in seen:
+            return
+        seen.add(key)
+        calls.append(call)
+
+    for match in PHP_HTTP_FACADE_CHAIN_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        method = str(match.group("method") or "").lower()
+        prefix = str(match.group("prefix") or "")
+        append_call(
+            _php_outbound_http_call_from_args(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                http_method_name=method,
+                http_call_method=f"Http::{prefix}->{method}",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+
+    for match in PHP_HTTP_FACADE_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        method = str(match.group("method") or "").lower()
+        append_call(
+            _php_outbound_http_call_from_args(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                http_method_name=method,
+                http_call_method=f"Http::{method}",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return calls
+
+
+def _append_php_route_outbound_http_call_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    calls: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not calls:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for call in calls:
+            http_target = str(call.get("http_target") or "")
+            if not http_target:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_outbound_http_call",
+                    "from": route_ref,
+                    "to": http_target,
+                    "handler": method_symbol,
+                    "http_client": call.get("http_client"),
+                    "http_method": call.get("http_method"),
+                    "http_scheme": call.get("http_scheme"),
+                    "http_host": call.get("http_host"),
+                    "http_path": call.get("http_path"),
+                    "http_call_method": call.get("http_call_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": call.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -5470,6 +5641,36 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 cache_accesses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            outbound_http_calls = _php_outbound_http_calls_for_method(source, method_body, method_body_offset)
+            for call in outbound_http_calls:
+                http_target = str(call.get("http_target") or "")
+                if not http_target:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "outbound_http_call",
+                        "from": method_symbol,
+                        "to": http_target,
+                        "http_client": call.get("http_client"),
+                        "http_method": call.get("http_method"),
+                        "http_scheme": call.get("http_scheme"),
+                        "http_host": call.get("http_host"),
+                        "http_path": call.get("http_path"),
+                        "http_call_method": call.get("http_call_method"),
+                        "path": rel,
+                        "line": call.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_outbound_http_call_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                outbound_http_calls,
                 edges,
                 max_edges=max_edges,
             ) or truncated

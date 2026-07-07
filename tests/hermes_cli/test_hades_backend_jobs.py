@@ -674,6 +674,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        redirect()->route('orders.index', [], 302);\n"
         "        \\Illuminate\\Support\\Facades\\Cache::remember('orders.summary', 60, fn () => 'cached');\n"
         "        session()->flash('orders.notice', 'Order queued');\n"
+        "        \\Illuminate\\Support\\Facades\\Http::post('https://api.example.test/orders/sync?token=secret', ['status' => 'paid']);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1072,6 +1073,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_cache_access", "route:orders.show", "cache_key:orders.summary") in edges
     assert ("session_access", "OrderController@show", "session_key:orders.notice") in edges
     assert ("route_session_access", "route:orders.show", "session_key:orders.notice") in edges
+    assert ("outbound_http_call", "OrderController@show", "http_endpoint:api.example.test/orders/sync") in edges
+    assert ("route_outbound_http_call", "route:orders.show", "http_endpoint:api.example.test/orders/sync") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1221,6 +1224,37 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 32,
+    } in artifact["edges"]
+    assert {
+        "kind": "outbound_http_call",
+        "from": "OrderController@show",
+        "to": "http_endpoint:api.example.test/orders/sync",
+        "http_client": "laravel_http",
+        "http_method": "POST",
+        "http_scheme": "https",
+        "http_host": "api.example.test",
+        "http_path": "/orders/sync",
+        "http_call_method": "Http::post",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 33,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_outbound_http_call",
+        "from": "route:orders.show",
+        "to": "http_endpoint:api.example.test/orders/sync",
+        "handler": "OrderController@show",
+        "http_client": "laravel_http",
+        "http_method": "POST",
+        "http_scheme": "https",
+        "http_host": "api.example.test",
+        "http_path": "/orders/sync",
+        "http_call_method": "Http::post",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 33,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1740,6 +1774,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "cached" not in str(artifact)
     assert "session()->flash" not in str(artifact)
     assert "Order queued" not in str(artifact)
+    assert "token=secret" not in str(artifact)
+    assert "https://api.example.test/orders/sync?token=secret" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)

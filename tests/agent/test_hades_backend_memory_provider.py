@@ -2182,6 +2182,94 @@ def test_hades_backend_graph_search_finds_local_cache_access_edges(monkeypatch, 
     )
 
 
+def test_hades_backend_graph_search_finds_local_outbound_http_call_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "outbound_http_call",
+                "from": "OrderController@show",
+                "to": "http_endpoint:api.example.test/orders/sync",
+                "http_client": "laravel_http",
+                "http_method": "POST",
+                "http_scheme": "https",
+                "http_host": "api.example.test",
+                "http_path": "/orders/sync",
+                "http_call_method": "Http::post",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 46,
+            },
+            {
+                "kind": "route_outbound_http_call",
+                "from": "route:orders.show",
+                "to": "http_endpoint:api.example.test/orders/sync",
+                "handler": "OrderController@show",
+                "http_client": "laravel_http",
+                "http_method": "POST",
+                "http_scheme": "https",
+                "http_host": "api.example.test",
+                "http_path": "/orders/sync",
+                "http_call_method": "Http::post",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 46,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders outbound http api.example.test POST sync", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_outbound_http_call"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "http_endpoint:api.example.test/orders/sync"
+        and ref["provenance"]["http_method"] == "POST"
+        and ref["provenance"]["http_host"] == "api.example.test"
+        and ref["provenance"]["http_path"] == "/orders/sync"
+        for ref in graph_refs
+    )
+    assert any(
+        "http_method=POST" in item["summary"]
+        and "http_host=api.example.test" in item["summary"]
+        and "http_path=/orders/sync" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
