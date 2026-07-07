@@ -2357,7 +2357,7 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Symfony e database schema adapters.
+- Database schema adapters cross-framework.
 - Parser strutturati profondi per JS/TS oltre al primo graph regex-bounded.
 - Search/traversal semantico piu' profondo su graph JS/TS oltre al summary
   artifact e al traversal generico gia' disponibile.
@@ -2394,8 +2394,44 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Symfony e database schema adapters.
-- Parser strutturati profondi per JS/TS/Python oltre ai casi AST/regex bounded.
+- Database schema adapters cross-framework.
+- Parser strutturati profondi per JS/TS/Python/PHP oltre ai casi AST/regex
+  bounded.
+
+## Esecuzione Symfony graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` continua a produrre `hades.php_graph.v1` per progetti
+  PHP e ora marca `framework: symfony` quando rileva route Symfony o
+  `bin/console`.
+- Route Symfony estratte da attribute PHP `#[Route(...)]` e annotation legacy
+  `@Route(...)`, con class-level prefix/name combinati con method-level route.
+- Controller invocabili con route class-level e metodo `__invoke` producono una
+  route-handler edge esplicita.
+- Gli artifact restano source-free: uri, method, name, handler, controller,
+  path, linee, simboli ed edge, non codice sorgente.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_symfony_php_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `2 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `16 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Database schema adapters cross-framework.
+- Parser PHP strutturati profondi oltre alle route Symfony attribute/annotation
+  e al graph Laravel regex-bounded.
 
 ## Esecuzione performance/storage controls Hades - 2026-07-07
 

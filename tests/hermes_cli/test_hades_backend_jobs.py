@@ -723,6 +723,92 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "@livewire" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "symfony"
+    workspace.mkdir()
+    (workspace / "bin").mkdir()
+    (workspace / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    (workspace / "src" / "Controller").mkdir(parents=True)
+    (workspace / "src" / "Service").mkdir(parents=True)
+    (workspace / "src" / "Controller" / "OrderController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "use App\\Service\\OrderService;\n"
+        "use Symfony\\Component\\HttpFoundation\\Response;\n"
+        "use Symfony\\Component\\Routing\\Attribute\\Route;\n"
+        "#[Route('/admin', name: 'admin_')]\n"
+        "class OrderController {\n"
+        "    #[Route('/orders/{id}', name: 'orders_show', methods: ['GET'])]\n"
+        "    public function show(OrderService $orders): Response {\n"
+        "        return new Response('order');\n"
+        "    }\n"
+        "    /**\n"
+        "     * @Route(\"/legacy\", name=\"legacy_index\", methods={\"POST\"})\n"
+        "     */\n"
+        "    public function legacy(): Response {\n"
+        "        return new Response('legacy');\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "src" / "Controller" / "HealthController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "use Symfony\\Component\\HttpFoundation\\Response;\n"
+        "use Symfony\\Component\\Routing\\Attribute\\Route;\n"
+        "#[Route('/health', name: 'health_check', methods: ['GET'])]\n"
+        "class HealthController {\n"
+        "    public function __invoke(): Response {\n"
+        "        return new Response('ok');\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "src" / "Service" / "OrderService.php").write_text(
+        "<?php\n"
+        "namespace App\\Service;\n"
+        "class OrderService {}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_symfony_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 30, "max_edges": 30},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    routes = {(item["method"], item["uri"], item["handler"], item.get("name")) for item in artifact["routes"]}
+    symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.php_graph.v1"
+    assert artifact["framework"] == "symfony"
+    assert artifact["raw_source_included"] is False
+    assert ("GET", "/admin/orders/{id}", "OrderController@show", "admin_orders_show") in routes
+    assert ("POST", "/admin/legacy", "OrderController@legacy", "admin_legacy_index") in routes
+    assert ("GET", "/health", "HealthController@__invoke", "health_check") in routes
+    assert ("class", "App\\Controller\\OrderController") in symbols
+    assert ("class", "App\\Controller\\HealthController") in symbols
+    assert ("class", "App\\Service\\OrderService") in symbols
+    assert ("method", "OrderController@show") in symbols
+    assert ("method", "OrderController@legacy") in symbols
+    assert ("method", "HealthController@__invoke") in symbols
+    assert ("route_handler", "route:admin_orders_show", "OrderController@show") in edges
+    assert ("route_handler", "route:admin_legacy_index", "OrderController@legacy") in edges
+    assert ("route_handler", "route:health_check", "HealthController@__invoke") in edges
+    assert ("uses_dependency", "OrderController@show", "App\\Service\\OrderService") in edges
+    assert "#[Route" not in str(artifact)
+    assert "@Route" not in str(artifact)
+    assert "return new Response" not in str(artifact)
+
+
 def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

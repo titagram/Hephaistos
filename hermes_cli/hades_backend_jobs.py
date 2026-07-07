@@ -184,6 +184,20 @@ PHP_BROADCAST_CHANNEL_RE = re.compile(
     r"\bBroadcast::channel\s*\(\s*['\"](?P<channel>[^'\"]+)['\"]\s*,\s*(?P<handler>.*?)\)",
     re.DOTALL,
 )
+PHP_SYMFONY_ROUTE_ATTRIBUTE_RE = re.compile(
+    r"#\[\s*(?:[A-Za-z0-9_\\]+\\)?Route\s*\((?P<args>.*?)\)\s*\]",
+    re.DOTALL,
+)
+PHP_SYMFONY_ROUTE_ANNOTATION_RE = re.compile(
+    r"@\s*(?:[A-Za-z0-9_\\]+\\)?Route\s*\((?P<args>.*?)\)",
+    re.DOTALL,
+)
+PHP_DOCBLOCK_RE = re.compile(r"/\*\*(?P<body>.*?)\*/", re.DOTALL)
+PHP_NAMED_ROUTE_ARG_RE = re.compile(r"\b(?P<name>path|name)\s*[:=]\s*['\"](?P<value>[^'\"]+)['\"]")
+PHP_ROUTE_METHODS_ARG_RE = re.compile(
+    r"\bmethods\s*[:=]\s*(?P<value>\[[^\]]*\]|\{[^}]*\}|['\"][^'\"]+['\"])",
+    re.DOTALL,
+)
 BLADE_EXTENDS_RE = re.compile(r"@extends\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 BLADE_INCLUDE_RE = re.compile(
     r"@(?:include|includeIf|each)\s*\(\s*['\"](?P<view>[^'\"]+)['\"]",
@@ -530,6 +544,109 @@ def _route_middleware_values(chain: str) -> list[str]:
     return sorted({value for value in values if value})
 
 
+def _php_route_arg(args: str, name: str) -> str:
+    for match in PHP_NAMED_ROUTE_ARG_RE.finditer(args or ""):
+        if match.group("name") == name:
+            return match.group("value")
+    return ""
+
+
+def _php_route_path_arg(args: str) -> str:
+    path = _php_route_arg(args, "path")
+    if path:
+        return path
+    stripped = str(args or "").lstrip()
+    if stripped.startswith(("'", '"')):
+        match = PHP_QUOTED_VALUE_RE.match(stripped)
+        return match.group("value") if match else ""
+    return ""
+
+
+def _php_route_methods(args: str) -> list[str]:
+    match = PHP_ROUTE_METHODS_ARG_RE.search(args or "")
+    if not match:
+        return []
+    methods = [item.group("value").upper() for item in PHP_QUOTED_VALUE_RE.finditer(match.group("value"))]
+    return sorted({method for method in methods if method})
+
+
+def _php_route_metadata(args: str, *, line: int, source: str) -> dict[str, Any]:
+    route = {
+        "uri": _php_route_path_arg(args),
+        "name": _php_route_arg(args, "name"),
+        "methods": _php_route_methods(args),
+        "line": line,
+        "source": source,
+    }
+    return {key: value for key, value in route.items() if value not in ("", None, [])}
+
+
+def _php_route_metadata_before(source: str, offset: int) -> list[dict[str, Any]]:
+    start = max(0, offset - 2_000)
+    segment = source[start:offset]
+    routes: list[dict[str, Any]] = []
+    for match in PHP_SYMFONY_ROUTE_ATTRIBUTE_RE.finditer(segment):
+        tail = segment[match.end() :].strip()
+        if tail and not tail.startswith("#["):
+            continue
+        routes.append(
+            _php_route_metadata(
+                match.group("args"),
+                line=_line_number(source, start + match.start()),
+                source="attribute",
+            )
+        )
+    if routes:
+        return routes
+
+    docblocks = list(PHP_DOCBLOCK_RE.finditer(segment))
+    if not docblocks:
+        return []
+    docblock = docblocks[-1]
+    if segment[docblock.end() :].strip():
+        return []
+    body_start = start + docblock.start("body")
+    return [
+        _php_route_metadata(
+            match.group("args"),
+            line=_line_number(source, body_start + match.start()),
+            source="annotation",
+        )
+        for match in PHP_SYMFONY_ROUTE_ANNOTATION_RE.finditer(docblock.group("body"))
+    ]
+
+
+def _php_combine_route_names(prefix: str, name: str) -> str:
+    if prefix and name:
+        return f"{prefix}{name}"
+    return name or prefix
+
+
+def _php_symfony_route(
+    class_route: dict[str, Any],
+    method_route: dict[str, Any],
+    *,
+    handler: str,
+    controller: str,
+    rel: str,
+    fallback_line: int,
+) -> dict[str, Any]:
+    methods = method_route.get("methods") or class_route.get("methods") or ["ANY"]
+    route = {
+        "framework": "symfony",
+        "method": "|".join(methods),
+        "uri": _join_url_path(str(class_route.get("uri") or ""), str(method_route.get("uri") or "")),
+        "handler": handler,
+        "controller": controller,
+        "path": rel,
+        "line": int(method_route.get("line") or class_route.get("line") or fallback_line),
+    }
+    name = _php_combine_route_names(str(class_route.get("name") or ""), str(method_route.get("name") or ""))
+    if name:
+        route["name"] = name
+    return route
+
+
 def _php_array_field_keys(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -693,6 +810,7 @@ def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int 
                 name_match = PHP_ROUTE_NAME_RE.search(chain)
                 name = name_match.group("name") if name_match else None
             route = {
+                "framework": "laravel",
                 "method": match.group("method").upper(),
                 "uri": match.group("uri"),
                 "handler": _normalize_laravel_handler(match.group("handler")),
@@ -1191,6 +1309,7 @@ def _build_php_graph(
         namespace = _php_namespace(source)
         uses = _php_use_map(source)
         classes: list[dict[str, Any]] = []
+        symfony_class_routes: dict[str, list[dict[str, Any]]] = {}
         for match in PHP_CLASS_RE.finditer(source):
             class_name = match.group("name")
             extends = match.group("extends") or ""
@@ -1208,6 +1327,9 @@ def _build_php_graph(
                 "offset": match.start(),
             }
             classes.append(class_symbol)
+            route_metadata = _php_route_metadata_before(source, match.start())
+            if route_metadata:
+                symfony_class_routes[fqcn] = route_metadata
             if len(symbols) < max_symbols:
                 symbols.append({key: value for key, value in class_symbol.items() if key != "offset" and value not in ("", None)})
             else:
@@ -1296,6 +1418,35 @@ def _build_php_graph(
                             "to": param_class,
                             "path": rel,
                             "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+
+            method_routes = _php_route_metadata_before(source, match.start())
+            if not method_routes and method_name == "__invoke":
+                method_routes = [{}] if symfony_class_routes.get(fqcn) else []
+            for class_route in symfony_class_routes.get(fqcn) or [{}]:
+                for method_route in method_routes:
+                    route = _php_symfony_route(
+                        class_route,
+                        method_route,
+                        handler=method_symbol,
+                        controller=fqcn,
+                        rel=rel,
+                        fallback_line=_line_number(source, match.start()),
+                    )
+                    routes.append(route)
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "route_handler",
+                            "from": f"route:{_php_route_id(route)}",
+                            "to": method_symbol,
+                            "framework": "symfony",
+                            "method": route.get("method"),
+                            "uri": route.get("uri"),
+                            "path": rel,
+                            "line": route.get("line"),
                         },
                         max_edges=max_edges,
                     ) or truncated
@@ -1648,10 +1799,22 @@ def _build_php_graph(
                         max_edges=max_edges,
                     ) or truncated
 
+    route_frameworks = {str(route.get("framework")) for route in routes if route.get("framework")}
+    has_laravel = "laravel" in route_frameworks or (workspace_root / "artisan").exists()
+    has_symfony = "symfony" in route_frameworks or (workspace_root / "bin" / "console").exists()
+    if has_laravel and has_symfony:
+        framework = "php_web"
+    elif has_laravel:
+        framework = "laravel"
+    elif has_symfony:
+        framework = "symfony"
+    else:
+        framework = "php"
+
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",
-        "framework": "laravel" if routes or (workspace_root / "artisan").exists() else "php",
+        "framework": framework,
         "root": workspace_root.name,
         "routes": routes,
         "symbols": symbols,
