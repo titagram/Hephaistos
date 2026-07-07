@@ -3580,7 +3580,32 @@ Resta fuori da questa tranche:
 
 - Wizard desktop.
 - Upload file dal dashboard.
-- Privacy preview/edit prima del submit.
+
+## Esecuzione dashboard bug-intake privacy preview Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-1.
+
+Agent locale:
+
+- Il pannello dashboard `Bug intake` mostra una `Privacy preview` quando sono
+  compilati failing test, runtime log o request URL.
+- La preview usa pattern equivalenti al client backend locale per mascherare
+  chiavi `sk-*`, bearer token, `token=`/`token:` e `api_key=`/`api-key=`.
+- La UI mostra il conteggio redazioni e il testo mascherato prima del submit.
+- La redazione server resta autoritativa: la route `/api/hades/backend/bug-intake`
+  continua a redigere lato Python prima di inviare evidenze al backend.
+
+Verifiche eseguite:
+
+- Frontend:
+  `npm run typecheck` in `web/` passato.
+- Frontend:
+  `npx eslint src/pages/BackendPage.tsx --max-warnings=0` in `web/` passato.
+
+Resta fuori da questa tranche:
+
+- Wizard desktop.
+- Upload file dal dashboard.
 
 ## Esecuzione timeout live Hades agent - 2026-07-07
 

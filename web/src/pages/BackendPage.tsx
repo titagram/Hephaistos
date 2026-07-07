@@ -757,6 +757,27 @@ function optionalNumber(value: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function redactPreviewText(value: string): { text: string; redactions: number } {
+  let redactions = 0;
+  const apply = (pattern: RegExp, replacement: string | ((match: RegExpExecArray) => string), source: string) =>
+    source.replace(pattern, (...args: unknown[]) => {
+      redactions += 1;
+      const match = args.slice(0, -2) as string[];
+      if (typeof replacement === "string") return replacement;
+      const execMatch = match as RegExpExecArray;
+      execMatch.index = Number(args.at(-2) ?? 0);
+      execMatch.input = String(args.at(-1) ?? "");
+      return replacement(execMatch);
+    });
+
+  let text = value;
+  text = apply(/sk-[A-Za-z0-9][A-Za-z0-9_-]{6,}/g, "***", text);
+  text = apply(/(bearer\s+)[A-Za-z0-9._-]{8,}/gi, (match) => `${match[1]}***`, text);
+  text = apply(/(token[=:]\s*)[A-Za-z0-9._-]{8,}/gi, (match) => `${match[1]}***`, text);
+  text = apply(/(api[_-]?key[=:]\s*)[A-Za-z0-9._-]{8,}/gi, (match) => `${match[1]}***`, text);
+  return { text, redactions };
+}
+
 function defaultBugIntakeBindingId(status: HadesBackendStatus): string {
   const current = status.identity?.workspace_binding.current_workspace_binding_id;
   if (current) return current;
@@ -829,6 +850,21 @@ function BugIntakePanel({
   const bindingOptions = status.bindings.filter((binding) => Boolean(binding.workspace_binding_id));
   const selectedBinding = bindingOptions.find((binding) => binding.workspace_binding_id === form.workspaceBindingId);
   const canSubmit = Boolean(form.title.trim() && form.symptom.trim() && form.workspaceBindingId && !submitting);
+  const redactionPreview = useMemo(
+    () =>
+      [
+        ["Failing test", form.failingTest],
+        ["Runtime log", form.runtimeLog],
+        ["Request URL", form.requestUrl],
+      ]
+        .filter(([, value]) => value.trim())
+        .map(([label, value]) => ({
+          label,
+          ...redactPreviewText(value),
+        })),
+    [form.failingTest, form.requestUrl, form.runtimeLog],
+  );
+  const redactionCount = redactionPreview.reduce((total, item) => total + item.redactions, 0);
 
   const setField = useCallback(
     (field: keyof BugIntakeFormState, value: string) => {
@@ -1064,6 +1100,30 @@ function BugIntakePanel({
               />
             </FormField>
           </div>
+
+          {redactionPreview.length > 0 && (
+            <div className="border border-border bg-background/40 px-3 py-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                  Privacy preview
+                </div>
+                <Badge tone={redactionCount > 0 ? "warning" : "success"}>
+                  {redactionCount} redaction{redactionCount === 1 ? "" : "s"}
+                </Badge>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                {redactionPreview.map((item) => (
+                  <div className="min-w-0" key={item.label}>
+                    <div className="mb-1 text-xs uppercase text-muted-foreground">{item.label}</div>
+                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      {item.text}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <FormField label="Method" className="w-32">
