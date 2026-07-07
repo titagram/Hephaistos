@@ -2882,6 +2882,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "target_model",
         "target_class",
         "target_param",
+        "receiver",
         "request_class",
         "param",
         "handler",

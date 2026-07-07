@@ -210,6 +210,11 @@ PHP_VALIDATE_ARRAY_RE = re.compile(
 PHP_ARRAY_FIELD_KEY_RE = re.compile(r"['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>")
 PHP_THIS_INPUT_MUTATION_RE = re.compile(r"\$this->(?P<operation>merge|replace)\s*\(", re.MULTILINE)
 PHP_ABORT_HELPER_RE = re.compile(r"\babort(?P<suffix>_if|_unless)?\s*\(", re.IGNORECASE | re.MULTILINE)
+PHP_INSTANCE_METHOD_CALL_RE = re.compile(
+    r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
+    r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    re.MULTILINE,
+)
 PHP_LISTEN_ARRAY_RE = re.compile(
     r"(?P<event>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*\[(?P<listeners>.*?)\]",
     re.DOTALL,
@@ -3442,6 +3447,49 @@ def _append_php_route_http_abort_edges(
     return truncated
 
 
+def _append_php_instance_method_call_edges(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    method_body: str,
+    method_body_offset: int,
+    method_symbol: str,
+    typed_params: dict[str, str],
+    php_method_symbols: dict[tuple[str, str], str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not typed_params:
+        return False
+    truncated = False
+    for match in PHP_INSTANCE_METHOD_CALL_RE.finditer(method_body):
+        receiver = str(match.group("receiver") or "")
+        if not receiver.startswith("$") or receiver.startswith("$this->"):
+            continue
+        receiver_name = receiver[1:]
+        target_class = typed_params.get(receiver_name, "")
+        if not target_class:
+            continue
+        target_method = str(match.group("method") or "")
+        target_method_symbol = php_method_symbols.get((target_class, target_method))
+        if not target_method_symbol:
+            continue
+        call_edge = {
+            "kind": "calls_method",
+            "from": method_symbol,
+            "to": target_method_symbol,
+            "target_class": target_class,
+            "call_type": "instance",
+            "receiver": receiver_name,
+            "target_method": target_method,
+            "path": rel,
+            "line": _line_number(source, method_body_offset + match.start()),
+        }
+        truncated = not _edge_append(edges, call_edge, max_edges=max_edges) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -4048,6 +4096,19 @@ def _build_php_graph(
                         edges,
                         max_edges=max_edges,
                     ) or truncated
+
+            truncated = _append_php_instance_method_call_edges(
+                source,
+                rel,
+                classes,
+                method_body,
+                method_body_offset,
+                method_symbol,
+                typed_params,
+                php_method_symbols,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
 
             for auth_pattern, auth_source in (
                 (PHP_THIS_AUTHORIZE_RE, "this_authorize"),
