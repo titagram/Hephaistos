@@ -705,13 +705,17 @@ def test_git_tree_artifact_includes_structured_project_index(tmp_path):
     assert index["schema"] == "hades.project_index.v1"
     assert index["source_schema"] == "hades.git_tree.v1"
     assert index["language_counts"]["php"]["files"] >= 2
-    assert {
-        "method": "GET",
-        "uri": "/hades/memory",
-        "handler": "MemoryController@index",
-        "name": "hades.memory",
-        "path": "routes/api.php",
-    } in index["routes"]
+    assert any(
+        route.items()
+        >= {
+            "method": "GET",
+            "uri": "/hades/memory",
+            "handler": "MemoryController@index",
+            "name": "hades.memory",
+            "path": "routes/api.php",
+        }.items()
+        for route in index["routes"]
+    )
     assert {
         "manager": "composer",
         "path": "composer.json",

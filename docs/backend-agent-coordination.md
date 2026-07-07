@@ -2294,3 +2294,48 @@ Resta fuori da questa tranche:
 - Scheduler audit periodico.
 - Dashboard metrics/action queue nativa.
 - Review queue dedicata per stale facts e low-confidence diagnosis reali.
+
+## Esecuzione Laravel graph metadata Hades - 2026-07-07
+
+Stato: completata una seconda tranche locale P0-4 del piano "Bug Root Cause
+Awareness".
+
+Agent locale:
+
+- `populate_backend_ast` arricchisce `hades.php_graph.v1` con route
+  middleware, model-to-table edges, migration tables/columns/indexes/foreign
+  keys, policy mappings e riferimenti `config()`/`env()` come chiavi redatte.
+- Le static call PHP risolvono gli import `use` semplici, cosi' un controller
+  che chiama un service importato genera un edge verso il FQCN del service e
+  non verso il namespace corrente sbagliato.
+- `Schema` e `Gate` non vengono duplicati come static-call generiche quando
+  sono gia' rappresentati da migration metadata o policy edges.
+- Il fixture Laravel locale verifica che l'artifact resti source-free:
+  `raw_source_included=false` e niente stringhe di codice come `Route::get`,
+  `Schema::create` o `config('...')` nel payload indicizzato.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale aggregato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_client.py tests/hermes_cli/test_hades_backend_mvp_smoke.py tests/hermes_cli/test_hades_note_quality.py tests/hermes_cli/test_hades_quality_report.py tests/agent/test_hades_backend_memory_provider.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/test_docs_hades_mvp.py`
+  passato: `128 passed`.
+- Lint/compile/docs:
+  `ruff check` su indexer e test Hades toccati passato; `py_compile
+  hermes_cli/hades_backend_jobs.py` passato; `scripts/docs_audit.py` passato:
+  `docs audit passed: 18 required docs checked`.
+- Remoto read-only:
+  `ssh ubuntu@162.19.229.31 'cd /home/ubuntu/dev-sandbox/backend && grep -RIn "hades.php_graph.v1\\|hades.code_graph.v1" app docs routes tests database --include="*.php" --include="*.json" | sed -n "1,120p"'`
+  conferma che `ArtifactController`, awareness, graph traversal, search,
+  OpenAPI e feature tests accettano gia' `hades.php_graph.v1` e
+  `hades.code_graph.v1`.
+
+Resta fuori da questa tranche:
+
+- Parser strutturato PHP/Laravel completo con AST reale.
+- Request validation, form requests, jobs/events/listeners, scheduler/commands.
+- DB query runtime (`DB::`, query builder) e viste Blade.
+- Graph traversal specializzato per table/config/policy oltre agli edge gia'
+  persistiti.

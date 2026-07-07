@@ -106,6 +106,10 @@ LARAVEL_HANDLER_RE = re.compile(
     r"\[\s*(?P<class>[A-Za-z0-9_\\\\]+)::class\s*,\s*['\"](?P<method>[A-Za-z0-9_]+)['\"]\s*\]"
 )
 PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
+PHP_USE_RE = re.compile(
+    r"^\s*use\s+(?P<class>[A-Za-z0-9_\\]+)(?:\s+as\s+(?P<alias>[A-Za-z_][A-Za-z0-9_]*))?\s*;",
+    re.MULTILINE,
+)
 PHP_CLASS_RE = re.compile(
     r"\b(?P<kind>class|interface|trait|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
     r"(?:\s+extends\s+(?P<extends>[A-Za-z0-9_\\]+))?",
@@ -123,6 +127,24 @@ PHP_ELOQUENT_RELATION_RE = re.compile(
 )
 PHP_STATIC_CALL_RE = re.compile(r"\b(?P<class>[A-Z][A-Za-z0-9_\\]+)::(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PHP_NEW_RE = re.compile(r"\bnew\s+(?P<class>[A-Z][A-Za-z0-9_\\]+)\s*\(")
+PHP_ROUTE_NAME_RE = re.compile(r"->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)")
+PHP_ROUTE_MIDDLEWARE_RE = re.compile(r"->middleware\(\s*(?P<value>.*?)\s*\)", re.DOTALL)
+PHP_QUOTED_VALUE_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
+PHP_MODEL_TABLE_RE = re.compile(r"\bprotected\s+\$table\s*=\s*['\"](?P<table>[^'\"]+)['\"]", re.MULTILINE)
+PHP_CONFIG_RE = re.compile(r"\bconfig\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
+PHP_ENV_RE = re.compile(r"\benv\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
+PHP_GATE_POLICY_RE = re.compile(
+    r"\bGate::policy\s*\(\s*(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*,\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
+    re.MULTILINE,
+)
+PHP_SCHEMA_ACTION_RE = re.compile(
+    r"\bSchema::(?P<action>create|table|drop|dropIfExists)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_TABLE_CALL_RE = re.compile(
+    r"\$table->(?P<type>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<args>[^)]*)\)(?P<chain>(?:\s*->[A-Za-z_][A-Za-z0-9_]*\([^)]*\))*)",
+    re.MULTILINE,
+)
 TS_IMPORT_RE = re.compile(r"\bimport(?:\s+type)?(?:\s+[^;]*?\s+from)?\s+['\"](?P<target>[^'\"]+)['\"]", re.MULTILINE)
 TS_EXPORT_DECL_RE = re.compile(
     r"\bexport\s+(?:default\s+)?(?:(?:async\s+)?function|class|const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)",
@@ -332,6 +354,15 @@ def _php_namespace(content: str) -> str:
     return match.group("namespace") if match else ""
 
 
+def _php_use_map(content: str) -> dict[str, str]:
+    uses: dict[str, str] = {}
+    for match in PHP_USE_RE.finditer(content):
+        fqcn = match.group("class").strip("\\")
+        alias = match.group("alias") or _php_short_name(fqcn)
+        uses[alias] = fqcn
+    return uses
+
+
 def _php_fqcn(namespace: str, name: str) -> str:
     clean = name.strip("\\")
     if "\\" in clean or namespace == "":
@@ -339,8 +370,23 @@ def _php_fqcn(namespace: str, name: str) -> str:
     return f"{namespace}\\{clean}"
 
 
+def _php_fqcn_resolved(namespace: str, name: str, uses: dict[str, str]) -> str:
+    clean = name.strip("\\")
+    if "\\" in clean:
+        return clean
+    return uses.get(clean) or _php_fqcn(namespace, clean)
+
+
 def _php_short_name(name: str) -> str:
     return name.strip("\\").split("\\")[-1]
+
+
+def _php_context_id(class_info: dict[str, Any] | None, rel: str) -> str:
+    return str(class_info["name"]) if class_info else rel
+
+
+def _php_route_id(route: dict[str, Any]) -> str:
+    return str(route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}".strip())
 
 
 def _php_role(path: str, class_name: str, extends: str) -> str:
@@ -378,8 +424,29 @@ def _edge_append(edges: list[dict[str, Any]], edge: dict[str, Any], *, max_edges
     return True
 
 
-def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, str]]:
-    routes: list[dict[str, str]] = []
+def _route_chain(content: str, start: int) -> str:
+    end = content.find(";", start)
+    if end == -1:
+        return content[start : start + 240]
+    return content[start:end]
+
+
+def _route_middleware_values(chain: str) -> list[str]:
+    values: list[str] = []
+    for match in PHP_ROUTE_MIDDLEWARE_RE.finditer(chain):
+        raw = match.group("value")
+        quoted = [item.group("value").strip() for item in PHP_QUOTED_VALUE_RE.finditer(raw)]
+        if quoted:
+            values.extend(quoted)
+            continue
+        clean = raw.strip().strip("'\"")
+        if clean:
+            values.append(clean)
+    return sorted({value for value in values if value})
+
+
+def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
     for item in files:
         rel = str(item.get("path") or "")
         if not (rel.startswith("routes/") and rel.endswith(".php")):
@@ -391,15 +458,23 @@ def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int 
         if truncated:
             continue
         for match in ROUTE_CALL_RE.finditer(content):
+            chain = _route_chain(content, match.end())
+            name = match.group("name")
+            if not name:
+                name_match = PHP_ROUTE_NAME_RE.search(chain)
+                name = name_match.group("name") if name_match else None
             route = {
                 "method": match.group("method").upper(),
                 "uri": match.group("uri"),
                 "handler": _normalize_laravel_handler(match.group("handler")),
                 "path": rel,
+                "line": _line_number(content, match.start()),
             }
-            name = match.group("name")
             if name:
                 route["name"] = name
+            middleware = _route_middleware_values(chain)
+            if middleware:
+                route["middleware"] = middleware
             routes.append(route)
             if len(routes) >= max_routes:
                 return routes
@@ -413,6 +488,95 @@ def _database_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
         if str(item.get("path") or "").startswith("database/migrations/")
     )
     return {"migrations": migrations[:500], "migration_count": len(migrations)}
+
+
+def _first_quoted_arg(args: str) -> str:
+    match = PHP_QUOTED_VALUE_RE.search(args)
+    return match.group("value") if match else ""
+
+
+def _migration_column_name(call_type: str, args: str) -> str:
+    quoted = _first_quoted_arg(args)
+    if quoted:
+        return quoted
+    if call_type == "id":
+        return "id"
+    if call_type == "timestamps":
+        return "created_at,updated_at"
+    if call_type == "softDeletes":
+        return "deleted_at"
+    return ""
+
+
+def _foreign_table_from_column(column: str) -> str:
+    if column.endswith("_id") and len(column) > 3:
+        stem = column[:-3]
+        return stem + "ies" if stem.endswith("y") else stem + "s"
+    return ""
+
+
+def _migration_columns(source: str, rel: str, table: str, start: int, end: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    columns: list[dict[str, Any]] = []
+    indexes: list[dict[str, Any]] = []
+    foreign_keys: list[dict[str, Any]] = []
+    body = source[start:end]
+    for match in PHP_TABLE_CALL_RE.finditer(body):
+        call_type = match.group("type")
+        args = match.group("args")
+        chain = match.group("chain") or ""
+        column = _migration_column_name(call_type, args)
+        line = _line_number(source, start + match.start())
+        if call_type in {"index", "unique", "primary", "foreign"}:
+            target = column or _first_quoted_arg(args)
+            if target:
+                indexes.append({"table": table, "column": target, "kind": call_type, "path": rel, "line": line})
+            continue
+        if column:
+            columns.append(
+                {
+                    "name": column,
+                    "type": call_type,
+                    "path": rel,
+                    "line": line,
+                    "nullable": "->nullable(" in chain,
+                    "indexed": "->index(" in chain or "->unique(" in chain,
+                }
+            )
+        if call_type == "foreignId" or "->constrained(" in chain:
+            foreign_table = _first_quoted_arg(chain) or _foreign_table_from_column(column)
+            if column and foreign_table:
+                foreign_keys.append(
+                    {
+                        "table": table,
+                        "column": column,
+                        "references_table": foreign_table,
+                        "path": rel,
+                        "line": line,
+                    }
+                )
+    return columns, indexes, foreign_keys
+
+
+def _laravel_migration_tables(source: str, rel: str) -> list[dict[str, Any]]:
+    matches = list(PHP_SCHEMA_ACTION_RE.finditer(source))
+    tables: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        table = match.group("table")
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        columns, indexes, foreign_keys = _migration_columns(source, rel, table, start, end)
+        tables.append(
+            {
+                "table": table,
+                "action": match.group("action"),
+                "path": rel,
+                "line": _line_number(source, match.start()),
+                "columns": columns[:200],
+                "indexes": indexes[:100],
+                "foreign_keys": foreign_keys[:100],
+            }
+        )
+    return tables
 
 
 def _project_index_summary(index: dict[str, Any]) -> str:
@@ -691,36 +855,58 @@ def _execute_project_inspection(job: dict[str, Any], workspace_root: Path) -> di
     return result
 
 
-def _php_graph_summary(routes: list[dict[str, str]], symbols: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+def _php_graph_summary(
+    routes: list[dict[str, Any]],
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    database: dict[str, Any] | None = None,
+) -> str:
     role_counts: dict[str, int] = {}
     for symbol in symbols:
         role = str(symbol.get("role") or symbol.get("kind") or "symbol")
         role_counts[role] = role_counts.get(role, 0) + 1
     roles = ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())[:8])
-    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {roles or 'roles:none'}"
+    table_count = len((database or {}).get("tables") or [])
+    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {roles or 'roles:none'}"
 
 
-def _php_route_edges(routes: list[dict[str, str]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
     truncated = False
     for route in routes:
-        route_id = route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}".strip()
+        route_id = _php_route_id(route)
         handler = route.get("handler", "")
-        if "@" not in handler:
-            continue
-        if not _edge_append(
-            edges,
-            {
-                "kind": "route_handler",
-                "from": f"route:{route_id}",
-                "to": handler,
-                "method": route.get("method"),
-                "uri": route.get("uri"),
-                "path": route.get("path"),
-            },
-            max_edges=max_edges,
-        ):
-            truncated = True
-            break
+        if "@" in handler:
+            if not _edge_append(
+                edges,
+                {
+                    "kind": "route_handler",
+                    "from": f"route:{route_id}",
+                    "to": handler,
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                },
+                max_edges=max_edges,
+            ):
+                truncated = True
+                break
+        for middleware in route.get("middleware") or []:
+            if not _edge_append(
+                edges,
+                {
+                    "kind": "route_middleware",
+                    "from": f"route:{route_id}",
+                    "to": f"middleware:{middleware}",
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                },
+                max_edges=max_edges,
+            ):
+                truncated = True
+                break
     return truncated
 
 
@@ -739,6 +925,8 @@ def _build_php_graph(
     routes = _laravel_routes(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    database = _database_summary(file_refs)
+    database["tables"] = []
     truncated = _php_route_edges(routes, edges, max_edges=max_edges) or truncated
 
     for path in php_files:
@@ -763,11 +951,13 @@ def _build_php_graph(
             continue
 
         namespace = _php_namespace(source)
+        uses = _php_use_map(source)
         classes: list[dict[str, Any]] = []
         for match in PHP_CLASS_RE.finditer(source):
             class_name = match.group("name")
             extends = match.group("extends") or ""
             fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else None
             role = _php_role(rel, fqcn, extends)
             class_symbol = {
                 "kind": match.group("kind"),
@@ -776,7 +966,7 @@ def _build_php_graph(
                 "role": role,
                 "path": rel,
                 "line": _line_number(source, match.start()),
-                "extends": _php_fqcn(namespace, extends) if extends else None,
+                "extends": extends_fqcn,
                 "offset": match.start(),
             }
             classes.append(class_symbol)
@@ -790,7 +980,7 @@ def _build_php_graph(
                     {
                         "kind": "extends",
                         "from": fqcn,
-                        "to": _php_fqcn(namespace, extends),
+                        "to": extends_fqcn,
                         "path": rel,
                         "line": _line_number(source, match.start()),
                     },
@@ -798,6 +988,29 @@ def _build_php_graph(
                 ) or truncated
 
         classes.sort(key=lambda item: int(item["offset"]))
+
+        model_table = ""
+        model_table_match = PHP_MODEL_TABLE_RE.search(source)
+        if model_table_match:
+            model_table = model_table_match.group("table")
+        elif classes and classes[0].get("role") == "model":
+            short = _php_short_name(str(classes[0]["name"]))
+            model_table = re.sub(r"(?<!^)([A-Z])", r"_\1", short).lower() + "s"
+        if model_table and classes:
+            for class_info in classes:
+                if class_info.get("role") != "model":
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "model_table",
+                        "from": class_info["name"],
+                        "to": f"table:{model_table}",
+                        "path": rel,
+                        "line": _line_number(source, model_table_match.start()) if model_table_match else class_info.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_METHOD_RE.finditer(source):
             class_info = _class_context(classes, match.start())
@@ -830,7 +1043,7 @@ def _build_php_graph(
                 {
                     "kind": "eloquent_relation",
                     "from": class_info["name"],
-                    "to": _php_fqcn(namespace, match.group("target")),
+                    "to": _php_fqcn_resolved(namespace, match.group("target"), uses),
                     "relation": match.group("relation"),
                     "path": rel,
                     "line": _line_number(source, match.start()),
@@ -840,7 +1053,7 @@ def _build_php_graph(
 
         for match in PHP_STATIC_CALL_RE.finditer(source):
             class_name = match.group("class")
-            if _php_short_name(class_name) in {"self", "static", "parent", "Route"}:
+            if _php_short_name(class_name) in {"self", "static", "parent", "Route", "Schema", "Gate"}:
                 continue
             class_info = _class_context(classes, match.start())
             truncated = not _edge_append(
@@ -848,12 +1061,43 @@ def _build_php_graph(
                 {
                     "kind": "static_call",
                     "from": class_info["name"] if class_info else rel,
-                    "to": f"{_php_fqcn(namespace, class_name)}::{match.group('method')}",
+                    "to": f"{_php_fqcn_resolved(namespace, class_name, uses)}::{match.group('method')}",
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+
+        for match in PHP_GATE_POLICY_RE.finditer(source):
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "policy_for",
+                    "from": _php_fqcn(namespace, match.group("model")),
+                    "to": _php_fqcn(namespace, match.group("policy")),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for kind, pattern, prefix in (
+            ("config_ref", PHP_CONFIG_RE, "config"),
+            ("env_ref", PHP_ENV_RE, "env"),
+        ):
+            for match in pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": kind,
+                        "from": _php_context_id(class_info, rel),
+                        "to": f"{prefix}:{match.group('key')}",
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_NEW_RE.finditer(source):
             class_info = _class_context(classes, match.start())
@@ -862,12 +1106,54 @@ def _build_php_graph(
                 {
                     "kind": "instantiates",
                     "from": class_info["name"] if class_info else rel,
-                    "to": _php_fqcn(namespace, match.group("class")),
+                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+
+        if rel.startswith("database/migrations/"):
+            for table_info in _laravel_migration_tables(source, rel):
+                database["tables"].append(table_info)
+                table_name = str(table_info["table"])
+                if len(symbols) < max_symbols:
+                    symbols.append(
+                        {
+                            "kind": "table",
+                            "name": f"table:{table_name}",
+                            "table": table_name,
+                            "role": "database_table",
+                            "path": rel,
+                            "line": table_info.get("line"),
+                        }
+                    )
+                else:
+                    truncated = True
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "migration_table",
+                        "from": rel,
+                        "to": f"table:{table_name}",
+                        "action": table_info.get("action"),
+                        "path": rel,
+                        "line": table_info.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+                for foreign_key in table_info.get("foreign_keys") or []:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "foreign_key",
+                            "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                            "to": f"table:{foreign_key['references_table']}",
+                            "path": rel,
+                            "line": foreign_key.get("line"),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
 
     graph = {
         "schema": "hades.php_graph.v1",
@@ -877,7 +1163,7 @@ def _build_php_graph(
         "routes": routes,
         "symbols": symbols,
         "edges": edges,
-        "database": _database_summary(file_refs),
+        "database": database,
         "summary": "",
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges,
@@ -885,7 +1171,7 @@ def _build_php_graph(
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _php_graph_summary(routes, symbols, edges)
+    graph["summary"] = _php_graph_summary(routes, symbols, edges, database)
     return graph
 
 

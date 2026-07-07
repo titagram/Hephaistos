@@ -145,11 +145,13 @@ redacted reason to the backend.
 `populate_backend_ast` uploads source-symbol artifacts without raw source:
 `hades.php_graph.v1` for PHP/Laravel projects, `hades.code_graph.v1` for
 Node/TypeScript/React/Next/Express projects, and `hades.symbols.v1` for Python
-projects. The PHP graph includes route-handler, class/method, Eloquent
-relation, static-call, and instantiation metadata; the code graph includes
-framework, route/page handlers, symbols, dependency manifests, and import
-edges so backend search can answer structure questions without loading source
-chunks.
+projects. The PHP graph includes route-handler and route-middleware edges,
+class/method symbols, Eloquent relations, static calls with simple `use`
+resolution, instantiation metadata, model-to-table edges, migration
+tables/columns/indexes/foreign keys, policy mappings, and redacted
+`config()`/`env()` references. The code graph includes framework, route/page
+handlers, symbols, dependency manifests, and import edges so backend search can
+answer structure questions without loading source chunks.
 
 `read_source_slice` is the bounded source-content path for diagnosis: it is not
 auto-executed by piggyback sync, stores only a selected redacted line window as

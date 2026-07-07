@@ -303,11 +303,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "routes").mkdir()
     (workspace / "app" / "Http" / "Controllers").mkdir(parents=True)
     (workspace / "app" / "Models").mkdir(parents=True)
+    (workspace / "app" / "Policies").mkdir(parents=True)
+    (workspace / "app" / "Providers").mkdir(parents=True)
     (workspace / "app" / "Services").mkdir(parents=True)
+    (workspace / "database" / "migrations").mkdir(parents=True)
     (workspace / "routes" / "web.php").write_text(
         "<?php\n"
         "use App\\Http\\Controllers\\OrderController;\n"
-        "Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');\n",
+        "Route::get('/orders/{order}', [OrderController::class, 'show'])"
+        "->middleware(['auth', 'verified'])->name('orders.show');\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Http" / "Controllers" / "OrderController.php").write_text(
@@ -317,6 +321,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Services\\OrderService;\n"
         "class OrderController extends Controller {\n"
         "    public function show(Order $order) {\n"
+        "        config('services.orders.cache');\n"
+        "        env('ORDER_DEBUG');\n"
         "        return OrderService::format($order);\n"
         "    }\n"
         "}\n",
@@ -327,6 +333,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "namespace App\\Models;\n"
         "use Illuminate\\Database\\Eloquent\\Model;\n"
         "class Order extends Model {\n"
+        "    protected $table = 'orders';\n"
         "    public function customer() {\n"
         "        return $this->belongsTo(Customer::class);\n"
         "    }\n"
@@ -339,6 +346,41 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "class OrderService {\n"
         "    public static function format($order) { return ['id' => $order->id]; }\n"
         "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Policies" / "OrderPolicy.php").write_text(
+        "<?php\n"
+        "namespace App\\Policies;\n"
+        "class OrderPolicy {\n"
+        "    public function view($user, $order) { return true; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Providers" / "AuthServiceProvider.php").write_text(
+        "<?php\n"
+        "namespace App\\Providers;\n"
+        "use Illuminate\\Support\\Facades\\Gate;\n"
+        "class AuthServiceProvider {\n"
+        "    public function boot() {\n"
+        "        Gate::policy(\\App\\Models\\Order::class, \\App\\Policies\\OrderPolicy::class);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "database" / "migrations" / "2026_01_01_000000_create_orders_table.php").write_text(
+        "<?php\n"
+        "use Illuminate\\Database\\Schema\\Blueprint;\n"
+        "use Illuminate\\Support\\Facades\\Schema;\n"
+        "return new class {\n"
+        "    public function up() {\n"
+        "        Schema::create('orders', function (Blueprint $table) {\n"
+        "            $table->id();\n"
+        "            $table->foreignId('customer_id')->constrained();\n"
+        "            $table->string('status')->index();\n"
+        "            $table->timestamps();\n"
+        "        });\n"
+        "    }\n"
+        "};\n",
         encoding="utf-8",
     )
 
@@ -355,6 +397,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     routes = {(item["method"], item["uri"], item["handler"]) for item in artifact["routes"]}
     symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.php_graph.v1"
@@ -363,14 +406,42 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("GET", "/orders/{order}", "OrderController@show") in routes
     assert ("class", "App\\Http\\Controllers\\OrderController") in symbols
     assert ("class", "App\\Models\\Order") in symbols
+    assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
+    assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@show") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
+    assert ("route_middleware", "route:orders.show", "middleware:auth") in edges
+    assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
+    assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
+    assert ("model_table", "App\\Models\\Order", "table:orders") in edges
+    assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
+    assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
+    assert ("env_ref", "App\\Http\\Controllers\\OrderController", "env:ORDER_DEBUG") in edges
+    assert (
+        "migration_table",
+        "database/migrations/2026_01_01_000000_create_orders_table.php",
+        "table:orders",
+    ) in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert set(tables["orders"]) >= {"columns", "foreign_keys", "indexes"}
+    assert {column["name"] for column in tables["orders"]["columns"]} >= {"id", "customer_id", "status"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "path": "database/migrations/2026_01_01_000000_create_orders_table.php",
+            "line": 8,
+        }
+    ]
     assert "Route::get" not in str(artifact)
     assert "return $this->belongsTo" not in str(artifact)
     assert "return OrderService::format" not in str(artifact)
+    assert "Schema::create" not in str(artifact)
+    assert "config('services.orders.cache')" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):

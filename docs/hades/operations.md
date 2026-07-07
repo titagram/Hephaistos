@@ -301,11 +301,14 @@ ask about project structure without loading raw source chunks into ordinary
 memory.
 `populate_backend_ast` emits bounded source-symbol artifacts with provenance,
 not raw source. On PHP/Laravel workspaces it produces `hades.php_graph.v1`
-with detected routes, classes, methods, Eloquent relations, static calls, and
-instantiation edges. On Node/TypeScript/React/Next/Express workspaces it
-produces `hades.code_graph.v1` with framework detection, route/page handlers,
-symbols, dependency manifests, and import edges. On Python workspaces it keeps
-the existing `hades.symbols.v1` class/function symbol output. All artifact jobs
+with detected routes, route middleware, classes, methods, Eloquent relations,
+static calls with simple PHP import resolution, instantiation edges,
+model-table edges, migration tables/columns/indexes/foreign keys, policy
+mappings, and redacted config/env references. On
+Node/TypeScript/React/Next/Express workspaces it produces
+`hades.code_graph.v1` with framework detection, route/page handlers, symbols,
+dependency manifests, and import edges. On Python workspaces it keeps the
+existing `hades.symbols.v1` class/function symbol output. All artifact jobs
 report omission reasons instead of following path escapes or failing the whole
 sync.
 
