@@ -3579,7 +3579,6 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - Wizard desktop.
-- Upload file dal dashboard.
 
 ## Esecuzione scheduled quality audit Hades - 2026-07-07
 
@@ -3615,6 +3614,33 @@ Resta fuori da questa tranche:
 - Scheduler/reporting remoto centralizzato.
 - Trend lunghi in dashboard.
 
+## Esecuzione dashboard bug-intake file upload Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-1.
+
+Agent locale:
+
+- Il pannello dashboard `Bug intake` accetta file per failing test output e
+  runtime log.
+- La lettura avviene lato browser, con limite `64_000` byte per file.
+- I file piu' grandi vengono caricati nel form come testo troncato con marker
+  `... [truncated]`.
+- Il testo caricato resta modificabile prima del submit e passa dalla privacy
+  preview locale gia' presente.
+- Il submit continua a usare `/api/hades/backend/bug-intake`, quindi la
+  redazione backend e i test FastAPI esistenti restano applicati.
+
+Verifiche eseguite:
+
+- Frontend:
+  `npm run typecheck` in `web/` passato.
+- Frontend:
+  `npx eslint src/pages/BackendPage.tsx --max-warnings=0` in `web/` passato.
+
+Resta fuori da questa tranche:
+
+- Wizard desktop.
+
 ## Esecuzione dashboard bug-intake privacy preview Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-1.
@@ -3639,7 +3665,6 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - Wizard desktop.
-- Upload file dal dashboard.
 
 ## Esecuzione timeout live Hades agent - 2026-07-07
 

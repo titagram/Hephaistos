@@ -1,4 +1,13 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   AlertTriangle,
   Brain,
@@ -836,6 +845,8 @@ const inputClassName =
 const textareaClassName =
   "min-h-[86px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60";
 
+const MAX_EVIDENCE_UPLOAD_BYTES = 64_000;
+
 function BugIntakePanel({
   status,
   onCreated,
@@ -886,6 +897,23 @@ function BugIntakePanel({
       }));
     },
     [bindingOptions],
+  );
+
+  const loadEvidenceFile = useCallback(
+    async (field: "failingTest" | "runtimeLog", event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      try {
+        const truncated = file.size > MAX_EVIDENCE_UPLOAD_BYTES;
+        const text = await file.slice(0, MAX_EVIDENCE_UPLOAD_BYTES).text();
+        setField(field, truncated ? `${text}\n... [truncated]` : text);
+        showToast(`${file.name} loaded${truncated ? " with truncation" : ""}`, "success");
+      } catch (error) {
+        showToast(`File load failed: ${error}`, "error");
+      }
+    },
+    [setField, showToast],
   );
 
   const handleSubmit = useCallback(
@@ -1042,6 +1070,13 @@ function BugIntakePanel({
 
           <div className="grid gap-3 lg:grid-cols-2">
             <FormField label="Failing test output">
+              <input
+                className={inputClassName}
+                type="file"
+                disabled={submitting}
+                accept=".txt,.log,.out,.md"
+                onChange={(event) => void loadEvidenceFile("failingTest", event)}
+              />
               <textarea
                 className={textareaClassName}
                 value={form.failingTest}
@@ -1051,6 +1086,13 @@ function BugIntakePanel({
               />
             </FormField>
             <FormField label="Runtime log">
+              <input
+                className={inputClassName}
+                type="file"
+                disabled={submitting}
+                accept=".txt,.log,.out,.md"
+                onChange={(event) => void loadEvidenceFile("runtimeLog", event)}
+              />
               <textarea
                 className={textareaClassName}
                 value={form.runtimeLog}
