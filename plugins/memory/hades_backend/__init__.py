@@ -2881,6 +2881,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "storage_path",
         "storage_operation",
         "storage_method",
+        "input_source",
+        "input_method",
         "call_type",
         "target_method",
         "job_class",

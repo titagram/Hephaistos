@@ -280,6 +280,12 @@ PHP_STORAGE_DISK_CHAIN_RE = re.compile(
     r"(?P<method>get|put|prepend|append|exists|missing|delete|url|temporaryUrl|path|download|files|allFiles|directories|makeDirectory|deleteDirectory)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_REQUEST_INPUT_CHAIN_RE = re.compile(
+    r"(?P<receiver>request\s*\(\s*\)|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
+    r"(?P<method>input|get|query|header|cookie|route)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_REQUEST_HELPER_RE = re.compile(r"\brequest\s*\(", re.IGNORECASE | re.MULTILINE)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -4701,6 +4707,150 @@ def _append_php_route_storage_access_edges(
     return truncated
 
 
+def _php_request_input_source(method: str) -> str:
+    normalized = method.lower()
+    if normalized == "query":
+        return "query"
+    if normalized == "header":
+        return "header"
+    if normalized == "cookie":
+        return "cookie"
+    if normalized == "route":
+        return "route_param"
+    return "input"
+
+
+def _php_request_input_field_literal(raw: str) -> str:
+    literal = _php_quoted_literal(raw)
+    if not literal or len(literal) > 128:
+        return ""
+    if "$" in literal or "{" in literal or "}" in literal:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_.*:-]+", literal):
+        return ""
+    return literal
+
+
+def _php_request_input_access_items(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    input_method: str,
+    args: str,
+) -> list[dict[str, Any]]:
+    parts = _split_top_level_items(args)
+    field = _php_request_input_field_literal(parts[0][0]) if parts else ""
+    if not field:
+        return []
+    method = input_method.lower()
+    return [
+        {
+            "field": field,
+            "input_source": _php_request_input_source(method.removeprefix("request_")),
+            "input_method": input_method,
+            "line": _line_number(source, method_body_offset + relative_call_start),
+        }
+    ]
+
+
+def _php_request_input_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+
+    def append_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("field") or ""),
+                str(item.get("input_source") or ""),
+                str(item.get("input_method") or ""),
+                int(item.get("line") or 0),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            accesses.append(item)
+
+    for match in PHP_REQUEST_INPUT_CHAIN_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        method = str(match.group("method") or "").lower()
+        append_items(
+            _php_request_input_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                input_method=f"request_{method}",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+
+    for match in PHP_REQUEST_HELPER_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        chain_preview = source[close_abs + 1 : close_abs + 20]
+        if re.match(r"\s*->\s*(?:input|get|query|header|cookie|route)\s*\(", chain_preview, re.IGNORECASE):
+            continue
+        append_items(
+            _php_request_input_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                input_method="request_helper",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_request_input_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            field = str(access.get("field") or "")
+            if not field:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_request_input_access",
+                    "from": route_ref,
+                    "to": f"request_field:{field}",
+                    "handler": method_symbol,
+                    "field": field,
+                    "input_source": access.get("input_source"),
+                    "input_method": access.get("input_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -5860,6 +6010,33 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 storage_accesses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            request_input_accesses = _php_request_input_accesses_for_method(source, method_body, method_body_offset)
+            for access in request_input_accesses:
+                field = str(access.get("field") or "")
+                if not field:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "request_input_access",
+                        "from": method_symbol,
+                        "to": f"request_field:{field}",
+                        "field": field,
+                        "input_source": access.get("input_source"),
+                        "input_method": access.get("input_method"),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_request_input_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                request_input_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated

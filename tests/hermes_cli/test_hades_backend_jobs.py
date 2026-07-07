@@ -676,6 +676,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        session()->flash('orders.notice', 'Order queued');\n"
         "        \\Illuminate\\Support\\Facades\\Http::post('https://api.example.test/orders/sync?token=secret', ['status' => 'paid']);\n"
         "        \\Illuminate\\Support\\Facades\\Storage::disk('s3')->put('orders/export.csv', 'secret csv payload');\n"
+        "        $request->input('customer_note', 'private fallback note');\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1078,6 +1079,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_outbound_http_call", "route:orders.show", "http_endpoint:api.example.test/orders/sync") in edges
     assert ("storage_access", "OrderController@show", "storage_path:s3:orders/export.csv") in edges
     assert ("route_storage_access", "route:orders.show", "storage_path:s3:orders/export.csv") in edges
+    assert ("request_input_access", "OrderController@show", "request_field:customer_note") in edges
+    assert ("route_request_input_access", "route:orders.show", "request_field:customer_note") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1285,6 +1288,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 34,
+    } in artifact["edges"]
+    assert {
+        "kind": "request_input_access",
+        "from": "OrderController@show",
+        "to": "request_field:customer_note",
+        "field": "customer_note",
+        "input_source": "input",
+        "input_method": "request_input",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 35,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_request_input_access",
+        "from": "route:orders.show",
+        "to": "request_field:customer_note",
+        "handler": "OrderController@show",
+        "field": "customer_note",
+        "input_source": "input",
+        "input_method": "request_input",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 35,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1807,6 +1835,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "token=secret" not in str(artifact)
     assert "https://api.example.test/orders/sync?token=secret" not in str(artifact)
     assert "secret csv payload" not in str(artifact)
+    assert "private fallback note" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)

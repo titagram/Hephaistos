@@ -2354,6 +2354,88 @@ def test_hades_backend_graph_search_finds_local_storage_access_edges(monkeypatch
     )
 
 
+def test_hades_backend_graph_search_finds_local_request_input_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "request_input_access",
+                "from": "OrderController@show",
+                "to": "request_field:customer_note",
+                "field": "customer_note",
+                "input_source": "input",
+                "input_method": "request_input",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 48,
+            },
+            {
+                "kind": "route_request_input_access",
+                "from": "route:orders.show",
+                "to": "request_field:customer_note",
+                "handler": "OrderController@show",
+                "field": "customer_note",
+                "input_source": "input",
+                "input_method": "request_input",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 48,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders request input customer_note", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_request_input_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "request_field:customer_note"
+        and ref["provenance"]["field"] == "customer_note"
+        and ref["provenance"]["input_source"] == "input"
+        and ref["provenance"]["input_method"] == "request_input"
+        for ref in graph_refs
+    )
+    assert any(
+        "field=customer_note" in item["summary"]
+        and "input_source=input" in item["summary"]
+        and "input_method=request_input" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
