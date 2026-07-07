@@ -570,6 +570,22 @@ def test_hades_backend_web_route_reads_bug_report_detail(monkeypatch, tmp_path):
                 ],
             }
 
+        def evidence_packs(self, **payload):
+            self.calls.append(("evidence_packs", payload))
+            return {
+                "count": 1,
+                "items": [
+                    {
+                        "id": "pack_1",
+                        "title": "Checkout evidence pack",
+                        "evidence_refs": [{"type": "bug_evidence", "id": "ev_1"}],
+                        "graph_refs": [{"type": "route", "id": "checkout.submit"}],
+                        "source_slice_ids": ["slice_1"],
+                    }
+                ],
+                "freshness": {"status": "current"},
+            }
+
         def close(self):
             self.closed = True
 
@@ -626,6 +642,9 @@ def test_hades_backend_web_route_reads_bug_report_detail(monkeypatch, tmp_path):
     assert body["workspace_binding_id"] == "wb_1"
     assert body["bug_report"]["title"] == "Checkout fails"
     assert body["evidence"][0]["id"] == "ev_1"
+    assert body["evidence_packs"][0]["id"] == "pack_1"
+    assert body["evidence_pack_count"] == 1
+    assert body["evidence_pack_freshness"] == {"status": "current"}
     assert body["diagnosis_reports"][0]["id"] == "diag_1"
     assert fake_client.closed is True
     assert fake_client.calls == [
@@ -635,7 +654,16 @@ def test_hades_backend_web_route_reads_bug_report_detail(monkeypatch, tmp_path):
                 "project_id": "proj_1",
                 "workspace_binding_id": "wb_1",
             },
-        )
+        ),
+        (
+            "evidence_packs",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "bug_report_id": "bug_1",
+                "limit": 5,
+            },
+        ),
     ]
 
 

@@ -1904,11 +1904,26 @@ export interface HadesBackendDiagnosisReportSummary {
   [key: string]: unknown;
 }
 
+export interface HadesBackendEvidencePackSummary {
+  id?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  evidence_refs?: Array<Record<string, unknown>>;
+  graph_refs?: Array<Record<string, unknown>>;
+  source_slice_ids?: string[];
+  freshness?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
 export interface HadesBackendBugReportDetailResponse extends HadesBackendActionResponse {
   bug_report?: HadesBackendBugReportDetail | null;
   evidence?: HadesBackendBugReportEvidenceItem[];
   evidence_items?: HadesBackendBugReportEvidenceItem[];
   diagnosis_reports?: HadesBackendDiagnosisReportSummary[];
+  evidence_packs?: HadesBackendEvidencePackSummary[];
+  evidence_pack_count?: number;
+  evidence_pack_freshness?: Record<string, unknown> | null;
+  evidence_pack_error?: string | null;
 }
 
 export interface HadesBackendPromoteDiagnosisRequest {

@@ -130,8 +130,8 @@ commit differs from the linked workspace head. Add `--request-url <url>`,
 `--request-method <method>`, and optional `--response-status <code>` to attach
 bounded HTTP request/response context to the same report.
 The dashboard Backend page can read a saved case by id in `Bug case lookup`;
-it shows the bug report summary, evidence timeline, and any diagnosis reports
-returned by the backend.
+it shows the bug report summary, evidence timeline, evidence packs with
+graph/source refs, and any diagnosis reports returned by the backend.
 
 Diagnosis outcomes should be persisted with
 `hades_backend_diagnosis_report_create` / `POST /api/hades/v1/diagnosis-reports`

@@ -95,6 +95,10 @@ function recordItems<T extends Record<string, unknown>>(value: unknown): T[] {
     : [];
 }
 
+function itemCount(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
 function statusTone(status?: string | null): "success" | "warning" | "destructive" | "secondary" | "outline" {
   if (!status) return "outline";
   if (["linked", "completed", "accepted", "ok", "present", "ready", "success", "high", "passed"].includes(status)) return "success";
@@ -1433,6 +1437,7 @@ function BugCaseLookupPanel({
   const report = detail?.bug_report ?? null;
   const evidence = recordItems(detail?.evidence ?? detail?.evidence_items);
   const diagnoses = recordItems(detail?.diagnosis_reports);
+  const packs = recordItems(detail?.evidence_packs);
 
   const loadBugReport = useCallback(async () => {
     if (!cleanId || loading) return;
@@ -1513,7 +1518,7 @@ function BugCaseLookupPanel({
               </div>
             </div>
 
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+            <div className="grid gap-3 xl:grid-cols-3">
               <div className="border border-border bg-background/40 px-3 py-3">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs uppercase text-muted-foreground">Evidence timeline</div>
@@ -1537,6 +1542,40 @@ function BugCaseLookupPanel({
                   </div>
                 ) : (
                   <ReviewEmpty label="No evidence returned" />
+                )}
+              </div>
+
+              <div className="border border-border bg-background/40 px-3 py-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs uppercase text-muted-foreground">Evidence packs</div>
+                  <Badge tone={packs.length ? "success" : detail.evidence_pack_error ? "warning" : "outline"}>
+                    {packs.length || detail.evidence_pack_count || 0}
+                  </Badge>
+                </div>
+                {packs.length > 0 ? (
+                  <div className="grid gap-2">
+                    {packs.slice(0, 4).map((item, index) => (
+                      <div className="border border-border bg-background px-3 py-2" key={stringLabel(item.id, String(index))}>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                          <span className="min-w-0 truncate font-medium">
+                            {stringLabel(item.title, stringLabel(item.summary, "Evidence pack"))}
+                          </span>
+                          <Badge tone="secondary">
+                            refs {itemCount(item.evidence_refs) + itemCount(item.graph_refs)}
+                          </Badge>
+                        </div>
+                        <ReviewMeta>
+                          {stringLabel(item.id, "no id")} / graph {itemCount(item.graph_refs)} / slices {itemCount(item.source_slice_ids)}
+                        </ReviewMeta>
+                      </div>
+                    ))}
+                  </div>
+                ) : detail.evidence_pack_error ? (
+                  <div className="border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
+                    {detail.evidence_pack_error}
+                  </div>
+                ) : (
+                  <ReviewEmpty label="No evidence packs returned" />
                 )}
               </div>
 

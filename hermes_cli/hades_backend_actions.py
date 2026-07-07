@@ -494,6 +494,19 @@ def get_bug_report_detail(bug_report_id: str) -> BackendActionResult:
                 project_id=binding.project_id,
                 workspace_binding_id=binding.backend_workspace_binding_id,
             )
+            packs_method = getattr(client, "evidence_packs", None)
+            pack_response = None
+            pack_error = None
+            if callable(packs_method):
+                try:
+                    pack_response = packs_method(
+                        project_id=binding.project_id,
+                        workspace_binding_id=binding.backend_workspace_binding_id,
+                        bug_report_id=clean_id,
+                        limit=5,
+                    )
+                except Exception as exc:
+                    pack_error = redact_secret(str(exc))
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -504,6 +517,14 @@ def get_bug_report_detail(bug_report_id: str) -> BackendActionResult:
     payload = dict(response) if isinstance(response, dict) else {"bug_report": response}
     payload.setdefault("project_id", binding.project_id)
     payload.setdefault("workspace_binding_id", binding.backend_workspace_binding_id)
+    if isinstance(pack_response, dict):
+        packs = pack_response.get("items") or pack_response.get("evidence_packs") or []
+        payload["evidence_packs"] = packs if isinstance(packs, list) else []
+        payload["evidence_pack_count"] = pack_response.get("count", len(payload["evidence_packs"]))
+        if isinstance(pack_response.get("freshness"), dict):
+            payload["evidence_pack_freshness"] = pack_response["freshness"]
+    if pack_error:
+        payload["evidence_pack_error"] = pack_error
     report = payload.get("bug_report") if isinstance(payload.get("bug_report"), dict) else {}
     title = _clean_text(report.get("title")) if isinstance(report, dict) else None
     return BackendActionResult(

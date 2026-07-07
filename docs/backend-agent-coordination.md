@@ -4856,10 +4856,10 @@ Integrazione locale/dashboard:
   `workspace_binding_id`.
 - Nuova route dashboard `GET /api/hades/backend/bug-reports/{bug_report_id}`.
 - Nuovo metodo frontend `api.getHadesBackendBugReport` e tipi per bug report,
-  evidence item e diagnosis report summary.
+  evidence item, evidence pack e diagnosis report summary.
 - La dashboard Backend aggiunge il pannello `Bug case lookup`: carica un bug
-  report per id e mostra summary, evidence timeline e diagnosis reports
-  restituiti dal backend.
+  report per id e mostra summary, evidence timeline, evidence packs con
+  conteggi graph/source refs e diagnosis reports restituiti dal backend.
 
 Verifiche eseguite:
 
