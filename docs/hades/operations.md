@@ -319,8 +319,10 @@ not raw source. On PHP/Laravel workspaces it produces `hades.php_graph.v1`
 with detected routes, route middleware, classes, methods, Eloquent relations,
 static calls with simple PHP import resolution, instantiation edges,
 model-table edges, migration tables/columns/indexes/foreign keys, policy
-mappings, and redacted config/env references. On
-Node/TypeScript/React/Next/Express workspaces it produces
+mappings, FormRequest/request validation fields, dispatched jobs, emitted
+events, event listeners, Artisan command signatures, scheduler command/job
+edges, query-table edges, Eloquent query calls, and redacted config/env
+references. On Node/TypeScript/React/Next/Express workspaces it produces
 `hades.code_graph.v1` with framework detection, route/page handlers, symbols,
 dependency manifests, and import edges. On Python workspaces it keeps the
 existing `hades.symbols.v1` class/function symbol output. All artifact jobs

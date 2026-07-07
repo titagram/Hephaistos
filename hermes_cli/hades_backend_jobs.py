@@ -117,7 +117,7 @@ PHP_CLASS_RE = re.compile(
 )
 PHP_METHOD_RE = re.compile(
     r"\b(?P<visibility>public|protected|private)\s+(?:static\s+)?function\s+"
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)",
     re.MULTILINE,
 )
 PHP_ELOQUENT_RELATION_RE = re.compile(
@@ -137,6 +137,51 @@ PHP_GATE_POLICY_RE = re.compile(
     r"\bGate::policy\s*\(\s*(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*,\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
     re.MULTILINE,
 )
+PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$[A-Za-z_][A-Za-z0-9_]*")
+PHP_VALIDATE_ARRAY_RE = re.compile(
+    r"(?:\$[A-Za-z_][A-Za-z0-9_]*|request\s*\(\))->validate\s*\(\s*\[(?P<body>.*?)\]\s*\)",
+    re.DOTALL,
+)
+PHP_ARRAY_FIELD_KEY_RE = re.compile(r"['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>")
+PHP_LISTEN_ARRAY_RE = re.compile(
+    r"(?P<event>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*\[(?P<listeners>.*?)\]",
+    re.DOTALL,
+)
+PHP_CLASS_CONST_RE = re.compile(r"(?P<class>\\?[A-Za-z0-9_\\]+)::class")
+PHP_DISPATCH_JOB_RE = re.compile(r"\b(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::dispatch(?:Sync|AfterResponse)?\s*\(")
+PHP_EVENT_FUNCTION_RE = re.compile(r"\bevent\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(")
+PHP_EVENT_DISPATCH_RE = re.compile(
+    r"\b(?:Event::dispatch|event)\s*\(\s*(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::class"
+)
+PHP_COMMAND_SIGNATURE_RE = re.compile(r"\bprotected\s+\$signature\s*=\s*['\"](?P<signature>[^'\"]+)['\"]")
+PHP_SCHEDULE_COMMAND_RE = re.compile(
+    r"\$schedule->command\s*\(\s*['\"](?P<command>[^'\"]+)['\"]\s*\)(?P<chain>(?:\s*->[A-Za-z_][A-Za-z0-9_]*\([^)]*\))*)",
+    re.DOTALL,
+)
+PHP_SCHEDULE_JOB_RE = re.compile(
+    r"\$schedule->job\s*\(\s*(?:new\s+)?(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)(?:\([^)]*\))?\s*\)"
+    r"(?P<chain>(?:\s*->[A-Za-z_][A-Za-z0-9_]*\([^)]*\))*)",
+    re.DOTALL,
+)
+PHP_SCHEDULE_CADENCE_RE = re.compile(r"->(?P<cadence>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+PHP_DB_TABLE_RE = re.compile(r"\bDB::table\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_QUERY_FROM_RE = re.compile(r"->from\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_QUERY_JOIN_RE = re.compile(r"->(?P<method>join|leftJoin|rightJoin|crossJoin)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_ELOQUENT_QUERY_METHODS = {
+    "all",
+    "count",
+    "create",
+    "doesntHave",
+    "find",
+    "first",
+    "firstOrFail",
+    "has",
+    "query",
+    "update",
+    "where",
+    "whereHas",
+    "with",
+}
 PHP_SCHEMA_ACTION_RE = re.compile(
     r"\bSchema::(?P<action>create|table|drop|dropIfExists)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]",
     re.IGNORECASE | re.MULTILINE,
@@ -393,6 +438,8 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
     short = _php_short_name(class_name)
     if path.startswith("app/Http/Controllers/") or short.endswith("Controller"):
         return "controller"
+    if path.startswith("app/Http/Requests/") or _php_short_name(extends) == "FormRequest" or short.endswith("Request"):
+        return "form_request"
     if path.startswith("app/Models/") or _php_short_name(extends) == "Model":
         return "model"
     if path.startswith("app/Http/Middleware/") or short.endswith("Middleware"):
@@ -401,6 +448,10 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
         return "job"
     if path.startswith("app/Events/") or short.endswith("Event"):
         return "event"
+    if path.startswith("app/Listeners/") or short.endswith("Listener"):
+        return "listener"
+    if path.startswith("app/Console/Commands/") or _php_short_name(extends) == "Command" or short.endswith("Command"):
+        return "artisan_command"
     if path.startswith("app/Policies/") or short.endswith("Policy"):
         return "policy"
     if path.startswith("app/Services/") or short.endswith("Service"):
@@ -443,6 +494,40 @@ def _route_middleware_values(chain: str) -> list[str]:
         if clean:
             values.append(clean)
     return sorted({value for value in values if value})
+
+
+def _php_array_field_keys(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
+    fields: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in PHP_ARRAY_FIELD_KEY_RE.finditer(body):
+        field = match.group("field")
+        if field in seen:
+            continue
+        seen.add(field)
+        fields.append({"field": field, "line": _line_number(source, base_offset + match.start())})
+    return fields
+
+
+def _php_rules_method_body(source: str) -> tuple[str, int] | None:
+    match = re.search(r"\bfunction\s+rules\s*\([^)]*\)", source)
+    if not match:
+        return None
+    next_method = re.search(r"\bfunction\s+[A-Za-z_][A-Za-z0-9_]*\s*\(", source[match.end() :])
+    end = match.end() + next_method.start() if next_method else len(source)
+    return source[match.end() : end], match.end()
+
+
+def _php_schedule_cadence(chain: str) -> str:
+    ignored = {"name", "timezone", "withoutOverlapping", "onOneServer", "runInBackground", "evenInMaintenanceMode"}
+    for match in PHP_SCHEDULE_CADENCE_RE.finditer(chain or ""):
+        cadence = match.group("cadence")
+        if cadence not in ignored:
+            return cadence
+    return ""
+
+
+def _php_command_name(signature: str) -> str:
+    return str(signature or "").split(maxsplit=1)[0].strip()
 
 
 def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, Any]]:
@@ -1018,11 +1103,12 @@ def _build_php_graph(
                 continue
             method_name = match.group("name")
             fqcn = str(class_info["name"])
+            method_symbol = f"{_php_short_name(fqcn)}@{method_name}"
             if len(symbols) < max_symbols:
                 symbols.append(
                     {
                         "kind": "method",
-                        "name": f"{_php_short_name(fqcn)}@{method_name}",
+                        "name": method_symbol,
                         "class": fqcn,
                         "method": method_name,
                         "visibility": match.group("visibility"),
@@ -1033,6 +1119,54 @@ def _build_php_graph(
                 )
             else:
                 truncated = True
+            for param_match in PHP_TYPED_PARAM_RE.finditer(match.group("params") or ""):
+                param_class = _php_fqcn_resolved(namespace, param_match.group("class"), uses)
+                if _php_short_name(param_class).endswith("Request"):
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "uses_form_request",
+                            "from": method_symbol,
+                            "to": param_class,
+                            "path": rel,
+                            "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+
+        rules_body = _php_rules_method_body(source)
+        if rules_body is not None:
+            body, base_offset = rules_body
+            for class_info in classes:
+                if class_info.get("role") != "form_request":
+                    continue
+                for field_info in _php_array_field_keys(source, body, base_offset):
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "request_validation",
+                            "from": class_info["name"],
+                            "to": f"validation:{field_info['field']}",
+                            "path": rel,
+                            "line": field_info["line"],
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+
+        for match in PHP_VALIDATE_ARRAY_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            for field_info in _php_array_field_keys(source, match.group("body"), match.start()):
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "request_validation",
+                        "from": _php_context_id(class_info, rel),
+                        "to": f"validation:{field_info['field']}",
+                        "path": rel,
+                        "line": field_info["line"],
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_ELOQUENT_RELATION_RE.finditer(source):
             class_info = _class_context(classes, match.start())
@@ -1053,20 +1187,34 @@ def _build_php_graph(
 
         for match in PHP_STATIC_CALL_RE.finditer(source):
             class_name = match.group("class")
-            if _php_short_name(class_name) in {"self", "static", "parent", "Route", "Schema", "Gate"}:
+            method_name = match.group("method")
+            if _php_short_name(class_name) in {"self", "static", "parent", "Route", "Schema", "Gate", "DB"}:
                 continue
             class_info = _class_context(classes, match.start())
+            resolved_class = _php_fqcn_resolved(namespace, class_name, uses)
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "static_call",
                     "from": class_info["name"] if class_info else rel,
-                    "to": f"{_php_fqcn_resolved(namespace, class_name, uses)}::{match.group('method')}",
+                    "to": f"{resolved_class}::{method_name}",
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+            if method_name in PHP_ELOQUENT_QUERY_METHODS and _php_short_name(resolved_class) != "DB":
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "eloquent_query",
+                        "from": class_info["name"] if class_info else rel,
+                        "to": f"{resolved_class}::{method_name}",
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_GATE_POLICY_RE.finditer(source):
             truncated = not _edge_append(
@@ -1080,6 +1228,112 @@ def _build_php_graph(
                 },
                 max_edges=max_edges,
             ) or truncated
+
+        for match in PHP_LISTEN_ARRAY_RE.finditer(source):
+            event_class = _php_fqcn_resolved(namespace, match.group("event"), uses)
+            for listener_match in PHP_CLASS_CONST_RE.finditer(match.group("listeners")):
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "event_listener",
+                        "from": event_class,
+                        "to": _php_fqcn_resolved(namespace, listener_match.group("class"), uses),
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
+        for match in PHP_DISPATCH_JOB_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "dispatches_job",
+                    "from": _php_context_id(class_info, rel),
+                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for event_pattern in (PHP_EVENT_FUNCTION_RE, PHP_EVENT_DISPATCH_RE):
+            for match in event_pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "emits_event",
+                        "from": _php_context_id(class_info, rel),
+                        "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
+        for match in PHP_COMMAND_SIGNATURE_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            command_name = _php_command_name(match.group("signature"))
+            if class_info is None or not command_name:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "artisan_command",
+                    "from": class_info["name"],
+                    "to": f"command:{command_name}",
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_SCHEDULE_COMMAND_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            command_name = _php_command_name(match.group("command"))
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "scheduled_command",
+                    "from": _php_context_id(class_info, rel),
+                    "to": f"command:{command_name}",
+                    "cadence": _php_schedule_cadence(match.group("chain")),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_SCHEDULE_JOB_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "scheduled_job",
+                    "from": _php_context_id(class_info, rel),
+                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                    "cadence": _php_schedule_cadence(match.group("chain")),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for table_pattern in (PHP_DB_TABLE_RE, PHP_QUERY_FROM_RE, PHP_QUERY_JOIN_RE):
+            for match in table_pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                edge = {
+                    "kind": "query_table",
+                    "from": _php_context_id(class_info, rel),
+                    "to": f"table:{match.group('table')}",
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                if "method" in match.groupdict():
+                    edge["query_method"] = match.group("method")
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
 
         for kind, pattern, prefix in (
             ("config_ref", PHP_CONFIG_RE, "config"),

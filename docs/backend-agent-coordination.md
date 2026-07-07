@@ -2433,3 +2433,42 @@ Resta fuori da questa tranche:
 
 - UI wizard che degrada automaticamente confidence quando il gate fallisce.
 - Deploy-aware freshness distinta dal solo workspace/artifact HEAD.
+
+## Esecuzione PHP graph runtime edges Hades - 2026-07-07
+
+Stato: completata una tranche P0-4 locale del piano "Bug Root Cause Awareness".
+
+Agent locale:
+
+- `populate_backend_ast` continua a produrre `hades.php_graph.v1`, senza
+  cambiare il contratto backend gia' accettato.
+- Il grafo PHP/Laravel ora include anche:
+  - FormRequest/request validation fields;
+  - job dispatch;
+  - event emission e event listeners;
+  - Artisan command signatures;
+  - scheduler command/job edges;
+  - DB query-table edges;
+  - Eloquent query calls.
+- Gli edge restano metadata/symbol-only: non vengono salvati raw source, blocchi
+  `validate`, `DB::table`, scheduler source o altre righe sorgente.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale aggregato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `39 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato; `py_compile hermes_cli/hades_backend_jobs.py` passato.
+
+Resta fuori da questa tranche:
+
+- Parser PHP/Laravel AST reale invece di pattern conservativi.
+- Dependency injection/container bindings, observer/broadcasting e Blade/view
+  references.
+- Query builder avanzato oltre a table/from/join e principali Eloquent static
+  query calls.

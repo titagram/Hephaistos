@@ -302,6 +302,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
     (workspace / "routes").mkdir()
     (workspace / "app" / "Http" / "Controllers").mkdir(parents=True)
+    (workspace / "app" / "Http" / "Requests").mkdir(parents=True)
+    (workspace / "app" / "Jobs").mkdir(parents=True)
+    (workspace / "app" / "Events").mkdir(parents=True)
+    (workspace / "app" / "Listeners").mkdir(parents=True)
+    (workspace / "app" / "Console" / "Commands").mkdir(parents=True)
     (workspace / "app" / "Models").mkdir(parents=True)
     (workspace / "app" / "Policies").mkdir(parents=True)
     (workspace / "app" / "Providers").mkdir(parents=True)
@@ -317,13 +322,77 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Http" / "Controllers" / "OrderController.php").write_text(
         "<?php\n"
         "namespace App\\Http\\Controllers;\n"
+        "use App\\Events\\OrderPlaced;\n"
+        "use App\\Http\\Requests\\StoreOrderRequest;\n"
+        "use App\\Jobs\\SyncOrderJob;\n"
         "use App\\Models\\Order;\n"
         "use App\\Services\\OrderService;\n"
+        "use Illuminate\\Support\\Facades\\DB;\n"
         "class OrderController extends Controller {\n"
-        "    public function show(Order $order) {\n"
+        "    public function show(StoreOrderRequest $request, Order $order) {\n"
+        "        $request->validate(['status' => 'required|string']);\n"
         "        config('services.orders.cache');\n"
         "        env('ORDER_DEBUG');\n"
+        "        SyncOrderJob::dispatch($order->id);\n"
+        "        event(new OrderPlaced($order));\n"
+        "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
+        "        Order::where('status', 'paid')->first();\n"
         "        return OrderService::format($order);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Requests" / "StoreOrderRequest.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Requests;\n"
+        "use Illuminate\\Foundation\\Http\\FormRequest;\n"
+        "class StoreOrderRequest extends FormRequest {\n"
+        "    public function rules(): array {\n"
+        "        return ['customer_id' => 'required|integer', 'status' => 'required|string'];\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Jobs" / "SyncOrderJob.php").write_text(
+        "<?php\n"
+        "namespace App\\Jobs;\n"
+        "class SyncOrderJob {\n"
+        "    public function handle() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Events" / "OrderPlaced.php").write_text(
+        "<?php\n"
+        "namespace App\\Events;\n"
+        "class OrderPlaced {}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Listeners" / "SendOrderReceipt.php").write_text(
+        "<?php\n"
+        "namespace App\\Listeners;\n"
+        "class SendOrderReceipt {\n"
+        "    public function handle($event) {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Console" / "Commands" / "SyncOrdersCommand.php").write_text(
+        "<?php\n"
+        "namespace App\\Console\\Commands;\n"
+        "use Illuminate\\Console\\Command;\n"
+        "class SyncOrdersCommand extends Command {\n"
+        "    protected $signature = 'orders:sync {order?}';\n"
+        "    public function handle() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Console" / "Kernel.php").write_text(
+        "<?php\n"
+        "namespace App\\Console;\n"
+        "use App\\Jobs\\SyncOrderJob;\n"
+        "class Kernel {\n"
+        "    protected function schedule($schedule) {\n"
+        "        $schedule->command('orders:sync')->hourly();\n"
+        "        $schedule->job(new SyncOrderJob())->daily();\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -359,8 +428,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Providers" / "AuthServiceProvider.php").write_text(
         "<?php\n"
         "namespace App\\Providers;\n"
+        "use App\\Events\\OrderPlaced;\n"
+        "use App\\Listeners\\SendOrderReceipt;\n"
         "use Illuminate\\Support\\Facades\\Gate;\n"
         "class AuthServiceProvider {\n"
+        "    protected $listen = [OrderPlaced::class => [SendOrderReceipt::class]];\n"
         "    public function boot() {\n"
         "        Gate::policy(\\App\\Models\\Order::class, \\App\\Policies\\OrderPolicy::class);\n"
         "    }\n"
@@ -408,6 +480,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Models\\Order") in symbols
     assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
+    assert ("class", "App\\Http\\Requests\\StoreOrderRequest") in symbols
+    assert ("class", "App\\Jobs\\SyncOrderJob") in symbols
+    assert ("class", "App\\Events\\OrderPlaced") in symbols
+    assert ("class", "App\\Listeners\\SendOrderReceipt") in symbols
+    assert ("class", "App\\Console\\Commands\\SyncOrdersCommand") in symbols
     assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@show") in symbols
     assert ("method", "Order@customer") in symbols
@@ -416,6 +493,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
+    assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
+    assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
+    assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
+    assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
+    assert ("emits_event", "App\\Http\\Controllers\\OrderController", "App\\Events\\OrderPlaced") in edges
+    assert ("event_listener", "App\\Events\\OrderPlaced", "App\\Listeners\\SendOrderReceipt") in edges
+    assert ("artisan_command", "App\\Console\\Commands\\SyncOrdersCommand", "command:orders:sync") in edges
+    assert ("scheduled_command", "App\\Console\\Kernel", "command:orders:sync") in edges
+    assert ("scheduled_job", "App\\Console\\Kernel", "App\\Jobs\\SyncOrderJob") in edges
+    assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:orders") in edges
+    assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
+    assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
@@ -442,6 +531,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "return OrderService::format" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
+    assert "$request->validate" not in str(artifact)
+    assert "DB::table" not in str(artifact)
+    assert "$schedule->command" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):
