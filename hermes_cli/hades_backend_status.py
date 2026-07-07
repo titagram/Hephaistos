@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from hermes_cli import hades_backend_db as db
+from hermes_cli.config import load_config
 from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
 
 
 def load_backend_status_payload() -> dict[str, Any]:
     """Return the canonical local Hades backend status payload."""
+    config = load_config()
+    memory_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    memory_provider = str(memory_config.get("provider") or "local").strip() or "local"
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         if agent:
@@ -54,6 +59,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_summary=last_summary,
         last_error=last_error,
         background_sync=background_sync,
+        memory_provider=memory_provider,
         last_summary_updated_at=last_summary_updated_at,
         last_error_updated_at=last_error_updated_at,
         background_sync_updated_at=background_sync_updated_at,
@@ -70,6 +76,7 @@ def backend_status_payload(
     last_summary: dict[str, Any] | None,
     last_error: dict[str, Any] | None,
     memory_caches: dict[str, Any] | None = None,
+    memory_provider: str = "local",
     background_sync: dict[str, Any] | None = None,
     last_summary_updated_at: int | None = None,
     last_error_updated_at: int | None = None,
@@ -104,6 +111,12 @@ def backend_status_payload(
         binding_payloads=binding_payloads,
         last_error=last_error,
     )
+    identity = _identity_payload(
+        agent=agent,
+        binding_payloads=binding_payloads,
+        awareness=awareness,
+        memory_provider=memory_provider,
+    )
     if awareness["status"] in {"partial", "degraded", "unmapped"} and not last_error and not background_failed:
         actions.append("Project awareness is incomplete; inspect `awareness` before source-free diagnosis.")
     return {
@@ -117,6 +130,7 @@ def backend_status_payload(
         },
         "bindings": binding_payloads,
         "awareness": awareness,
+        "identity": identity,
         "job_counts": job_counts,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
@@ -131,6 +145,66 @@ def backend_status_payload(
         "degraded": bool(waiting or refused or last_error or background_failed),
         "actions": actions,
     }
+
+
+def _identity_payload(
+    *,
+    agent: Any,
+    binding_payloads: list[dict[str, Any]],
+    awareness: dict[str, Any],
+    memory_provider: str,
+) -> dict[str, Any]:
+    linked_bindings = [binding for binding in binding_payloads if binding.get("status") == "linked"]
+    cached_items = sum(
+        int(binding.get("awareness", {}).get("coverage", {}).get("memory_cache", {}).get("items") or 0)
+        for binding in linked_bindings
+    )
+    current_binding = _current_binding_payload(linked_bindings)
+    project_id = getattr(agent, "project_id", None) if agent is not None else None
+    return {
+        "personal_memory": {
+            "scope": "local_profile",
+            "provider": memory_provider,
+            "portable_between_devices": False,
+        },
+        "project_memory": {
+            "scope": "backend_project",
+            "provider": "hades_backend" if agent is not None else None,
+            "project_id": project_id,
+            "available": agent is not None,
+            "cached_items": cached_items,
+            "portable_between_devices": agent is not None,
+        },
+        "workspace_binding": {
+            "scope": "local_workspace",
+            "total_bindings": len(binding_payloads),
+            "linked_bindings": len(linked_bindings),
+            "current_workspace_binding_id": current_binding.get("workspace_binding_id") if current_binding else None,
+            "current_display_path": current_binding.get("display_path") if current_binding else None,
+            "source_free_ready": awareness.get("diagnosable_without_source_bindings", 0),
+        },
+    }
+
+
+def _current_binding_payload(bindings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    cwd = Path.cwd().resolve()
+    matches: list[tuple[int, dict[str, Any]]] = []
+    with db.connect_closing() as conn:
+        for binding in bindings:
+            workspace_binding_id = str(binding.get("workspace_binding_id") or "")
+            if not workspace_binding_id:
+                continue
+            stored = db.get_binding_for_backend_id(conn, workspace_binding_id)
+            if stored is None:
+                continue
+            try:
+                repo_root = Path(stored.repo_root).resolve()
+                cwd.relative_to(repo_root)
+            except (OSError, ValueError):
+                continue
+            matches.append((len(str(repo_root)), binding))
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1] if matches else None
 
 
 def _count(source: dict[str, Any] | None, key: str) -> int:

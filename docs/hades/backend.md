@@ -120,6 +120,10 @@ artifacts, uploaded source slices, known bug evidence, and no recorded sync
 errors.
 When a profile has multiple workspace bindings, last-sync counters are marked
 as aggregate and do not make any single binding source-free diagnosable.
+The same payload includes `identity` to separate local profile memory,
+backend project memory, and the current local workspace binding. Project memory
+is portable across devices once the backend agent is configured; local profile
+memory and workspace freshness remain device-local.
 
 `jobs` defaults to `waiting_confirmation` work. `approve-job` executes a stored
 waiting job in the linked workspace, submits the result or artifact metadata,

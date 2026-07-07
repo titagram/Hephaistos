@@ -787,8 +787,10 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
             backend_workspace_binding_id="wb_1",
         )
 
+    monkeypatch.chdir(workspace)
     payload = load_backend_status_payload()
     binding_awareness = payload["bindings"][0]["awareness"]
+    identity = payload["identity"]
 
     assert payload["awareness"] == {
         "status": "partial",
@@ -815,6 +817,16 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
     assert payload["actions"] == [
         "Project awareness is incomplete; inspect `awareness` before source-free diagnosis."
     ]
+    assert identity["personal_memory"]["scope"] == "local_profile"
+    assert identity["personal_memory"]["portable_between_devices"] is False
+    assert identity["project_memory"]["scope"] == "backend_project"
+    assert identity["project_memory"]["project_id"] == "proj_1"
+    assert identity["project_memory"]["cached_items"] == 0
+    assert identity["project_memory"]["portable_between_devices"] is True
+    assert identity["workspace_binding"]["scope"] == "local_workspace"
+    assert identity["workspace_binding"]["current_workspace_binding_id"] == "wb_1"
+    assert identity["workspace_binding"]["current_display_path"] == "~/repo"
+    assert identity["workspace_binding"]["linked_bindings"] == 1
 
 
 def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp_path):
@@ -891,6 +903,8 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
     assert binding_awareness["coverage"]["bug_evidence"]["items_last_sync"] == 1
     assert binding_awareness["quality"]["confidence"] == "ready"
     assert binding_awareness["quality"]["missing"] == []
+    assert payload["identity"]["project_memory"]["cached_items"] == 1
+    assert payload["identity"]["workspace_binding"]["source_free_ready"] == 1
 
 
 def test_backend_status_keeps_multi_binding_aggregate_summary_partial(monkeypatch, tmp_path):

@@ -161,6 +161,25 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"  Project: {agent['project_id']}")
     print(f"  Agent:   {agent['agent_id']} ({agent['label']})")
     print(f"  Bindings: {len(payload['bindings'])}")
+    identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+    personal_memory = identity.get("personal_memory") if isinstance(identity.get("personal_memory"), dict) else {}
+    project_memory = identity.get("project_memory") if isinstance(identity.get("project_memory"), dict) else {}
+    workspace_binding = identity.get("workspace_binding") if isinstance(identity.get("workspace_binding"), dict) else {}
+    if identity:
+        print(
+            "  Personal memory: "
+            f"{personal_memory.get('provider', 'local')} "
+            f"({personal_memory.get('scope', 'local_profile')})"
+        )
+        print(
+            "  Project memory:  "
+            f"{project_memory.get('project_id') or 'none'} "
+            f"({project_memory.get('cached_items', 0)} cached item(s))"
+        )
+        print(
+            "  Workspace scope: "
+            f"{workspace_binding.get('linked_bindings', 0)}/{workspace_binding.get('total_bindings', 0)} linked"
+        )
     if payload["job_counts"]:
         print(f"  Jobs:    {payload['job_counts']}")
     if payload["proposal_counts"]:

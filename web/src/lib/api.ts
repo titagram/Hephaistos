@@ -1675,6 +1675,30 @@ export interface HadesBackendBindingAwareness {
   };
 }
 
+export interface HadesBackendIdentity {
+  personal_memory: {
+    scope: string;
+    provider: string;
+    portable_between_devices: boolean;
+  };
+  project_memory: {
+    scope: string;
+    provider: string | null;
+    project_id: string | null;
+    available: boolean;
+    cached_items: number;
+    portable_between_devices: boolean;
+  };
+  workspace_binding: {
+    scope: string;
+    total_bindings: number;
+    linked_bindings: number;
+    current_workspace_binding_id: string | null;
+    current_display_path: string | null;
+    source_free_ready: number;
+  };
+}
+
 export interface HadesBackendBinding {
   workspace_fingerprint: string | null;
   workspace_binding_id: string | null;
@@ -1700,6 +1724,7 @@ export interface HadesBackendStatus {
   agent: HadesBackendAgent | null;
   bindings: HadesBackendBinding[];
   awareness?: HadesBackendAwarenessSummary;
+  identity?: HadesBackendIdentity;
   job_counts: Record<string, number>;
   proposal_counts: Record<string, number>;
   inbox_counts: Record<string, number>;

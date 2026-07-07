@@ -65,6 +65,10 @@ binding. Use it as the local readiness view for memory cache, artifact upload,
 source-slice upload, and bug-evidence availability before attempting
 source-free diagnosis. It does not perform live backend calls; for backend
 freshness and coverage, use the project-awareness tool/API below.
+Its `identity` section separates local profile memory, portable backend project
+memory, and local workspace binding state so a new device can distinguish
+shared project recall from source/index freshness that must be established on
+that device.
 
 ## Bug Evidence
 

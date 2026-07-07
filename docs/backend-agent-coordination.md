@@ -2034,3 +2034,43 @@ Resta fuori da questa tranche:
 - Trend storici e ultimi failure in dashboard.
 - Bug case detail con evidence timeline, graph path e source slices.
 - Controlli UI completi per source/evidence policy e diagnosis promotion.
+
+## Esecuzione identity domains Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-6 del piano "Multi-Device Identity And
+Project Binding UX".
+
+Agent locale:
+
+- `hades backend status --json` include ora `identity`.
+- `identity.personal_memory` descrive la memoria del profilo locale e la marca
+  come non portabile tra device.
+- `identity.project_memory` descrive la memoria condivisa del backend project,
+  include `project_id`, `cached_items` e `portable_between_devices=true` quando
+  il backend e' configurato.
+- `identity.workspace_binding` descrive lo stato locale del workspace:
+  binding totali/linkati, binding corrente se il comando gira dentro una repo
+  linkata, e quanti binding sono source-free ready.
+- L'output umano di `hades backend status` mostra personal memory, project
+  memory e workspace scope.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_mvp_smoke.py tests/hermes_cli/test_hades_backend_web_api.py tests/test_docs_hades_mvp.py`
+  passato: `44 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_status.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_backend_status.py hermes_cli/hades_backend_cmd.py`
+  passato.
+- Locale:
+  `npm --prefix web run typecheck`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Recovery/onboarding UI per nuovo device.
+- Test remoti multi-device/multi-agent.
+- Policy UI completa per source-slice ACL.
