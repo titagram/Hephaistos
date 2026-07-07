@@ -3707,9 +3707,63 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - FTS/vector backend vero sopra `hades_search_documents`.
-- Backfill dei record legacy creati prima dei documenti indicizzati.
+- Scheduler automatico per reindex periodico, se vorremo renderlo operativo
+  senza comando manuale.
 - Ranking derivato direttamente dai documenti indicizzati invece del ranking
   finale ancora calcolato sul record sorgente restituito.
+
+## Esecuzione Hades search documents backfill backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `296f9a9 feat: backfill Hades search documents`.
+- Nuovo comando Artisan `hades:search-documents-reindex`.
+- Opzioni supportate: `--project`, `--workspace-binding`, `--domain`,
+  `--limit`, `--dry-run`, `--json`.
+- Il comando usa `App\Services\Hades\HadesSearchDocumentIndexer` per
+  reindicizzare project memory, wiki revisions, artifacts, bug evidence,
+  source slices ed evidence packs.
+- Il backfill e' idempotente sul vincolo unico `(source_table, source_id)` di
+  `hades_search_documents`.
+- I filtri workspace si applicano alle sorgenti workspace-scoped; project
+  memory e wiki restano portabili a livello progetto.
+
+Runtime dev:
+
+- Dry-run:
+  `php artisan hades:search-documents-reindex --limit=100000 --dry-run --json`
+  ha prodotto `1358` sorgenti scansionate/indicizzabili:
+  `memory=1355`, `wiki=3`, `artifacts=0`, `bug_evidence=0`,
+  `source_slices=0`, `evidence_packs=0`.
+- Backfill reale:
+  `php artisan hades:search-documents-reindex --limit=100000 --json` ha
+  completato gli stessi `1358` documenti sul runtime dev.
+
+Verifiche eseguite:
+
+- Comando registrato:
+  `php artisan list --raw | grep hades:search-documents-reindex`.
+- Remoto lint/syntax:
+  `php -l` su comando, `bootstrap/app.php` e test M3 passato.
+- Remoto formatter:
+  `vendor/bin/pint --test app/Console/Commands/Hades/ReindexSearchDocumentsCommand.php bootstrap/app.php tests/Feature/Hades/HadesM3SharedMemoryTest.php app/Services/Hades/HadesSearchDocumentIndexer.php`
+  passato.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `66 passed / 786 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Public health:
+  `https://home-sweet-home.cloud/api/hades/v1/health` ha risposto HTTP 200.
+
+Resta fuori da questa tranche:
+
+- FTS/vector backend vero sopra `hades_search_documents`.
+- Scheduler/cron per reindex periodico, se serve.
+- Ranking finale calcolato direttamente sul documento indicizzato invece che
+  sul record sorgente.
 
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
