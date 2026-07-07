@@ -2239,6 +2239,38 @@ Resta fuori da questa tranche:
 - Promozione automatizzata candidate fact -> verified wiki/project memory.
 - Ranking prima/dopo backfill su dataset reale.
 
+## Esecuzione note-quality diagnostics Hades - 2026-07-07
+
+Stato: completata una terza tranche P1-7 locale.
+
+Agent locale:
+
+- `hades_note_quality.analyze_note_quality()` espone ora
+  `quality_score`, `quality_grade`, `quality_issues` e `promotion_state`.
+- `hades backend backfill-note` mostra quality grade/score e promotion state
+  anche nell'output testuale, non solo JSON.
+- I raw chunk con candidate facts restano fuori da automatic recall ma vengono
+  marcati come `review_candidate`; note libere senza facts diventano
+  `needs_manual_structuring`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_note_quality.py`
+  passato: `4 passed`.
+- Locale comando backend:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `22 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_note_quality.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Promozione automatizzata candidate fact -> verified wiki/project memory.
+- Ranking prima/dopo backfill su dataset reale.
+
 ## Esecuzione guided bug intake CLI Hades - 2026-07-07
 
 Stato: completata la prima tranche P2-1 del piano "Guided Bug Intake".

@@ -964,6 +964,8 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     print("Hades note backfill preview")
     print(f"  Classification: {result['classification']}")
     print(f"  Raw chunk:      {result['raw_chunk']}")
+    print(f"  Quality:        {result['quality_grade']} ({result['quality_score']}/100)")
+    print(f"  Promotion:      {result['promotion_state']}")
     print(f"  Candidate facts: {result['candidate_fact_count']}")
     print(f"  Created proposals: {result['created_proposal_count']}")
     print(f"  Skipped duplicates: {result['skipped_duplicate_proposal_count']}")

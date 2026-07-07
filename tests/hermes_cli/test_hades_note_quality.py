@@ -22,7 +22,12 @@ def test_note_quality_groups_raw_route_chunk_into_reviewed_candidate_fact():
     assert result["classification"] == "raw_chunk"
     assert result["raw_chunk"] is True
     assert result["automatic_recall_allowed"] is False
+    assert result["automatic_recall_reason"] == "raw chunks are excluded from automatic recall"
     assert result["memory_proposal_ready"] is False
+    assert result["promotion_state"] == "review_candidate"
+    assert result["quality_score"] == 65
+    assert result["quality_grade"] == "reviewable"
+    assert result["quality_issues"] == ["raw_chunk_quarantined", "review_required"]
     assert result["candidate_fact_count"] == 1
     fact = result["candidate_facts"][0]
     assert fact["kind"] == "route_handler_group"
@@ -39,6 +44,21 @@ def test_note_quality_groups_raw_route_chunk_into_reviewed_candidate_fact():
     assert fact["evidence_ref"]["schema"] == "hades.backend_wiki.file_chunk.v1"
     assert fact["evidence_ref"]["chunk_index"] == 245
     assert "automatic recall" in result["actions"][0]
+
+
+def test_note_quality_marks_unstructured_note_as_manual_structuring_needed():
+    from hermes_cli.hades_note_quality import analyze_note_quality
+
+    result = analyze_note_quality("Remember to check the flaky import later.", source="note.md")
+
+    assert result["classification"] == "unclassified_note"
+    assert result["raw_chunk"] is False
+    assert result["automatic_recall_allowed"] is True
+    assert result["automatic_recall_reason"] == "freeform notes require manual evidence before promotion"
+    assert result["promotion_state"] == "needs_manual_structuring"
+    assert result["quality_grade"] == "quarantine"
+    assert result["quality_issues"] == ["no_structured_facts", "missing_evidence_fingerprint"]
+    assert result["candidate_fact_count"] == 0
 
 
 def test_backfill_note_command_emits_json_preview(tmp_path, capsys):
@@ -58,6 +78,8 @@ def test_backfill_note_command_emits_json_preview(tmp_path, capsys):
 
     assert rc == 0
     assert payload["classification"] == "raw_chunk"
+    assert payload["quality_grade"] == "reviewable"
+    assert payload["promotion_state"] == "review_candidate"
     assert payload["candidate_fact_count"] == 1
     assert payload["candidate_facts"][0]["object_count"] == 3
 

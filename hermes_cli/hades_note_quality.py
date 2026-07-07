@@ -31,13 +31,25 @@ def analyze_note_quality(text: str, *, source: str | None = None, truncated: boo
     raw_chunk = _is_raw_chunk(schema=schema, text=text)
     route_facts = _route_handler_facts(content, header)
     classification = "raw_chunk" if raw_chunk else ("candidate_fact_note" if route_facts else "unclassified_note")
+    quality = _quality_assessment(
+        classification=classification,
+        raw_chunk=raw_chunk,
+        candidate_facts=route_facts,
+        provenance=_provenance(header),
+        truncated=truncated,
+    )
     return {
         "schema": "hades.note_quality.preview.v1",
         "source": source,
         "classification": classification,
         "raw_chunk": raw_chunk,
         "automatic_recall_allowed": not raw_chunk,
+        "automatic_recall_reason": quality["automatic_recall_reason"],
         "memory_proposal_ready": False,
+        "promotion_state": quality["promotion_state"],
+        "quality_score": quality["score"],
+        "quality_grade": quality["grade"],
+        "quality_issues": quality["issues"],
         "candidate_fact_count": len(route_facts),
         "candidate_facts": route_facts,
         "provenance": _provenance(header),
@@ -179,3 +191,64 @@ def _actions(classification: str, facts: list[dict[str, Any]]) -> list[str]:
     if facts:
         return ["Review candidate facts before creating project memory."]
     return ["No structured facts detected; leave as an unresolved note or add evidence manually."]
+
+
+def _quality_assessment(
+    *,
+    classification: str,
+    raw_chunk: bool,
+    candidate_facts: list[dict[str, Any]],
+    provenance: dict[str, Any],
+    truncated: bool,
+) -> dict[str, Any]:
+    score = 35
+    issues: list[str] = []
+    if raw_chunk:
+        score -= 20
+        issues.append("raw_chunk_quarantined")
+    if candidate_facts:
+        score += 35
+        issues.append("review_required")
+    else:
+        score -= 15
+        issues.append("no_structured_facts")
+    if provenance.get("schema") and provenance.get("sha256"):
+        score += 15
+    else:
+        issues.append("missing_evidence_fingerprint")
+    if truncated:
+        score -= 20
+        issues.append("preview_truncated")
+
+    bounded_score = max(0, min(100, score))
+    if raw_chunk and not candidate_facts:
+        promotion_state = "quarantine"
+    elif candidate_facts:
+        promotion_state = "review_candidate"
+    else:
+        promotion_state = "needs_manual_structuring"
+
+    if bounded_score >= 80:
+        grade = "strong"
+    elif bounded_score >= 55:
+        grade = "reviewable"
+    elif bounded_score >= 30:
+        grade = "weak"
+    else:
+        grade = "quarantine"
+
+    recall_reason = "raw chunks are excluded from automatic recall"
+    if not raw_chunk:
+        recall_reason = (
+            "candidate facts require review before promotion"
+            if classification == "candidate_fact_note"
+            else "freeform notes require manual evidence before promotion"
+        )
+
+    return {
+        "score": bounded_score,
+        "grade": grade,
+        "issues": issues,
+        "promotion_state": promotion_state,
+        "automatic_recall_reason": recall_reason,
+    }

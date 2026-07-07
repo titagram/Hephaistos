@@ -256,8 +256,11 @@ review-only: raw chunks stay out of automatic recall, candidate facts include
 evidence refs, and a human/backend review step must promote any verified fact.
 For route dumps, repeated `route:* --handled_by--> file:*` edges are grouped by
 handler so noisy chunks become compact candidate summaries instead of hundreds
-of memory entries. Use `--create-proposals` to save candidate facts as pending
-local memory proposals, then run `hades backend sync` to submit them for review.
+of memory entries. The preview includes `quality_score`, `quality_grade`,
+`quality_issues`, and `promotion_state` so raw chunks, weak freeform notes, and
+reviewable candidate facts are distinguishable before sync. Use
+`--create-proposals` to save candidate facts as pending local memory proposals,
+then run `hades backend sync` to submit them for review.
 
 Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before
@@ -312,7 +315,9 @@ headers, extract lightweight stack frames when possible, and upload
 For legacy raw chunk notes, use `hades backend backfill-note <file> --json`
 first. Add `--create-proposals` only after reviewing the candidate facts. The
 command assigns stable fingerprints to extracted facts and skips local duplicate
-proposals on repeated runs; raw chunks remain outside automatic recall.
+proposals on repeated runs; raw chunks remain outside automatic recall. Inspect
+`quality_grade`, `quality_issues`, and `promotion_state` before creating
+proposals from legacy material.
 
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, existing evidence
