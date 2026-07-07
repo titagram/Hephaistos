@@ -271,6 +271,134 @@ def test_hades_backend_web_route_runs_sync(monkeypatch, tmp_path):
     assert calls == [{"quiet": True}]
 
 
+def test_hades_backend_web_routes_run_privacy_and_retention_actions(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime
+    from hermes_cli import web_server
+
+    class FakeBackendClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def privacy_export(self, **payload):
+            self.calls.append(("privacy_export", payload))
+            return {
+                "include_content": payload["include_content"],
+                "counts": {"bug_reports": 1, "source_slices": 2},
+            }
+
+        def privacy_delete(self, **payload):
+            self.calls.append(("privacy_delete", payload))
+            key = "deleted" if payload["confirm"] else "would_delete"
+            return {"dry_run": payload["dry_run"], key: {"hades_bug_reports": 1}}
+
+        def privacy_retention_cleanup(self, **payload):
+            self.calls.append(("privacy_retention_cleanup", payload))
+            key = "deleted" if payload["confirm"] else "would_delete"
+            return {
+                "retention_days": payload["retention_days"],
+                "dry_run": payload["dry_run"],
+                key: {"hades_bug_evidence": 2},
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake_client = FakeBackendClient()
+    monkeypatch.setattr(hades_backend_runtime, "client_from_config", lambda: fake_client)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="local_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(repo),
+            git_remote_display="origin",
+            git_remote_hash="hash",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    try:
+        export_response = client.post("/api/hades/backend/privacy-export", json={})
+        delete_response = client.post("/api/hades/backend/privacy-delete", json={})
+        cleanup_response = client.post(
+            "/api/hades/backend/retention-cleanup",
+            json={"retention_days": 14, "confirm": True},
+        )
+    finally:
+        if previous_auth_required is None:
+            try:
+                delattr(web_server.app.state, "auth_required")
+            except AttributeError:
+                pass
+        else:
+            web_server.app.state.auth_required = previous_auth_required
+
+    assert export_response.status_code == 200
+    assert export_response.json()["include_content"] is False
+    assert export_response.json()["counts"] == {"bug_reports": 1, "source_slices": 2}
+    assert delete_response.status_code == 200
+    assert delete_response.json()["dry_run"] is True
+    assert delete_response.json()["would_delete"] == {"hades_bug_reports": 1}
+    assert cleanup_response.status_code == 200
+    assert cleanup_response.json()["dry_run"] is False
+    assert cleanup_response.json()["retention_days"] == 14
+    assert cleanup_response.json()["deleted"] == {"hades_bug_evidence": 2}
+    assert fake_client.closed == 3
+    assert fake_client.calls == [
+        (
+            "privacy_export",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "include_content": False,
+            },
+        ),
+        (
+            "privacy_delete",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "dry_run": True,
+                "confirm": False,
+            },
+        ),
+        (
+            "privacy_retention_cleanup",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "retention_days": 14,
+                "dry_run": False,
+                "confirm": True,
+            },
+        ),
+    ]
+
+
 def test_hades_backend_web_route_creates_bug_intake_with_evidence(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

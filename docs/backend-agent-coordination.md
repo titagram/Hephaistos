@@ -1863,6 +1863,19 @@ Integrazione locale:
   e invia `confirm=true` solo con `--yes`.
 - OpenAPI locale e docs operative/runbook aggiornati.
 
+Integrazione dashboard locale:
+
+- Le operazioni privacy sono state estratte in
+  `hermes_cli/hades_backend_actions.py` e riusate da CLI e web server.
+- Nuove route dashboard:
+  - `POST /api/hades/backend/privacy-export`;
+  - `POST /api/hades/backend/privacy-delete`;
+  - `POST /api/hades/backend/retention-cleanup`.
+- La pagina Backend aggiunge il pannello `Privacy retention` con export
+  metadata/content, delete dry-run/confirm e retention cleanup dry-run/confirm.
+  Le azioni distruttive richiedono conferma UI e inviano `confirm=true` solo
+  dopo conferma esplicita.
+
 Verifiche eseguite:
 
 - Remoto:
@@ -1887,11 +1900,26 @@ Verifiche eseguite:
 - Locale lint/contract:
   `json.tool` su OpenAPI, `py_compile` e `ruff check` sui file client/CLI/test
   passati.
+- Locale dashboard privacy, passato: `4 passed`.
+
+  ```bash
+  .venv/bin/pytest \
+    tests/hermes_cli/test_hades_backend_cmd.py::test_backend_privacy_export_defaults_to_metadata_only \
+    tests/hermes_cli/test_hades_backend_cmd.py::test_backend_privacy_delete_is_dry_run_unless_confirmed \
+    tests/hermes_cli/test_hades_backend_cmd.py::test_backend_retention_cleanup_requires_yes_for_confirmed_delete \
+    tests/hermes_cli/test_hades_backend_web_api.py::test_hades_backend_web_routes_run_privacy_and_retention_actions
+  ```
+- Locale frontend:
+  `npm --prefix web run typecheck` passato; `npx eslint
+  src/pages/BackendPage.tsx src/lib/api.ts` passato da `web/`.
+- Locale client contract:
+  `.venv/bin/pytest tests/hermes_cli/test_hades_backend_client.py` passato:
+  `40 passed`.
 
 Resta fuori da questa tranche:
 
 - Export/delete project-wide o user-wide oltre allo scope workspace linked.
-- Dashboard policy UI e controlli review per source/evidence retention.
+- Ruoli dashboard granulari oltre alla guardia auth locale gia' esistente.
 
 ## Esecuzione runtime/test evidence ingestion Hades - 2026-07-07
 

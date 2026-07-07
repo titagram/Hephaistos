@@ -2316,6 +2316,19 @@ class HadesBackendPromoteDiagnosisRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class HadesBackendPrivacyExportRequest(BaseModel):
+    include_content: bool = False
+
+
+class HadesBackendPrivacyDeleteRequest(BaseModel):
+    confirm: bool = False
+
+
+class HadesBackendRetentionCleanupRequest(BaseModel):
+    retention_days: int = 30
+    confirm: bool = False
+
+
 def _hades_backend_action_payload(result: Any) -> Dict[str, Any]:
     return {
         "ok": bool(result.ok),
@@ -2398,6 +2411,50 @@ def promote_hades_backend_diagnosis(
                     regression_tests=body.regression_tests or [],
                     notes=body.notes,
                 )
+            )
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
+@app.post("/api/hades/backend/privacy-export")
+def export_hades_backend_privacy(
+    body: HadesBackendPrivacyExportRequest,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import privacy_export
+
+        try:
+            return _hades_backend_action_payload(privacy_export(include_content=body.include_content))
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
+@app.post("/api/hades/backend/privacy-delete")
+def delete_hades_backend_privacy(
+    body: HadesBackendPrivacyDeleteRequest,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import privacy_delete
+
+        try:
+            return _hades_backend_action_payload(privacy_delete(confirm=body.confirm))
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
+@app.post("/api/hades/backend/retention-cleanup")
+def cleanup_hades_backend_retention(
+    body: HadesBackendRetentionCleanupRequest,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import retention_cleanup
+
+        try:
+            return _hades_backend_action_payload(
+                retention_cleanup(retention_days=body.retention_days, confirm=body.confirm)
             )
         except Exception as exc:
             raise _hades_backend_action_error(exc) from exc

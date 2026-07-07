@@ -15,14 +15,17 @@ import {
   CheckCircle2,
   Clock,
   Database,
+  Download,
   GitBranch,
   Inbox,
   Link2,
   Play,
   RefreshCw,
   Send,
+  Shield,
   Server,
   ShieldCheck,
+  Trash2,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -661,6 +664,178 @@ function PolicyControlsPanel({
             No source or evidence policy reviews
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PrivacyControlsPanel({
+  status,
+  busyAction,
+  runReviewAction,
+}: {
+  status: HadesBackendStatus;
+  busyAction: string | null;
+  runReviewAction: ReviewActionRunner;
+}) {
+  const [retentionDays, setRetentionDays] = useState("30");
+  const configured = Boolean(status.configured && status.agent?.project_id);
+  const currentBinding =
+    status.identity?.workspace_binding.current_workspace_binding_id ||
+    status.bindings.find((binding) => binding.workspace_binding_id)?.workspace_binding_id ||
+    "no binding";
+  const sourceFreeReady = sourceFreeReadyCount(status);
+  const parsedRetentionDays = Math.max(1, Math.floor(Number(retentionDays) || 30));
+  const scoped = configured && currentBinding !== "no binding";
+  const disabled = busyAction !== null || !scoped;
+  const confirmDelete = () =>
+    window.confirm("Delete scoped Hades backend diagnosis and evidence data for this workspace?");
+  const confirmCleanup = () =>
+    window.confirm(`Delete scoped Hades backend data older than ${parsedRetentionDays} day(s)?`);
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Shield className="h-4 w-4" />
+            Privacy retention
+          </H2>
+          <Badge tone={scoped ? "success" : configured ? "warning" : "outline"}>
+            {scoped ? "scoped" : configured ? "no binding" : "not configured"}
+          </Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Project</div>
+            <div className="mt-1 truncate font-mono text-sm font-semibold">
+              {status.agent?.project_id || "none"}
+            </div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Workspace</div>
+            <div className="mt-1 truncate font-mono text-sm font-semibold">{currentBinding}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Source-free ready</div>
+            <div className="mt-1 text-sm font-semibold">
+              {sourceFreeReady}/{status.awareness?.bindings ?? status.bindings.length}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disabled}
+              prefix={busyAction === "privacy:export" ? <Spinner /> : <Download className="h-4 w-4" />}
+              onClick={() =>
+                void runReviewAction(
+                  "privacy:export",
+                  () => api.runHadesBackendPrivacyExport(false),
+                  "Privacy metadata exported",
+                )
+              }
+            >
+              Export metadata
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disabled}
+              prefix={busyAction === "privacy:export-content" ? <Spinner /> : <Download className="h-4 w-4" />}
+              onClick={() => {
+                if (!window.confirm("Include stored Hades backend content in the export?")) return;
+                void runReviewAction(
+                  "privacy:export-content",
+                  () => api.runHadesBackendPrivacyExport(true),
+                  "Privacy content exported",
+                );
+              }}
+            >
+              Export content
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disabled}
+              prefix={busyAction === "privacy:delete-dry-run" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
+              onClick={() =>
+                void runReviewAction(
+                  "privacy:delete-dry-run",
+                  () => api.runHadesBackendPrivacyDelete(false),
+                  "Privacy delete dry-run completed",
+                )
+              }
+            >
+              Delete dry-run
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={disabled}
+              prefix={busyAction === "privacy:delete-confirm" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
+              onClick={() => {
+                if (!confirmDelete()) return;
+                void runReviewAction(
+                  "privacy:delete-confirm",
+                  () => api.runHadesBackendPrivacyDelete(true),
+                  "Privacy data deleted",
+                );
+              }}
+            >
+              Delete confirmed
+            </Button>
+          </div>
+
+          <div className="grid gap-3 border border-border bg-background/40 px-3 py-3 sm:grid-cols-[8rem_minmax(0,1fr)]">
+            <FormField label="Days">
+              <input
+                className={inputClassName}
+                value={retentionDays}
+                disabled={disabled}
+                inputMode="numeric"
+                onChange={(event) => setRetentionDays(event.target.value)}
+              />
+            </FormField>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={disabled}
+                prefix={busyAction === "privacy:retention-dry-run" ? <Spinner /> : <Clock className="h-4 w-4" />}
+                onClick={() =>
+                  void runReviewAction(
+                    "privacy:retention-dry-run",
+                    () => api.runHadesBackendRetentionCleanup(parsedRetentionDays, false),
+                    "Retention cleanup dry-run completed",
+                  )
+                }
+              >
+                Retention dry-run
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={disabled}
+                prefix={busyAction === "privacy:retention-confirm" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
+                onClick={() => {
+                  if (!confirmCleanup()) return;
+                  void runReviewAction(
+                    "privacy:retention-confirm",
+                    () => api.runHadesBackendRetentionCleanup(parsedRetentionDays, true),
+                    "Retention cleanup applied",
+                  );
+                }}
+              >
+                Apply retention
+              </Button>
+            </div>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -1595,6 +1770,11 @@ export default function BackendPage() {
       <PolicyControlsPanel
         status={status}
         jobs={jobs}
+        busyAction={busyAction}
+        runReviewAction={runReviewAction}
+      />
+      <PrivacyControlsPanel
+        status={status}
         busyAction={busyAction}
         runReviewAction={runReviewAction}
       />

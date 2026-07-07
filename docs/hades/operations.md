@@ -225,6 +225,10 @@ The backend audits every successful privacy export/delete/retention request in
 `audit_logs` with scope, agent id, counts, dry-run flag, and retention metadata
 only; raw evidence, source slices, and diagnosis text are never copied into the
 audit payload.
+The dashboard Backend page exposes the same workspace-scoped controls in the
+`Privacy retention` panel: metadata export, content export after confirmation,
+delete dry-run, confirmed delete, retention dry-run, and confirmed retention
+cleanup.
 
 ## MVP Smoke
 

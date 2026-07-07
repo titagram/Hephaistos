@@ -103,6 +103,99 @@ def list_memory_proposals(*, statuses: Iterable[str] | None = None) -> list[dict
     return [proposal_payload_for_display(proposal) for proposal in proposals]
 
 
+def privacy_export(*, include_content: bool = False) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+
+    _agent, binding = _select_workspace_binding()
+    try:
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_export(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                include_content=bool(include_content),
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+
+    return BackendActionResult(
+        ok=True,
+        status="exported",
+        summary="Privacy export completed",
+        payload=response if isinstance(response, dict) else {"export": response},
+    )
+
+
+def privacy_delete(*, confirm: bool = False) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+
+    _agent, binding = _select_workspace_binding()
+    dry_run = not bool(confirm)
+    try:
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_delete(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                dry_run=dry_run,
+                confirm=not dry_run,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+
+    return BackendActionResult(
+        ok=True,
+        status="dry_run" if dry_run else "deleted",
+        summary="Privacy delete dry-run completed" if dry_run else "Privacy delete completed",
+        payload=response if isinstance(response, dict) else {"delete": response},
+    )
+
+
+def retention_cleanup(*, retention_days: int, confirm: bool = False) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+
+    try:
+        days = int(retention_days)
+    except (TypeError, ValueError) as exc:
+        raise BackendActionError("retention_days must be an integer", status_code=400) from exc
+    if days < 1:
+        raise BackendActionError("retention_days must be greater than zero", status_code=400)
+
+    _agent, binding = _select_workspace_binding()
+    dry_run = not bool(confirm)
+    try:
+        client = runtime.client_from_config()
+        try:
+            response = client.privacy_retention_cleanup(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                retention_days=days,
+                dry_run=dry_run,
+                confirm=not dry_run,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+
+    return BackendActionResult(
+        ok=True,
+        status="dry_run" if dry_run else "deleted",
+        summary="Retention cleanup dry-run completed" if dry_run else "Retention cleanup completed",
+        payload=response if isinstance(response, dict) else {"cleanup": response},
+    )
+
+
 def approve_backend_job(job_id: str) -> BackendActionResult:
     from hermes_cli import hades_backend_runtime as runtime
     from hermes_cli.hades_backend_sync import _upload_job_artifact, _upload_job_source_slice

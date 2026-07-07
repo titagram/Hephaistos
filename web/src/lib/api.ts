@@ -336,6 +336,24 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  runHadesBackendPrivacyExport: (includeContent = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/privacy-export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ include_content: includeContent }),
+    }),
+  runHadesBackendPrivacyDelete: (confirm = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/privacy-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm }),
+    }),
+  runHadesBackendRetentionCleanup: (retentionDays = 30, confirm = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/retention-cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retention_days: retentionDays, confirm }),
+    }),
   getHadesBackendJobs: () =>
     fetchJSON<HadesBackendJobsResponse>("/api/hades/backend/jobs"),
   approveHadesBackendJob: (jobId: string) =>
@@ -1873,6 +1891,13 @@ export interface HadesBackendActionResponse {
   resolved_bug_memory_id?: string | null;
   resolved_bug?: Record<string, unknown>;
   sync?: Record<string, number>;
+  include_content?: boolean;
+  counts?: Record<string, number>;
+  collections?: Record<string, unknown>;
+  dry_run?: boolean;
+  would_delete?: Record<string, number>;
+  deleted?: Record<string, number>;
+  retention_days?: number;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

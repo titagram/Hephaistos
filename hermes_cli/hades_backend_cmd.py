@@ -523,20 +523,11 @@ def _quality_history_entry(report: dict[str, Any], recorded_at: int) -> dict[str
 
 def _cmd_privacy_export(args: argparse.Namespace) -> int:
     try:
-        _agent, binding = _current_workspace_binding()
-        from hermes_cli import hades_backend_runtime as runtime
+        from hermes_cli.hades_backend_actions import privacy_export
 
-        client = runtime.client_from_config()
-        try:
-            response = client.privacy_export(
-                project_id=binding.project_id,
-                workspace_binding_id=binding.backend_workspace_binding_id,
-                include_content=bool(getattr(args, "include_content", False)),
-            )
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+        _agent, binding = _current_workspace_binding()
+        result = privacy_export(include_content=bool(getattr(args, "include_content", False)))
+        response = result.payload
     except Exception as exc:
         print(f"Hades backend privacy-export: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
@@ -557,21 +548,11 @@ def _cmd_privacy_export(args: argparse.Namespace) -> int:
 def _cmd_privacy_delete(args: argparse.Namespace) -> int:
     dry_run = not bool(getattr(args, "yes", False))
     try:
-        _agent, binding = _current_workspace_binding()
-        from hermes_cli import hades_backend_runtime as runtime
+        from hermes_cli.hades_backend_actions import privacy_delete
 
-        client = runtime.client_from_config()
-        try:
-            response = client.privacy_delete(
-                project_id=binding.project_id,
-                workspace_binding_id=binding.backend_workspace_binding_id,
-                dry_run=dry_run,
-                confirm=not dry_run,
-            )
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+        _agent, binding = _current_workspace_binding()
+        result = privacy_delete(confirm=not dry_run)
+        response = result.payload
     except Exception as exc:
         print(f"Hades backend privacy-delete: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
@@ -593,22 +574,14 @@ def _cmd_privacy_delete(args: argparse.Namespace) -> int:
 def _cmd_retention_cleanup(args: argparse.Namespace) -> int:
     dry_run = not bool(getattr(args, "yes", False))
     try:
-        _agent, binding = _current_workspace_binding()
-        from hermes_cli import hades_backend_runtime as runtime
+        from hermes_cli.hades_backend_actions import retention_cleanup
 
-        client = runtime.client_from_config()
-        try:
-            response = client.privacy_retention_cleanup(
-                project_id=binding.project_id,
-                workspace_binding_id=binding.backend_workspace_binding_id,
-                retention_days=int(getattr(args, "retention_days")),
-                dry_run=dry_run,
-                confirm=not dry_run,
-            )
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+        _agent, binding = _current_workspace_binding()
+        result = retention_cleanup(
+            retention_days=int(getattr(args, "retention_days")),
+            confirm=not dry_run,
+        )
+        response = result.payload
     except Exception as exc:
         print(f"Hades backend retention-cleanup: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
