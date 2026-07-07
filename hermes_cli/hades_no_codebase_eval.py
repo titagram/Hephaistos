@@ -151,6 +151,10 @@ def load_no_codebase_eval_fixture(path: str | Path) -> tuple[
     fixtures = [_fixture_from_mapping(item) for item in data.get("fixtures", [])]
     runs = [_run_from_mapping(item) for item in data.get("runs", [])]
     runs.extend(_trajectory_run_from_mapping(item, base_dir=fixture_path.parent) for item in data.get("trajectory_runs", []))
+    for item in data.get("trajectory_globs", []):
+        runs.extend(_trajectory_runs_from_glob(item, base_dir=fixture_path.parent))
+    for item in data.get("trajectory_dirs", []):
+        runs.extend(_trajectory_runs_from_dir(item, base_dir=fixture_path.parent))
     return fixtures, runs
 
 
@@ -345,14 +349,85 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
 
 
 def _trajectory_run_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> NoCodebaseDiagnosisRun:
-    fixture_id = str(data["fixture_id"])
     trajectory_path = data.get("trajectory_path") or data.get("path")
     if not trajectory_path:
+        fixture_id = str(data.get("fixture_id") or "<unknown>")
         raise ValueError(f"trajectory_runs entry for {fixture_id} is missing trajectory_path")
     path = Path(str(trajectory_path)).expanduser()
     if not path.is_absolute():
         path = base_dir / path
     entry = _load_trajectory_entry(path, index=data.get("index"))
+    fixture_id = str(data.get("fixture_id") or _trajectory_fixture_id(entry, path))
+    return _trajectory_run_from_entry(
+        entry,
+        fixture_id=fixture_id,
+        persisted_report=data.get("persisted_report"),
+    )
+
+
+def _trajectory_runs_from_glob(data: Any, *, base_dir: Path) -> list[NoCodebaseDiagnosisRun]:
+    if isinstance(data, Mapping):
+        pattern = str(data.get("pattern") or data.get("path") or "").strip()
+        fixture_id = _optional_str(data.get("fixture_id"))
+        index = data.get("index")
+        persisted_report = data.get("persisted_report")
+    else:
+        pattern = str(data or "").strip()
+        fixture_id = None
+        index = None
+        persisted_report = None
+    if not pattern:
+        raise ValueError("trajectory_globs entry is missing pattern")
+    paths = sorted(path for path in base_dir.glob(pattern) if path.is_file() and path.suffix in {".json", ".jsonl"})
+    return [_trajectory_run_from_path(path, fixture_id=fixture_id, index=index, persisted_report=persisted_report) for path in paths]
+
+
+def _trajectory_runs_from_dir(data: Any, *, base_dir: Path) -> list[NoCodebaseDiagnosisRun]:
+    if isinstance(data, Mapping):
+        raw_path = str(data.get("path") or data.get("dir") or "").strip()
+        pattern = str(data.get("pattern") or "*.json*").strip()
+        fixture_id = _optional_str(data.get("fixture_id"))
+        index = data.get("index")
+        persisted_report = data.get("persisted_report")
+        recursive = bool(data.get("recursive", False))
+    else:
+        raw_path = str(data or "").strip()
+        pattern = "*.json*"
+        fixture_id = None
+        index = None
+        persisted_report = None
+        recursive = False
+    if not raw_path:
+        raise ValueError("trajectory_dirs entry is missing path")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    globber = path.rglob if recursive else path.glob
+    paths = sorted(candidate for candidate in globber(pattern) if candidate.is_file() and candidate.suffix in {".json", ".jsonl"})
+    return [_trajectory_run_from_path(candidate, fixture_id=fixture_id, index=index, persisted_report=persisted_report) for candidate in paths]
+
+
+def _trajectory_run_from_path(
+    path: Path,
+    *,
+    fixture_id: str | None = None,
+    index: Any = None,
+    persisted_report: Any = None,
+) -> NoCodebaseDiagnosisRun:
+    entry = _load_trajectory_entry(path, index=index)
+    return _trajectory_run_from_entry(
+        entry,
+        fixture_id=fixture_id or _trajectory_fixture_id(entry, path),
+        persisted_report=persisted_report,
+    )
+
+
+def _trajectory_run_from_entry(
+    entry: Any,
+    *,
+    fixture_id: str,
+    persisted_report: Any = None,
+) -> NoCodebaseDiagnosisRun:
     conversations = _trajectory_conversations(entry)
     tool_calls = _trajectory_tool_calls(conversations)
     final_payload = _trajectory_final_payload(conversations)
@@ -363,7 +438,6 @@ def _trajectory_run_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> 
     evidence_refs = final_payload.get("evidence_refs")
     if evidence_refs is None:
         evidence_refs = diagnosis_args.get("evidence_refs", [])
-    persisted_report = data.get("persisted_report")
     if persisted_report is None:
         persisted_report = bool(diagnosis_args)
     return NoCodebaseDiagnosisRun(
@@ -384,6 +458,19 @@ def _trajectory_run_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> 
         missing_evidence=tuple(_string_values(final_payload.get("missing_evidence", []))),
         persisted_report=bool(persisted_report),
     )
+
+
+def _trajectory_fixture_id(entry: Any, path: Path) -> str:
+    if isinstance(entry, Mapping):
+        for key in ("fixture_id", "case_id", "eval_id", "id"):
+            if value := _optional_str(entry.get(key)):
+                return value
+        metadata = entry.get("metadata")
+        if isinstance(metadata, Mapping):
+            for key in ("fixture_id", "case_id", "eval_id", "id"):
+                if value := _optional_str(metadata.get(key)):
+                    return value
+    return path.stem
 
 
 def _load_trajectory_entry(path: Path, *, index: Any = None) -> Any:

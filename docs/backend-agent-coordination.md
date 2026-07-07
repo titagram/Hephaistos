@@ -3604,6 +3604,35 @@ Resta fuori da questa tranche:
 - Matching automatico semantico fra runtime log message e log-template hash; i
   refs path/line sono il primo ponte affidabile senza raw source.
 
+## Esecuzione no-codebase trajectory discovery - 2026-07-07
+
+Stato: completata una tranche locale P0-7 sulla discovery delle run reali.
+
+Agent locale:
+
+- `load_no_codebase_eval_fixture` supporta `trajectory_globs` e
+  `trajectory_dirs` oltre a `trajectory_runs` espliciti.
+- Il fixture id viene ricavato da `fixture_id`, `case_id`, `eval_id`, `id`,
+  `metadata.*` o dal nome file.
+- Questo permette di usare directory/glob di trajectory reali in quality-report
+  senza trascrivere ogni file nel JSON eval.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py tests/test_docs_hades_mvp.py`
+  passato.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_no_codebase_eval.py tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Esecuzione nightly con modello reale; questa tranche rende ripetibile il
+  caricamento delle trajectory prodotte.
+
 ## Esecuzione PHP method-level graph edges - 2026-07-07
 
 Stato: completata una tranche locale P0-4 sulla precisione del graph PHP.

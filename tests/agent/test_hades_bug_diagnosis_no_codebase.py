@@ -236,6 +236,87 @@ def test_hades_no_codebase_eval_loads_sharegpt_trajectory_runs(tmp_path):
     assert report["persistence_coverage"] == 1.0
 
 
+def test_hades_no_codebase_eval_discovers_trajectory_globs(tmp_path):
+    from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
+
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "glob_case.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"fixture_id": "glob_case"},
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "hades_backend_project_awareness_status", "arguments": "{}"}},
+                            {
+                                "function": {
+                                    "name": "hades_backend_diagnosis_report_create",
+                                    "arguments": json.dumps(
+                                        {
+                                            "root_cause": "rc.glob.case",
+                                            "confidence": "high",
+                                            "evidence_refs": [{"type": "bug_evidence", "id": "ev.glob"}],
+                                            "freshness": {"status": "current"},
+                                            "awareness": {"diagnosable_without_source": True},
+                                        }
+                                    ),
+                                }
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "root_cause_id": "rc.glob.case",
+                                "confidence": "high",
+                                "freshness": {"status": "current"},
+                                "awareness": {"diagnosable_without_source": True},
+                                "evidence_refs": ["bug_evidence:ev.glob"],
+                            }
+                        ),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "schema": "hades.no_codebase_eval.v1",
+                "fixtures": [
+                    {
+                        "id": "glob_case",
+                        "title": "Glob case",
+                        "expected_root_cause_id": "rc.glob.case",
+                        "expected_confidence": "high",
+                        "expected_freshness_status": "current",
+                        "expected_diagnosable_without_source": True,
+                        "required_evidence_refs": ["bug_evidence:ev.glob"],
+                        "required_tool_calls": [
+                            "hades_backend_project_awareness_status",
+                            "hades_backend_diagnosis_report_create",
+                        ],
+                    }
+                ],
+                "trajectory_globs": [{"pattern": "runs/*.json"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(eval_file)
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+
+    assert [run.fixture_id for run in runs] == ["glob_case"]
+    assert report["status"] == "passed"
+    assert report["total"] == 1
+
+
 def test_hades_no_codebase_eval_fails_when_hades_tools_are_out_of_order():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisRun,
