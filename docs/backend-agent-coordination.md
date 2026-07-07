@@ -5845,3 +5845,41 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel mail notification graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per mail/notification side-effect
+awareness metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` rileva chiamate conservative a
+  `Mail::to(...)->send/queue/later(new Mailable(...))`,
+  `Mail::send/queue/later(new Mailable(...))`, `->notify(new Notification(...))`
+  e `Notification::send/sendNow(..., new Notification(...))`.
+- Il graph aggiunge `sends_mail`, `sends_mail_method`,
+  `route_sends_mail_method`, `sends_notification`,
+  `sends_notification_method` e `route_sends_notification_method`.
+- I method edge puntano a `Mailable@build/content/envelope` o
+  `Notification@toMail/toArray/toDatabase/toBroadcast/via`, scegliendo il primo
+  metodo indicizzato disponibile.
+- Il payload salva solo mailable/notification class, metodo target, metodo di
+  invio/source, route metadata e path/line; non conserva destinatari, payload,
+  template data o argomenti raw.
+- Il fallback locale di `hades_backend_graph_search` espone questi dettagli da
+  cache artifact anche a backend offline.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/search/traversal:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_mail_notification_edges tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_traverse_falls_back_to_local_graph_cache`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `95 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

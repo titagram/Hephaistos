@@ -137,6 +137,24 @@ def _php_graph_artifact():
             },
             {
                 "kind": "method",
+                "name": "OrderReceiptMail@build",
+                "class": "App\\Mail\\OrderReceiptMail",
+                "method": "build",
+                "role": "mailable",
+                "path": "app/Mail/OrderReceiptMail.php",
+                "line": 4,
+            },
+            {
+                "kind": "method",
+                "name": "OrderShippedNotification@toMail",
+                "class": "App\\Notifications\\OrderShippedNotification",
+                "method": "toMail",
+                "role": "notification",
+                "path": "app/Notifications/OrderShippedNotification.php",
+                "line": 4,
+            },
+            {
+                "kind": "method",
                 "name": "SyncOrdersCommand@handle",
                 "class": "App\\Console\\Commands\\SyncOrdersCommand",
                 "method": "handle",
@@ -636,6 +654,72 @@ def _php_graph_artifact():
                 "source_line": 42,
                 "listener_path": "app/Providers/AuthServiceProvider.php",
                 "listener_line": 13,
+            },
+            {
+                "kind": "sends_mail",
+                "from": "OrderController@show",
+                "to": "App\\Mail\\OrderReceiptMail",
+                "mail_method": "send",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "sends_mail_method",
+                "from": "OrderController@show",
+                "to": "OrderReceiptMail@build",
+                "mailable_class": "App\\Mail\\OrderReceiptMail",
+                "mailable_method": "build",
+                "mail_method": "send",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "route_sends_mail_method",
+                "from": "route:orders.show",
+                "to": "OrderReceiptMail@build",
+                "handler": "OrderController@show",
+                "mailable_class": "App\\Mail\\OrderReceiptMail",
+                "mailable_method": "build",
+                "mail_method": "send",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 42,
+            },
+            {
+                "kind": "sends_notification",
+                "from": "OrderController@show",
+                "to": "App\\Notifications\\OrderShippedNotification",
+                "notification_source": "notifiable_notify",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "sends_notification_method",
+                "from": "OrderController@show",
+                "to": "OrderShippedNotification@toMail",
+                "notification_class": "App\\Notifications\\OrderShippedNotification",
+                "notification_method": "toMail",
+                "notification_source": "notifiable_notify",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 42,
+            },
+            {
+                "kind": "route_sends_notification_method",
+                "from": "route:orders.show",
+                "to": "OrderShippedNotification@toMail",
+                "handler": "OrderController@show",
+                "notification_class": "App\\Notifications\\OrderShippedNotification",
+                "notification_method": "toMail",
+                "notification_source": "notifiable_notify",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 42,
             },
             {
                 "kind": "view_ref",
@@ -2705,6 +2789,63 @@ def test_hades_backend_graph_search_finds_local_scheduled_handle_edges(monkeypat
     )
 
 
+def test_hades_backend_graph_search_finds_local_mail_notification_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders receipt mail notification toMail", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_sends_mail_method"
+        and ref["to"] == "OrderReceiptMail@build"
+        and ref["provenance"]["mailable_class"] == "App\\Mail\\OrderReceiptMail"
+        and ref["provenance"]["mail_method"] == "send"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_sends_notification_method"
+        and ref["to"] == "OrderShippedNotification@toMail"
+        and ref["provenance"]["notification_class"] == "App\\Notifications\\OrderShippedNotification"
+        and ref["provenance"]["notification_source"] == "notifiable_notify"
+        for ref in graph_refs
+    )
+    assert any(
+        "mailable_class=App\\Mail\\OrderReceiptMail" in item["summary"]
+        and "mail_method=send" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_traverse_finds_local_scheduled_handle_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
@@ -2868,27 +3009,41 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     assert result["backend_live_error"] == "backend offline"
     assert "id" in result["match_fields"]
     assert {
-            "route:orders.show",
-            "OrderController@show",
-            "OrderService@format",
-            "SyncOrderJob@handle",
-            "SendOrderReceipt@handle",
-            "App\\Exceptions\\OrderLockedException",
-            "view:orders.show",
-            "view:layouts.app",
-            "component:alert",
-        } <= node_ids
+        "route:orders.show",
+        "OrderController@show",
+        "OrderService@format",
+        "SyncOrderJob@handle",
+        "SendOrderReceipt@handle",
+        "OrderReceiptMail@build",
+        "OrderShippedNotification@toMail",
+        "App\\Exceptions\\OrderLockedException",
+        "view:orders.show",
+    } <= node_ids
     assert {
         "route_handler",
         "calls_method",
         "throws_exception",
         "route_dispatches_job_method",
         "route_emits_event_listener",
+        "route_sends_mail_method",
+        "route_sends_notification_method",
         "view_ref",
-        "blade_extends",
-        "blade_component",
     } <= edge_kinds
     assert result["provenance"]["artifacts"][0]["origin"] == "memory_cache"
+
+    view_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "view:orders.show", "direction": "out", "max_depth": 1, "limit": 10},
+        )
+    )
+    view_node_ids = {node["id"] for node in view_result["nodes"]}
+    view_edge_kinds = {edge["kind"] for edge in view_result["edges"]}
+
+    assert view_result["status"] == "ok"
+    assert view_result["searched_cache_only"] is True
+    assert {"view:orders.show", "view:layouts.app", "component:alert"} <= view_node_ids
+    assert {"blade_extends", "blade_component"} <= view_edge_kinds
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):

@@ -565,6 +565,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Jobs").mkdir(parents=True)
     (workspace / "app" / "Events").mkdir(parents=True)
     (workspace / "app" / "Listeners").mkdir(parents=True)
+    (workspace / "app" / "Mail").mkdir(parents=True)
+    (workspace / "app" / "Notifications").mkdir(parents=True)
     (workspace / "app" / "Console" / "Commands").mkdir(parents=True)
     (workspace / "app" / "Models").mkdir(parents=True)
     (workspace / "app" / "Http" / "Resources").mkdir(parents=True)
@@ -650,7 +652,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        env('ORDER_DEBUG');\n"
         "        Log::warning('order payment gateway degraded');\n"
         "        SyncOrderJob::dispatch($order->id);\n"
-        "        event(new OrderPlaced($order));\n"
+        "        event(new OrderPlaced($order)); "
+        "Mail::to($order->customer)->send(new \\App\\Mail\\OrderReceiptMail($order)); "
+        "$order->customer->notify(new \\App\\Notifications\\OrderShippedNotification($order));\n"
         "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
         "        DB::table('orders')->where('status', 'pending')->update(['status' => 'paid']);\n"
         "        Order::where('status', 'paid')->first();\n"
@@ -723,6 +727,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "namespace App\\Listeners;\n"
         "class SendOrderReceipt {\n"
         "    public function handle($event) {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Mail" / "OrderReceiptMail.php").write_text(
+        "<?php\n"
+        "namespace App\\Mail;\n"
+        "class OrderReceiptMail {\n"
+        "    public function build() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Notifications" / "OrderShippedNotification.php").write_text(
+        "<?php\n"
+        "namespace App\\Notifications;\n"
+        "class OrderShippedNotification {\n"
+        "    public function toMail($notifiable) {}\n"
         "}\n",
         encoding="utf-8",
     )
@@ -905,7 +925,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 60, "max_symbols": 90, "max_edges": 360},
+            "payload": {"max_files": 60, "max_symbols": 110, "max_edges": 430},
         },
         workspace_root=workspace,
     )
@@ -946,6 +966,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Jobs\\SyncOrderJob") in symbols
     assert ("class", "App\\Events\\OrderPlaced") in symbols
     assert ("class", "App\\Listeners\\SendOrderReceipt") in symbols
+    assert ("class", "App\\Mail\\OrderReceiptMail") in symbols
+    assert ("class", "App\\Notifications\\OrderShippedNotification") in symbols
     assert ("class", "App\\Console\\Commands\\SyncOrdersCommand") in symbols
     assert ("interface", "App\\Contracts\\OrderFormatter") in symbols
     assert ("class", "App\\Observers\\OrderObserver") in symbols
@@ -962,6 +984,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "Order@customer") in symbols
     assert ("method", "SyncOrderJob@handle") in symbols
     assert ("method", "SendOrderReceipt@handle") in symbols
+    assert ("method", "OrderReceiptMail@build") in symbols
+    assert ("method", "OrderShippedNotification@toMail") in symbols
     assert ("method", "SyncOrdersCommand@handle") in symbols
     assert ("method", "OrderPolicy@view") in symbols
     assert ("method", "OrderService@format") in symbols
@@ -1286,6 +1310,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("event_listener_method", "App\\Events\\OrderPlaced", "SendOrderReceipt@handle") in edges
     assert ("emits_event_listener", "OrderController@show", "SendOrderReceipt@handle") in edges
     assert ("route_emits_event_listener", "route:orders.show", "SendOrderReceipt@handle") in edges
+    assert ("sends_mail", "OrderController@show", "App\\Mail\\OrderReceiptMail") in edges
+    assert ("sends_mail_method", "OrderController@show", "OrderReceiptMail@build") in edges
+    assert ("route_sends_mail_method", "route:orders.show", "OrderReceiptMail@build") in edges
+    assert (
+        "sends_notification",
+        "OrderController@show",
+        "App\\Notifications\\OrderShippedNotification",
+    ) in edges
+    assert ("sends_notification_method", "OrderController@show", "OrderShippedNotification@toMail") in edges
+    assert ("route_sends_notification_method", "route:orders.show", "OrderShippedNotification@toMail") in edges
     assert {
         "kind": "route_emits_event_listener",
         "from": "route:orders.show",
@@ -1301,6 +1335,36 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "source_line": 19,
         "listener_path": "app/Providers/AuthServiceProvider.php",
         "listener_line": 13,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_sends_mail_method",
+        "from": "route:orders.show",
+        "to": "OrderReceiptMail@build",
+        "handler": "OrderController@show",
+        "mailable_class": "App\\Mail\\OrderReceiptMail",
+        "mailable_method": "build",
+        "mail_method": "send",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 19,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_sends_notification_method",
+        "from": "route:orders.show",
+        "to": "OrderShippedNotification@toMail",
+        "handler": "OrderController@show",
+        "notification_class": "App\\Notifications\\OrderShippedNotification",
+        "notification_method": "toMail",
+        "notification_source": "notifiable_notify",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 19,
     } in artifact["edges"]
     assert ("artisan_command", "App\\Console\\Commands\\SyncOrdersCommand", "command:orders:sync") in edges
     assert ("artisan_command_method", "command:orders:sync", "SyncOrdersCommand@handle") in edges

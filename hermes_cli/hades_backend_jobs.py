@@ -246,6 +246,24 @@ PHP_EVENT_FUNCTION_RE = re.compile(r"\bevent\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Z
 PHP_EVENT_DISPATCH_RE = re.compile(
     r"\b(?:Event::dispatch|event)\s*\(\s*(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::class"
 )
+PHP_MAIL_CHAIN_RE = re.compile(
+    r"\bMail::(?:to|cc|bcc)\s*\([^;]*?->\s*(?P<method>send|queue|later)\s*\(\s*new\s+"
+    r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(",
+    re.DOTALL,
+)
+PHP_MAIL_DIRECT_RE = re.compile(
+    r"\bMail::(?P<method>send|queue|later)\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(",
+    re.DOTALL,
+)
+PHP_NOTIFY_NEW_RE = re.compile(
+    r"->\s*notify\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(",
+    re.DOTALL,
+)
+PHP_NOTIFICATION_SEND_RE = re.compile(
+    r"\bNotification::(?P<method>send|sendNow)\s*\([^;]*?,\s*new\s+"
+    r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(",
+    re.DOTALL,
+)
 PHP_THROW_NEW_RE = re.compile(r"\bthrow\s+new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(")
 PHP_COMMAND_SIGNATURE_RE = re.compile(r"\bprotected\s+\$signature\s*=\s*['\"](?P<signature>[^'\"]+)['\"]")
 PHP_SCHEDULE_COMMAND_RE = re.compile(
@@ -1070,6 +1088,10 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
         return "event"
     if path.startswith("app/Listeners/") or short.endswith("Listener"):
         return "listener"
+    if path.startswith("app/Mail/") or short.endswith(("Mail", "Mailable")):
+        return "mailable"
+    if path.startswith("app/Notifications/") or short.endswith("Notification"):
+        return "notification"
     if path.startswith("app/Console/Commands/") or _php_short_name(extends) == "Command" or short.endswith("Command"):
         return "artisan_command"
     if path.startswith("app/Policies/") or short.endswith("Policy"):
@@ -3992,6 +4014,132 @@ def _append_php_dispatched_job_method_edges(
                 "source_line": source_line,
             },
             max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
+def _php_first_method_symbol(
+    php_method_symbols: dict[tuple[str, str], str],
+    class_name: str,
+    method_names: tuple[str, ...],
+) -> tuple[str, str]:
+    for method_name in method_names:
+        method_symbol = php_method_symbols.get((class_name, method_name), "")
+        if method_symbol:
+            return method_symbol, method_name
+    return "", ""
+
+
+def _append_php_mail_method_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    source_line: int,
+    *,
+    mailable_class: str,
+    mailable_method_symbol: str,
+    mailable_method: str,
+    mail_method: str,
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    if not method_symbol or not mailable_class or not mailable_method_symbol:
+        return False
+    truncated = False
+    payload = {
+        "mailable_class": mailable_class,
+        "mailable_method": mailable_method,
+        "mail_method": mail_method,
+        "path": rel,
+        "line": source_line,
+    }
+    truncated = not _edge_append(
+        edges,
+        {
+            "kind": "sends_mail_method",
+            "from": method_symbol,
+            "to": mailable_method_symbol,
+            **payload,
+        },
+        max_edges=max_edges,
+    ) or truncated
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_sends_mail_method",
+                "from": route_ref,
+                "to": mailable_method_symbol,
+                "handler": method_symbol,
+                "mailable_class": mailable_class,
+                "mailable_method": mailable_method,
+                "mail_method": mail_method,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+                "source_path": rel,
+                "source_line": source_line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
+def _append_php_notification_method_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    source_line: int,
+    *,
+    notification_class: str,
+    notification_method_symbol: str,
+    notification_method: str,
+    notification_source: str,
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    if not method_symbol or not notification_class or not notification_method_symbol:
+        return False
+    truncated = False
+    payload = {
+        "notification_class": notification_class,
+        "notification_method": notification_method,
+        "notification_source": notification_source,
+        "path": rel,
+        "line": source_line,
+    }
+    truncated = not _edge_append(
+        edges,
+        {
+            "kind": "sends_notification_method",
+            "from": method_symbol,
+            "to": notification_method_symbol,
+            **payload,
+        },
+        max_edges=max_edges,
+    ) or truncated
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_sends_notification_method",
+                "from": route_ref,
+                "to": notification_method_symbol,
+                "handler": method_symbol,
+                "notification_class": notification_class,
+                "notification_method": notification_method,
+                "notification_source": notification_source,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+                "source_path": rel,
+                "source_line": source_line,
+            },
+            max_edges=max_edges,
         ) or truncated
     return truncated
 
@@ -5169,6 +5317,94 @@ def _build_php_graph(
                     _line_number(source, match.start()),
                     event_class=event_class,
                     listener_methods=event_listener_methods_by_event.get(event_class, []),
+                    edges=edges,
+                    max_edges=max_edges,
+                ) or truncated
+
+        for mail_pattern in (PHP_MAIL_CHAIN_RE, PHP_MAIL_DIRECT_RE):
+            for match in mail_pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                mailable_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
+                source_line = _line_number(source, match.start())
+                mail_method = str(match.group("method") or "")
+                edge = {
+                    "kind": "sends_mail",
+                    "from": _php_context_id(class_info, rel),
+                    "to": mailable_class,
+                    "mail_method": mail_method,
+                    "path": rel,
+                    "line": source_line,
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    edge,
+                    max_edges=max_edges,
+                ) or truncated
+                method_context = _php_method_context_id(source, classes, match.start(), rel)
+                mailable_method_symbol, mailable_method = _php_first_method_symbol(
+                    php_method_symbols,
+                    mailable_class,
+                    ("build", "content", "envelope"),
+                )
+                truncated = _append_php_mail_method_edges(
+                    routes_by_handler,
+                    method_context,
+                    rel,
+                    source_line,
+                    mailable_class=mailable_class,
+                    mailable_method_symbol=mailable_method_symbol,
+                    mailable_method=mailable_method,
+                    mail_method=mail_method,
+                    edges=edges,
+                    max_edges=max_edges,
+                ) or truncated
+
+        for notification_pattern, notification_source in (
+            (PHP_NOTIFY_NEW_RE, "notifiable_notify"),
+            (PHP_NOTIFICATION_SEND_RE, "notification_facade"),
+        ):
+            for match in notification_pattern.finditer(source):
+                class_info = _class_context(classes, match.start())
+                notification_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
+                source_line = _line_number(source, match.start())
+                edge = {
+                    "kind": "sends_notification",
+                    "from": _php_context_id(class_info, rel),
+                    "to": notification_class,
+                    "notification_source": notification_source,
+                    "path": rel,
+                    "line": source_line,
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    edge,
+                    max_edges=max_edges,
+                ) or truncated
+                method_context = _php_method_context_id(source, classes, match.start(), rel)
+                notification_method_symbol, notification_method = _php_first_method_symbol(
+                    php_method_symbols,
+                    notification_class,
+                    ("toMail", "toArray", "toDatabase", "toBroadcast", "via"),
+                )
+                truncated = _append_php_notification_method_edges(
+                    routes_by_handler,
+                    method_context,
+                    rel,
+                    source_line,
+                    notification_class=notification_class,
+                    notification_method_symbol=notification_method_symbol,
+                    notification_method=notification_method,
+                    notification_source=notification_source,
                     edges=edges,
                     max_edges=max_edges,
                 ) or truncated
