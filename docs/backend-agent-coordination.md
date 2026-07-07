@@ -1856,3 +1856,55 @@ Resta fuori da questa slice:
 - Parser CI/deploy specifici.
 - Upload automatico dopo failure.
 - Normalizzazione frame verso graph symbols/source slices oltre al file:line.
+
+## Esecuzione resolved bug memory Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-2 del piano "Bug Root Cause Awareness".
+
+Backend remoto:
+
+- Commit remoto `4f78566 feat: promote Hades diagnoses to resolved bug memory`.
+- Nuovo endpoint
+  `POST /api/hades/v1/diagnosis-reports/{diagnosisReport}/promote`.
+- Promozione consentita solo per diagnosis report `final` con confidence
+  `high` o `medium`.
+- La richiesta richiede `verification_status` tra `user_confirmed`,
+  `test_passed` e `manual_review`.
+- La promozione crea `project_memory_entries.kind=resolved_bug` con
+  `source=hades_diagnosis_report`, payload `hades.resolved_bug.v1`, links verso
+  diagnosis report, bug report ed evidence refs.
+- `memory/search` assegna boost ai `resolved_bug` e ritorna `stale` /
+  `stale_reason=workspace_head_changed` quando il commit della diagnosi non
+  coincide piu' con l'HEAD del workspace.
+
+Agent locale:
+
+- `HadesBackendClient.promote_diagnosis_report()`.
+- Nuovo tool provider `hades_backend_resolved_bug_promote`.
+- Il tool usa timeout live di 2 secondi, rifiuta status di verifica non
+  supportati e degrada a `unmapped_project` se la directory non e' linkata.
+- Memory search locale espone `kind`, `stale` e `stale_reason`, e il fallback
+  cache assegna priorita' ai `resolved_bug`.
+
+Verifiche eseguite:
+
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/DiagnosisReportController.php app/Http/Controllers/Hades/MemorySearchController.php routes/api.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `23 passed / 274 assertions`.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `47 passed / 490 assertions`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`
+  passato: `56 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check plugins/memory/hades_backend/__init__.py hermes_cli/hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Dashboard bug case detail.
+- Invalidation symbol-level basata su graph diff; oggi lo stale e' commit-level.

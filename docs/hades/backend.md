@@ -69,6 +69,20 @@ cause, call-path, owner-method, or line-level claims without source access.
 `hades backend sync` uploads artifacts with the linked workspace HEAD commit so
 the backend can distinguish current indexes from stale ones.
 
+## Resolved Bug Memory
+
+Final high/medium confidence diagnosis reports can be promoted through
+`POST /api/hades/v1/diagnosis-reports/{diagnosisReport}/promote`. Promotion is
+allowed only after explicit verification (`user_confirmed`, `test_passed`, or
+`manual_review`) and creates a `project_memory_entries` record with
+`kind=resolved_bug` and `source=hades_diagnosis_report`.
+
+Resolved bug memory stores symptom, root cause, mechanism, evidence refs,
+affected symbols, fix/regression-test metadata, and a validity window. Memory
+search boosts `resolved_bug` entries for similar bug queries and marks them
+`stale` when the linked workspace HEAD no longer matches the commit captured by
+the diagnosis.
+
 ## Status
 
 Use:

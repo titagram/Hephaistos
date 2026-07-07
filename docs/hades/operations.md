@@ -218,6 +218,12 @@ or follow the same order manually: project awareness status, bug evidence
 search, graph search, minimal source slice fetch, then a persisted structured
 diagnosis report with evidence refs and confidence.
 
+After the diagnosis is verified by a passing regression test or explicit user
+confirmation, promote it with the service-gated
+`hades_backend_resolved_bug_promote` tool. This stores a `resolved_bug` memory
+entry in backend project memory, linked to the diagnosis report and evidence,
+so future similar bugs can be recalled without loading the source code.
+
 The local no-codebase release gate is:
 
 ```bash

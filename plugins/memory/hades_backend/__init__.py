@@ -30,6 +30,7 @@ GRAPH_SEARCH_TOOL_NAME = "hades_backend_graph_search"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 DIAGNOSIS_REPORT_CREATE_TOOL_NAME = "hades_backend_diagnosis_report_create"
+RESOLVED_BUG_PROMOTE_TOOL_NAME = "hades_backend_resolved_bug_promote"
 RAW_CHUNK_DOMAINS = {
     "backend_wiki_chunks",
     "chunk",
@@ -61,6 +62,8 @@ DOMAIN_ALIASES = {
     "project": "project_memory",
     "project-memory": "project_memory",
     "project_memory": "project_memory",
+    "resolved-bug": "project_memory",
+    "resolved_bug": "project_memory",
     "source": "source_chunks",
     "source-chunks": "source_chunks",
     "source_chunks": "source_chunks",
@@ -84,6 +87,7 @@ BUG_EVIDENCE_KINDS = (
 )
 DIAGNOSIS_REPORT_STATUSES = ("draft", "final")
 DIAGNOSIS_CONFIDENCE_LEVELS = ("high", "medium", "low", "insufficient")
+RESOLVED_BUG_VERIFICATION_STATUSES = ("user_confirmed", "test_passed", "manual_review")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 
 SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
@@ -319,6 +323,62 @@ DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+RESOLVED_BUG_PROMOTE_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": RESOLVED_BUG_PROMOTE_TOOL_NAME,
+    "description": (
+        "Promote a final high/medium confidence Hades diagnosis report to "
+        "verified resolved-bug project memory. Use only after a user confirms "
+        "the diagnosis or a regression/fix verification has passed, so similar "
+        "future bugs can be recalled without reading the source code."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "diagnosis_report_id": {
+                "type": "string",
+                "description": "Hades diagnosis report id to promote.",
+            },
+            "verification_status": {
+                "type": "string",
+                "enum": list(RESOLVED_BUG_VERIFICATION_STATUSES),
+                "description": "How the resolved bug was verified.",
+            },
+            "fix_commit": {
+                "type": "string",
+                "description": "Optional commit hash containing the fix.",
+            },
+            "fix_pr_url": {
+                "type": "string",
+                "description": "Optional PR or review URL for the fix.",
+            },
+            "affected_symbols": {
+                "type": "array",
+                "description": "Optional affected symbols, routes, classes, or methods.",
+                "items": {"type": "string"},
+            },
+            "regression_tests": {
+                "type": "array",
+                "description": "Optional regression tests that prove the fix.",
+                "items": {"type": "string"},
+            },
+            "payload": {
+                "type": "object",
+                "description": "Optional bounded promotion metadata.",
+                "additionalProperties": True,
+            },
+            "redactions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000,
+                "default": 0,
+                "description": "Number of redactions applied to promotion metadata.",
+            },
+        },
+        "required": ["diagnosis_report_id", "verification_status"],
+        "additionalProperties": False,
+    },
+}
+
 
 class HadesBackendMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
@@ -431,9 +491,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
             DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA,
+            RESOLVED_BUG_PROMOTE_TOOL_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        if tool_name == RESOLVED_BUG_PROMOTE_TOOL_NAME:
+            return self._handle_resolved_bug_promote(args)
         if tool_name == DIAGNOSIS_REPORT_CREATE_TOOL_NAME:
             return self._handle_diagnosis_report_create(args)
         if tool_name == PROJECT_AWARENESS_STATUS_TOOL_NAME:
@@ -590,6 +653,62 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "project_id": self._binding.project_id,
             "workspace_binding_id": self._binding.backend_workspace_binding_id,
             "message": "Hades backend diagnosis report create is unavailable.",
+            "actions": ["Run `hades backend status` and retry after backend connectivity is healthy."],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
+    def _handle_resolved_bug_promote(self, args: Dict[str, Any]) -> str:
+        diagnosis_report_id = str(args.get("diagnosis_report_id") or "").strip()
+        if not diagnosis_report_id:
+            return tool_error("Missing required parameter: diagnosis_report_id")
+        verification_status = str(args.get("verification_status") or "").strip()
+        if verification_status not in RESOLVED_BUG_VERIFICATION_STATUSES:
+            return tool_error(
+                f"Unsupported resolved bug verification status: {verification_status}",
+                allowed_statuses=list(RESOLVED_BUG_VERIFICATION_STATUSES),
+            )
+        affected_symbols = _string_list(args.get("affected_symbols"))
+        regression_tests = _string_list(args.get("regression_tests"))
+        payload = args.get("payload")
+        if payload is not None and not isinstance(payload, dict):
+            return tool_error("Parameter payload must be an object when provided.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so resolved bug memory cannot be promoted."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                }
+            )
+
+        backend_result, backend_error = self._backend_resolved_bug_promote(
+            diagnosis_report_id=diagnosis_report_id,
+            verification_status=verification_status,
+            fix_commit=str(args.get("fix_commit") or "").strip(),
+            fix_pr_url=str(args.get("fix_pr_url") or "").strip(),
+            affected_symbols=affected_symbols,
+            regression_tests=regression_tests,
+            payload=payload,
+            redactions=_bounded_int(args.get("redactions"), default=0, minimum=0, maximum=100_000),
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_resolved_bug_promote(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend resolved bug promotion is unavailable.",
             "actions": ["Run `hades backend status` and retry after backend connectivity is healthy."],
         }
         if backend_error:
@@ -956,6 +1075,43 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return None, redact_secret(str(exc))
         return response, None
 
+    def _backend_resolved_bug_promote(
+        self,
+        *,
+        diagnosis_report_id: str,
+        verification_status: str,
+        fix_commit: str,
+        fix_pr_url: str,
+        affected_symbols: list[str],
+        regression_tests: list[str],
+        payload: dict[str, Any] | None,
+        redactions: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.promote_diagnosis_report(
+                    diagnosis_report_id,
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    verification_status=verification_status,
+                    fix_commit=fix_commit or None,
+                    fix_pr_url=fix_pr_url or None,
+                    affected_symbols=affected_symbols,
+                    regression_tests=regression_tests,
+                    payload=payload,
+                    redactions=redactions,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
     def _backend_project_awareness_status(self) -> tuple[dict[str, Any] | None, str | None]:
         if self._binding is None:
             return None, None
@@ -1027,6 +1183,21 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, (str, int, float, bool)):
+            continue
+        text = _compact_text(item, max_chars=500)
+        if text:
+            result.append(text)
+        if len(result) >= 50:
+            break
+    return list(dict.fromkeys(result))
 
 
 def _compact_text(text: Any, *, max_chars: int) -> str:
@@ -1148,6 +1319,8 @@ def _score_item(item: dict[str, Any], query: str, query_tokens: set[str]) -> int
             score += 4
         elif token in text:
             score += 2
+    if _first_item_value(item, ("kind",)).lower() == "resolved_bug":
+        score += 12
     return score
 
 
@@ -1186,6 +1359,7 @@ def _tool_result_item(item: dict[str, Any], *, score: int, raw_chunk: bool) -> d
     result: dict[str, Any] = {
         "id": _item_id(item),
         "domain": _item_domain(item),
+        "kind": _first_item_value(item, ("kind",)),
         "schema": _item_schema(item),
         "source": _item_source(item),
         "summary": _compact_text(_item_summary(item), max_chars=1200 if raw_chunk else 800),
@@ -1243,6 +1417,8 @@ def _tool_result_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
         "source_status",
         "evidence_count",
         "occurred_at",
+        "stale",
+        "stale_reason",
         "updated_at",
         "version",
     ):
@@ -1428,6 +1604,34 @@ def _tool_result_from_backend_diagnosis_report(response: dict[str, Any]) -> dict
         "server_time": response.get("server_time"),
         "diagnosis_report": {
             key: value for key, value in report_payload.items() if value not in ("", None)
+        },
+    }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_resolved_bug_promote(response: dict[str, Any]) -> dict[str, Any]:
+    memory = response.get("resolved_bug_memory")
+    if not isinstance(memory, dict):
+        memory = {}
+    payload = memory.get("payload") if isinstance(memory.get("payload"), dict) else {}
+    memory_payload: dict[str, Any] = {
+        "id": memory.get("id"),
+        "kind": memory.get("kind"),
+        "summary": _compact_text(memory.get("summary"), max_chars=1200),
+        "payload": _bounded_payload(payload),
+        "occurred_at": memory.get("occurred_at"),
+        "updated_at": memory.get("updated_at"),
+        "version": memory.get("version"),
+    }
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "diagnosis_report_id": response.get("diagnosis_report_id"),
+        "already_promoted": bool(response.get("already_promoted")),
+        "server_time": response.get("server_time"),
+        "resolved_bug_memory": {
+            key: value for key, value in memory_payload.items() if value not in ("", None)
         },
     }
     return {key: value for key, value in result.items() if value not in ("", None)}

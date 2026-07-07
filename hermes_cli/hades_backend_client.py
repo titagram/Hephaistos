@@ -209,6 +209,12 @@ class HadesBackendClient:
     def create_diagnosis_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "diagnosis-reports", json_body=payload)
 
+    def promote_diagnosis_report(self, diagnosis_report_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(diagnosis_report_id or "").strip()
+        if not clean:
+            raise ValueError("diagnosis report id is required")
+        return self._request("POST", f"diagnosis-reports/{clean}/promote", json_body=payload)
+
     def project_awareness_status(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "project-awareness/status", params=payload)
 

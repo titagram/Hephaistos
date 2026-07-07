@@ -596,6 +596,49 @@
         }
       }
     },
+    "/api/hades/v1/diagnosis-reports/{diagnosisReport}/promote": {
+      "post": {
+        "summary": "Promote a final Hades diagnosis report to resolved bug memory",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "diagnosisReport",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Diagnosis report was already promoted"
+          },
+          "201": {
+            "description": "Resolved bug memory created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
     "/api/hades/v1/source-slices": {
       "get": {
         "summary": "Fetch bounded redacted source slices for a linked workspace",

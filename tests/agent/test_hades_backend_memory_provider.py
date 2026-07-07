@@ -123,6 +123,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
         "hades_backend_source_slice_fetch",
         "hades_backend_project_awareness_status",
         "hades_backend_diagnosis_report_create",
+        "hades_backend_resolved_bug_promote",
     ]
 
 
@@ -249,6 +250,58 @@ def test_hades_backend_memory_search_tool_prefers_live_backend(monkeypatch, tmp_
     assert fake.calls[1]["limit"] == 5
     assert fake.calls[1]["workspace_binding_id"] == "wb_1"
     assert fake.closed == 2
+
+
+def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def memory_search(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "search_v1",
+                "etag": "search_v1",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "include_raw_chunks": payload["include_raw_chunks"],
+                "count": 1,
+                "candidate_count": 1,
+                "truncated": False,
+                "raw_chunks_omitted": 0,
+                "items": [
+                    {
+                        "id": "mem_bug_1",
+                        "domain": "project_memory",
+                        "kind": "resolved_bug",
+                        "schema": "hades.resolved_bug.v1",
+                        "source": "hades_diagnosis_report",
+                        "summary": "Resolved bug: active() on null in OrderController.",
+                        "score": 42,
+                        "raw_chunk": False,
+                        "stale": True,
+                        "stale_reason": "workspace_head_changed",
+                    }
+                ],
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: FakeClient())
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {"query": "active null", "domain": "project_memory", "limit": 5},
+        )
+    )
+
+    assert result["items"][0]["kind"] == "resolved_bug"
+    assert result["items"][0]["stale"] is True
+    assert result["items"][0]["stale_reason"] == "workspace_head_changed"
 
 
 def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp_path):
@@ -688,6 +741,103 @@ def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypa
     assert result["error"] == "Missing required parameter: root_cause"
 
 
+def test_hades_backend_resolved_bug_promote_tool_persists_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def promote_diagnosis_report(self, diagnosis_report_id, **payload):
+            self.calls.append((diagnosis_report_id, payload))
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "diagnosis_report_id": diagnosis_report_id,
+                "already_promoted": False,
+                "server_time": "2026-07-07T12:30:00Z",
+                "resolved_bug_memory": {
+                    "id": "mem_bug_1",
+                    "kind": "resolved_bug",
+                    "summary": "Resolved bug: active() on null in OrderController.",
+                    "payload": {
+                        "schema": "hades.resolved_bug.v1",
+                        "root_cause": "OrderController dereferences a missing customer relation.",
+                        "verification_status": payload["verification_status"],
+                        "affected_symbols": payload["affected_symbols"],
+                    },
+                    "occurred_at": "2026-07-07T12:29:00Z",
+                    "updated_at": "2026-07-07T12:29:00Z",
+                    "version": "mem_resolved_bug_1",
+                },
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_resolved_bug_promote",
+            {
+                "diagnosis_report_id": "diag_1",
+                "verification_status": "test_passed",
+                "fix_commit": "abc123",
+                "affected_symbols": ["OrderController@show"],
+                "regression_tests": ["OrderControllerTest::test_show_missing_customer"],
+                "payload": {"notes": "Focused regression test passed."},
+                "redactions": 1,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["resolved_bug_memory"]["id"] == "mem_bug_1"
+    assert result["resolved_bug_memory"]["kind"] == "resolved_bug"
+    assert result["resolved_bug_memory"]["payload"]["verification_status"] == "test_passed"
+    assert fake.calls == [
+        (
+            "diag_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "verification_status": "test_passed",
+                "fix_commit": "abc123",
+                "fix_pr_url": None,
+                "affected_symbols": ["OrderController@show"],
+                "regression_tests": ["OrderControllerTest::test_show_missing_customer"],
+                "payload": {"notes": "Focused regression test passed."},
+                "redactions": 1,
+            },
+        )
+    ]
+    assert fake.closed == 1
+    assert timeouts == [2.0]
+
+
+def test_hades_backend_resolved_bug_promote_tool_requires_verification(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_resolved_bug_promote",
+            {"diagnosis_report_id": "diag_1", "verification_status": "guessed"},
+        )
+    )
+
+    assert result["error"].startswith("Unsupported resolved bug verification status")
+
+
 def test_hades_backend_project_awareness_status_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
@@ -915,6 +1065,12 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
             {"confidence": "insufficient", "root_cause": "not determined"},
         )
     )
+    promote_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_resolved_bug_promote",
+            {"diagnosis_report_id": "diag_1", "verification_status": "manual_review"},
+        )
+    )
 
     assert "not linked" in block
     assert result["status"] == "unmapped_project"
@@ -923,6 +1079,7 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
     assert bug_result["items"] == []
     assert awareness_result["status"] == "unmapped_project"
     assert diagnosis_result["status"] == "unmapped_project"
+    assert promote_result["status"] == "unmapped_project"
 
 
 def test_hades_backend_memory_write_creates_local_proposal(monkeypatch, tmp_path):
