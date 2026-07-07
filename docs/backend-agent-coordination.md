@@ -2516,6 +2516,35 @@ Resta fuori da questa tranche:
 - Scheduler periodico nativo per invocare `quality-report --record` su cadenza.
 - Review queue dedicata per stale facts e low-confidence diagnosis reali.
 
+## Esecuzione governance quality staleness Hades - 2026-07-07
+
+Stato: completata una tranche locale/dashboard P2-5.
+
+Agent locale:
+
+- `hades.quality_report.v1` include ora `generated_at`.
+- `hades backend status --json` espone `quality.staleness` con
+  `missing`, `stale`, `age_seconds` e `stale_after_seconds`.
+- Se manca un baseline report, lo status aggiunge un'action per eseguire
+  `hades backend quality-report --record`.
+- Se l'ultimo report e' piu' vecchio di 7 giorni, lo status aggiunge un'action
+  di refresh; un report stale ma `passed` non marca il backend come degraded.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `10 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_quality_report.py hermes_cli/hades_backend_status.py tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_quality_report.py hermes_cli/hades_backend_status.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Scheduler periodico nativo per invocare `quality-report --record` su cadenza.
+- Review queue dedicata per stale facts e low-confidence diagnosis reali.
+
 ## Esecuzione Laravel graph metadata Hades - 2026-07-07
 
 Stato: completata una seconda tranche locale P0-4 del piano "Bug Root Cause

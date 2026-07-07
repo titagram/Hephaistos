@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from hermes_cli import hades_backend_db as db
@@ -13,6 +14,7 @@ from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
 
 ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])(?:/[^\s,;:]+)+")
 WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
+QUALITY_REPORT_STALE_SECONDS = 7 * 24 * 60 * 60
 
 
 def load_backend_status_payload() -> dict[str, Any]:
@@ -180,10 +182,15 @@ def backend_status_payload(
     background_sync_updated_at: int | None = None,
     last_quality_report: dict[str, Any] | None = None,
     last_quality_report_updated_at: int | None = None,
+    now: int | None = None,
 ) -> dict[str, Any]:
+    current_time = int(now if now is not None else time.time())
     refused = _count(proposal_counts, "refused") + _count(proposal_counts, "conflicted")
     waiting = _count(job_counts, "waiting_confirmation")
     background_failed = bool(background_sync and background_sync.get("status") == "failed")
+    quality_state = _quality_payload(last_quality_report, last_quality_report_updated_at, now=current_time)
+    quality_stale = bool(quality_state.get("staleness", {}).get("stale"))
+    quality_missing = bool(quality_state.get("staleness", {}).get("missing"))
     quality_failed = bool(last_quality_report and last_quality_report.get("status") == "failed")
     quality_attention = bool(last_quality_report and last_quality_report.get("status") == "attention")
     actions: list[str] = []
@@ -224,6 +231,10 @@ def backend_status_payload(
         actions.append("Review latest Hades quality report blocker(s).")
     elif quality_attention:
         actions.append("Review latest Hades quality report warning(s).")
+    elif quality_missing:
+        actions.append("Run `hades backend quality-report --record` to establish a governance baseline.")
+    elif quality_stale:
+        actions.append("Refresh stale Hades quality report with `hades backend quality-report --record`.")
     return {
         "configured": agent is not None,
         "agent": None if agent is None else {
@@ -236,7 +247,7 @@ def backend_status_payload(
         "bindings": binding_payloads,
         "awareness": awareness,
         "identity": identity,
-        "quality": _quality_payload(last_quality_report, last_quality_report_updated_at),
+        "quality": quality_state,
         "job_counts": job_counts,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
@@ -253,22 +264,33 @@ def backend_status_payload(
     }
 
 
-def _quality_payload(report: dict[str, Any] | None, updated_at: int | None) -> dict[str, Any]:
+def _quality_payload(report: dict[str, Any] | None, updated_at: int | None, *, now: int | None = None) -> dict[str, Any]:
+    current_time = int(now if now is not None else time.time())
+    age_seconds = max(0, current_time - int(updated_at or 0)) if updated_at else None
+    staleness = {
+        "missing": not isinstance(report, dict),
+        "stale": bool(age_seconds is not None and age_seconds > QUALITY_REPORT_STALE_SECONDS),
+        "age_seconds": age_seconds,
+        "stale_after_seconds": QUALITY_REPORT_STALE_SECONDS,
+    }
     if not isinstance(report, dict):
         return {
             "last_report": None,
             "last_report_updated_at": None,
+            "staleness": staleness,
         }
     action_queue = report.get("action_queue") if isinstance(report.get("action_queue"), list) else []
     return {
         "last_report": {
             "schema": report.get("schema"),
+            "generated_at": report.get("generated_at"),
             "status": report.get("status"),
             "summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
             "metrics": report.get("metrics") if isinstance(report.get("metrics"), dict) else {},
             "action_queue": [action for action in action_queue if isinstance(action, dict)][:10],
         },
         "last_report_updated_at": updated_at,
+        "staleness": staleness,
     }
 
 

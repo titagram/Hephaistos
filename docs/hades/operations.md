@@ -246,7 +246,9 @@ Use the dashboard `Diagnosis quality` panel for the current workspace snapshot;
 use `quality-report` for release gates and periodic governance. Add `--record`
 when running the report from an audit job so `hades backend status --json` and
 the dashboard `Governance quality` panel show the latest blockers, warnings, and
-action queue.
+action queue. Recorded reports include `generated_at`; backend status also
+reports `quality.staleness` and prompts for a new `quality-report --record` when
+no baseline exists or the latest baseline is older than 7 days.
 
 ## Note Backfill
 

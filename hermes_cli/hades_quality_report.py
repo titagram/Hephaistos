@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 
@@ -9,6 +10,7 @@ def build_hades_quality_report(
     *,
     no_codebase_report: dict[str, Any] | None = None,
     support_report: dict[str, Any] | None = None,
+    generated_at: int | None = None,
 ) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     metrics: dict[str, Any] = {}
@@ -38,6 +40,7 @@ def build_hades_quality_report(
     status = "failed" if blocker_count else ("attention" if warning_count else "passed")
     return {
         "schema": "hades.quality_report.v1",
+        "generated_at": int(generated_at if generated_at is not None else time.time()),
         "status": status,
         "metrics": metrics,
         "action_queue": actions,

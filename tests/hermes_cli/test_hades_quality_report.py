@@ -22,9 +22,11 @@ def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
             "degraded": False,
             "awareness": {"status": "ready"},
         },
+        generated_at=12345,
     )
 
     assert report["schema"] == "hades.quality_report.v1"
+    assert report["generated_at"] == 12345
     assert report["status"] == "passed"
     assert report["summary"] == {"blockers": 0, "warnings": 0, "actions": 0}
     assert report["metrics"]["no_codebase"]["accuracy"] == 1.0
@@ -174,3 +176,55 @@ def test_backend_quality_report_command_records_latest_snapshot(monkeypatch, tmp
     assert rc == 0
     assert recorded == payload
     assert recorded_at is not None
+
+
+def test_backend_status_flags_missing_quality_report_baseline():
+    from hermes_cli.hades_backend_status import backend_status_payload
+
+    payload = backend_status_payload(
+        agent=SimpleNamespace(agent_id="agent_1", project_id="proj_1", base_url="https://backend.example", label="dev", capabilities={}),
+        bindings=[],
+        job_counts={},
+        proposal_counts={},
+        inbox_counts={"total": 0, "unread": 0},
+        last_summary=None,
+        last_error=None,
+        last_quality_report=None,
+        last_quality_report_updated_at=None,
+        now=1_000,
+    )
+
+    assert payload["quality"]["staleness"]["missing"] is True
+    assert payload["quality"]["staleness"]["stale"] is False
+    assert any("quality-report --record" in action for action in payload["actions"])
+
+
+def test_backend_status_flags_stale_quality_report_without_degrading_backend():
+    from hermes_cli.hades_backend_status import QUALITY_REPORT_STALE_SECONDS, backend_status_payload
+
+    payload = backend_status_payload(
+        agent=SimpleNamespace(agent_id="agent_1", project_id="proj_1", base_url="https://backend.example", label="dev", capabilities={}),
+        bindings=[],
+        job_counts={},
+        proposal_counts={},
+        inbox_counts={"total": 0, "unread": 0},
+        last_summary=None,
+        last_error=None,
+        last_quality_report={
+            "schema": "hades.quality_report.v1",
+            "generated_at": 10,
+            "status": "passed",
+            "summary": {"blockers": 0, "warnings": 0, "actions": 0},
+            "metrics": {},
+            "action_queue": [],
+        },
+        last_quality_report_updated_at=10,
+        now=10 + QUALITY_REPORT_STALE_SECONDS + 1,
+    )
+
+    assert payload["quality"]["last_report"]["generated_at"] == 10
+    assert payload["quality"]["staleness"]["missing"] is False
+    assert payload["quality"]["staleness"]["stale"] is True
+    assert payload["quality"]["staleness"]["age_seconds"] == QUALITY_REPORT_STALE_SECONDS + 1
+    assert payload["degraded"] is False
+    assert any("Refresh stale Hades quality report" in action for action in payload["actions"])
