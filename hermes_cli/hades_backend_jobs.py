@@ -241,6 +241,8 @@ EXPRESS_ROUTE_RE = re.compile(
 NEXT_ROUTE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/route\.(?:ts|tsx|js|jsx)$")
 NEXT_PAGE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/page\.(?:ts|tsx|js|jsx)$")
 NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(")
+PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
+PY_DJANGO_ROUTE_FUNCS = {"path", "re_path"}
 
 
 def _safe_relpath(path: str) -> str:
@@ -1681,6 +1683,55 @@ def _ts_graph_summary(
     return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {kinds or 'symbols:none'}"
 
 
+def _py_graph_summary(
+    routes: list[dict[str, str]],
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    framework: str,
+) -> str:
+    kind_counts: dict[str, int] = {}
+    for symbol in symbols:
+        kind = str(symbol.get("kind") or "symbol")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {kinds or 'symbols:none'}"
+
+
+def _py_dotted_name(node: ast.AST | None) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _py_dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Call):
+        return _py_dotted_name(node.func)
+    return ""
+
+
+def _py_string(node: ast.AST | None) -> str:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else ""
+
+
+def _py_keyword_string(node: ast.Call, name: str) -> str:
+    for keyword in node.keywords:
+        if keyword.arg == name:
+            return _py_string(keyword.value)
+    return ""
+
+
+def _join_url_path(prefix: str, path: str) -> str:
+    if not prefix:
+        return path or "/"
+    if not path:
+        return prefix
+    return f"/{prefix.strip('/')}/{path.strip('/')}".replace("//", "/")
+
+
+def _py_route_id(route: dict[str, Any]) -> str:
+    return str(route.get("name") or f"{route.get('method', '')} {route.get('path', '')}".strip())
+
+
 def _ts_framework(root: Path, files: list[Path], dependency_manifests: list[dict[str, Any]]) -> str:
     packages = {
         str(package)
@@ -1850,6 +1901,179 @@ def _build_ts_graph(
     return graph
 
 
+def _build_python_artifact(
+    workspace_root: Path,
+    candidates: list[Path],
+    omitted: list[dict[str, str]],
+    *,
+    truncated: bool,
+    max_symbols: int,
+    max_edges: int,
+    max_file_bytes: int,
+) -> dict[str, Any]:
+    symbols: list[dict[str, Any]] = []
+    routes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    frameworks: set[str] = set()
+    python_files = [path for path in candidates if path.suffix == ".py"]
+
+    for path in python_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
+        if size > max_file_bytes:
+            omitted.append({"path": rel, "reason": "file_too_large"})
+            truncated = True
+            continue
+        try:
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+            if was_truncated:
+                omitted.append({"path": rel, "reason": "file_too_large"})
+                truncated = True
+                continue
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            omitted.append({"path": rel, "reason": f"syntax_error:{exc.lineno}"})
+            continue
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
+            continue
+
+        router_prefixes: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                continue
+            if _py_dotted_name(node.value.func).split(".")[-1] != "APIRouter":
+                continue
+            prefix = _py_keyword_string(node.value, "prefix")
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    router_prefixes[target.id] = prefix
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                if len(symbols) < max_symbols:
+                    symbols.append({"kind": "class", "name": node.name, "path": rel, "line": node.lineno})
+                else:
+                    truncated = True
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if len(symbols) < max_symbols:
+                    symbols.append({"kind": "function", "name": node.name, "path": rel, "line": node.lineno})
+                else:
+                    truncated = True
+                for decorator in node.decorator_list:
+                    if not isinstance(decorator, ast.Call):
+                        continue
+                    decorator_name = _py_dotted_name(decorator.func)
+                    decorator_parts = decorator_name.split(".")
+                    method = decorator_parts[-1] if decorator_parts else ""
+                    router_name = decorator_parts[-2] if len(decorator_parts) >= 2 else ""
+                    if method not in PY_HTTP_METHODS or not decorator.args:
+                        continue
+                    route_path = _py_string(decorator.args[0])
+                    if not route_path:
+                        continue
+                    route = {
+                        "framework": "fastapi",
+                        "method": "ANY" if method in {"api_route", "route"} else method.upper(),
+                        "path": _join_url_path(router_prefixes.get(router_name, ""), route_path),
+                        "handler": node.name,
+                        "source_path": rel,
+                        "line": getattr(decorator, "lineno", node.lineno),
+                    }
+                    route_name = _py_keyword_string(decorator, "name")
+                    if route_name:
+                        route["name"] = route_name
+                    routes.append(route)
+                    frameworks.add("fastapi")
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "route_handler",
+                            "from": f"route:{_py_route_id(route)}",
+                            "to": node.name,
+                            "framework": "fastapi",
+                            "path": rel,
+                            "line": getattr(decorator, "lineno", node.lineno),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+            if len(symbols) >= max_symbols:
+                truncated = True
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            call_name = _py_dotted_name(node.func).split(".")[-1]
+            if call_name not in PY_DJANGO_ROUTE_FUNCS or len(node.args) < 2:
+                continue
+            route_path = _py_string(node.args[0])
+            handler = _py_dotted_name(node.args[1])
+            if not route_path or not handler:
+                continue
+            route = {
+                "framework": "django",
+                "method": "ROUTE",
+                "path": route_path,
+                "handler": handler,
+                "source_path": rel,
+                "line": getattr(node, "lineno", 0),
+            }
+            route_name = _py_keyword_string(node, "name")
+            if route_name:
+                route["name"] = route_name
+            routes.append(route)
+            frameworks.add("django")
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_handler",
+                    "from": f"route:{_py_route_id(route)}",
+                    "to": handler,
+                    "framework": "django",
+                    "path": rel,
+                    "line": getattr(node, "lineno", 0),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        if len(symbols) >= max_symbols:
+            break
+
+    if routes:
+        framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
+        graph = {
+            "schema": "hades.code_graph.v1",
+            "language": "python",
+            "framework": framework,
+            "root": workspace_root.name,
+            "routes": routes[:500],
+            "symbols": symbols,
+            "edges": edges,
+            "summary": "",
+            "omitted": omitted,
+            "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges or len(routes) > 500,
+            "redactions": len(omitted),
+            "retention_class": "source_symbols",
+            "raw_source_included": False,
+        }
+        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework)
+        return graph
+
+    return {
+        "schema": "hades.symbols.v1",
+        "symbols": symbols,
+        "omitted": omitted,
+        "truncated": truncated or len(symbols) >= max_symbols,
+        "redactions": len(omitted),
+        "retention_class": "source_symbols",
+        "raw_source_included": False,
+    }
+
+
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     payload = job.get("payload") or {}
     max_files = int(payload.get("max_files") or 1_000)
@@ -1889,54 +2113,20 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             "artifact": graph,
         }
 
-    symbols: list[dict[str, Any]] = []
-    for path in candidates:
-        if path.suffix != ".py":
-            continue
-        rel = path.relative_to(workspace_root).as_posix()
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
-            continue
-        if size > max_file_bytes:
-            omitted.append({"path": rel, "reason": "file_too_large"})
-            truncated = True
-            continue
-        try:
-            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
-            if was_truncated:
-                omitted.append({"path": rel, "reason": "file_too_large"})
-                truncated = True
-                continue
-            tree = ast.parse(source)
-        except SyntaxError as exc:
-            omitted.append({"path": rel, "reason": f"syntax_error:{exc.lineno}"})
-            continue
-        except OSError as exc:
-            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                symbols.append({"kind": "class", "name": node.name, "path": rel, "line": node.lineno})
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                symbols.append({"kind": "function", "name": node.name, "path": rel, "line": node.lineno})
-            if len(symbols) >= max_symbols:
-                break
-        if len(symbols) >= max_symbols:
-            break
+    max_edges = int(payload.get("max_edges") or max_symbols * 2)
+    artifact = _build_python_artifact(
+        workspace_root,
+        candidates,
+        omitted,
+        truncated=truncated,
+        max_symbols=max_symbols,
+        max_edges=max_edges,
+        max_file_bytes=max_file_bytes,
+    )
     return {
         "status": "completed",
-        "summary": f"Collected {len(symbols)} symbol(s).",
-        "artifact": {
-            "schema": "hades.symbols.v1",
-            "symbols": symbols,
-            "omitted": omitted,
-            "truncated": truncated or len(symbols) >= max_symbols,
-            "redactions": len(omitted),
-            "retention_class": "source_symbols",
-            "raw_source_included": False,
-        },
+        "summary": artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).",
+        "artifact": artifact,
     }
 
 

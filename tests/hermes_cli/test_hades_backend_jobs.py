@@ -294,6 +294,73 @@ def test_populate_backend_ast_extracts_python_symbols_without_source(tmp_path):
     assert "return 1" not in str(result)
 
 
+def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "project").mkdir()
+    (tmp_path / "app" / "api.py").write_text(
+        "from fastapi import APIRouter, FastAPI\n"
+        "app = FastAPI()\n"
+        "router = APIRouter(prefix='/api')\n"
+        "@router.get('/orders/{order_id}', name='orders-show')\n"
+        "async def show_order(order_id: int):\n"
+        "    return {'id': order_id}\n"
+        "@app.post('/health')\n"
+        "def health():\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "project" / "urls.py").write_text(
+        "from django.urls import path\n"
+        "from app import views\n"
+        "urlpatterns = [\n"
+        "    path('orders/<int:pk>/', views.order_detail, name='orders-detail'),\n"
+        "    path('orders/create/', views.OrderCreateView.as_view(), name='orders-create'),\n"
+        "]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "views.py").write_text(
+        "def order_detail(request, pk):\n"
+        "    return None\n"
+        "class OrderCreateView:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_py_web_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 20, "max_edges": 20},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    routes = {(item["framework"], item["method"], item["path"], item["handler"]) for item in artifact["routes"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+    symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["language"] == "python"
+    assert artifact["framework"] == "python_web"
+    assert artifact["raw_source_included"] is False
+    assert ("fastapi", "GET", "/api/orders/{order_id}", "show_order") in routes
+    assert ("fastapi", "POST", "/health", "health") in routes
+    assert ("django", "ROUTE", "orders/<int:pk>/", "views.order_detail") in routes
+    assert ("django", "ROUTE", "orders/create/", "views.OrderCreateView.as_view") in routes
+    assert ("function", "show_order", "app/api.py") in symbols
+    assert ("function", "order_detail", "app/views.py") in symbols
+    assert ("class", "OrderCreateView", "app/views.py") in symbols
+    assert ("route_handler", "route:orders-show", "show_order") in edges
+    assert ("route_handler", "route:orders-detail", "views.order_detail") in edges
+    assert ("route_handler", "route:orders-create", "views.OrderCreateView.as_view") in edges
+    assert "return {'id': order_id}" not in str(artifact)
+    assert "urlpatterns" not in str(artifact)
+
+
 def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

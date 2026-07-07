@@ -2357,10 +2357,45 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Symfony, FastAPI/Django e database schema adapters.
+- Symfony e database schema adapters.
 - Parser strutturati profondi per JS/TS oltre al primo graph regex-bounded.
 - Search/traversal semantico piu' profondo su graph JS/TS oltre al summary
   artifact e al traversal generico gia' disponibile.
+
+## Esecuzione Python web graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` produce `hades.code_graph.v1` per workspace Python web
+  quando rileva route FastAPI o Django.
+- FastAPI: estrae decorators `@app.<method>()` e `@router.<method>()`, include
+  prefix `APIRouter(prefix=...)`, route name opzionale e route-handler edge.
+- Django: estrae `path()`/`re_path()` in `urls.py`, handler function/class
+  dotted e route name opzionale.
+- Workspace Python senza route web continuano a produrre `hades.symbols.v1`,
+  quindi il comportamento legacy resta compatibile.
+- Gli artifact restano source-free: route, handler, path, linee, simboli ed
+  edge, non codice sorgente.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_web_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_symbols_without_source`
+  passato: `2 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `15 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Symfony e database schema adapters.
+- Parser strutturati profondi per JS/TS/Python oltre ai casi AST/regex bounded.
 
 ## Esecuzione performance/storage controls Hades - 2026-07-07
 
