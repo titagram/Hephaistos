@@ -65,6 +65,17 @@ def _php_graph_artifact():
                 "handler": "OrderController@show",
                 "path": "routes/web.php",
                 "line": 4,
+            },
+            {
+                "method": "GET",
+                "uri": "/invoices",
+                "name": "invoices.index",
+                "handler": "InvoiceController@index",
+                "resource": "invoices",
+                "resource_action": "index",
+                "middleware": ["auth"],
+                "path": "routes/web.php",
+                "line": 5,
             }
         ],
         "symbols": [
@@ -109,6 +120,15 @@ def _php_graph_artifact():
                 "to": "OrderController@show",
                 "path": "routes/web.php",
                 "line": 4,
+            },
+            {
+                "kind": "route_handler",
+                "from": "route:invoices.index",
+                "to": "InvoiceController@index",
+                "method": "GET",
+                "uri": "/invoices",
+                "path": "routes/web.php",
+                "line": 5,
             },
             {
                 "kind": "route_model_binding",
@@ -820,6 +840,55 @@ def test_hades_backend_graph_search_falls_back_to_local_graph_cache(monkeypatch,
     assert any("bm25" in item["match_fields"] for item in result["items"])
     assert any(ref["type"] == "node" and ref["id"] == "OrderController@show" for ref in graph_refs)
     assert any(ref["type"] == "edge" and ref["kind"] == "route_handler" for ref in graph_refs)
+
+
+def test_hades_backend_graph_search_finds_local_resource_routes(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "invoices resource index", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "node"
+        and ref["id"] == "route:invoices.index"
+        and ref["attributes"]["resource"] == "invoices"
+        and ref["attributes"]["resource_action"] == "index"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_handler"
+        and ref["from"] == "route:invoices.index"
+        for ref in graph_refs
+    )
 
 
 def test_hades_backend_graph_search_finds_local_test_map_nodes(monkeypatch, tmp_path):

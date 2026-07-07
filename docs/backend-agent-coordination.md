@@ -5023,6 +5023,39 @@ Verifiche eseguite:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
 
+## Esecuzione Laravel resource routes graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per route coverage metadata-only.
+
+Integrazione locale:
+
+- `_laravel_routes` espande ora `Route::resource(...)` e
+  `Route::apiResource(...)` in route CRUD standard Laravel.
+- Le route generate includono `name` (`invoices.index`, `invoices.show`, ...),
+  handler (`InvoiceController@index`), uri, method, middleware ereditato dalla
+  chain e metadati `resource` / `resource_action`.
+- `apiResource` omette `create` ed `edit`, coerentemente col comportamento
+  Laravel API.
+- Il fallback locale di `hades_backend_graph_search` indicizza
+  `resource/resource_action` negli attributi route, cosi' query come
+  `invoices resource index` trovano l'entrypoint anche senza source.
+- Il payload non include `Route::apiResource` o sorgente raw.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_resource_routes`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `72 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
 ## Esecuzione Laravel authorization graph Hades - 2026-07-07
 
 Stato: completata una tranche locale P0-4 per authorization awareness

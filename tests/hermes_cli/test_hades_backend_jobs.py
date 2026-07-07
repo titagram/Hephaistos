@@ -553,8 +553,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "routes" / "web.php").write_text(
         "<?php\n"
         "use App\\Http\\Controllers\\OrderController;\n"
+        "use App\\Http\\Controllers\\InvoiceController;\n"
         "Route::get('/orders/{order}', [OrderController::class, 'show'])"
-        "->middleware(['web', 'auth', 'verified'])->name('orders.show');\n",
+        "->middleware(['web', 'auth', 'verified'])->name('orders.show');\n"
+        "Route::apiResource('invoices', InvoiceController::class)->middleware('auth');\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Http" / "Kernel.php").write_text(
@@ -626,6 +628,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        OrderService::format($order);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Controllers" / "InvoiceController.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "class InvoiceController extends Controller {\n"
+        "    public function index() {}\n"
+        "    public function store() {}\n"
+        "    public function show($invoice) {}\n"
+        "    public function update($invoice) {}\n"
+        "    public function destroy($invoice) {}\n"
         "}\n",
         encoding="utf-8",
     )
@@ -829,7 +843,13 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert artifact["middleware"]["alias_count"] == 2
     assert artifact["middleware"]["group_count"] == 1
     assert ("GET", "/orders/{order}", "OrderController@show") in routes
+    assert ("GET", "/invoices", "InvoiceController@index") in routes
+    assert ("POST", "/invoices", "InvoiceController@store") in routes
+    assert ("GET", "/invoices/{invoice}", "InvoiceController@show") in routes
+    assert ("PUT", "/invoices/{invoice}", "InvoiceController@update") in routes
+    assert ("DELETE", "/invoices/{invoice}", "InvoiceController@destroy") in routes
     assert ("class", "App\\Http\\Controllers\\OrderController") in symbols
+    assert ("class", "App\\Http\\Controllers\\InvoiceController") in symbols
     assert ("class", "App\\Models\\Order") in symbols
     assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
@@ -855,13 +875,19 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
+    assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
+    assert ("route_handler", "route:invoices.index", "InvoiceController@index") in edges
+    assert ("route_handler", "route:invoices.show", "InvoiceController@show") in edges
+    assert ("route_handler", "route:invoices.update", "InvoiceController@update") in edges
     assert ("route_middleware", "route:orders.show", "middleware:web") in edges
     assert ("route_middleware", "route:orders.show", "middleware:auth") in edges
     assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
     assert ("route_middleware_group", "route:orders.show", "middleware_group:web") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\Authenticate") in edges
+    assert ("route_middleware", "route:invoices.index", "middleware:auth") in edges
+    assert ("route_middleware_class", "route:invoices.index", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EncryptCookies") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
     assert ("middleware_alias_class", "middleware:auth", "App\\Http\\Middleware\\Authenticate") in edges
@@ -895,7 +921,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",
-        "line": 3,
+        "line": 4,
     } in artifact["edges"]
     assert {
         "kind": "route_authorization",
@@ -910,7 +936,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",
-        "line": 3,
+        "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 13,
     } in artifact["edges"]
@@ -926,7 +952,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",
-        "line": 3,
+        "line": 4,
     } in artifact["edges"]
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
@@ -1042,6 +1068,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "$this->app->singleton" not in str(artifact)
     assert "Order::observe" not in str(artifact)
     assert "Broadcast::channel" not in str(artifact)
+    assert "Route::apiResource" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
     assert "order payment gateway degraded" not in str(artifact)

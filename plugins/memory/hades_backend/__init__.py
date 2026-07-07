@@ -2451,6 +2451,8 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                     "uri": route.get("uri") or route.get("path"),
                     "handler": route.get("handler"),
                     "name": route.get("name"),
+                    "resource": route.get("resource"),
+                    "resource_action": route.get("resource_action"),
                     "middleware": route.get("middleware"),
                     "line": route.get("line"),
                     "schema": schema,

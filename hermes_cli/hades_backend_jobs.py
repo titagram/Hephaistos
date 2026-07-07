@@ -103,6 +103,11 @@ ROUTE_CALL_RE = re.compile(
     r"(?:->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\))?",
     re.IGNORECASE | re.DOTALL,
 )
+ROUTE_RESOURCE_RE = re.compile(
+    r"Route::(?P<kind>resource|apiResource)\s*"
+    r"\(\s*['\"](?P<resource>[^'\"]+)['\"]\s*,\s*(?P<controller>\\?[A-Za-z0-9_\\]+)::class\s*\)",
+    re.IGNORECASE | re.DOTALL,
+)
 LARAVEL_HANDLER_RE = re.compile(
     r"\[\s*(?P<class>[A-Za-z0-9_\\\\]+)::class\s*,\s*['\"](?P<method>[A-Za-z0-9_]+)['\"]\s*\]"
 )
@@ -868,6 +873,59 @@ def _normalize_laravel_handler(raw: str) -> str:
     return compact[:160]
 
 
+def _laravel_resource_param(resource: str) -> str:
+    tail = str(resource or "").strip("/").split("/")[-1].replace("-", "_")
+    if tail.endswith("ies") and len(tail) > 3:
+        return tail[:-3] + "y"
+    if tail.endswith("s") and len(tail) > 1:
+        return tail[:-1]
+    return tail or "id"
+
+
+def _laravel_resource_routes(
+    *,
+    resource: str,
+    controller: str,
+    api: bool,
+    rel: str,
+    line: int,
+    chain: str,
+) -> list[dict[str, Any]]:
+    base_uri = "/" + str(resource or "").strip("/")
+    route_name = base_uri.strip("/").replace("/", ".")
+    param = _laravel_resource_param(resource)
+    actions = [
+        ("GET", base_uri, "index"),
+        ("POST", base_uri, "store"),
+        ("GET", f"{base_uri}/{{{param}}}", "show"),
+        ("PUT", f"{base_uri}/{{{param}}}", "update"),
+        ("PATCH", f"{base_uri}/{{{param}}}", "update"),
+        ("DELETE", f"{base_uri}/{{{param}}}", "destroy"),
+    ]
+    if not api:
+        actions.insert(2, ("GET", f"{base_uri}/create", "create"))
+        actions.insert(4, ("GET", f"{base_uri}/{{{param}}}/edit", "edit"))
+    middleware = _route_middleware_values(chain)
+    routes: list[dict[str, Any]] = []
+    controller_short = _php_short_name(controller)
+    for method, uri, action in actions:
+        route = {
+            "framework": "laravel",
+            "method": method,
+            "uri": uri,
+            "handler": f"{controller_short}@{action}",
+            "path": rel,
+            "line": line,
+            "name": f"{route_name}.{action}",
+            "resource": resource,
+            "resource_action": action,
+        }
+        if middleware:
+            route["middleware"] = middleware
+        routes.append(route)
+    return routes
+
+
 def _line_number(content: str, offset: int) -> int:
     return content.count("\n", 0, max(0, offset)) + 1
 
@@ -1511,6 +1569,20 @@ def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int 
             routes.append(route)
             if len(routes) >= max_routes:
                 return routes
+        for match in ROUTE_RESOURCE_RE.finditer(content):
+            chain = _route_chain(content, match.end())
+            resource_routes = _laravel_resource_routes(
+                resource=match.group("resource"),
+                controller=match.group("controller"),
+                api=str(match.group("kind") or "").lower() == "apiresource",
+                rel=rel,
+                line=_line_number(content, match.start()),
+                chain=chain,
+            )
+            for route in resource_routes:
+                routes.append(route)
+                if len(routes) >= max_routes:
+                    return routes
     return routes
 
 
