@@ -2638,6 +2638,136 @@ def test_hades_backend_graph_search_finds_local_policy_mapping_edges(monkeypatch
     )
 
 
+def test_hades_backend_graph_search_finds_local_middleware_method_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["routes"][0]["middleware"] = ["web", "auth", "verified"]
+    artifact["symbols"].extend(
+        [
+            {
+                "kind": "method",
+                "name": "Authenticate@handle",
+                "class": "App\\Http\\Middleware\\Authenticate",
+                "method": "handle",
+                "role": "middleware",
+                "path": "app/Http/Middleware/Authenticate.php",
+                "line": 4,
+            },
+            {
+                "kind": "method",
+                "name": "EncryptCookies@handle",
+                "class": "App\\Http\\Middleware\\EncryptCookies",
+                "method": "handle",
+                "role": "middleware",
+                "path": "app/Http/Middleware/EncryptCookies.php",
+                "line": 4,
+            },
+            {
+                "kind": "method",
+                "name": "EnsureEmailIsVerified@handle",
+                "class": "App\\Http\\Middleware\\EnsureEmailIsVerified",
+                "method": "handle",
+                "role": "middleware",
+                "path": "app/Http/Middleware/EnsureEmailIsVerified.php",
+                "line": 4,
+            },
+        ]
+    )
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "route_middleware_method",
+                "from": "route:orders.show",
+                "to": "Authenticate@handle",
+                "middleware": "auth",
+                "middleware_class": "App\\Http\\Middleware\\Authenticate",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
+                "kind": "route_middleware_method",
+                "from": "route:orders.show",
+                "to": "EncryptCookies@handle",
+                "middleware": "web",
+                "middleware_class": "App\\Http\\Middleware\\EncryptCookies",
+                "via": "App\\Http\\Middleware\\EncryptCookies",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
+                "kind": "route_middleware_method",
+                "from": "route:orders.show",
+                "to": "EnsureEmailIsVerified@handle",
+                "middleware": "verified",
+                "middleware_class": "App\\Http\\Middleware\\EnsureEmailIsVerified",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders middleware Authenticate verified handle", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_middleware_method"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "Authenticate@handle"
+        and ref["provenance"]["middleware"] == "auth"
+        and ref["provenance"]["middleware_class"] == "App\\Http\\Middleware\\Authenticate"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_middleware_method"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "EnsureEmailIsVerified@handle"
+        and ref["provenance"]["middleware"] == "verified"
+        and ref["provenance"]["middleware_class"] == "App\\Http\\Middleware\\EnsureEmailIsVerified"
+        for ref in graph_refs
+    )
+    assert any(
+        "middleware=auth" in item["summary"]
+        and "middleware_class=App\\Http\\Middleware\\Authenticate" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

@@ -2259,19 +2259,51 @@ def _php_route_edges(
     *,
     max_edges: int,
     middleware_catalog: dict[str, Any] | None = None,
+    php_method_symbols: dict[tuple[str, str], str] | None = None,
 ) -> bool:
     truncated = False
+    php_method_symbols = php_method_symbols or {}
     alias_map = middleware_catalog.get("_alias_map", {}) if isinstance(middleware_catalog, dict) else {}
     group_map = middleware_catalog.get("_group_map", {}) if isinstance(middleware_catalog, dict) else {}
+
+    def append_middleware_method_edge(
+        *,
+        route_ref: str,
+        route: dict[str, Any],
+        middleware_name: str,
+        middleware_class: str,
+        via: str = "",
+    ) -> bool:
+        handle_symbol = php_method_symbols.get((middleware_class, "handle"), "")
+        if not handle_symbol:
+            return True
+        return _edge_append(
+            edges,
+            {
+                "kind": "route_middleware_method",
+                "from": route_ref,
+                "to": handle_symbol,
+                "middleware": middleware_name,
+                "middleware_class": middleware_class,
+                "via": via,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            },
+            max_edges=max_edges,
+        )
+
     for route in routes:
         route_id = _php_route_id(route)
+        route_ref = f"route:{route_id}"
         handler = route.get("handler", "")
         if "@" in handler:
             if not _edge_append(
                 edges,
                 {
                     "kind": "route_handler",
-                    "from": f"route:{route_id}",
+                    "from": route_ref,
                     "to": handler,
                     "method": route.get("method"),
                     "uri": route.get("uri"),
@@ -2288,7 +2320,7 @@ def _php_route_edges(
                 edges,
                 {
                     "kind": "route_middleware",
-                    "from": f"route:{route_id}",
+                    "from": route_ref,
                     "to": f"middleware:{middleware}",
                     "method": route.get("method"),
                     "uri": route.get("uri"),
@@ -2305,7 +2337,7 @@ def _php_route_edges(
                     edges,
                     {
                         "kind": "route_middleware_class",
-                        "from": f"route:{route_id}",
+                        "from": route_ref,
                         "to": class_target,
                         "middleware": base_middleware,
                         "method": route.get("method"),
@@ -2315,13 +2347,19 @@ def _php_route_edges(
                     },
                     max_edges=max_edges,
                 ) or truncated
+                truncated = not append_middleware_method_edge(
+                    route_ref=route_ref,
+                    route=route,
+                    middleware_name=base_middleware,
+                    middleware_class=class_target,
+                ) or truncated
             group_members = group_map.get(base_middleware) or []
             if group_members:
                 truncated = not _edge_append(
                     edges,
                     {
                         "kind": "route_middleware_group",
-                        "from": f"route:{route_id}",
+                        "from": route_ref,
                         "to": f"middleware_group:{base_middleware}",
                         "method": route.get("method"),
                         "uri": route.get("uri"),
@@ -2339,7 +2377,7 @@ def _php_route_edges(
                         edges,
                         {
                             "kind": "route_middleware_class",
-                            "from": f"route:{route_id}",
+                            "from": route_ref,
                             "to": target,
                             "middleware": base_middleware,
                             "via": member,
@@ -2349,6 +2387,13 @@ def _php_route_edges(
                             "line": route.get("line"),
                         },
                         max_edges=max_edges,
+                    ) or truncated
+                    truncated = not append_middleware_method_edge(
+                        route_ref=route_ref,
+                        route=route,
+                        middleware_name=base_middleware,
+                        middleware_class=target,
+                        via=str(member),
                     ) or truncated
     return truncated
 
@@ -4419,7 +4464,13 @@ def _build_php_graph(
         max_symbols=max_symbols,
         max_edges=max_edges,
     ) or truncated
-    truncated = _php_route_edges(routes, edges, max_edges=max_edges, middleware_catalog=middleware_catalog) or truncated
+    truncated = _php_route_edges(
+        routes,
+        edges,
+        max_edges=max_edges,
+        middleware_catalog=middleware_catalog,
+        php_method_symbols=php_method_symbols,
+    ) or truncated
 
     for path in php_files:
         rel = path.relative_to(workspace_root).as_posix()

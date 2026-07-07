@@ -611,19 +611,25 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Http" / "Middleware" / "Authenticate.php").write_text(
         "<?php\n"
         "namespace App\\Http\\Middleware;\n"
-        "class Authenticate {}\n",
+        "class Authenticate {\n"
+        "    public function handle($request, $next) { return $next($request); }\n"
+        "}\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Http" / "Middleware" / "EncryptCookies.php").write_text(
         "<?php\n"
         "namespace App\\Http\\Middleware;\n"
-        "class EncryptCookies {}\n",
+        "class EncryptCookies {\n"
+        "    public function handle($request, $next) { return $next($request); }\n"
+        "}\n",
         encoding="utf-8",
     )
     (workspace / "app" / "Http" / "Middleware" / "EnsureEmailIsVerified.php").write_text(
         "<?php\n"
         "namespace App\\Http\\Middleware;\n"
-        "class EnsureEmailIsVerified {}\n",
+        "class EnsureEmailIsVerified {\n"
+        "    public function handle($request, $next) { return $next($request); }\n"
+        "}\n",
         encoding="utf-8",
     )
     (workspace / "routes" / "channels.php").write_text(
@@ -981,6 +987,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
+    assert ("method", "Authenticate@handle") in symbols
+    assert ("method", "EncryptCookies@handle") in symbols
+    assert ("method", "EnsureEmailIsVerified@handle") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("method", "SyncOrderJob@handle") in symbols
     assert ("method", "SendOrderReceipt@handle") in symbols
@@ -1005,10 +1014,24 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_middleware_class", "route:invoices.index", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EncryptCookies") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
+    assert ("route_middleware_method", "route:orders.show", "Authenticate@handle") in edges
+    assert ("route_middleware_method", "route:orders.show", "EncryptCookies@handle") in edges
+    assert ("route_middleware_method", "route:orders.show", "EnsureEmailIsVerified@handle") in edges
     assert ("middleware_alias_class", "middleware:auth", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("middleware_alias_class", "middleware:verified", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
     assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\EncryptCookies") in edges
     assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\Authenticate") in edges
+    assert {
+        "kind": "route_middleware_method",
+        "from": "route:orders.show",
+        "to": "Authenticate@handle",
+        "middleware": "auth",
+        "middleware_class": "App\\Http\\Middleware\\Authenticate",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+    } in artifact["edges"]
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
     assert ("static_call", "OrderController@show", "App\\Services\\OrderService::format") in edges
