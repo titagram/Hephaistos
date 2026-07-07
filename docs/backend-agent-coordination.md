@@ -2466,8 +2466,41 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Prisma/Drizzle, Doctrine e schema SQL raw adapters.
+- Drizzle, Doctrine e schema SQL raw adapters.
 - SQLAlchemy relationship graph e resolver dichiarazioni FK piu' complessi.
+
+## Esecuzione Prisma DB graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` include `.prisma` nel graph Node/TS e gestisce anche
+  progetti Prisma-only.
+- Estrae `model`, `@@map`, campi scalari, `@id`, `@unique`, `@default`,
+  optional/list type e `@relation(fields: [...], references: [...])`.
+- Il graph include `database.tables`, simboli `prisma_model`, edge
+  `model_table` e `foreign_key`, senza raw schema.
+- Progetti solo Prisma producono `hades.code_graph.v1` con `language: prisma`
+  e `framework: prisma`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_prisma_schema_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_node_react_code_graph_without_source`
+  passato: `2 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `19 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Drizzle, Doctrine e schema SQL raw adapters.
+- Prisma relation edge piu' ricchi oltre alle FK tabella/colonna.
 
 ## Esecuzione Symfony graph Hades - 2026-07-07
 

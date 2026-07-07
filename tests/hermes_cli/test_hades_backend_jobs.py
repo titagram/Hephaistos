@@ -997,6 +997,67 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     assert "<table" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "prisma").mkdir()
+    (tmp_path / "prisma" / "schema.prisma").write_text(
+        "model Customer {\n"
+        "  id Int @id @default(autoincrement())\n"
+        "  email String @unique\n"
+        "  orders Order[]\n"
+        "  @@map(\"customers\")\n"
+        "}\n"
+        "model Order {\n"
+        "  id Int @id\n"
+        "  customerId Int\n"
+        "  customer Customer @relation(fields: [customerId], references: [id])\n"
+        "  total Decimal?\n"
+        "  @@map(\"orders\")\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_prisma_schema",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 10, "max_edges": 10},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["language"] == "prisma"
+    assert artifact["framework"] == "prisma"
+    assert artifact["routes"] == []
+    assert ("model", "Customer") in symbols
+    assert ("model", "Order") in symbols
+    assert set(tables) == {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} == {"id", "customerId", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customerId",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "prisma/schema.prisma",
+            "line": 10,
+        }
+    ]
+    assert ("model_table", "Order", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customerId", "table:customers") in edges
+    assert "model Order" not in str(artifact)
+    assert "@relation" not in str(artifact)
+    assert "@@map" not in str(artifact)
+
+
 def test_populate_backend_ast_omits_symlinked_python_escape(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

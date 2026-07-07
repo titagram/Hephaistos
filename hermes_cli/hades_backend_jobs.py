@@ -82,6 +82,7 @@ LANGUAGE_SUFFIXES = {
     ".jsx": "javascript",
     ".md": "markdown",
     ".php": "php",
+    ".prisma": "prisma",
     ".py": "python",
     ".rb": "ruby",
     ".rs": "rust",
@@ -252,6 +253,12 @@ EXPRESS_ROUTE_RE = re.compile(
     r"\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_$][A-Za-z0-9_.$]*)?",
     re.IGNORECASE | re.MULTILINE,
 )
+PRISMA_MODEL_RE = re.compile(r"^model\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>.*?)^\}", re.MULTILINE | re.DOTALL)
+PRISMA_FIELD_RE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+(?P<type>[A-Za-z_][A-Za-z0-9_]*(?:\[\])?\??)(?P<attrs>.*)$", re.MULTILINE)
+PRISMA_MAP_RE = re.compile(r"@@map\(\s*['\"](?P<table>[^'\"]+)['\"]\s*\)")
+PRISMA_RELATION_RE = re.compile(r"@relation\((?P<body>[^)]*)\)")
+PRISMA_LIST_ARG_RE = re.compile(r"\b(?P<name>fields|references)\s*:\s*\[(?P<values>[^\]]+)\]")
+PRISMA_SCALAR_TYPES = {"String", "Boolean", "Int", "BigInt", "Float", "Decimal", "DateTime", "Json", "Bytes"}
 NEXT_ROUTE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/route\.(?:ts|tsx|js|jsx)$")
 NEXT_PAGE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/page\.(?:ts|tsx|js|jsx)$")
 NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(")
@@ -1839,13 +1846,15 @@ def _ts_graph_summary(
     edges: list[dict[str, Any]],
     *,
     framework: str,
+    database: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
         kind = str(symbol.get("kind") or "symbol")
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {kinds or 'symbols:none'}"
+    table_count = len((database or {}).get("tables") or [])
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {kinds or 'symbols:none'}"
 
 
 def _py_graph_summary(
@@ -2145,6 +2154,136 @@ def _py_sqlalchemy_model_fields(node: ast.ClassDef, table: str, rel: str) -> tup
     return columns, foreign_keys
 
 
+def _prisma_table_name(model_name: str, body: str) -> str:
+    match = PRISMA_MAP_RE.search(body)
+    return match.group("table") if match else model_name
+
+
+def _prisma_list_arg(relation_body: str, name: str) -> list[str]:
+    for match in PRISMA_LIST_ARG_RE.finditer(relation_body or ""):
+        if match.group("name") != name:
+            continue
+        return [item.strip() for item in match.group("values").split(",") if item.strip()]
+    return []
+
+
+def _prisma_model_graph(
+    source: str,
+    rel: str,
+    *,
+    max_symbols: int,
+    max_edges: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+    model_matches = list(PRISMA_MODEL_RE.finditer(source))
+    table_by_model = {match.group("name"): _prisma_table_name(match.group("name"), match.group("body")) for match in model_matches}
+    symbols: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    tables: list[dict[str, Any]] = []
+    truncated = False
+
+    for model_match in model_matches:
+        model_name = model_match.group("name")
+        body = model_match.group("body")
+        table_name = table_by_model[model_name]
+        columns: list[dict[str, Any]] = []
+        foreign_keys: list[dict[str, Any]] = []
+        line = _line_number(source, model_match.start())
+
+        if len(symbols) < max_symbols:
+            symbols.append(
+                {
+                    "kind": "model",
+                    "name": model_name,
+                    "role": "prisma_model",
+                    "path": rel,
+                    "line": line,
+                }
+            )
+        else:
+            truncated = True
+
+        for field_match in PRISMA_FIELD_RE.finditer(body):
+            field_name = field_match.group("name")
+            raw_type = field_match.group("type")
+            base_type = raw_type.rstrip("?").removesuffix("[]")
+            attrs = field_match.group("attrs") or ""
+            field_line = _line_number(source, model_match.start("body") + field_match.start())
+            if base_type in PRISMA_SCALAR_TYPES:
+                column = {
+                    "name": field_name,
+                    "field": field_name,
+                    "type": base_type,
+                    "path": rel,
+                    "line": field_line,
+                    "optional": raw_type.endswith("?"),
+                    "list": raw_type.endswith("[]") or raw_type.endswith("[]?"),
+                }
+                if "@id" in attrs:
+                    column["primary_key"] = True
+                if "@unique" in attrs:
+                    column["unique"] = True
+                if "@default" in attrs:
+                    column["has_default"] = True
+                columns.append(column)
+                continue
+
+            relation_match = PRISMA_RELATION_RE.search(attrs)
+            if not relation_match:
+                continue
+            fields = _prisma_list_arg(relation_match.group("body"), "fields")
+            references = _prisma_list_arg(relation_match.group("body"), "references")
+            target_table = table_by_model.get(base_type, base_type)
+            for index, field in enumerate(fields):
+                foreign_keys.append(
+                    {
+                        "table": table_name,
+                        "column": field,
+                        "references_table": target_table,
+                        "references_column": references[index] if index < len(references) else "",
+                        "path": rel,
+                        "line": field_line,
+                    }
+                )
+
+        tables.append(
+            {
+                "table": table_name,
+                "model": model_name,
+                "orm": "prisma",
+                "path": rel,
+                "line": line,
+                "columns": columns[:200],
+                "foreign_keys": foreign_keys[:100],
+            }
+        )
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "model_table",
+                "from": model_name,
+                "to": f"table:{table_name}",
+                "framework": "prisma",
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+        for foreign_key in foreign_keys:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "foreign_key",
+                    "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                    "to": f"table:{foreign_key['references_table']}",
+                    "framework": "prisma",
+                    "path": rel,
+                    "line": foreign_key.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return tables, symbols, edges, truncated
+
+
 def _ts_framework(root: Path, files: list[Path], dependency_manifests: list[dict[str, Any]]) -> str:
     packages = {
         str(package)
@@ -2194,12 +2333,14 @@ def _build_ts_graph(
     max_file_bytes: int,
 ) -> dict[str, Any]:
     ts_files = [path for path in candidates if path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}]
+    prisma_files = [path for path in candidates if path.suffix.lower() == ".prisma"]
     file_refs = [{"path": path.relative_to(workspace_root).as_posix(), "bytes": path.stat().st_size} for path in candidates if path.is_file()]
     dependency_manifests = _dependency_manifests(workspace_root, file_refs)
     framework = _ts_framework(workspace_root, ts_files, dependency_manifests)
     routes: list[dict[str, str]] = []
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    database: dict[str, Any] = {"tables": []}
 
     for path in ts_files:
         rel = path.relative_to(workspace_root).as_posix()
@@ -2294,23 +2435,65 @@ def _build_ts_graph(
             if len(symbols) >= max_symbols:
                 break
 
+    for path in prisma_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
+        if size > max_file_bytes:
+            omitted.append({"path": rel, "reason": "file_too_large"})
+            truncated = True
+            continue
+        try:
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+            if was_truncated:
+                omitted.append({"path": rel, "reason": "file_too_large"})
+                truncated = True
+                continue
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
+            continue
+        prisma_tables, prisma_symbols, prisma_edges, prisma_truncated = _prisma_model_graph(
+            source,
+            rel,
+            max_symbols=max(0, max_symbols - len(symbols)),
+            max_edges=max(0, max_edges - len(edges)),
+        )
+        database["tables"].extend(prisma_tables)
+        symbols.extend(prisma_symbols)
+        edges.extend(prisma_edges)
+        truncated = truncated or prisma_truncated
+
+    if prisma_files and not ts_files:
+        framework = "prisma"
+    graph_database = {**database, "tables": database["tables"][:500]}
+    language = "prisma"
+    if ts_files:
+        language = "typescript" if any(path.suffix.lower() in {".ts", ".tsx"} for path in ts_files) else "javascript"
     graph = {
         "schema": "hades.code_graph.v1",
-        "language": "typescript" if any(path.suffix.lower() in {".ts", ".tsx"} for path in ts_files) else "javascript",
+        "language": language,
         "framework": framework,
         "root": workspace_root.name,
         "routes": routes[:500],
         "symbols": symbols,
         "edges": edges,
+        "database": graph_database,
         "dependency_manifests": dependency_manifests,
         "summary": "",
         "omitted": omitted,
-        "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges or len(routes) > 500,
+        "truncated": truncated
+        or len(symbols) >= max_symbols
+        or len(edges) >= max_edges
+        or len(routes) > 500
+        or len(database["tables"]) > 500,
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework)
+    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database)
     return graph
 
 
@@ -2608,7 +2791,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             "summary": graph["summary"],
             "artifact": graph,
         }
-    if any(path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"} for path in candidates):
+    if any(path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"} for path in candidates):
         max_edges = int(payload.get("max_edges") or max_symbols * 2)
         graph = _build_ts_graph(
             workspace_root,
