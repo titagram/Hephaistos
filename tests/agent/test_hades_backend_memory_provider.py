@@ -381,6 +381,14 @@ def _php_graph_artifact():
                 "policy_class": "App\\Policies\\OrderPolicy",
             },
             {
+                "kind": "policy_for",
+                "from": "App\\Models\\Order",
+                "to": "App\\Policies\\OrderPolicy",
+                "source": "policies_property",
+                "path": "app/Providers/AuthServiceProvider.php",
+                "line": 12,
+            },
+            {
                 "kind": "http_abort",
                 "from": "OrderController@show",
                 "to": "http_status:403",
@@ -2325,6 +2333,55 @@ def test_hades_backend_graph_search_finds_local_authorization_edges(monkeypatch,
     assert any(
         "policy_class=App\\Policies\\OrderPolicy" in item["summary"]
         and "ability=view" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_policy_mapping_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderPolicy policies_property order policy", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "policy_for"
+        and ref["from"] == "App\\Models\\Order"
+        and ref["to"] == "App\\Policies\\OrderPolicy"
+        and ref["provenance"]["source"] == "policies_property"
+        for ref in graph_refs
+    )
+    assert any(
+        "source=policies_property" in item["summary"]
+        and "app/Providers/AuthServiceProvider.php" in item["summary"]
         for item in result["items"]
     )
 

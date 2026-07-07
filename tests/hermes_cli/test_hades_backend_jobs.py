@@ -833,16 +833,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Listeners\\SendOrderReceipt;\n"
         "use App\\Models\\Order;\n"
         "use App\\Observers\\OrderObserver;\n"
+        "use App\\Policies\\OrderPolicy;\n"
         "use App\\Services\\OrderService;\n"
         "use Illuminate\\Support\\Facades\\Gate;\n"
         "class AuthServiceProvider {\n"
+        "    protected array $policies = [Order::class => OrderPolicy::class];\n"
         "    protected $listen = [OrderPlaced::class => [SendOrderReceipt::class]];\n"
         "    public function register() {\n"
         "        $this->app->singleton(OrderFormatter::class, OrderService::class);\n"
         "    }\n"
         "    public function boot() {\n"
         "        Order::observe(OrderObserver::class);\n"
-        "        Gate::policy(\\App\\Models\\Order::class, \\App\\Policies\\OrderPolicy::class);\n"
+        "        Gate::policy(\\App\\Models\\Invoice::class, \\App\\Policies\\InvoicePolicy::class);\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -1427,6 +1429,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 24,
     } in artifact["edges"]
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
+    assert {
+        "kind": "policy_for",
+        "from": "App\\Models\\Order",
+        "to": "App\\Policies\\OrderPolicy",
+        "source": "policies_property",
+        "path": "app/Providers/AuthServiceProvider.php",
+        "line": 12,
+    } in artifact["edges"]
+    assert {
+        "kind": "policy_for",
+        "from": "App\\Models\\Invoice",
+        "to": "App\\Policies\\InvoicePolicy",
+        "source": "gate_policy",
+        "path": "app/Providers/AuthServiceProvider.php",
+        "line": 19,
+    } in artifact["edges"]
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
     assert ("observed_by", "App\\Models\\Order", "App\\Observers\\OrderObserver") in edges
     assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges

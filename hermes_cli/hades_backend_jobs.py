@@ -196,6 +196,14 @@ PHP_GATE_POLICY_RE = re.compile(
     r"\bGate::policy\s*\(\s*(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*,\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
     re.MULTILINE,
 )
+PHP_POLICIES_PROPERTY_RE = re.compile(
+    r"\bprotected\s+(?:array\s+)?\$policies\s*=\s*\[(?P<body>.*?)\]\s*;",
+    re.DOTALL | re.MULTILINE,
+)
+PHP_POLICY_MAP_ENTRY_RE = re.compile(
+    r"(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
+    re.MULTILINE,
+)
 PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 PHP_PROMOTED_PROPERTY_PARAM_RE = re.compile(
     r"\b(?:public|protected|private)\s+(?:readonly\s+)?"
@@ -3313,7 +3321,39 @@ def _php_method_symbol_index(
     return method_symbols
 
 
-def _php_gate_policy_index(
+def _php_policy_mappings(source: str, namespace: str, uses: dict[str, str]) -> list[dict[str, Any]]:
+    mappings: list[dict[str, Any]] = []
+    for match in PHP_GATE_POLICY_RE.finditer(source):
+        model_class = _php_fqcn_resolved(namespace, str(match.group("model") or ""), uses)
+        policy_class = _php_fqcn_resolved(namespace, str(match.group("policy") or ""), uses)
+        if model_class and policy_class:
+            mappings.append(
+                {
+                    "model_class": model_class,
+                    "policy_class": policy_class,
+                    "source": "gate_policy",
+                    "offset": match.start(),
+                }
+            )
+    for property_match in PHP_POLICIES_PROPERTY_RE.finditer(source):
+        body = str(property_match.group("body") or "")
+        body_offset = property_match.start("body")
+        for entry_match in PHP_POLICY_MAP_ENTRY_RE.finditer(body):
+            model_class = _php_fqcn_resolved(namespace, str(entry_match.group("model") or ""), uses)
+            policy_class = _php_fqcn_resolved(namespace, str(entry_match.group("policy") or ""), uses)
+            if model_class and policy_class:
+                mappings.append(
+                    {
+                        "model_class": model_class,
+                        "policy_class": policy_class,
+                        "source": "policies_property",
+                        "offset": body_offset + entry_match.start(),
+                    }
+                )
+    return mappings
+
+
+def _php_policy_index(
     workspace_root: Path,
     php_files: list[Path],
     *,
@@ -3334,9 +3374,9 @@ def _php_gate_policy_index(
             continue
         namespace = _php_namespace(source)
         uses = _php_use_map(source)
-        for match in PHP_GATE_POLICY_RE.finditer(source):
-            model_class = _php_fqcn_resolved(namespace, str(match.group("model") or ""), uses)
-            policy_class = _php_fqcn_resolved(namespace, str(match.group("policy") or ""), uses)
+        for mapping in _php_policy_mappings(source, namespace, uses):
+            model_class = str(mapping.get("model_class") or "")
+            policy_class = str(mapping.get("policy_class") or "")
             if model_class and policy_class:
                 policy_by_model[model_class] = policy_class
     return policy_by_model
@@ -3927,7 +3967,7 @@ def _build_php_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
-    policy_by_model = _php_gate_policy_index(
+    policy_by_model = _php_policy_index(
         workspace_root,
         php_files,
         max_file_bytes=max_file_bytes,
@@ -4767,15 +4807,16 @@ def _build_php_graph(
                         max_edges=max_edges,
                     ) or truncated
 
-        for match in PHP_GATE_POLICY_RE.finditer(source):
+        for mapping in _php_policy_mappings(source, namespace, uses):
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "policy_for",
-                    "from": _php_fqcn(namespace, match.group("model")),
-                    "to": _php_fqcn(namespace, match.group("policy")),
+                    "from": mapping.get("model_class"),
+                    "to": mapping.get("policy_class"),
+                    "source": mapping.get("source"),
                     "path": rel,
-                    "line": _line_number(source, match.start()),
+                    "line": _line_number(source, int(mapping.get("offset") or 0)),
                 },
                 max_edges=max_edges,
             ) or truncated

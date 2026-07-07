@@ -5711,3 +5711,36 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel policies property graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per policy mapping awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` risolve anche i mapping Laravel
+  `protected $policies = [Model::class => Policy::class]`, oltre a
+  `Gate::policy(...)`.
+- Lo stesso helper alimenta sia l'indice `model -> policy` usato dagli edge
+  authorization-policy-method sia gli edge `policy_for`.
+- Il payload salva solo model class, policy class, source del mapping
+  (`policies_property` o `gate_policy`), path e line; non conserva body provider
+  o condizioni raw.
+- Il fallback locale di `hades_backend_graph_search` puo' recuperare il mapping
+  `policy_for` da cache artifact anche a backend offline.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/search:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_policy_mapping_edges tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_authorization_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `90 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
