@@ -5365,3 +5365,37 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel validation database rule graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per validation DB-rule awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` estrae riferimenti DB bounded dalle validation rules
+  Laravel `exists` e `unique`.
+- Il parser conserva solo identificatori semplici table/column, ad esempio
+  `exists:customers,id` diventa `table=customers`, `column=id`; parametri
+  complessi, condizioni e valori raw vengono scartati.
+- Il graph aggiunge `validation_database_rule` dal FormRequest/controller
+  context e `route_validation_database_rule` dalla route quando il campo e'
+  associato a una route.
+- Il fallback locale di `hades_backend_graph_search` espone nei summary
+  `field=...`, `rule=...`, `table=...` e `column=...`, utile per diagnosticare
+  422 causati da mismatch tra input validation e database senza leggere source.
+
+Verifiche eseguite:
+
+- Locale mirato parser/graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_php_validation_database_rule_refs_keep_only_sanitized_identifiers tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `2 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_validation_database_rule_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `80 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

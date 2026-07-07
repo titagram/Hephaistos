@@ -10,6 +10,22 @@ def _symlink_or_skip(link, target, *, target_is_directory=False):
         pytest.skip(f"symlinks unavailable in test environment: {exc}")
 
 
+def test_php_validation_database_rule_refs_keep_only_sanitized_identifiers():
+    from hermes_cli.hades_backend_jobs import _php_validation_database_rule_refs
+
+    refs = _php_validation_database_rule_refs(
+        "'required|unique:orders,status|exists:tenant.customers,id|exists:customers,id,deleted_at,NULL', "
+        "Rule::exists('warehouses', 'id'), Rule::unique('products', 'sku')"
+    )
+
+    assert refs == [
+        {"rule": "unique", "table": "orders", "column": "status"},
+        {"rule": "exists", "table": "customers", "column": "id"},
+        {"rule": "exists", "table": "warehouses", "column": "id"},
+        {"rule": "unique", "table": "products", "column": "sku"},
+    ]
+
+
 def test_read_files_job_redacts_and_bounds_payload(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -943,6 +959,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_uses_form_request", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("route_request_validation", "route:orders.show", "validation:customer_id") in edges
     assert ("route_request_validation", "route:orders.show", "validation:status") in edges
+    assert ("route_validation_database_rule", "route:orders.show", "table:customers.id") in edges
     assert ("authorization_check", "OrderController@show", "ability:view") in edges
     assert ("authorization_model", "OrderController@show", "App\\Models\\Order") in edges
     assert ("authorization_table", "OrderController@show", "table:orders") in edges
@@ -993,9 +1010,28 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "path": "routes/web.php",
         "line": 4,
     } in artifact["edges"]
+    assert {
+        "kind": "route_validation_database_rule",
+        "from": "route:orders.show",
+        "to": "table:customers.id",
+        "field": "customer_id",
+        "rule": "exists",
+        "table": "customers",
+        "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+        "validation_path": "app/Http/Requests/StoreOrderRequest.php",
+        "validation_line": 6,
+        "handler": "OrderController@show",
+        "param": "request",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "column": "id",
+    } in artifact["edges"]
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
     assert ("request_validation", "OrderController@show", "validation:status") in edges
+    assert ("validation_database_rule", "App\\Http\\Requests\\StoreOrderRequest", "table:customers.id") in edges
     assert {
         "kind": "request_validation",
         "from": "App\\Http\\Requests\\StoreOrderRequest",
@@ -1003,6 +1039,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_rules": ["required", "integer", "exists"],
         "path": "app/Http/Requests/StoreOrderRequest.php",
         "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "validation_database_rule",
+        "from": "App\\Http\\Requests\\StoreOrderRequest",
+        "to": "table:customers.id",
+        "field": "customer_id",
+        "rule": "exists",
+        "table": "customers",
+        "path": "app/Http/Requests/StoreOrderRequest.php",
+        "line": 6,
+        "column": "id",
     } in artifact["edges"]
     assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
     assert ("dispatches_job", "OrderController@show", "App\\Jobs\\SyncOrderJob") in edges

@@ -190,6 +190,35 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "route_validation_database_rule",
+                "from": "route:orders.show",
+                "to": "table:customers.id",
+                "field": "customer_id",
+                "rule": "exists",
+                "table": "customers",
+                "column": "id",
+                "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+                "validation_path": "app/Http/Requests/StoreOrderRequest.php",
+                "validation_line": 6,
+                "handler": "OrderController@show",
+                "param": "request",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
+                "kind": "validation_database_rule",
+                "from": "App\\Http\\Requests\\StoreOrderRequest",
+                "to": "table:customers.id",
+                "field": "customer_id",
+                "rule": "exists",
+                "table": "customers",
+                "column": "id",
+                "path": "app/Http/Requests/StoreOrderRequest.php",
+                "line": 6,
+            },
+            {
                 "kind": "route_authorization",
                 "from": "route:orders.show",
                 "to": "ability:view",
@@ -1558,7 +1587,7 @@ def test_hades_backend_graph_search_finds_local_route_validation_edges(monkeypat
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders customer_id validation request", "limit": 5},
+            {"query": "orders customer_id validation request", "limit": 10},
         )
     )
 
@@ -1577,6 +1606,56 @@ def test_hades_backend_graph_search_finds_local_route_validation_edges(monkeypat
         "request_class=App\\Http\\Requests\\StoreOrderRequest" in item["summary"]
         and "validation_path=app/Http/Requests/StoreOrderRequest.php" in item["summary"]
         and "validation_rules=['required', 'integer', 'exists']" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_validation_database_rule_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "customer_id exists customers validation", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_validation_database_rule"
+        and ref["to"] == "table:customers.id"
+        and ref["provenance"]["rule"] == "exists"
+        for ref in graph_refs
+    )
+    assert any(
+        "field=customer_id" in item["summary"]
+        and "rule=exists" in item["summary"]
+        and "table=customers" in item["summary"]
+        and "column=id" in item["summary"]
         for item in result["items"]
     )
 

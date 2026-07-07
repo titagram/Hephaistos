@@ -1447,6 +1447,55 @@ def _php_validation_rule_names(value: str) -> list[str]:
     return rules
 
 
+def _php_safe_db_identifier(value: str) -> str:
+    identifier = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+        return ""
+    return identifier
+
+
+def _php_validation_database_rule_refs(value: str) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_ref(raw_rule: str, raw_table: str, raw_column: str = "") -> None:
+        rule = _snake_name(raw_rule).lower()
+        if rule not in {"exists", "unique"}:
+            return
+        table = _php_safe_db_identifier(raw_table)
+        column = _php_safe_db_identifier(raw_column)
+        if not table:
+            return
+        key = (rule, table, column)
+        if key in seen:
+            return
+        seen.add(key)
+        ref = {"rule": rule, "table": table}
+        if column:
+            ref["column"] = column
+        refs.append(ref)
+
+    quoted_rule_source = re.sub(r"\bRule::[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", value)
+    for quoted in PHP_QUOTED_VALUE_RE.finditer(quoted_rule_source):
+        for part in quoted.group("value").split("|"):
+            rule, separator, params = part.partition(":")
+            if not separator:
+                continue
+            param_parts = [param.strip() for param in params.split(",")]
+            add_ref(rule, param_parts[0] if param_parts else "", param_parts[1] if len(param_parts) > 1 else "")
+    for rule_call in re.finditer(r"\bRule::(?P<rule>exists|unique)\s*\((?P<args>[^)]*)\)", value, re.IGNORECASE):
+        quoted_args = [match.group("value") for match in PHP_QUOTED_VALUE_RE.finditer(rule_call.group("args"))]
+        if quoted_args:
+            add_ref(rule_call.group("rule"), quoted_args[0], quoted_args[1] if len(quoted_args) > 1 else "")
+    return refs
+
+
+def _php_validation_database_rule_target(ref: dict[str, Any]) -> str:
+    table = str(ref.get("table") or "")
+    column = str(ref.get("column") or "")
+    return f"table:{table}.{column}" if column else f"table:{table}"
+
+
 def _php_array_validation_fields(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1463,6 +1512,7 @@ def _php_array_validation_fields(source: str, body: str, base_offset: int) -> li
                 "field": field,
                 "line": _line_number(source, base_offset + match.start()),
                 "rules": _php_validation_rule_names(value_segment),
+                "database_rules": _php_validation_database_rule_refs(value_segment),
             }
         )
     return fields
@@ -2896,6 +2946,7 @@ def _php_form_request_validation_index(
                 {
                     "field": field_info["field"],
                     "rules": field_info.get("rules") or [],
+                    "database_rules": field_info.get("database_rules") or [],
                     "path": rel,
                     "line": field_info["line"],
                 }
@@ -2953,6 +3004,22 @@ def _append_php_route_form_request_edges(
                 },
                 max_edges=max_edges,
             ) or truncated
+            for database_rule in field.get("database_rules") or []:
+                route_database_rule_edge = {
+                    "kind": "route_validation_database_rule",
+                    "from": route_ref,
+                    "to": _php_validation_database_rule_target(database_rule),
+                    "field": field_name,
+                    "rule": database_rule.get("rule"),
+                    "table": database_rule.get("table"),
+                    "request_class": request_class,
+                    "validation_path": field.get("path"),
+                    "validation_line": field.get("line"),
+                    **route_payload,
+                }
+                if database_rule.get("column"):
+                    route_database_rule_edge["column"] = database_rule.get("column")
+                truncated = not _edge_append(edges, route_database_rule_edge, max_edges=max_edges) or truncated
     return truncated
 
 
@@ -2970,11 +3037,12 @@ def _append_php_route_inline_validation_edges(
         return False
     truncated = False
     for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
         truncated = not _edge_append(
             edges,
             {
                 "kind": "route_request_validation",
-                "from": f"route:{_php_route_id(route)}",
+                "from": route_ref,
                 "to": f"validation:{field_name}",
                 "handler": method_symbol,
                 "source": "inline_validate",
@@ -2988,6 +3056,26 @@ def _append_php_route_inline_validation_edges(
             },
             max_edges=max_edges,
         ) or truncated
+        for database_rule in field_info.get("database_rules") or []:
+            route_database_rule_edge = {
+                "kind": "route_validation_database_rule",
+                "from": route_ref,
+                "to": _php_validation_database_rule_target(database_rule),
+                "handler": method_symbol,
+                "source": "inline_validate",
+                "field": field_name,
+                "rule": database_rule.get("rule"),
+                "table": database_rule.get("table"),
+                "validation_path": validation_path,
+                "validation_line": field_info.get("line"),
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            }
+            if database_rule.get("column"):
+                route_database_rule_edge["column"] = database_rule.get("column")
+            truncated = not _edge_append(edges, route_database_rule_edge, max_edges=max_edges) or truncated
     return truncated
 
 
@@ -3579,6 +3667,20 @@ def _build_php_graph(
                         },
                         max_edges=max_edges,
                     ) or truncated
+                    for database_rule in field_info.get("database_rules") or []:
+                        database_rule_edge = {
+                            "kind": "validation_database_rule",
+                            "from": class_info["name"],
+                            "to": _php_validation_database_rule_target(database_rule),
+                            "field": field_info["field"],
+                            "rule": database_rule.get("rule"),
+                            "table": database_rule.get("table"),
+                            "path": rel,
+                            "line": field_info["line"],
+                        }
+                        if database_rule.get("column"):
+                            database_rule_edge["column"] = database_rule.get("column")
+                        truncated = not _edge_append(edges, database_rule_edge, max_edges=max_edges) or truncated
 
         for match in PHP_VALIDATE_ARRAY_RE.finditer(source):
             class_info = _class_context(classes, match.start())
@@ -3602,6 +3704,29 @@ def _build_php_graph(
                     edge,
                     max_edges=max_edges,
                 ) or truncated
+                for database_rule in field_info.get("database_rules") or []:
+                    database_rule_edge = {
+                        "kind": "validation_database_rule",
+                        "from": _php_context_id(class_info, rel),
+                        "to": _php_validation_database_rule_target(database_rule),
+                        "field": field_info["field"],
+                        "rule": database_rule.get("rule"),
+                        "table": database_rule.get("table"),
+                        "path": rel,
+                        "line": field_info["line"],
+                    }
+                    if database_rule.get("column"):
+                        database_rule_edge["column"] = database_rule.get("column")
+                    truncated = not _edge_append(edges, database_rule_edge, max_edges=max_edges) or truncated
+                    truncated = not _append_php_method_context_edge(
+                        source,
+                        rel,
+                        classes,
+                        match.start(),
+                        edges,
+                        database_rule_edge,
+                        max_edges=max_edges,
+                    ) or truncated
                 truncated = _append_php_route_inline_validation_edges(
                     routes_by_handler,
                     method_context,
