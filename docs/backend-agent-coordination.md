@@ -4870,3 +4870,32 @@ Verifiche eseguite:
   `npm --prefix web run typecheck` passato.
 - Frontend lint mirato:
   `npx eslint src/pages/BackendPage.tsx src/lib/api.ts` passato da `web/`.
+
+## Esecuzione Laravel middleware graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per indicizzazione Laravel.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` include ora `middleware.schema=hades.laravel_middleware.v1`.
+- L'indexer legge `app/Http/Kernel.php` metadata-only e indicizza:
+  - alias middleware (`middleware:auth`, `middleware:verified`);
+  - gruppi middleware (`middleware_group:web`);
+  - classi middleware risolte tramite `use` PHP;
+  - edge `middleware_alias_class`, `middleware_group_member`,
+    `route_middleware_group` e `route_middleware_class`.
+- Le route con middleware parametrizzati continuano a conservare l'alias route;
+  la risoluzione classe usa il nome base prima dei parametri.
+- Il payload non include sorgente raw, nomi degli array PHP o corpo di Kernel.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/pytest tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source -q`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `.venv/bin/pytest tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `67 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

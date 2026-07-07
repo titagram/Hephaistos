@@ -532,6 +532,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
     (workspace / "routes").mkdir()
     (workspace / "app" / "Http" / "Controllers").mkdir(parents=True)
+    (workspace / "app" / "Http" / "Middleware").mkdir(parents=True)
     (workspace / "app" / "Http" / "Requests").mkdir(parents=True)
     (workspace / "app" / "Jobs").mkdir(parents=True)
     (workspace / "app" / "Events").mkdir(parents=True)
@@ -553,7 +554,42 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<?php\n"
         "use App\\Http\\Controllers\\OrderController;\n"
         "Route::get('/orders/{order}', [OrderController::class, 'show'])"
-        "->middleware(['auth', 'verified'])->name('orders.show');\n",
+        "->middleware(['web', 'auth', 'verified'])->name('orders.show');\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Kernel.php").write_text(
+        "<?php\n"
+        "namespace App\\Http;\n"
+        "use App\\Http\\Middleware\\Authenticate;\n"
+        "use App\\Http\\Middleware\\EncryptCookies;\n"
+        "use App\\Http\\Middleware\\EnsureEmailIsVerified;\n"
+        "class Kernel {\n"
+        "    protected $middlewareAliases = [\n"
+        "        'auth' => Authenticate::class,\n"
+        "        'verified' => EnsureEmailIsVerified::class,\n"
+        "    ];\n"
+        "    protected $middlewareGroups = [\n"
+        "        'web' => [EncryptCookies::class, 'auth'],\n"
+        "    ];\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Middleware" / "Authenticate.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Middleware;\n"
+        "class Authenticate {}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Middleware" / "EncryptCookies.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Middleware;\n"
+        "class EncryptCookies {}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Middleware" / "EnsureEmailIsVerified.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Middleware;\n"
+        "class EnsureEmailIsVerified {}\n",
         encoding="utf-8",
     )
     (workspace / "routes" / "channels.php").write_text(
@@ -771,7 +807,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 140},
+            "payload": {"max_files": 60, "max_symbols": 70, "max_edges": 180},
         },
         workspace_root=workspace,
     )
@@ -787,12 +823,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert artifact["schema"] == "hades.php_graph.v1"
     assert artifact["framework"] == "laravel"
     assert artifact["raw_source_included"] is False
+    assert artifact["middleware"]["alias_count"] == 2
+    assert artifact["middleware"]["group_count"] == 1
     assert ("GET", "/orders/{order}", "OrderController@show") in routes
     assert ("class", "App\\Http\\Controllers\\OrderController") in symbols
     assert ("class", "App\\Models\\Order") in symbols
     assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
     assert ("class", "App\\Http\\Requests\\StoreOrderRequest") in symbols
+    assert ("class", "App\\Http\\Middleware\\Authenticate") in symbols
+    assert ("class", "App\\Http\\Middleware\\EncryptCookies") in symbols
+    assert ("class", "App\\Http\\Middleware\\EnsureEmailIsVerified") in symbols
+    assert ("middleware_alias", "middleware:auth") in symbols
+    assert ("middleware_alias", "middleware:verified") in symbols
+    assert ("middleware_group", "middleware_group:web") in symbols
     assert ("class", "App\\Jobs\\SyncOrderJob") in symbols
     assert ("class", "App\\Events\\OrderPlaced") in symbols
     assert ("class", "App\\Listeners\\SendOrderReceipt") in symbols
@@ -810,8 +854,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "Order@customer") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
+    assert ("route_middleware", "route:orders.show", "middleware:web") in edges
     assert ("route_middleware", "route:orders.show", "middleware:auth") in edges
     assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
+    assert ("route_middleware_group", "route:orders.show", "middleware_group:web") in edges
+    assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\Authenticate") in edges
+    assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EncryptCookies") in edges
+    assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
+    assert ("middleware_alias_class", "middleware:auth", "App\\Http\\Middleware\\Authenticate") in edges
+    assert ("middleware_alias_class", "middleware:verified", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
+    assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\EncryptCookies") in edges
+    assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
     assert ("static_call", "OrderController@show", "App\\Services\\OrderService::format") in edges
@@ -900,6 +953,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "$request->validate" not in str(artifact)
     assert "DB::table" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
+    assert "middlewareAliases" not in str(artifact)
+    assert "middlewareGroups" not in str(artifact)
     assert "@extends" not in str(artifact)
     assert "@include" not in str(artifact)
     assert "<x-alert" not in str(artifact)

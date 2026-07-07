@@ -132,6 +132,14 @@ PHP_NEW_RE = re.compile(r"\bnew\s+(?P<class>[A-Z][A-Za-z0-9_\\]+)\s*\(")
 PHP_ROUTE_NAME_RE = re.compile(r"->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)")
 PHP_ROUTE_MIDDLEWARE_RE = re.compile(r"->middleware\(\s*(?P<value>.*?)\s*\)", re.DOTALL)
 PHP_QUOTED_VALUE_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
+PHP_ARRAY_ENTRY_CLASS_RE = re.compile(
+    r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class"
+)
+PHP_ARRAY_ENTRY_LIST_RE = re.compile(
+    r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*\[(?P<items>.*?)\]",
+    re.DOTALL,
+)
+PHP_CLASS_CONST_RE = re.compile(r"(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class")
 PHP_MODEL_TABLE_RE = re.compile(r"\bprotected\s+\$table\s*=\s*['\"](?P<table>[^'\"]+)['\"]", re.MULTILINE)
 PHP_CONFIG_RE = re.compile(r"\bconfig\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
 PHP_ENV_RE = re.compile(r"\benv\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
@@ -901,6 +909,103 @@ def _route_middleware_values(chain: str) -> list[str]:
         if clean:
             values.append(clean)
     return sorted({value for value in values if value})
+
+
+def _middleware_base_name(value: str) -> str:
+    return str(value or "").split(":", 1)[0].strip()
+
+
+def _php_class_ref(value: str) -> str:
+    return str(value or "").strip().lstrip("\\")
+
+
+def _php_middleware_list_items(raw: str, namespace: str = "", uses: dict[str, str] | None = None) -> list[str]:
+    use_map = uses or {}
+    items: list[str] = []
+    seen: set[str] = set()
+    for match in PHP_CLASS_CONST_RE.finditer(raw or ""):
+        item = _php_fqcn_resolved(namespace, _php_class_ref(match.group("class")), use_map)
+        if item and item not in seen:
+            seen.add(item)
+            items.append(item)
+    for match in PHP_QUOTED_VALUE_RE.finditer(raw or ""):
+        item = match.group("value").strip()
+        if item and item not in seen:
+            seen.add(item)
+            items.append(item)
+    return items
+
+
+def _laravel_middleware_catalog(root: Path, files: list[dict[str, Any]]) -> dict[str, Any]:
+    candidates = {
+        "app/Http/Kernel.php",
+        "bootstrap/app.php",
+    }
+    aliases: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    seen_aliases: set[tuple[str, str]] = set()
+    seen_groups: set[tuple[str, tuple[str, ...]]] = set()
+    for item in files:
+        rel = str(item.get("path") or "")
+        if rel not in candidates:
+            continue
+        try:
+            content, truncated, _digest = _read_text_bounded(root / rel, 256_000)
+        except OSError:
+            continue
+        if truncated:
+            continue
+        namespace = _php_namespace(content)
+        uses = _php_use_map(content)
+
+        for match in PHP_ARRAY_ENTRY_CLASS_RE.finditer(content):
+            name = match.group("key").strip()
+            class_name = _php_fqcn_resolved(namespace, _php_class_ref(match.group("class")), uses)
+            if not name or not class_name:
+                continue
+            key = (name, class_name)
+            if key in seen_aliases:
+                continue
+            seen_aliases.add(key)
+            aliases.append(
+                {
+                    "name": name,
+                    "class": class_name,
+                    "path": rel,
+                    "line": _line_number(content, match.start()),
+                }
+            )
+
+        for match in PHP_ARRAY_ENTRY_LIST_RE.finditer(content):
+            name = match.group("key").strip()
+            members = _php_middleware_list_items(match.group("items"), namespace, uses)
+            if not name or not members:
+                continue
+            key = (name, tuple(members))
+            if key in seen_groups:
+                continue
+            seen_groups.add(key)
+            groups.append(
+                {
+                    "name": name,
+                    "members": members,
+                    "path": rel,
+                    "line": _line_number(content, match.start()),
+                }
+            )
+
+    alias_map = {item["name"]: item["class"] for item in aliases}
+    group_map = {item["name"]: item["members"] for item in groups}
+    return {
+        "schema": "hades.laravel_middleware.v1",
+        "aliases": aliases[:500],
+        "groups": groups[:200],
+        "alias_count": len(aliases),
+        "group_count": len(groups),
+        "raw_source_included": False,
+        "_alias_map": alias_map,
+        "_group_map": group_map,
+    }
 
 
 def _php_route_arg(args: str, name: str) -> str:
@@ -1715,8 +1820,92 @@ def _php_graph_summary(
     return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; logs:{log_count}; {roles or 'roles:none'}"
 
 
-def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+def _append_laravel_middleware_graph(
+    catalog: dict[str, Any],
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_symbols: int,
+    max_edges: int,
+) -> bool:
     truncated = False
+    for alias in catalog.get("aliases") or []:
+        name = str(alias.get("name") or "").strip()
+        class_name = str(alias.get("class") or "").strip()
+        if not name or not class_name:
+            continue
+        if len(symbols) < max_symbols:
+            symbols.append(
+                {
+                    "kind": "middleware_alias",
+                    "name": f"middleware:{name}",
+                    "alias": name,
+                    "class": class_name,
+                    "role": "middleware_alias",
+                    "path": alias.get("path"),
+                    "line": alias.get("line"),
+                }
+            )
+        else:
+            truncated = True
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "middleware_alias_class",
+                "from": f"middleware:{name}",
+                "to": class_name,
+                "path": alias.get("path"),
+                "line": alias.get("line"),
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    alias_map = catalog.get("_alias_map") if isinstance(catalog.get("_alias_map"), dict) else {}
+    for group in catalog.get("groups") or []:
+        name = str(group.get("name") or "").strip()
+        members = [str(item).strip() for item in group.get("members") or [] if str(item).strip()]
+        if not name or not members:
+            continue
+        if len(symbols) < max_symbols:
+            symbols.append(
+                {
+                    "kind": "middleware_group",
+                    "name": f"middleware_group:{name}",
+                    "group": name,
+                    "member_count": len(members),
+                    "role": "middleware_group",
+                    "path": group.get("path"),
+                    "line": group.get("line"),
+                }
+            )
+        else:
+            truncated = True
+        for member in members:
+            target = alias_map.get(member) or (member if "\\" in member else f"middleware:{member}")
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "middleware_group_member",
+                    "from": f"middleware_group:{name}",
+                    "to": target,
+                    "path": group.get("path"),
+                    "line": group.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
+def _php_route_edges(
+    routes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+    middleware_catalog: dict[str, Any] | None = None,
+) -> bool:
+    truncated = False
+    alias_map = middleware_catalog.get("_alias_map", {}) if isinstance(middleware_catalog, dict) else {}
+    group_map = middleware_catalog.get("_group_map", {}) if isinstance(middleware_catalog, dict) else {}
     for route in routes:
         route_id = _php_route_id(route)
         handler = route.get("handler", "")
@@ -1737,6 +1926,7 @@ def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], 
                 truncated = True
                 break
         for middleware in route.get("middleware") or []:
+            base_middleware = _middleware_base_name(str(middleware))
             if not _edge_append(
                 edges,
                 {
@@ -1752,6 +1942,57 @@ def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], 
             ):
                 truncated = True
                 break
+            class_target = alias_map.get(base_middleware)
+            if class_target:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "route_middleware_class",
+                        "from": f"route:{route_id}",
+                        "to": class_target,
+                        "middleware": base_middleware,
+                        "method": route.get("method"),
+                        "uri": route.get("uri"),
+                        "path": route.get("path"),
+                        "line": route.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            group_members = group_map.get(base_middleware) or []
+            if group_members:
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "route_middleware_group",
+                        "from": f"route:{route_id}",
+                        "to": f"middleware_group:{base_middleware}",
+                        "method": route.get("method"),
+                        "uri": route.get("uri"),
+                        "path": route.get("path"),
+                        "line": route.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+                for member in group_members:
+                    member_base = _middleware_base_name(str(member))
+                    target = alias_map.get(member_base) or (member if "\\" in str(member) else "")
+                    if not target:
+                        continue
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "route_middleware_class",
+                            "from": f"route:{route_id}",
+                            "to": target,
+                            "middleware": base_middleware,
+                            "via": member,
+                            "method": route.get("method"),
+                            "uri": route.get("uri"),
+                            "path": route.get("path"),
+                            "line": route.get("line"),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
     return truncated
 
 
@@ -1849,12 +2090,20 @@ def _build_php_graph(
     php_files = [path for path in candidates if path.suffix.lower() == ".php"]
     file_refs = [{"path": path.relative_to(workspace_root).as_posix()} for path in php_files]
     routes = _laravel_routes(workspace_root, file_refs)
+    middleware_catalog = _laravel_middleware_catalog(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     database = _database_summary(file_refs)
     database["tables"] = []
     log_events: list[dict[str, Any]] = []
-    truncated = _php_route_edges(routes, edges, max_edges=max_edges) or truncated
+    truncated = _append_laravel_middleware_graph(
+        middleware_catalog,
+        symbols,
+        edges,
+        max_symbols=max_symbols,
+        max_edges=max_edges,
+    ) or truncated
+    truncated = _php_route_edges(routes, edges, max_edges=max_edges, middleware_catalog=middleware_catalog) or truncated
 
     for path in php_files:
         rel = path.relative_to(workspace_root).as_posix()
@@ -2564,6 +2813,7 @@ def _build_php_graph(
         "symbols": symbols,
         "edges": edges,
         "database": database,
+        "middleware": {key: value for key, value in middleware_catalog.items() if not key.startswith("_")},
         "tests": tests,
         "logs": logs,
         "summary": "",
