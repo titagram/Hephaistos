@@ -110,6 +110,15 @@ def _php_graph_artifact():
             },
             {
                 "kind": "method",
+                "name": "SyncOrderJob@handle",
+                "class": "App\\Jobs\\SyncOrderJob",
+                "method": "handle",
+                "role": "job",
+                "path": "app/Jobs/SyncOrderJob.php",
+                "line": 4,
+            },
+            {
+                "kind": "method",
                 "name": "OrderPolicy@view",
                 "class": "App\\Policies\\OrderPolicy",
                 "method": "view",
@@ -483,6 +492,38 @@ def _php_graph_artifact():
                 "line": 5,
                 "source_path": "app/Http/Controllers/InvoiceController.php",
                 "source_line": 7,
+            },
+            {
+                "kind": "dispatches_job",
+                "from": "OrderController@show",
+                "to": "App\\Jobs\\SyncOrderJob",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 41,
+            },
+            {
+                "kind": "dispatches_job_method",
+                "from": "OrderController@show",
+                "to": "SyncOrderJob@handle",
+                "job_class": "App\\Jobs\\SyncOrderJob",
+                "job_method": "handle",
+                "dispatch_method": "dispatch",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 41,
+            },
+            {
+                "kind": "route_dispatches_job_method",
+                "from": "route:orders.show",
+                "to": "SyncOrderJob@handle",
+                "handler": "OrderController@show",
+                "job_class": "App\\Jobs\\SyncOrderJob",
+                "job_method": "handle",
+                "dispatch_method": "dispatch",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 41,
             },
             {
                 "kind": "emits_event",
@@ -2495,6 +2536,56 @@ def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch
     )
 
 
+def test_hades_backend_graph_search_finds_local_job_dispatch_method_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders SyncOrderJob dispatch handle", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_dispatches_job_method"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "SyncOrderJob@handle"
+        and ref["provenance"]["job_class"] == "App\\Jobs\\SyncOrderJob"
+        and ref["provenance"]["dispatch_method"] == "dispatch"
+        for ref in graph_refs
+    )
+    assert any(
+        "job_class=App\\Jobs\\SyncOrderJob" in item["summary"]
+        and "dispatch_method=dispatch" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     timeouts = []
@@ -2619,9 +2710,10 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     assert result["backend_live_error"] == "backend offline"
     assert "id" in result["match_fields"]
     assert {
-        "route:orders.show",
-        "OrderController@show",
+            "route:orders.show",
+            "OrderController@show",
             "OrderService@format",
+            "SyncOrderJob@handle",
             "SendOrderReceipt@handle",
             "App\\Exceptions\\OrderLockedException",
             "view:orders.show",
@@ -2632,6 +2724,7 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
         "route_handler",
         "calls_method",
         "throws_exception",
+        "route_dispatches_job_method",
         "route_emits_event_listener",
         "view_ref",
         "blade_extends",

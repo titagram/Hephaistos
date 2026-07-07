@@ -960,6 +960,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
+    assert ("method", "SyncOrderJob@handle") in symbols
     assert ("method", "SendOrderReceipt@handle") in symbols
     assert ("method", "OrderPolicy@view") in symbols
     assert ("method", "OrderService@format") in symbols
@@ -1261,6 +1262,23 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     } in artifact["edges"]
     assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
     assert ("dispatches_job", "OrderController@show", "App\\Jobs\\SyncOrderJob") in edges
+    assert ("dispatches_job_method", "OrderController@show", "SyncOrderJob@handle") in edges
+    assert ("route_dispatches_job_method", "route:orders.show", "SyncOrderJob@handle") in edges
+    assert {
+        "kind": "route_dispatches_job_method",
+        "from": "route:orders.show",
+        "to": "SyncOrderJob@handle",
+        "handler": "OrderController@show",
+        "job_class": "App\\Jobs\\SyncOrderJob",
+        "job_method": "handle",
+        "dispatch_method": "dispatch",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 18,
+    } in artifact["edges"]
     assert ("emits_event", "App\\Http\\Controllers\\OrderController", "App\\Events\\OrderPlaced") in edges
     assert ("emits_event", "OrderController@show", "App\\Events\\OrderPlaced") in edges
     assert ("event_listener", "App\\Events\\OrderPlaced", "App\\Listeners\\SendOrderReceipt") in edges

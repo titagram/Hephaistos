@@ -239,7 +239,9 @@ PHP_LISTEN_ARRAY_RE = re.compile(
     re.DOTALL,
 )
 PHP_CLASS_CONST_RE = re.compile(r"(?P<class>\\?[A-Za-z0-9_\\]+)::class")
-PHP_DISPATCH_JOB_RE = re.compile(r"\b(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::dispatch(?:Sync|AfterResponse)?\s*\(")
+PHP_DISPATCH_JOB_RE = re.compile(
+    r"\b(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::(?P<method>dispatch(?:Sync|AfterResponse)?)\s*\("
+)
 PHP_EVENT_FUNCTION_RE = re.compile(r"\bevent\s*\(\s*new\s+(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s*\(")
 PHP_EVENT_DISPATCH_RE = re.compile(
     r"\b(?:Event::dispatch|event)\s*\(\s*(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)::class"
@@ -3887,6 +3889,62 @@ def _append_php_emitted_event_listener_edges(
     return truncated
 
 
+def _append_php_dispatched_job_method_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    source_line: int,
+    *,
+    job_class: str,
+    job_method_symbol: str,
+    dispatch_method: str,
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    if not method_symbol or not job_class or not job_method_symbol:
+        return False
+    truncated = False
+    payload = {
+        "job_class": job_class,
+        "job_method": "handle",
+        "dispatch_method": dispatch_method,
+        "path": rel,
+        "line": source_line,
+    }
+    truncated = not _edge_append(
+        edges,
+        {
+            "kind": "dispatches_job_method",
+            "from": method_symbol,
+            "to": job_method_symbol,
+            **payload,
+        },
+        max_edges=max_edges,
+    ) or truncated
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_dispatches_job_method",
+                "from": route_ref,
+                "to": job_method_symbol,
+                "handler": method_symbol,
+                "job_class": job_class,
+                "job_method": "handle",
+                "dispatch_method": dispatch_method,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+                "source_path": rel,
+                "source_line": source_line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _append_php_authorization_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -4992,12 +5050,14 @@ def _build_php_graph(
 
         for match in PHP_DISPATCH_JOB_RE.finditer(source):
             class_info = _class_context(classes, match.start())
+            job_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
+            source_line = _line_number(source, match.start())
             edge = {
                 "kind": "dispatches_job",
                 "from": _php_context_id(class_info, rel),
-                "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                "to": job_class,
                 "path": rel,
-                "line": _line_number(source, match.start()),
+                "line": source_line,
             }
             truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
             truncated = not _append_php_method_context_edge(
@@ -5007,6 +5067,19 @@ def _build_php_graph(
                 match.start(),
                 edges,
                 edge,
+                max_edges=max_edges,
+            ) or truncated
+            method_context = _php_method_context_id(source, classes, match.start(), rel)
+            job_method_symbol = php_method_symbols.get((job_class, "handle"), "")
+            truncated = _append_php_dispatched_job_method_edges(
+                routes_by_handler,
+                method_context,
+                rel,
+                source_line,
+                job_class=job_class,
+                job_method_symbol=job_method_symbol,
+                dispatch_method=match.group("method"),
+                edges=edges,
                 max_edges=max_edges,
             ) or truncated
 
