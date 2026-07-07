@@ -4990,3 +4990,35 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel route-model binding graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per data-flow metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` riconosce ora route-model binding Laravel implicito:
+  quando una route come `/orders/{order}` punta a `OrderController@show` e il
+  metodo riceve `Order $order`, il graph aggiunge edge `route_model_binding`.
+- Il graph aggiunge anche `route_model_table` verso la tabella risolta tramite
+  mappa `model_table` o convenzione Laravel, cosi' una traversata source-free
+  puo' passare direttamente da route a model/table.
+- Il fallback locale di `hades_backend_graph_search` include ora nei summary
+  edge anche `param`, `handler` e `uri`, oltre ai dettagli query gia' aggiunti.
+- Il payload non include source raw o corpo del controller: solo route id,
+  handler, parametro, model, table, path e line.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_route_model_bindings`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `69 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

@@ -131,6 +131,7 @@ PHP_STATIC_CALL_RE = re.compile(r"\b(?P<class>[A-Z][A-Za-z0-9_\\]+)::(?P<method>
 PHP_NEW_RE = re.compile(r"\bnew\s+(?P<class>[A-Z][A-Za-z0-9_\\]+)\s*\(")
 PHP_ROUTE_NAME_RE = re.compile(r"->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)")
 PHP_ROUTE_MIDDLEWARE_RE = re.compile(r"->middleware\(\s*(?P<value>.*?)\s*\)", re.DOTALL)
+PHP_ROUTE_PARAM_RE = re.compile(r"\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\?)?[^}]*\}")
 PHP_QUOTED_VALUE_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
 PHP_ARRAY_ENTRY_CLASS_RE = re.compile(
     r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class"
@@ -166,7 +167,7 @@ PHP_GATE_POLICY_RE = re.compile(
     r"\bGate::policy\s*\(\s*(?P<model>\\?[A-Za-z0-9_\\]+)::class\s*,\s*(?P<policy>\\?[A-Za-z0-9_\\]+)::class",
     re.MULTILINE,
 )
-PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$[A-Za-z_][A-Za-z0-9_]*")
+PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 PHP_PROPERTY_RE = re.compile(
     r"\b(?P<visibility>public|protected|private)\s+"
     r"(?:readonly\s+)?(?P<type>\??[A-Za-z_\\][A-Za-z0-9_\\|]*)?\s*"
@@ -920,6 +921,11 @@ def _php_method_context_id(source: str, classes: list[dict[str, Any]], offset: i
 
 def _php_route_id(route: dict[str, Any]) -> str:
     return str(route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}".strip())
+
+
+def _php_route_params(route: dict[str, Any]) -> set[str]:
+    uri = str(route.get("uri") or "")
+    return {match.group("name") for match in PHP_ROUTE_PARAM_RE.finditer(uri)}
 
 
 def _php_role(path: str, class_name: str, extends: str) -> str:
@@ -2378,6 +2384,53 @@ def _append_php_eloquent_query_builder_edges(
     return truncated
 
 
+def _append_php_route_model_binding_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    param_name: str,
+    param_class: str,
+    model_table_by_class: dict[str, str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    model_table = _php_model_table_for_class(param_class, model_table_by_class)
+    if not model_table:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        if param_name not in _php_route_params(route):
+            continue
+        route_ref = f"route:{_php_route_id(route)}"
+        binding_edge = {
+            "kind": "route_model_binding",
+            "from": route_ref,
+            "to": param_class,
+            "handler": method_symbol,
+            "param": param_name,
+            "table": model_table,
+            "method": route.get("method"),
+            "uri": route.get("uri"),
+            "path": route.get("path"),
+            "line": route.get("line"),
+        }
+        truncated = not _edge_append(edges, binding_edge, max_edges=max_edges) or truncated
+        table_edge = {
+            "kind": "route_model_table",
+            "from": route_ref,
+            "to": f"table:{model_table}",
+            "handler": method_symbol,
+            "param": param_name,
+            "model": param_class,
+            "method": route.get("method"),
+            "uri": route.get("uri"),
+            "path": route.get("path"),
+            "line": route.get("line"),
+        }
+        truncated = not _edge_append(edges, table_edge, max_edges=max_edges) or truncated
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2396,6 +2449,11 @@ def _build_php_graph(
         max_file_bytes=max_file_bytes,
     )
     routes = _laravel_routes(workspace_root, file_refs)
+    routes_by_handler: dict[str, list[dict[str, Any]]] = {}
+    for route in routes:
+        handler = str(route.get("handler") or "")
+        if handler:
+            routes_by_handler.setdefault(handler, []).append(route)
     middleware_catalog = _laravel_middleware_catalog(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -2641,6 +2699,15 @@ def _build_php_graph(
                             "path": rel,
                             "line": _line_number(source, match.start()),
                         },
+                        max_edges=max_edges,
+                    ) or truncated
+                    truncated = _append_php_route_model_binding_edges(
+                        routes_by_handler,
+                        method_symbol,
+                        str(param_match.group("name") or ""),
+                        param_class,
+                        model_table_by_class,
+                        edges,
                         max_edges=max_edges,
                     ) or truncated
 

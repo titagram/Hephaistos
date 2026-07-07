@@ -111,6 +111,30 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "route_model_binding",
+                "from": "route:orders.show",
+                "to": "App\\Models\\Order",
+                "handler": "OrderController@show",
+                "param": "order",
+                "table": "orders",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
+                "kind": "route_model_table",
+                "from": "route:orders.show",
+                "to": "table:orders",
+                "handler": "OrderController@show",
+                "param": "order",
+                "model": "App\\Models\\Order",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
                 "kind": "view_ref",
                 "from": "OrderController@show",
                 "to": "view:orders.show",
@@ -870,6 +894,55 @@ def test_hades_backend_graph_search_finds_local_query_write_edges(monkeypatch, t
         "operation=update" in item["summary"]
         and "access=write" in item["summary"]
         and "table=orders" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_route_model_bindings(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "route model binding orders order", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(ref["type"] == "edge" and ref["kind"] == "route_model_binding" for ref in graph_refs)
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_model_table"
+        and ref["to"] == "table:orders"
+        for ref in graph_refs
+    )
+    assert any(
+        "param=order" in item["summary"]
+        and "handler=OrderController@show" in item["summary"]
+        and "uri=/orders/{order}" in item["summary"]
         for item in result["items"]
     )
 

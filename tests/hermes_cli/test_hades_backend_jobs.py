@@ -873,6 +873,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("uses_dependency", "OrderController@__construct", "App\\Services\\OrderService") in edges
     assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
+    assert ("route_model_binding", "route:orders.show", "App\\Models\\Order") in edges
+    assert ("route_model_table", "route:orders.show", "table:orders") in edges
+    assert {
+        "kind": "route_model_binding",
+        "from": "route:orders.show",
+        "to": "App\\Models\\Order",
+        "handler": "OrderController@show",
+        "param": "order",
+        "table": "orders",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 3,
+    } in artifact["edges"]
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
     assert ("request_validation", "OrderController@show", "validation:status") in edges
