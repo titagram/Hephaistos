@@ -2589,8 +2589,8 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Feature tests remoti no-codebase piu' ampi con casi insufficient-evidence e
-  stale graph.
+- Valutazione remota end-to-end con modello/agent reale invece di solo API
+  contract backend.
 
 ## Esecuzione no-codebase feature test backend - 2026-07-07
 
@@ -2600,6 +2600,7 @@ Backend remoto:
 
 - Commit remoto `62691ce test: cover Hades no-codebase diagnosis path`.
 - Follow-up remoto `74bc64c feat: gate Hades diagnoses on awareness coverage`.
+- Follow-up remoto `aead8bc test: cover stale no-codebase diagnosis`.
 - Nuovo test `tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`.
 - Il test usa solo API Hades e fixture payload, senza leggere filesystem source:
   registra agent, lega workspace, carica `hades.php_graph.v1`, crea bug report,
@@ -2611,6 +2612,11 @@ Backend remoto:
   source slice coverage producono `diagnosable_without_source=false`; il backend
   rifiuta il report `high/final` con `diagnosis_awareness_not_diagnosable`, ma
   accetta un report `insufficient`.
+- Il secondo follow-up aggiunge il caso stale: graph artifact e source slice con
+  head commit vecchio producono `freshness.status=stale`,
+  `diagnosable_without_source=false`, blocco del report `high/final` con
+  `diagnosis_freshness_not_current`, e salvataggio consentito di un report
+  `insufficient`.
 
 Verifiche eseguite:
 
@@ -2623,15 +2629,18 @@ Verifiche eseguite:
 - Remoto mirato dopo il follow-up:
   `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
   passato: `33 passed / 447 assertions`.
+- Remoto mirato dopo il secondo follow-up:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `3 passed / 63 assertions`.
 - Remoto completo Hades + plugin auth:
   `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
   passato: `56 passed / 653 assertions` prima del follow-up; dopo il follow-up:
-  `57 passed / 666 assertions`.
+  `57 passed / 666 assertions`; dopo il secondo follow-up:
+  `58 passed / 688 assertions`.
 - Remoto:
   `git diff --check` passato prima del commit.
 
 Resta fuori da questa tranche:
 
-- Caso remoto stale graph dedicato che deve rifiutare claim precisi.
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
