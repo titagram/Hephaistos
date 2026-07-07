@@ -441,6 +441,65 @@ def test_sync_runner_uploads_php_graph_artifacts():
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
 
 
+def test_sync_runner_uploads_code_graph_artifacts():
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": "artifact_code_graph"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="a" * 40,
+        status="active",
+    )
+
+    uploaded, redactions = _upload_job_artifact(
+        client,
+        agent,
+        binding,
+        "job_code_graph",
+        {
+            "artifact": {
+                "schema": "hades.code_graph.v1",
+                "routes": [],
+                "symbols": [],
+                "edges": [],
+                "truncated": False,
+                "redactions": 0,
+                "raw_source_included": False,
+            }
+        },
+    )
+
+    assert uploaded == 1
+    assert redactions == 0
+    assert client.uploads[0]["schema"] == "hades.code_graph.v1"
+    assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
+
+
 def test_sync_runner_uploads_source_slices():
     from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
     from hermes_cli.hades_backend_sync import _upload_job_source_slice

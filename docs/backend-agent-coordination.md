@@ -2154,3 +2154,58 @@ Resta fuori da questa tranche:
 - Wizard desktop/dashboard.
 - Privacy preview visuale prima dell'invio.
 - Intake di screenshot/browser console/http trace da UI.
+
+## Esecuzione framework expansion Node/TS/React Hades - 2026-07-07
+
+Stato: completata la prima tranche locale e backend P2-2 del piano "Framework
+Expansion".
+
+Agent locale:
+
+- `populate_backend_ast` ora produce `hades.code_graph.v1` quando trova
+  workspace JavaScript/TypeScript senza PHP prioritario.
+- Il graph rileva framework (`nextjs`, `react`, `express`, `node`), route
+  handlers Next, page entrypoint Next, route Express, simboli
+  component/function/class/export, import edge e dependency manifests.
+- Gli artifact restano source-symbol: `raw_source_included=false`, retention
+  `source_symbols`, omission reasons bounded e nessun chunk di sorgente grezzo.
+- `hades backend sync` carica anche artifact `hades.code_graph.v1`.
+- OpenAPI e runbook locali dichiarano il nuovo schema accanto a
+  `hades.git_tree.v1`, `hades.symbols.v1` e `hades.php_graph.v1`.
+
+Backend remoto:
+
+- Commit remoto `635aed5 feat: accept Hades code graph artifacts`.
+- `ArtifactController` accetta upload `hades.code_graph.v1`.
+- `MemorySearchController` tratta `hades.code_graph.v1` come code graph
+  searchable insieme a `hades.php_graph.v1`, usando anche `path` per route
+  Next/Express e includendo il framework nel summary.
+- OpenAPI remoto dichiara `hades.code_graph.v1` nell'enum artifact.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `34 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_jobs.py hermes_cli/hades_backend_sync.py tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_backend_jobs.py hermes_cli/hades_backend_sync.py`
+  passato.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/ArtifactController.php app/Http/Controllers/Hades/MemorySearchController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  passato: `30 passed`.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `50 passed`.
+
+Resta fuori da questa tranche:
+
+- Symfony, FastAPI/Django e database schema adapters.
+- Parser strutturati profondi per JS/TS oltre al primo graph regex-bounded.
+- Search/traversal semantico piu' profondo su graph JS/TS oltre al summary
+  artifact e al traversal generico gia' disponibile.

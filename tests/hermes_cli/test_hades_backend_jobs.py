@@ -373,6 +373,72 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "return OrderService::format" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "app" / "api" / "orders").mkdir(parents=True)
+    (workspace / "app" / "orders").mkdir(parents=True)
+    (workspace / "server").mkdir()
+    (workspace / "components").mkdir()
+    (workspace / "package.json").write_text(
+        '{"dependencies":{"next":"latest","react":"latest","express":"latest"}}',
+        encoding="utf-8",
+    )
+    (workspace / "app" / "api" / "orders" / "route.ts").write_text(
+        "import { listOrders } from '../../../server/orders';\n"
+        "export async function GET() { return listOrders(); }\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "orders" / "page.tsx").write_text(
+        "import { OrderTable } from '../../components/OrderTable';\n"
+        "export default function OrdersPage() { return <OrderTable />; }\n",
+        encoding="utf-8",
+    )
+    (workspace / "server" / "api.ts").write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        "router.get('/health', healthHandler);\n"
+        "export function healthHandler() { return { ok: true }; }\n",
+        encoding="utf-8",
+    )
+    (workspace / "components" / "OrderTable.tsx").write_text(
+        "export const OrderTable = () => <table />;\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_ts_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    routes = {(item["framework"], item["method"], item["path"]) for item in artifact["routes"]}
+    symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["language"] == "typescript"
+    assert artifact["framework"] == "nextjs"
+    assert artifact["raw_source_included"] is False
+    assert ("nextjs", "GET", "/api/orders") in routes
+    assert ("nextjs", "PAGE", "/orders") in routes
+    assert ("express", "GET", "/health") in routes
+    assert ("component", "OrdersPage", "app/orders/page.tsx") in symbols
+    assert ("component", "OrderTable", "components/OrderTable.tsx") in symbols
+    assert ("function", "healthHandler", "server/api.ts") in symbols
+    assert ("imports", "app/api/orders/route.ts", "../../../server/orders") in edges
+    assert "return listOrders()" not in str(artifact)
+    assert "<OrderTable" not in str(artifact)
+    assert "<table" not in str(artifact)
+
+
 def test_populate_backend_ast_omits_symlinked_python_escape(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

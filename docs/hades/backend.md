@@ -139,10 +139,13 @@ not a synthesized answer. `refuse-job` marks a waiting job cancelled and sends a
 redacted reason to the backend.
 
 `populate_backend_ast` uploads source-symbol artifacts without raw source:
-`hades.php_graph.v1` for PHP/Laravel projects and `hades.symbols.v1` for Python
+`hades.php_graph.v1` for PHP/Laravel projects, `hades.code_graph.v1` for
+Node/TypeScript/React/Next/Express projects, and `hades.symbols.v1` for Python
 projects. The PHP graph includes route-handler, class/method, Eloquent
-relation, static-call, and instantiation metadata so backend search can answer
-structure questions without loading source chunks.
+relation, static-call, and instantiation metadata; the code graph includes
+framework, route/page handlers, symbols, dependency manifests, and import
+edges so backend search can answer structure questions without loading source
+chunks.
 
 `read_source_slice` is the bounded source-content path for diagnosis: it is not
 auto-executed by piggyback sync, stores only a selected redacted line window as

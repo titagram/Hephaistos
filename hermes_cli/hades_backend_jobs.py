@@ -123,6 +123,25 @@ PHP_ELOQUENT_RELATION_RE = re.compile(
 )
 PHP_STATIC_CALL_RE = re.compile(r"\b(?P<class>[A-Z][A-Za-z0-9_\\]+)::(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PHP_NEW_RE = re.compile(r"\bnew\s+(?P<class>[A-Z][A-Za-z0-9_\\]+)\s*\(")
+TS_IMPORT_RE = re.compile(r"\bimport(?:\s+type)?(?:\s+[^;]*?\s+from)?\s+['\"](?P<target>[^'\"]+)['\"]", re.MULTILINE)
+TS_EXPORT_DECL_RE = re.compile(
+    r"\bexport\s+(?:default\s+)?(?:(?:async\s+)?function|class|const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)",
+    re.MULTILINE,
+)
+TS_FUNCTION_RE = re.compile(r"\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(", re.MULTILINE)
+TS_ARROW_COMPONENT_RE = re.compile(
+    r"\b(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Z][A-Za-z0-9_$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>",
+    re.MULTILINE,
+)
+TS_CLASS_RE = re.compile(r"\bclass\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)", re.MULTILINE)
+EXPRESS_ROUTE_RE = re.compile(
+    r"\b(?P<router>app|router)\s*\.\s*(?P<method>get|post|put|patch|delete|options|all|use)\s*"
+    r"\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_$][A-Za-z0-9_.$]*)?",
+    re.IGNORECASE | re.MULTILINE,
+)
+NEXT_ROUTE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/route\.(?:ts|tsx|js|jsx)$")
+NEXT_PAGE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/page\.(?:ts|tsx|js|jsx)$")
+NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(")
 
 
 def _safe_relpath(path: str) -> str:
@@ -870,6 +889,190 @@ def _build_php_graph(
     return graph
 
 
+def _ts_graph_summary(
+    routes: list[dict[str, str]],
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    framework: str,
+) -> str:
+    kind_counts: dict[str, int] = {}
+    for symbol in symbols:
+        kind = str(symbol.get("kind") or "symbol")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {kinds or 'symbols:none'}"
+
+
+def _ts_framework(root: Path, files: list[Path], dependency_manifests: list[dict[str, Any]]) -> str:
+    packages = {
+        str(package)
+        for manifest in dependency_manifests
+        for package in (manifest.get("packages") or [])
+    }
+    if "next" in packages or any(NEXT_ROUTE_FILE_RE.search(path.relative_to(root).as_posix()) for path in files):
+        return "nextjs"
+    if "react" in packages or any(path.suffix.lower() in {".tsx", ".jsx"} for path in files):
+        return "react"
+    if "express" in packages:
+        return "express"
+    return "node"
+
+
+def _route_from_next_path(rel: str) -> str:
+    for pattern in (NEXT_ROUTE_FILE_RE, NEXT_PAGE_FILE_RE):
+        match = pattern.search(rel)
+        if not match:
+            continue
+        route = match.group("route")
+        clean = "/" + route.replace("/(group)", "").replace("index", "").strip("/")
+        return clean if clean != "/" else "/"
+    return ""
+
+
+def _append_ts_symbol(
+    symbols: list[dict[str, Any]],
+    symbol: dict[str, Any],
+    *,
+    max_symbols: int,
+) -> bool:
+    if len(symbols) >= max_symbols:
+        return False
+    symbols.append({key: value for key, value in symbol.items() if value not in ("", None)})
+    return True
+
+
+def _build_ts_graph(
+    workspace_root: Path,
+    candidates: list[Path],
+    omitted: list[dict[str, str]],
+    *,
+    truncated: bool,
+    max_symbols: int,
+    max_edges: int,
+    max_file_bytes: int,
+) -> dict[str, Any]:
+    ts_files = [path for path in candidates if path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}]
+    file_refs = [{"path": path.relative_to(workspace_root).as_posix(), "bytes": path.stat().st_size} for path in candidates if path.is_file()]
+    dependency_manifests = _dependency_manifests(workspace_root, file_refs)
+    framework = _ts_framework(workspace_root, ts_files, dependency_manifests)
+    routes: list[dict[str, str]] = []
+    symbols: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    for path in ts_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("stat_error", exc)})
+            continue
+        if size > max_file_bytes:
+            omitted.append({"path": rel, "reason": "file_too_large"})
+            truncated = True
+            continue
+        try:
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+            if was_truncated:
+                omitted.append({"path": rel, "reason": "file_too_large"})
+                truncated = True
+                continue
+        except OSError as exc:
+            omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
+            continue
+
+        route_path = _route_from_next_path(rel)
+        if route_path:
+            for match in NEXT_HTTP_EXPORT_RE.finditer(source):
+                routes.append(
+                    {
+                        "framework": "nextjs",
+                        "method": match.group("method"),
+                        "path": route_path,
+                        "handler": f"{rel}:{match.group('method')}",
+                        "source_path": rel,
+                    }
+                )
+            if rel.endswith(("/page.tsx", "/page.jsx", "/page.ts", "/page.js")):
+                routes.append(
+                    {
+                        "framework": "nextjs",
+                        "method": "PAGE",
+                        "path": route_path,
+                        "handler": rel,
+                        "source_path": rel,
+                    }
+                )
+
+        for match in EXPRESS_ROUTE_RE.finditer(source):
+            routes.append(
+                {
+                    "framework": "express",
+                    "method": match.group("method").upper(),
+                    "path": match.group("path"),
+                    "handler": match.group("handler") or "",
+                    "source_path": rel,
+                }
+            )
+
+        for match in TS_IMPORT_RE.finditer(source):
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "imports",
+                    "from": rel,
+                    "to": match.group("target"),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for kind, pattern in (
+            ("export", TS_EXPORT_DECL_RE),
+            ("function", TS_FUNCTION_RE),
+            ("component", TS_ARROW_COMPONENT_RE),
+            ("class", TS_CLASS_RE),
+        ):
+            for match in pattern.finditer(source):
+                name = match.group("name")
+                symbol_kind = "component" if kind == "component" or (path.suffix.lower() in {".tsx", ".jsx"} and name[:1].isupper()) else kind
+                truncated = not _append_ts_symbol(
+                    symbols,
+                    {
+                        "kind": symbol_kind,
+                        "name": name,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                        "framework": framework,
+                    },
+                    max_symbols=max_symbols,
+                ) or truncated
+                if len(symbols) >= max_symbols:
+                    break
+            if len(symbols) >= max_symbols:
+                break
+
+    graph = {
+        "schema": "hades.code_graph.v1",
+        "language": "typescript" if any(path.suffix.lower() in {".ts", ".tsx"} for path in ts_files) else "javascript",
+        "framework": framework,
+        "root": workspace_root.name,
+        "routes": routes[:500],
+        "symbols": symbols,
+        "edges": edges,
+        "dependency_manifests": dependency_manifests,
+        "summary": "",
+        "omitted": omitted,
+        "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges or len(routes) > 500,
+        "redactions": len(omitted),
+        "retention_class": "source_symbols",
+        "raw_source_included": False,
+    }
+    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework)
+    return graph
+
+
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     payload = job.get("payload") or {}
     max_files = int(payload.get("max_files") or 1_000)
@@ -879,6 +1082,22 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     if any(path.suffix.lower() == ".php" for path in candidates):
         max_edges = int(payload.get("max_edges") or max_symbols * 2)
         graph = _build_php_graph(
+            workspace_root,
+            candidates,
+            omitted,
+            truncated=truncated,
+            max_symbols=max_symbols,
+            max_edges=max_edges,
+            max_file_bytes=max_file_bytes,
+        )
+        return {
+            "status": "completed",
+            "summary": graph["summary"],
+            "artifact": graph,
+        }
+    if any(path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"} for path in candidates):
+        max_edges = int(payload.get("max_edges") or max_symbols * 2)
+        graph = _build_ts_graph(
             workspace_root,
             candidates,
             omitted,

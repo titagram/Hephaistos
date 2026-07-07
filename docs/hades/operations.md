@@ -284,9 +284,12 @@ memory.
 `populate_backend_ast` emits bounded source-symbol artifacts with provenance,
 not raw source. On PHP/Laravel workspaces it produces `hades.php_graph.v1`
 with detected routes, classes, methods, Eloquent relations, static calls, and
-instantiation edges. On Python workspaces it keeps the existing
-`hades.symbols.v1` class/function symbol output. Both artifact jobs report
-omission reasons instead of following path escapes or failing the whole sync.
+instantiation edges. On Node/TypeScript/React/Next/Express workspaces it
+produces `hades.code_graph.v1` with framework detection, route/page handlers,
+symbols, dependency manifests, and import edges. On Python workspaces it keeps
+the existing `hades.symbols.v1` class/function symbol output. All artifact jobs
+report omission reasons instead of following path escapes or failing the whole
+sync.
 
 `read_source_slice` is intentionally policy-gated/manual-review source access:
 it reads only a bounded line window, redacts likely secrets, uploads
