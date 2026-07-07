@@ -2858,6 +2858,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "resource_method",
         "status_code",
         "abort_helper",
+        "response_helper",
         "call_type",
         "target_method",
         "exception_class",

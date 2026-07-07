@@ -76,6 +76,17 @@ def _php_graph_artifact():
                 "middleware": ["auth"],
                 "path": "routes/web.php",
                 "line": 5,
+            },
+            {
+                "method": "PUT",
+                "uri": "/invoices/{invoice}",
+                "name": "invoices.update",
+                "handler": "InvoiceController@update",
+                "resource": "invoices",
+                "resource_action": "update",
+                "middleware": ["auth"],
+                "path": "routes/web.php",
+                "line": 5,
             }
         ],
         "symbols": [
@@ -153,6 +164,15 @@ def _php_graph_artifact():
                 "to": "InvoiceController@index",
                 "method": "GET",
                 "uri": "/invoices",
+                "path": "routes/web.php",
+                "line": 5,
+            },
+            {
+                "kind": "route_handler",
+                "from": "route:invoices.update",
+                "to": "InvoiceController@update",
+                "method": "PUT",
+                "uri": "/invoices/{invoice}",
                 "path": "routes/web.php",
                 "line": 5,
             },
@@ -385,6 +405,29 @@ def _php_graph_artifact():
                 "exception_short_name": "OrderLockedException",
                 "path": "app/Services/OrderService.php",
                 "line": 5,
+            },
+            {
+                "kind": "http_response_status",
+                "from": "InvoiceController@update",
+                "to": "http_status:409",
+                "status_code": 409,
+                "response_helper": "response_json",
+                "path": "app/Http/Controllers/InvoiceController.php",
+                "line": 7,
+            },
+            {
+                "kind": "route_http_response_status",
+                "from": "route:invoices.update",
+                "to": "http_status:409",
+                "handler": "InvoiceController@update",
+                "status_code": 409,
+                "response_helper": "response_json",
+                "method": "PUT",
+                "uri": "/invoices/{invoice}",
+                "path": "routes/web.php",
+                "line": 5,
+                "source_path": "app/Http/Controllers/InvoiceController.php",
+                "source_line": 7,
             },
             {
                 "kind": "view_ref",
@@ -1539,6 +1582,55 @@ def test_hades_backend_graph_search_finds_local_exception_throw_edges(monkeypatc
     assert any(
         "exception_class=App\\Exceptions\\OrderLockedException" in item["summary"]
         and "exception_short_name=OrderLockedException" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_http_response_status_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for invoice route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "invoices 409 response_json", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_http_response_status"
+        and ref["from"] == "route:invoices.update"
+        and ref["to"] == "http_status:409"
+        for ref in graph_refs
+    )
+    assert any(
+        "status_code=409" in item["summary"]
+        and "response_helper=response_json" in item["summary"]
+        and "handler=InvoiceController@update" in item["summary"]
         for item in result["items"]
     )
 

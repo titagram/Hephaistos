@@ -684,7 +684,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    public function index() {}\n"
         "    public function store() {}\n"
         "    public function show($invoice) {}\n"
-        "    public function update($invoice) {}\n"
+        "    public function update($invoice) { return response()->json(['error' => 'locked'], 409); }\n"
         "    public function destroy($invoice) {}\n"
         "}\n",
         encoding="utf-8",
@@ -1006,6 +1006,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_authorization_table", "route:orders.show", "table:orders") in edges
     assert ("http_abort", "OrderController@show", "http_status:403") in edges
     assert ("route_http_abort", "route:orders.show", "http_status:403") in edges
+    assert ("http_response_status", "InvoiceController@update", "http_status:409") in edges
+    assert ("route_http_response_status", "route:invoices.update", "http_status:409") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1100,6 +1102,29 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "exception_short_name": "OrderLockedException",
         "path": "app/Services/OrderService.php",
         "line": 5,
+    } in artifact["edges"]
+    assert {
+        "kind": "http_response_status",
+        "from": "InvoiceController@update",
+        "to": "http_status:409",
+        "status_code": 409,
+        "response_helper": "response_json",
+        "path": "app/Http/Controllers/InvoiceController.php",
+        "line": 7,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_http_response_status",
+        "from": "route:invoices.update",
+        "to": "http_status:409",
+        "handler": "InvoiceController@update",
+        "status_code": 409,
+        "response_helper": "response_json",
+        "method": "PUT",
+        "uri": "/invoices/{invoice}",
+        "path": "routes/web.php",
+        "line": 5,
+        "source_path": "app/Http/Controllers/InvoiceController.php",
+        "source_line": 7,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",
@@ -1430,6 +1455,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "private OrderService" not in str(artifact)
     assert "throw new" not in str(artifact)
     assert "OrderLockedException();" not in str(artifact)
+    assert "response()->json" not in str(artifact)
+    assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)
     assert "Order::observe" not in str(artifact)

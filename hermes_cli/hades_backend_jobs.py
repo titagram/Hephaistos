@@ -217,6 +217,10 @@ PHP_VALIDATE_ARRAY_RE = re.compile(
 PHP_ARRAY_FIELD_KEY_RE = re.compile(r"['\"](?P<field>[A-Za-z0-9_.*-]+)['\"]\s*=>")
 PHP_THIS_INPUT_MUTATION_RE = re.compile(r"\$this->(?P<operation>merge|replace)\s*\(", re.MULTILINE)
 PHP_ABORT_HELPER_RE = re.compile(r"\babort(?P<suffix>_if|_unless)?\s*\(", re.IGNORECASE | re.MULTILINE)
+PHP_RESPONSE_HELPER_RE = re.compile(
+    r"\bresponse\s*\(\s*\)\s*->\s*(?P<method>json|noContent)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -3464,6 +3468,87 @@ def _append_php_route_http_abort_edges(
     return truncated
 
 
+def _php_status_literal(raw: str) -> int | None:
+    status_match = re.fullmatch(r"[1-5][0-9]{2}", raw.strip())
+    return int(status_match.group(0)) if status_match else None
+
+
+def _php_http_response_statuses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    responses: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for match in PHP_RESPONSE_HELPER_RE.finditer(method_body):
+        helper_method = str(match.group("method") or "")
+        response_helper = f"response_{helper_method.lower()}"
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        args = source[open_abs + 1 : close_abs]
+        parts = _split_top_level_items(args)
+        status_index = 0 if helper_method.lower() == "nocontent" else 1
+        if len(parts) <= status_index:
+            continue
+        status_code = _php_status_literal(parts[status_index][0])
+        if status_code is None:
+            continue
+        line = _line_number(source, method_body_offset + match.start())
+        key = (response_helper, status_code, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        responses.append(
+            {
+                "status_code": status_code,
+                "response_helper": response_helper,
+                "line": line,
+            }
+        )
+    return responses
+
+
+def _append_php_route_http_response_status_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    responses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not responses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for response in responses:
+            status_code = response.get("status_code")
+            if not status_code:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_http_response_status",
+                    "from": route_ref,
+                    "to": f"http_status:{status_code}",
+                    "handler": method_symbol,
+                    "status_code": status_code,
+                    "response_helper": response.get("response_helper"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": response.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -4137,6 +4222,32 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 http_aborts,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            http_responses = _php_http_response_statuses_for_method(source, method_body, method_body_offset)
+            for response_status in http_responses:
+                status_code = response_status.get("status_code")
+                if not status_code:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "http_response_status",
+                        "from": method_symbol,
+                        "to": f"http_status:{status_code}",
+                        "status_code": status_code,
+                        "response_helper": response_status.get("response_helper"),
+                        "path": rel,
+                        "line": response_status.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_http_response_status_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                http_responses,
                 edges,
                 max_edges=max_edges,
             ) or truncated
