@@ -2391,3 +2391,45 @@ Resta fuori da questa tranche:
 - Evidence pack builder automatico a partire da un bug report.
 - UI/dashboard dedicata per leggere e revisionare pack.
 - FTS/vector ranking dedicato per evidence packs.
+
+## Esecuzione diagnosis hard gate Hades - 2026-07-07
+
+Stato: completata una tranche P0-3/P0-6 del piano "Bug Root Cause Awareness".
+
+Backend remoto:
+
+- Commit remoto: `2aa534c feat: enforce Hades diagnosis freshness gate`.
+- `DiagnosisReportController` rifiuta diagnosis report `high`/`medium` quando
+  `evidence_refs` e' vuoto o `freshness.status` non e' `current`.
+- Nuovi codici errore:
+  `diagnosis_evidence_refs_required` e `diagnosis_freshness_not_current`.
+- I report `low`/`insufficient` restano salvabili per preservare ipotesi o
+  insufficient-evidence senza claim causali precisi.
+
+Agent locale:
+
+- `hades_backend_diagnosis_report_create` applica lo stesso gate prima della
+  chiamata backend.
+- Skill e runbook indicano di salvare `low`/`insufficient` quando freshness o
+  refs non supportano una causa precisa.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `36 passed`.
+- Locale lint/docs:
+  `ruff check` su provider/test Hades passato; `py_compile` provider passato;
+  `scripts/docs_audit.py` passato: `docs audit passed: 18 required docs
+  checked`.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/DiagnosisReportController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `52 passed`.
+
+Resta fuori da questa tranche:
+
+- UI wizard che degrada automaticamente confidence quando il gate fallisce.
+- Deploy-aware freshness distinta dal solo workspace/artifact HEAD.

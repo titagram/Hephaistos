@@ -264,6 +264,13 @@ pack search, bug evidence search, graph search, minimal source slice fetch,
 evidence pack create, then a persisted structured diagnosis report with
 evidence refs and confidence.
 
+The backend and local provider enforce a hard gate for precise persisted
+diagnoses: `high` or `medium` confidence reports require non-empty
+`evidence_refs` and `freshness.status=current`. Otherwise the request is
+rejected with `diagnosis_evidence_refs_required` or
+`diagnosis_freshness_not_current`; save a `low` or `insufficient` report when
+the evidence is incomplete or stale.
+
 Use `hades_backend_graph_search` to find candidate graph artifacts by text, then
 `hades_backend_graph_traverse` when you know a starting route, URI, class,
 method, file, or symbol and need bounded call-path context. Traversal results

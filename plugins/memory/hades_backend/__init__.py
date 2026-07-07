@@ -769,6 +769,18 @@ class HadesBackendMemoryProvider(MemoryProvider):
         payload = args.get("payload")
         if payload is not None and not isinstance(payload, dict):
             return tool_error("Parameter payload must be an object when provided.")
+        if confidence in {"high", "medium"}:
+            if not evidence_refs:
+                return tool_error(
+                    "High/medium confidence diagnosis reports require evidence_refs.",
+                    required_for_confidence=confidence,
+                )
+            freshness_status = str((freshness or {}).get("status") or "").strip()
+            if freshness_status != "current":
+                return tool_error(
+                    "High/medium confidence diagnosis reports require freshness.status=current.",
+                    freshness_status=freshness_status or "missing",
+                )
 
         if self._binding is None:
             return tool_result(

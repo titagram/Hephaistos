@@ -60,6 +60,9 @@ as
 `unredacted_secret_detected`, `evidence_payload_too_large`,
 `source_slice_too_large`, `evidence_pack_payload_too_large`, or
 `diagnosis_payload_too_large`.
+High or medium confidence diagnosis reports are also rejected unless
+`freshness.status=current` and `evidence_refs` is non-empty; failures return
+`diagnosis_freshness_not_current` or `diagnosis_evidence_refs_required`.
 
 ## Project Awareness
 

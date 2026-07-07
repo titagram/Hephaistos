@@ -57,6 +57,8 @@ Return a compact diagnosis with:
 - Do not claim exact line-level cause without a current source slice covering
   that line.
 - Do not claim exact call path without a current graph artifact.
+- Do not save `high` or `medium` confidence unless `freshness.status=current`
+  and `evidence_refs` is non-empty; save `low` or `insufficient` otherwise.
 - Do not use raw source/wiki chunks from ordinary memory as automatic evidence.
 - Do not ask for full repository access when a bounded source slice would answer
   the question.

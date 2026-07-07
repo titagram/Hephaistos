@@ -1016,6 +1016,43 @@ def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypa
     assert result["error"] == "Missing required parameter: root_cause"
 
 
+def test_hades_backend_diagnosis_report_create_tool_blocks_precise_stale_claim(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "confidence": "high",
+                "root_cause": "OrderController dereferences a stale relation.",
+                "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                "freshness": {"status": "stale"},
+            },
+        )
+    )
+
+    assert result["error"] == "High/medium confidence diagnosis reports require freshness.status=current."
+    assert result["freshness_status"] == "stale"
+
+
+def test_hades_backend_diagnosis_report_create_tool_requires_evidence_for_precise_claim(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "confidence": "medium",
+                "root_cause": "OrderController dereferences a stale relation.",
+                "freshness": {"status": "current"},
+            },
+        )
+    )
+
+    assert result["error"] == "High/medium confidence diagnosis reports require evidence_refs."
+    assert result["required_for_confidence"] == "medium"
+
+
 def test_hades_backend_resolved_bug_promote_tool_persists_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     timeouts = []
