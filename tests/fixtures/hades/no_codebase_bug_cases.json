@@ -7,6 +7,7 @@
       "expected_root_cause_id": "rc.laravel.order_customer_null",
       "expected_confidence": "high",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
       "required_evidence_refs": [
         "bug_evidence:ev.order.stack",
         "bug_evidence:ev.order.http",
@@ -27,6 +28,7 @@
       "expected_root_cause_id": "rc.laravel.orders_status_column_missing",
       "expected_confidence": "high",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
       "required_evidence_refs": [
         "bug_evidence:ev.schema.sqlstate",
         "bug_evidence:ev.schema.failing_test",
@@ -47,6 +49,7 @@
       "expected_root_cause_id": "rc.laravel.invoice_policy_guard_mismatch",
       "expected_confidence": "medium",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
       "required_evidence_refs": [
         "bug_evidence:ev.policy.http403",
         "bug_evidence:ev.policy.user_steps",
@@ -67,6 +70,7 @@
       "expected_root_cause_id": "rc.laravel.shipment_job_unserializable_closure",
       "expected_confidence": "high",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
       "required_evidence_refs": [
         "bug_evidence:ev.queue.worker_log",
         "bug_evidence:ev.queue.failed_job",
@@ -87,6 +91,7 @@
       "expected_root_cause_id": "rc.python.fastapi_missing_payment_endpoint",
       "expected_confidence": "medium",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
       "required_evidence_refs": [
         "bug_evidence:ev.python.config_log",
         "bug_evidence:ev.python.failing_test",
@@ -107,6 +112,7 @@
       "expected_root_cause_id": null,
       "expected_confidence": "insufficient",
       "expected_freshness_status": "current",
+      "expected_diagnosable_without_source": false,
       "required_evidence_refs": [
         "bug_evidence:ev.missing_slice.stack",
         "graph:graph.missing_slice.controller"
@@ -128,6 +134,7 @@
       "expected_root_cause_id": null,
       "expected_confidence": "insufficient",
       "expected_freshness_status": "stale",
+      "expected_diagnosable_without_source": false,
       "required_evidence_refs": [
         "bug_evidence:ev.stale_graph.stack"
       ],
@@ -148,6 +155,7 @@
       "root_cause_id": "rc.laravel.order_customer_null",
       "confidence": "high",
       "freshness_status": "current",
+      "diagnosable_without_source": true,
       "evidence_refs": [
         "bug_evidence:ev.order.stack",
         "bug_evidence:ev.order.http",
@@ -168,6 +176,7 @@
       "root_cause_id": "rc.laravel.orders_status_column_missing",
       "confidence": "high",
       "freshness_status": "current",
+      "diagnosable_without_source": true,
       "evidence_refs": [
         "bug_evidence:ev.schema.sqlstate",
         "bug_evidence:ev.schema.failing_test",
@@ -188,6 +197,7 @@
       "root_cause_id": "rc.laravel.invoice_policy_guard_mismatch",
       "confidence": "medium",
       "freshness_status": "current",
+      "diagnosable_without_source": true,
       "evidence_refs": [
         "bug_evidence:ev.policy.http403",
         "bug_evidence:ev.policy.user_steps",
@@ -208,6 +218,7 @@
       "root_cause_id": "rc.laravel.shipment_job_unserializable_closure",
       "confidence": "high",
       "freshness_status": "current",
+      "diagnosable_without_source": true,
       "evidence_refs": [
         "bug_evidence:ev.queue.worker_log",
         "bug_evidence:ev.queue.failed_job",
@@ -228,6 +239,7 @@
       "root_cause_id": "rc.python.fastapi_missing_payment_endpoint",
       "confidence": "medium",
       "freshness_status": "current",
+      "diagnosable_without_source": true,
       "evidence_refs": [
         "bug_evidence:ev.python.config_log",
         "bug_evidence:ev.python.failing_test",
@@ -248,6 +260,7 @@
       "root_cause_id": null,
       "confidence": "insufficient",
       "freshness_status": "current",
+      "diagnosable_without_source": false,
       "evidence_refs": [
         "bug_evidence:ev.missing_slice.stack",
         "graph:graph.missing_slice.controller"
@@ -269,6 +282,7 @@
       "root_cause_id": null,
       "confidence": "insufficient",
       "freshness_status": "stale",
+      "diagnosable_without_source": false,
       "evidence_refs": [
         "bug_evidence:ev.stale_graph.stack"
       ],

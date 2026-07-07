@@ -223,9 +223,9 @@ hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase
 The quality report produces `hades.quality_report.v1` with no-codebase diagnosis
 metrics, including required evidence refs, required Hades tool calls, persisted
 diagnosis reports, forbidden source-access tool use, and diagnosis freshness
-coverage. Local awareness/support status is included when enabled. Causal
-quality, stale precise-claim, or privacy regressions are blockers; local setup
-gaps are warnings.
+coverage plus source-free awareness coverage. Local awareness/support status is
+included when enabled. Causal quality, stale precise-claim, undiagnosable
+awareness, or privacy regressions are blockers; local setup gaps are warnings.
 
 ## Note Backfill
 

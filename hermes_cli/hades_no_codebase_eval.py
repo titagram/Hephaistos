@@ -34,6 +34,7 @@ class NoCodebaseDiagnosisFixture:
     expected_root_cause_id: str | None
     expected_confidence: str
     expected_freshness_status: str = ""
+    expected_diagnosable_without_source: bool | None = None
     required_evidence_refs: tuple[str, ...] = ()
     required_tool_calls: tuple[str, ...] = ()
     expected_missing_evidence: tuple[str, ...] = ()
@@ -50,6 +51,7 @@ class NoCodebaseDiagnosisRun:
     root_cause_id: str | None
     confidence: str
     freshness_status: str = ""
+    diagnosable_without_source: bool | None = None
     evidence_refs: tuple[str, ...] = ()
     tool_calls: tuple[str, ...] = ()
     missing_evidence: tuple[str, ...] = ()
@@ -67,6 +69,8 @@ class NoCodebaseFixtureResult:
     actual_confidence: str = ""
     expected_freshness_status: str = ""
     actual_freshness_status: str = ""
+    expected_diagnosable_without_source: bool | None = None
+    actual_diagnosable_without_source: bool | None = None
     expected_evidence_refs: tuple[str, ...] = ()
     actual_evidence_refs: tuple[str, ...] = ()
 
@@ -86,6 +90,7 @@ class NoCodebaseEvaluationReport:
     insufficient_accuracy: float
     evidence_ref_coverage: float
     freshness_coverage: float
+    awareness_coverage: float
     tool_coverage: float
     persistence_coverage: float
     no_codebase_violations: tuple[dict[str, str], ...] = ()
@@ -106,6 +111,7 @@ class NoCodebaseEvaluationReport:
             "insufficient_accuracy": self.insufficient_accuracy,
             "evidence_ref_coverage": self.evidence_ref_coverage,
             "freshness_coverage": self.freshness_coverage,
+            "awareness_coverage": self.awareness_coverage,
             "tool_coverage": self.tool_coverage,
             "persistence_coverage": self.persistence_coverage,
             "no_codebase_violations": list(self.no_codebase_violations),
@@ -120,6 +126,8 @@ class NoCodebaseEvaluationReport:
                     "actual_confidence": result.actual_confidence,
                     "expected_freshness_status": result.expected_freshness_status,
                     "actual_freshness_status": result.actual_freshness_status,
+                    "expected_diagnosable_without_source": result.expected_diagnosable_without_source,
+                    "actual_diagnosable_without_source": result.actual_diagnosable_without_source,
                     "expected_evidence_refs": list(result.expected_evidence_refs),
                     "actual_evidence_refs": list(result.actual_evidence_refs),
                 }
@@ -149,6 +157,8 @@ def evaluate_no_codebase_diagnoses(
     evidence_hits = 0
     freshness_checks = 0
     freshness_hits = 0
+    awareness_checks = 0
+    awareness_hits = 0
     tool_checks = 0
     tool_hits = 0
     persistence_checks = 0
@@ -165,6 +175,7 @@ def evaluate_no_codebase_diagnoses(
                     expected_root_cause_id=fixture.expected_root_cause_id,
                     expected_confidence=fixture.expected_confidence,
                     expected_freshness_status=fixture.expected_freshness_status,
+                    expected_diagnosable_without_source=fixture.expected_diagnosable_without_source,
                     expected_evidence_refs=fixture.required_evidence_refs,
                 )
             )
@@ -204,6 +215,19 @@ def evaluate_no_codebase_diagnoses(
                 freshness_hits += 1
         if run.confidence in {"high", "medium"} and run.freshness_status != "current":
             failures.append("precise diagnosis requires current freshness")
+        expected_awareness = fixture.expected_diagnosable_without_source
+        if expected_awareness is not None:
+            awareness_checks += 1
+            if run.diagnosable_without_source is expected_awareness:
+                awareness_hits += 1
+            else:
+                failures.append("diagnosable_without_source mismatch")
+        elif run.confidence in {"high", "medium"}:
+            awareness_checks += 1
+            if run.diagnosable_without_source is True:
+                awareness_hits += 1
+        if run.confidence in {"high", "medium"} and run.diagnosable_without_source is not True:
+            failures.append("precise diagnosis requires source-free diagnosable awareness")
 
         required_refs = set(fixture.required_evidence_refs)
         actual_refs = set(run.evidence_refs)
@@ -237,6 +261,8 @@ def evaluate_no_codebase_diagnoses(
                 actual_confidence=run.confidence,
                 expected_freshness_status=fixture.expected_freshness_status,
                 actual_freshness_status=run.freshness_status,
+                expected_diagnosable_without_source=fixture.expected_diagnosable_without_source,
+                actual_diagnosable_without_source=run.diagnosable_without_source,
                 expected_evidence_refs=fixture.required_evidence_refs,
                 actual_evidence_refs=run.evidence_refs,
             )
@@ -264,6 +290,7 @@ def evaluate_no_codebase_diagnoses(
         insufficient_accuracy=_ratio(insufficient_passed, len(insufficient_fixtures)),
         evidence_ref_coverage=_ratio(evidence_hits, evidence_checks),
         freshness_coverage=_ratio(freshness_hits, freshness_checks),
+        awareness_coverage=_ratio(awareness_hits, awareness_checks),
         tool_coverage=_ratio(tool_hits, tool_checks),
         persistence_coverage=_ratio(persistence_hits, persistence_checks),
         no_codebase_violations=tuple(violations),
@@ -278,6 +305,7 @@ def _fixture_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisFixture
         expected_root_cause_id=_optional_str(data.get("expected_root_cause_id")),
         expected_confidence=str(data["expected_confidence"]),
         expected_freshness_status=str(data.get("expected_freshness_status") or ""),
+        expected_diagnosable_without_source=_optional_bool(data.get("expected_diagnosable_without_source")),
         required_evidence_refs=tuple(_string_values(data.get("required_evidence_refs", []))),
         required_tool_calls=tuple(_string_values(data.get("required_tool_calls", []))),
         expected_missing_evidence=tuple(_string_values(data.get("expected_missing_evidence", []))),
@@ -291,6 +319,7 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
         root_cause_id=_optional_str(data.get("root_cause_id")),
         confidence=str(data.get("confidence") or ""),
         freshness_status=str(data.get("freshness_status") or ""),
+        diagnosable_without_source=_optional_bool(data.get("diagnosable_without_source")),
         evidence_refs=tuple(_evidence_refs(data.get("evidence_refs", []))),
         tool_calls=tuple(_tool_names(data.get("tool_calls", []))),
         missing_evidence=tuple(_string_values(data.get("missing_evidence", []))),
@@ -303,6 +332,19 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _string_values(values: Iterable[Any]) -> list[str]:

@@ -2592,6 +2592,43 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione no-codebase awareness quality gate Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-6/P1-5/P2-5.
+
+Agent locale:
+
+- `hades_no_codebase_eval` legge ora `expected_diagnosable_without_source` dalle
+  fixture e `diagnosable_without_source` dai run.
+- La suite produce la metrica `awareness_coverage` e fallisce un run
+  high/medium quando l'awareness non prova
+  `diagnosable_without_source=true`, anche se root cause, evidence refs e
+  freshness risultano corretti.
+- `hades_quality_report` propaga `awareness_coverage` e genera il blocker
+  `repair_awareness_coverage`.
+- La fixture canonica dichiara source-free awareness true per i 5 casi completi
+  e false per missing source slice / stale graph.
+- La skill `hades-bug-diagnosis` allinea i guardrail: niente salvataggio
+  high/medium senza `freshness.status=current`, `evidence_refs` e
+  `awareness.diagnosable_without_source=true`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `10 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_no_codebase_eval.py hermes_cli/hades_quality_report.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale fixture:
+  `.venv/bin/python -m json.tool tests/fixtures/hades/no_codebase_bug_cases.json`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Valutazione remota end-to-end con modello/agent reale invece di solo API
+  contract backend.
+
 ## Esecuzione no-codebase feature test backend - 2026-07-07
 
 Stato: completate prime tranche remote P0-7.
