@@ -146,6 +146,24 @@ def _php_graph_artifact():
                 "path": "app/Http/Controllers/OrderController.php",
                 "line": 47,
             },
+            {
+                "kind": "query_operation",
+                "from": "OrderController@show",
+                "to": "query:orders:update",
+                "table": "orders",
+                "operation": "update",
+                "access": "write",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 49,
+            },
+            {
+                "kind": "query_write",
+                "from": "OrderController@show",
+                "to": "table:orders",
+                "query_method": "update",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 49,
+            },
         ],
         "tests": {
             "schema": "hades.test_map.v1",
@@ -805,6 +823,49 @@ def test_hades_backend_graph_search_finds_local_log_map_nodes(monkeypatch, tmp_p
         for ref in graph_refs
     )
     assert any(ref["type"] == "edge" and ref["kind"] == "emits_log" for ref in graph_refs)
+
+
+def test_hades_backend_graph_search_finds_local_query_write_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders update write", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(ref["type"] == "edge" and ref["kind"] == "query_write" for ref in graph_refs)
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "query_operation"
+        and ref["to"] == "query:orders:update"
+        for ref in graph_refs
+    )
 
 
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):

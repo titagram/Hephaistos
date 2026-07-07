@@ -4899,3 +4899,32 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel query builder graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per query awareness source-free.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` mantiene gli edge compatibili `query_table` e aggiunge
+  edge metadata-only per catene `DB::table(...)->...`.
+- I nuovi edge `query_operation` puntano a nodi `query:<table>:<operation>` e
+  conservano solo tabella, operazione, accesso (`filter`, `join`, `read`,
+  `write`, `shape`), path e linea.
+- I nuovi edge `query_read` e `query_write` collegano controller/metodo alle
+  tabelle coinvolte, cosi' una traversata no-codebase puo' distinguere una
+  route che legge `orders` da una che aggiorna `orders`.
+- Il payload non include literal della query, argomenti `where`, valori
+  aggiornati o sorgente raw.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `68 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

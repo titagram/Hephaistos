@@ -619,6 +619,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        SyncOrderJob::dispatch($order->id);\n"
         "        event(new OrderPlaced($order));\n"
         "        DB::table('orders')->join('customers', 'orders.customer_id', '=', 'customers.id')->first();\n"
+        "        DB::table('orders')->where('status', 'pending')->update(['status' => 'paid']);\n"
         "        Order::where('status', 'paid')->first();\n"
         "        OrderService::format($order);\n"
         "        return view('orders.show', ['order' => $order]);\n"
@@ -886,6 +887,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
     assert ("query_table", "OrderController@show", "table:orders") in edges
     assert ("query_table", "OrderController@show", "table:customers") in edges
+    assert ("query_operation", "OrderController@show", "query:customers:join") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:first") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:update") in edges
+    assert ("query_read", "OrderController@show", "table:orders") in edges
+    assert ("query_write", "OrderController@show", "table:orders") in edges
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:update",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "operation": "update",
+        "access": "write",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 20,
+    } in artifact["edges"]
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges
     assert ("view_ref", "App\\Http\\Controllers\\OrderController", "view:orders.show") in edges
@@ -950,6 +967,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
     assert "order payment gateway degraded" not in str(artifact)
+    assert "pending" not in str(artifact)
+    assert "paid" not in str(artifact)
     assert "$request->validate" not in str(artifact)
     assert "DB::table" not in str(artifact)
     assert "$schedule->command" not in str(artifact)

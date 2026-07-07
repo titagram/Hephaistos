@@ -202,6 +202,61 @@ PHP_SCHEDULE_CADENCE_RE = re.compile(r"->(?P<cadence>[A-Za-z_][A-Za-z0-9_]*)\s*\
 PHP_DB_TABLE_RE = re.compile(r"\bDB::table\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_FROM_RE = re.compile(r"->from\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_JOIN_RE = re.compile(r"->(?P<method>join|leftJoin|rightJoin|crossJoin)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_QUERY_CHAIN_CALL_RE = re.compile(r"->(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+PHP_QUERY_READ_TERMINALS = {
+    "chunk",
+    "count",
+    "cursor",
+    "doesntexist",
+    "exists",
+    "find",
+    "first",
+    "get",
+    "lazy",
+    "paginate",
+    "pluck",
+    "simplepaginate",
+    "value",
+}
+PHP_QUERY_WRITE_TERMINALS = {
+    "decrement",
+    "delete",
+    "increment",
+    "insert",
+    "insertgetid",
+    "insertorignore",
+    "truncate",
+    "update",
+    "updateorinsert",
+    "upsert",
+}
+PHP_QUERY_TABLE_METHODS = {"from", "join", "leftjoin", "rightjoin", "crossjoin"}
+PHP_QUERY_SHAPE_METHODS = {
+    "addselect",
+    "groupby",
+    "having",
+    "limit",
+    "orderby",
+    "offset",
+    "select",
+}
+PHP_QUERY_FILTER_METHODS = {
+    "orwhere",
+    "where",
+    "wherebetween",
+    "wherein",
+    "wherenotbetween",
+    "wherenotin",
+    "wherenotnull",
+    "wherenull",
+}
+PHP_QUERY_TRACKED_METHODS = (
+    PHP_QUERY_READ_TERMINALS
+    | PHP_QUERY_WRITE_TERMINALS
+    | PHP_QUERY_TABLE_METHODS
+    | PHP_QUERY_SHAPE_METHODS
+    | PHP_QUERY_FILTER_METHODS
+)
 PHP_CONTAINER_BIND_RE = re.compile(
     r"(?:\$this->app->|app\(\)->|App::)(?P<method>bind|singleton|scoped|instance)\s*"
     r"\(\s*(?P<abstract>\\?[A-Za-z0-9_\\]+)::class\s*,\s*"
@@ -2077,6 +2132,111 @@ def _append_php_method_context_edge(
     return _edge_append(edges, method_edge, max_edges=max_edges)
 
 
+def _php_query_operation_access(method: str) -> str:
+    normalized = method.lower()
+    if normalized in PHP_QUERY_WRITE_TERMINALS:
+        return "write"
+    if normalized in PHP_QUERY_READ_TERMINALS:
+        return "read"
+    if normalized in PHP_QUERY_TABLE_METHODS:
+        return "join" if normalized.endswith("join") else "table"
+    if normalized in PHP_QUERY_FILTER_METHODS:
+        return "filter"
+    if normalized in PHP_QUERY_SHAPE_METHODS:
+        return "shape"
+    return "query"
+
+
+def _php_query_chain_operations(source: str, start: int, main_table: str) -> list[dict[str, Any]]:
+    statement_end = source.find(";", start)
+    if statement_end == -1:
+        statement_end = min(len(source), start + 4000)
+    statement = source[start:statement_end]
+    operations: list[dict[str, Any]] = []
+    for match in PHP_QUERY_CHAIN_CALL_RE.finditer(statement):
+        method = match.group("method")
+        normalized = method.lower()
+        if normalized not in PHP_QUERY_TRACKED_METHODS:
+            continue
+        table = main_table
+        if normalized in PHP_QUERY_TABLE_METHODS:
+            args_end = statement.find(")", match.end())
+            args = statement[match.end() : args_end if args_end != -1 else len(statement)]
+            table_match = PHP_QUOTED_VALUE_RE.search(args)
+            if table_match:
+                table = table_match.group("value")
+        operations.append(
+            {
+                "method": method,
+                "table": table,
+                "access": _php_query_operation_access(method),
+                "offset": start + match.start(),
+            }
+        )
+    return operations
+
+
+def _append_php_query_builder_edges(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    match: re.Match[str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    class_info = _class_context(classes, match.start())
+    context = _php_context_id(class_info, rel)
+    main_table = match.group("table")
+    for operation in _php_query_chain_operations(source, match.end(), main_table):
+        operation_name = str(operation["method"])
+        table = str(operation["table"])
+        access = str(operation["access"])
+        offset = int(operation["offset"])
+        operation_edge = {
+            "kind": "query_operation",
+            "from": context,
+            "to": f"query:{table}:{operation_name}",
+            "table": table,
+            "operation": operation_name,
+            "access": access,
+            "path": rel,
+            "line": _line_number(source, offset),
+        }
+        truncated = not _edge_append(edges, operation_edge, max_edges=max_edges) or truncated
+        truncated = not _append_php_method_context_edge(
+            source,
+            rel,
+            classes,
+            offset,
+            edges,
+            operation_edge,
+            max_edges=max_edges,
+        ) or truncated
+        if access not in {"read", "write"}:
+            continue
+        access_edge = {
+            "kind": f"query_{access}",
+            "from": context,
+            "to": f"table:{table}",
+            "query_method": operation_name,
+            "path": rel,
+            "line": _line_number(source, offset),
+        }
+        truncated = not _edge_append(edges, access_edge, max_edges=max_edges) or truncated
+        truncated = not _append_php_method_context_edge(
+            source,
+            rel,
+            classes,
+            offset,
+            edges,
+            access_edge,
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2646,6 +2806,15 @@ def _build_php_graph(
                     edge,
                     max_edges=max_edges,
                 ) or truncated
+                if table_pattern is PHP_DB_TABLE_RE:
+                    truncated = _append_php_query_builder_edges(
+                        source,
+                        rel,
+                        classes,
+                        match,
+                        edges,
+                        max_edges=max_edges,
+                    ) or truncated
 
         for kind, pattern, prefix in (
             ("view_ref", PHP_VIEW_FUNCTION_RE, "view"),
