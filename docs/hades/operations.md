@@ -70,6 +70,9 @@ HEAD commit. If `sync_git_tree` or `populate_backend_ast` produces the same
 artifact twice, Hades logs `artifact.skipped`, records
 `artifacts_skipped`/`skipped_unchanged_last_sync`, and avoids a duplicate
 backend upload while keeping local awareness coverage present.
+The same sync summary records `duration_ms`; use it as the local operational
+baseline for sync cost before comparing larger projects or changing indexing
+budgets.
 Its `identity` section separates local profile memory, portable backend project
 memory, and local workspace binding state so a new device can distinguish
 shared project recall from source/index freshness that must be established on

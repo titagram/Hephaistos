@@ -119,7 +119,8 @@ def test_hades_backend_mvp_smoke_no_network(monkeypatch, tmp_path):
     status = load_backend_status_payload()
 
     assert result.exit_code == 0
-    assert result.summary == {
+    assert result.summary["duration_ms"] >= 0
+    assert {key: value for key, value in result.summary.items() if key != "duration_ms"} == {
         "pulled": 1,
         "completed": 1,
         "waiting": 0,

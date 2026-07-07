@@ -90,6 +90,7 @@ def run_backend_sync(
             "hades_expired_jobs": len(expired_jobs),
         },
     )
+    started_monotonic = time.monotonic()
 
     try:
         client = client_factory() if client_factory is not None else runtime.client_from_config()
@@ -262,6 +263,7 @@ def run_backend_sync(
         "source_slices_uploaded": source_slices_uploaded,
         "source_slice_errors": source_slice_errors,
         "inbox_events": inbox_events,
+        "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }
     with db.connect_closing() as conn:
         db.record_sync_state(conn, "last_sync_summary", summary)

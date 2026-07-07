@@ -2360,6 +2360,35 @@ Resta fuori da questa tranche:
 - Compressione payload artifact e benchmark dataset medio/grande.
 - Retention/cleanup dedicata delle chiavi cache di workspace non piu' linkati.
 
+## Esecuzione sync duration metric Hades - 2026-07-07
+
+Stato: completata una seconda tranche locale P2-3.
+
+Agent locale:
+
+- `run_backend_sync` misura `duration_ms` con `time.monotonic()` e lo include in
+  `last_sync_summary`.
+- La metrica viene quindi salvata in `hades_backend.db`, esposta da
+  `hades backend status --json` e renderizzata dalla dashboard nel pannello
+  "Last sync summary".
+- Lo smoke test MVP verifica che `duration_ms` sia presente e non negativo senza
+  rendere fragile il valore assoluto.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_mvp_smoke.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `46 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_sync.py tests/hermes_cli/test_hades_backend_mvp_smoke.py`
+  passato; `py_compile` sugli stessi file passato.
+
+Resta fuori da questa tranche:
+
+- Benchmark dataset medio/grande con soglie automatiche.
+- Compressione payload artifact.
+- Indexing incrementale file-level.
+
 ## Esecuzione support runbook Hades - 2026-07-07
 
 Stato: completata la prima tranche locale P2-4 del piano "Documentation,
