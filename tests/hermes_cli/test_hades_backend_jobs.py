@@ -771,7 +771,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 80},
+            "payload": {"max_files": 50, "max_symbols": 50, "max_edges": 140},
         },
         workspace_root=workspace,
     )
@@ -814,21 +814,29 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
+    assert ("static_call", "OrderController@show", "App\\Services\\OrderService::format") in edges
     assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("uses_dependency", "OrderController@__construct", "App\\Services\\OrderService") in edges
     assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
+    assert ("request_validation", "OrderController@show", "validation:status") in edges
     assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
+    assert ("dispatches_job", "OrderController@show", "App\\Jobs\\SyncOrderJob") in edges
     assert ("emits_event", "App\\Http\\Controllers\\OrderController", "App\\Events\\OrderPlaced") in edges
+    assert ("emits_event", "OrderController@show", "App\\Events\\OrderPlaced") in edges
     assert ("event_listener", "App\\Events\\OrderPlaced", "App\\Listeners\\SendOrderReceipt") in edges
     assert ("artisan_command", "App\\Console\\Commands\\SyncOrdersCommand", "command:orders:sync") in edges
     assert ("scheduled_command", "App\\Console\\Kernel", "command:orders:sync") in edges
     assert ("scheduled_job", "App\\Console\\Kernel", "App\\Jobs\\SyncOrderJob") in edges
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:orders") in edges
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
+    assert ("query_table", "OrderController@show", "table:orders") in edges
+    assert ("query_table", "OrderController@show", "table:customers") in edges
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
+    assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges
     assert ("view_ref", "App\\Http\\Controllers\\OrderController", "view:orders.show") in edges
+    assert ("view_ref", "OrderController@show", "view:orders.show") in edges
     assert ("blade_extends", "view:orders.show", "view:layouts.app") in edges
     assert ("blade_include", "view:orders.show", "view:orders.partials.summary") in edges
     assert ("blade_include", "view:layouts.app", "view:shared.flash") in edges
@@ -843,6 +851,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
     assert ("env_ref", "App\\Http\\Controllers\\OrderController", "env:ORDER_DEBUG") in edges
+    assert ("config_ref", "OrderController@show", "config:services.orders.cache") in edges
+    assert ("env_ref", "OrderController@show", "env:ORDER_DEBUG") in edges
     assert ("emits_log", "OrderController@show", log_events["OrderController@show"]["id"]) in edges
     assert (
         "migration_table",

@@ -193,7 +193,11 @@ resolution, instantiation metadata, model-to-table edges, migration
 tables/columns/indexes/foreign keys, policy mappings, FormRequest/request
 validation fields, dispatched jobs, emitted events, event listeners, Artisan
 command signatures, scheduler command/job edges, query-table edges, Eloquent
-query calls, and redacted `config()`/`env()` references. The code graph includes
+query calls, and redacted `config()`/`env()` references. For diagnostic
+traversal, PHP graph artifacts keep the existing class-level edges and also add
+method-level duplicates for calls, validation, DB queries, config/env refs,
+view refs, job/event dispatch, and instantiation when a method context is
+recognizable. The code graph includes
 framework, route/page handlers, symbols, dependency manifests, and import edges
 so backend search can answer structure questions without loading source chunks.
 Graph artifacts also include a source-free `tests` map for recognized test

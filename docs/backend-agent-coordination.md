@@ -3573,6 +3573,35 @@ Resta fuori da questa tranche:
 
 - Valutazione E2E con modello/agent reale e guidance visuale dedicata nelle UI.
 
+## Esecuzione PHP method-level graph edges - 2026-07-07
+
+Stato: completata una tranche locale P0-4 sulla precisione del graph PHP.
+
+Agent locale:
+
+- `hades.php_graph.v1` conserva gli edge class-level esistenti e aggiunge edge
+  duplicati method-level quando il contesto metodo e' riconoscibile.
+- I nuovi edge coprono validation inline, static/service calls, job/event
+  dispatch, query-table, Eloquent query, view refs, config/env refs e
+  instantiation.
+- Una traversata source-free puo' quindi seguire `route -> Controller@method ->`
+  service/table/view/config/job/event senza leggere source code.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Parser PHP AST/type-aware reale e query builder/data-flow avanzato.
+
 ## Esecuzione source-free test map graph - 2026-07-07
 
 Stato: completata una tranche locale P2-2 sull'indicizzazione vera dei

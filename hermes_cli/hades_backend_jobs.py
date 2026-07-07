@@ -1814,6 +1814,28 @@ def _append_php_log_events(
     return truncated
 
 
+def _append_php_method_context_edge(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    offset: int,
+    edges: list[dict[str, Any]],
+    edge: dict[str, Any],
+    *,
+    max_edges: int,
+) -> bool:
+    class_context = _php_context_id(_class_context(classes, offset), rel)
+    method_context = _php_method_context_id(source, classes, offset, rel)
+    if method_context == class_context:
+        return True
+    method_edge = {
+        **edge,
+        "from": method_context,
+        "class_context": class_context,
+    }
+    return _edge_append(edges, method_edge, max_edges=max_edges)
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2118,15 +2140,21 @@ def _build_php_graph(
         for match in PHP_VALIDATE_ARRAY_RE.finditer(source):
             class_info = _class_context(classes, match.start())
             for field_info in _php_array_field_keys(source, match.group("body"), match.start()):
-                truncated = not _edge_append(
+                edge = {
+                    "kind": "request_validation",
+                    "from": _php_context_id(class_info, rel),
+                    "to": f"validation:{field_info['field']}",
+                    "path": rel,
+                    "line": field_info["line"],
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
                     edges,
-                    {
-                        "kind": "request_validation",
-                        "from": _php_context_id(class_info, rel),
-                        "to": f"validation:{field_info['field']}",
-                        "path": rel,
-                        "line": field_info["line"],
-                    },
+                    edge,
                     max_edges=max_edges,
                 ) or truncated
 
@@ -2167,27 +2195,39 @@ def _build_php_graph(
                 continue
             class_info = _class_context(classes, match.start())
             resolved_class = _php_fqcn_resolved(namespace, class_name, uses)
-            truncated = not _edge_append(
+            edge = {
+                "kind": "static_call",
+                "from": class_info["name"] if class_info else rel,
+                "to": f"{resolved_class}::{method_name}",
+                "path": rel,
+                "line": _line_number(source, match.start()),
+            }
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+            truncated = not _append_php_method_context_edge(
+                source,
+                rel,
+                classes,
+                match.start(),
                 edges,
-                {
-                    "kind": "static_call",
+                edge,
+                max_edges=max_edges,
+            ) or truncated
+            if method_name in PHP_ELOQUENT_QUERY_METHODS and _php_short_name(resolved_class) != "DB":
+                query_edge = {
+                    "kind": "eloquent_query",
                     "from": class_info["name"] if class_info else rel,
                     "to": f"{resolved_class}::{method_name}",
                     "path": rel,
                     "line": _line_number(source, match.start()),
-                },
-                max_edges=max_edges,
-            ) or truncated
-            if method_name in PHP_ELOQUENT_QUERY_METHODS and _php_short_name(resolved_class) != "DB":
-                truncated = not _edge_append(
+                }
+                truncated = not _edge_append(edges, query_edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
                     edges,
-                    {
-                        "kind": "eloquent_query",
-                        "from": class_info["name"] if class_info else rel,
-                        "to": f"{resolved_class}::{method_name}",
-                        "path": rel,
-                        "line": _line_number(source, match.start()),
-                    },
+                    query_edge,
                     max_edges=max_edges,
                 ) or truncated
 
@@ -2248,30 +2288,42 @@ def _build_php_graph(
 
         for match in PHP_DISPATCH_JOB_RE.finditer(source):
             class_info = _class_context(classes, match.start())
-            truncated = not _edge_append(
+            edge = {
+                "kind": "dispatches_job",
+                "from": _php_context_id(class_info, rel),
+                "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                "path": rel,
+                "line": _line_number(source, match.start()),
+            }
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+            truncated = not _append_php_method_context_edge(
+                source,
+                rel,
+                classes,
+                match.start(),
                 edges,
-                {
-                    "kind": "dispatches_job",
-                    "from": _php_context_id(class_info, rel),
-                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
-                    "path": rel,
-                    "line": _line_number(source, match.start()),
-                },
+                edge,
                 max_edges=max_edges,
             ) or truncated
 
         for event_pattern in (PHP_EVENT_FUNCTION_RE, PHP_EVENT_DISPATCH_RE):
             for match in event_pattern.finditer(source):
                 class_info = _class_context(classes, match.start())
-                truncated = not _edge_append(
+                edge = {
+                    "kind": "emits_event",
+                    "from": _php_context_id(class_info, rel),
+                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
                     edges,
-                    {
-                        "kind": "emits_event",
-                        "from": _php_context_id(class_info, rel),
-                        "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
-                        "path": rel,
-                        "line": _line_number(source, match.start()),
-                    },
+                    edge,
                     max_edges=max_edges,
                 ) or truncated
 
@@ -2336,6 +2388,15 @@ def _build_php_graph(
                 if "method" in match.groupdict():
                     edge["query_method"] = match.group("method")
                 truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    edge,
+                    max_edges=max_edges,
+                ) or truncated
 
         for kind, pattern, prefix in (
             ("view_ref", PHP_VIEW_FUNCTION_RE, "view"),
@@ -2344,15 +2405,21 @@ def _build_php_graph(
         ):
             for match in pattern.finditer(source):
                 class_info = _class_context(classes, match.start())
-                truncated = not _edge_append(
+                edge = {
+                    "kind": kind,
+                    "from": _php_context_id(class_info, rel),
+                    "to": f"{prefix}:{match.group('view')}",
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
                     edges,
-                    {
-                        "kind": kind,
-                        "from": _php_context_id(class_info, rel),
-                        "to": f"{prefix}:{match.group('view')}",
-                        "path": rel,
-                        "line": _line_number(source, match.start()),
-                    },
+                    edge,
                     max_edges=max_edges,
                 ) or truncated
 
@@ -2376,29 +2443,41 @@ def _build_php_graph(
         ):
             for match in pattern.finditer(source):
                 class_info = _class_context(classes, match.start())
-                truncated = not _edge_append(
+                edge = {
+                    "kind": kind,
+                    "from": _php_context_id(class_info, rel),
+                    "to": f"{prefix}:{match.group('key')}",
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
                     edges,
-                    {
-                        "kind": kind,
-                        "from": _php_context_id(class_info, rel),
-                        "to": f"{prefix}:{match.group('key')}",
-                        "path": rel,
-                        "line": _line_number(source, match.start()),
-                    },
+                    edge,
                     max_edges=max_edges,
                 ) or truncated
 
         for match in PHP_NEW_RE.finditer(source):
             class_info = _class_context(classes, match.start())
-            truncated = not _edge_append(
+            edge = {
+                "kind": "instantiates",
+                "from": class_info["name"] if class_info else rel,
+                "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                "path": rel,
+                "line": _line_number(source, match.start()),
+            }
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+            truncated = not _append_php_method_context_edge(
+                source,
+                rel,
+                classes,
+                match.start(),
                 edges,
-                {
-                    "kind": "instantiates",
-                    "from": class_info["name"] if class_info else rel,
-                    "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
-                    "path": rel,
-                    "line": _line_number(source, match.start()),
-                },
+                edge,
                 max_edges=max_edges,
             ) or truncated
 

@@ -437,7 +437,10 @@ model-table edges, migration tables/columns/indexes/foreign keys, policy
 mappings, FormRequest/request validation fields, dispatched jobs, emitted
 events, event listeners, Artisan command signatures, scheduler command/job
 edges, query-table edges, Eloquent query calls, and redacted config/env
-references. On Node/TypeScript/React/Next/Express workspaces it produces
+references. It keeps class-level PHP edges for compatibility and adds
+method-level duplicates for calls, validation, DB queries, config/env refs,
+view refs, job/event dispatch, and instantiation when method context is
+recognizable. On Node/TypeScript/React/Next/Express workspaces it produces
 `hades.code_graph.v1` with framework detection, route/page handlers, symbols,
 dependency manifests, and import edges. On Python workspaces it keeps the
 existing `hades.symbols.v1` class/function symbol output when no web graph is
