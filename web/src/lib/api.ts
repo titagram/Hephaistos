@@ -320,6 +320,12 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getHadesBackendStatus: () =>
     fetchJSON<HadesBackendStatus>("/api/hades/backend/status"),
+  createHadesBackendBugIntake: (body: HadesBackendBugIntakeRequest) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/bug-intake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   getHadesBackendJobs: () =>
     fetchJSON<HadesBackendJobsResponse>("/api/hades/backend/jobs"),
   approveHadesBackendJob: (jobId: string) =>
@@ -1815,12 +1821,34 @@ export interface HadesBackendProposalsResponse {
   proposals: HadesBackendMemoryProposal[];
 }
 
+export interface HadesBackendBugIntakeRequest {
+  title: string;
+  symptom: string;
+  workspace_binding_id?: string | null;
+  steps?: string | null;
+  expected?: string | null;
+  actual?: string | null;
+  severity?: string | null;
+  environment?: string | null;
+  failing_test?: string | null;
+  runtime_log?: string | null;
+  deploy_commit?: string | null;
+  workspace_head?: string | null;
+  request_url?: string | null;
+  request_method?: string | null;
+  response_status?: number | null;
+}
+
 export interface HadesBackendActionResponse {
   ok: boolean;
   status: string;
   summary: string;
   job?: HadesBackendJob;
   proposal?: HadesBackendMemoryProposal;
+  bug_report_id?: string | null;
+  evidence_ids?: Array<string | null>;
+  project_id?: string | null;
+  workspace_binding_id?: string | null;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

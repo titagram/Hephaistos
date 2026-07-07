@@ -3542,6 +3542,46 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione dashboard guided bug intake Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-1.
+
+Agent locale:
+
+- Nuova route dashboard `POST /api/hades/backend/bug-intake`.
+- La route crea un bug report backend usando il workspace binding esplicito
+  scelto dalla UI, quindi funziona anche quando il dashboard non e' avviato
+  dentro la repo collegata.
+- Il payload usa `hades.bug_intake.v1` e salva symptom, steps,
+  expected/actual, severity, environment e agent id.
+- Evidenze inline supportate: failing test, runtime log, deploy version,
+  HTTP request e HTTP response.
+- Failing test, log e URL passano dalla stessa redazione usata dalla CLI prima
+  dell'invio al backend.
+- La dashboard backend aggiunge il pannello `Bug intake` con selezione
+  workspace, campi bug principali, evidenze opzionali, stato busy e toast con
+  bug report id/evidence count.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m py_compile hermes_cli/web_server.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `3 passed`.
+- Frontend:
+  `npm run typecheck` in `web/` passato.
+- Frontend:
+  `npx eslint src/pages/BackendPage.tsx src/lib/api.ts --max-warnings=0` in
+  `web/` passato.
+
+Resta fuori da questa tranche:
+
+- Wizard desktop.
+- Upload file dal dashboard.
+- Privacy preview/edit prima del submit.
+
 ## Esecuzione timeout live Hades agent - 2026-07-07
 
 Stato: completata una tranche locale P2-3 sui timeout del provider Hades usato

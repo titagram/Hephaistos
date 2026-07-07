@@ -1,7 +1,8 @@
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Brain,
+  Bug,
   CheckCircle2,
   Clock,
   Database,
@@ -10,6 +11,7 @@ import {
   Link2,
   Play,
   RefreshCw,
+  Send,
   Server,
   ShieldCheck,
   XCircle,
@@ -27,6 +29,7 @@ import type {
   HadesBackendActionResponse,
   HadesBackendBinding,
   HadesBackendBindingAwareness,
+  HadesBackendBugIntakeRequest,
   HadesBackendCoverageItem,
   HadesBackendJob,
   HadesBackendMemoryProposal,
@@ -724,6 +727,374 @@ function ReviewMeta({ children }: { children: ReactNode }) {
   return <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{children}</div>;
 }
 
+interface BugIntakeFormState {
+  workspaceBindingId: string;
+  title: string;
+  symptom: string;
+  steps: string;
+  expected: string;
+  actual: string;
+  severity: string;
+  environment: string;
+  failingTest: string;
+  runtimeLog: string;
+  deployCommit: string;
+  workspaceHead: string;
+  requestUrl: string;
+  requestMethod: string;
+  responseStatus: string;
+}
+
+function optionalText(value: string): string | undefined {
+  const clean = value.trim();
+  return clean || undefined;
+}
+
+function optionalNumber(value: string): number | undefined {
+  const clean = value.trim();
+  if (!clean) return undefined;
+  const parsed = Number(clean);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function defaultBugIntakeBindingId(status: HadesBackendStatus): string {
+  const current = status.identity?.workspace_binding.current_workspace_binding_id;
+  if (current) return current;
+  return status.bindings.find((binding) => binding.workspace_binding_id)?.workspace_binding_id ?? "";
+}
+
+function initialBugIntakeForm(status: HadesBackendStatus): BugIntakeFormState {
+  const selected = status.bindings.find(
+    (binding) => binding.workspace_binding_id === defaultBugIntakeBindingId(status),
+  );
+  return {
+    workspaceBindingId: selected?.workspace_binding_id ?? "",
+    title: "",
+    symptom: "",
+    steps: "",
+    expected: "",
+    actual: "",
+    severity: "medium",
+    environment: "",
+    failingTest: "",
+    runtimeLog: "",
+    deployCommit: "",
+    workspaceHead: selected?.head_commit ?? "",
+    requestUrl: "",
+    requestMethod: "GET",
+    responseStatus: "",
+  };
+}
+
+function bugIntakeBindingLabel(binding: HadesBackendBinding): string {
+  const label = binding.display_path || binding.workspace_binding_id || "Workspace";
+  const head = binding.head_commit ? ` (${binding.head_commit.slice(0, 12)})` : "";
+  return `${label}${head}`;
+}
+
+function FormField({
+  label,
+  children,
+  className = "",
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={`grid gap-1.5 text-xs font-medium text-muted-foreground ${className}`}>
+      {label}
+      {children}
+    </label>
+  );
+}
+
+const inputClassName =
+  "w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60";
+
+const textareaClassName =
+  "min-h-[86px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60";
+
+function BugIntakePanel({
+  status,
+  onCreated,
+  showToast,
+}: {
+  status: HadesBackendStatus;
+  onCreated: () => Promise<void>;
+  showToast: (message: string, tone?: "success" | "error") => void;
+}) {
+  const [form, setForm] = useState<BugIntakeFormState>(() => initialBugIntakeForm(status));
+  const [submitting, setSubmitting] = useState(false);
+  const bindingOptions = status.bindings.filter((binding) => Boolean(binding.workspace_binding_id));
+  const selectedBinding = bindingOptions.find((binding) => binding.workspace_binding_id === form.workspaceBindingId);
+  const canSubmit = Boolean(form.title.trim() && form.symptom.trim() && form.workspaceBindingId && !submitting);
+
+  const setField = useCallback(
+    (field: keyof BugIntakeFormState, value: string) => {
+      setForm((current) => ({
+        ...current,
+        [field]: value,
+      }));
+    },
+    [],
+  );
+
+  const handleBindingChange = useCallback(
+    (value: string) => {
+      const binding = bindingOptions.find((item) => item.workspace_binding_id === value);
+      setForm((current) => ({
+        ...current,
+        workspaceBindingId: value,
+        workspaceHead: current.workspaceHead || binding?.head_commit || "",
+      }));
+    },
+    [bindingOptions],
+  );
+
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!canSubmit) return;
+      const payload: HadesBackendBugIntakeRequest = {
+        workspace_binding_id: form.workspaceBindingId,
+        title: form.title.trim(),
+        symptom: form.symptom.trim(),
+        steps: optionalText(form.steps),
+        expected: optionalText(form.expected),
+        actual: optionalText(form.actual),
+        severity: optionalText(form.severity),
+        environment: optionalText(form.environment),
+        failing_test: optionalText(form.failingTest),
+        runtime_log: optionalText(form.runtimeLog),
+        deploy_commit: optionalText(form.deployCommit),
+        workspace_head: optionalText(form.workspaceHead),
+        request_url: optionalText(form.requestUrl),
+        request_method: optionalText(form.requestMethod),
+        response_status: optionalNumber(form.responseStatus),
+      };
+      setSubmitting(true);
+      try {
+        const result = await api.createHadesBackendBugIntake(payload);
+        const evidenceCount = result.evidence_ids?.filter(Boolean).length ?? 0;
+        showToast(
+          `Bug report ${result.bug_report_id || "created"} saved with ${evidenceCount} evidence item(s)`,
+          "success",
+        );
+        setForm((current) => ({
+          ...initialBugIntakeForm(status),
+          workspaceBindingId: current.workspaceBindingId,
+          workspaceHead: current.workspaceHead,
+        }));
+        await onCreated();
+      } catch (error) {
+        showToast(`Bug intake failed: ${error}`, "error");
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [canSubmit, form, onCreated, showToast, status],
+  );
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Bug className="h-4 w-4" />
+            Bug intake
+          </H2>
+          <Badge tone={bindingOptions.length ? "success" : "warning"}>
+            {bindingOptions.length ? "workspace selected" : "no workspace"}
+          </Badge>
+        </div>
+
+        <form className="grid gap-4" onSubmit={handleSubmit}>
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_12rem]">
+            <FormField label="Workspace">
+              <select
+                className={inputClassName}
+                value={form.workspaceBindingId}
+                disabled={bindingOptions.length === 0 || submitting}
+                onChange={(event) => handleBindingChange(event.target.value)}
+              >
+                {bindingOptions.length === 0 ? (
+                  <option value="">No linked workspace</option>
+                ) : (
+                  bindingOptions.map((binding) => (
+                    <option value={binding.workspace_binding_id || ""} key={binding.workspace_binding_id}>
+                      {bugIntakeBindingLabel(binding)}
+                    </option>
+                  ))
+                )}
+              </select>
+            </FormField>
+            <FormField label="Severity">
+              <select
+                className={inputClassName}
+                value={form.severity}
+                disabled={submitting}
+                onChange={(event) => setField("severity", event.target.value)}
+              >
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="critical">critical</option>
+              </select>
+            </FormField>
+            <FormField label="Environment">
+              <input
+                className={inputClassName}
+                value={form.environment}
+                disabled={submitting}
+                placeholder="production"
+                onChange={(event) => setField("environment", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+            <FormField label="Title">
+              <input
+                className={inputClassName}
+                value={form.title}
+                disabled={submitting}
+                placeholder="Short bug title"
+                onChange={(event) => setField("title", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Symptom">
+              <textarea
+                className={textareaClassName}
+                value={form.symptom}
+                disabled={submitting}
+                placeholder="Observed behavior"
+                onChange={(event) => setField("symptom", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-3">
+            <FormField label="Steps">
+              <textarea
+                className={textareaClassName}
+                value={form.steps}
+                disabled={submitting}
+                placeholder="Reproduction path"
+                onChange={(event) => setField("steps", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Expected">
+              <textarea
+                className={textareaClassName}
+                value={form.expected}
+                disabled={submitting}
+                placeholder="Expected result"
+                onChange={(event) => setField("expected", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Actual">
+              <textarea
+                className={textareaClassName}
+                value={form.actual}
+                disabled={submitting}
+                placeholder="Actual result"
+                onChange={(event) => setField("actual", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <FormField label="Failing test output">
+              <textarea
+                className={textareaClassName}
+                value={form.failingTest}
+                disabled={submitting}
+                placeholder="Paste failing test output"
+                onChange={(event) => setField("failingTest", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Runtime log">
+              <textarea
+                className={textareaClassName}
+                value={form.runtimeLog}
+                disabled={submitting}
+                placeholder="Paste relevant log excerpt"
+                onChange={(event) => setField("runtimeLog", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_9rem]">
+            <FormField label="Deploy commit">
+              <input
+                className={inputClassName}
+                value={form.deployCommit}
+                disabled={submitting}
+                placeholder="deployed SHA"
+                onChange={(event) => setField("deployCommit", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Workspace head">
+              <input
+                className={inputClassName}
+                value={form.workspaceHead}
+                disabled={submitting}
+                placeholder={selectedBinding?.head_commit || "indexed SHA"}
+                onChange={(event) => setField("workspaceHead", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Request URL">
+              <input
+                className={inputClassName}
+                value={form.requestUrl}
+                disabled={submitting}
+                placeholder="https://..."
+                onChange={(event) => setField("requestUrl", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Status">
+              <input
+                className={inputClassName}
+                value={form.responseStatus}
+                disabled={submitting}
+                inputMode="numeric"
+                placeholder="500"
+                onChange={(event) => setField("responseStatus", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <FormField label="Method" className="w-32">
+              <select
+                className={inputClassName}
+                value={form.requestMethod}
+                disabled={submitting}
+                onChange={(event) => setField("requestMethod", event.target.value)}
+              >
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </FormField>
+            <Button
+              className="uppercase"
+              type="submit"
+              disabled={!canSubmit}
+              prefix={submitting ? <Spinner /> : <Send className="h-4 w-4" />}
+            >
+              Save bug report
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function BackendPage() {
   const [status, setStatus] = useState<HadesBackendStatus | null>(null);
   const [jobs, setJobs] = useState<HadesBackendJob[]>([]);
@@ -928,6 +1299,7 @@ export default function BackendPage() {
         busyAction={busyAction}
         runReviewAction={runReviewAction}
       />
+      <BugIntakePanel status={status} onCreated={load} showToast={showToast} />
       <GovernanceQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />
 

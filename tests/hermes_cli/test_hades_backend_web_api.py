@@ -230,3 +230,134 @@ def test_hades_backend_web_routes_review_jobs_and_proposals(monkeypatch, tmp_pat
     assert any(payload["status"] == "cancelled" for _, payload in fake_client.status_updates)
     assert any(payload["status"] == "started" for _, payload in fake_client.status_updates)
     assert fake_client.results[0][0] == "job_approve"
+
+
+def test_hades_backend_web_route_creates_bug_intake_with_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime
+    from hermes_cli import web_server
+
+    class FakeBackendClient:
+        def __init__(self):
+            self.reports = []
+            self.evidence = []
+            self.closed = False
+
+        def create_bug_report(self, **payload):
+            self.reports.append(payload)
+            return {"bug_report": {"id": "bug_1"}}
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": f"ev_{len(self.evidence)}"}}
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeBackendClient()
+    monkeypatch.setattr(hades_backend_runtime, "client_from_config", lambda: fake_client)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="local_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(repo),
+            git_remote_display="origin",
+            git_remote_hash="hash",
+            head_commit="a" * 40,
+            backend_workspace_binding_id="wb_1",
+        )
+
+    previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    try:
+        response = client.post(
+            "/api/hades/backend/bug-intake",
+            json={
+                "workspace_binding_id": "wb_1",
+                "title": "Checkout fails",
+                "symptom": "The checkout endpoint returns 500.",
+                "steps": "Open cart and submit payment.",
+                "expected": "Order is created.",
+                "actual": "HTTP 500.",
+                "severity": "high",
+                "environment": "production",
+                "failing_test": "FAILED tests/test_checkout.py::test_submit OPENAI_API_KEY=sk-live-secretvalue12345",
+                "runtime_log": "ERROR checkout Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+                "deploy_commit": "b" * 40,
+                "workspace_head": "a" * 40,
+                "request_url": "https://app.example/orders/1?token=supersecret12345",
+                "request_method": "post",
+                "response_status": 500,
+            },
+        )
+    finally:
+        if previous_auth_required is None:
+            try:
+                delattr(web_server.app.state, "auth_required")
+            except AttributeError:
+                pass
+        else:
+            web_server.app.state.auth_required = previous_auth_required
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["bug_report_id"] == "bug_1"
+    assert body["project_id"] == "proj_1"
+    assert body["workspace_binding_id"] == "wb_1"
+    assert body["evidence_ids"] == ["ev_1", "ev_2", "ev_3", "ev_4", "ev_5"]
+    assert fake_client.closed is True
+
+    assert fake_client.reports == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "title": "Checkout fails",
+            "symptom": "The checkout endpoint returns 500.",
+            "payload": {
+                "schema": "hades.bug_intake.v1",
+                "source": "dashboard",
+                "steps": "Open cart and submit payment.",
+                "expected": "Order is created.",
+                "actual": "HTTP 500.",
+                "severity": "high",
+                "environment": "production",
+                "agent_id": "agent_1",
+            },
+        }
+    ]
+
+    assert [item["kind"] for item in fake_client.evidence] == [
+        "failing_test",
+        "log_excerpt",
+        "deploy_version",
+        "http_request",
+        "http_response",
+    ]
+    evidence_json = str(fake_client.evidence)
+    assert "sk-live-secretvalue12345" not in evidence_json
+    assert "abcdefghijklmnopqrstuvwxyz" not in evidence_json
+    assert "supersecret12345" not in evidence_json
+    assert fake_client.evidence[2]["payload"]["mismatch"] is True
+    assert fake_client.evidence[3]["payload"]["method"] == "POST"
+    assert fake_client.evidence[4]["payload"]["status"] == 500
