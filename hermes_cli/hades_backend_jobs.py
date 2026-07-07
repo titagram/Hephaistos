@@ -262,6 +262,11 @@ TS_ARROW_COMPONENT_RE = re.compile(
     re.MULTILINE,
 )
 TS_CLASS_RE = re.compile(r"\bclass\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)", re.MULTILINE)
+TS_LOG_CALL_RE = re.compile(
+    r"\b(?P<logger>console|logger|log)\s*\.\s*(?P<level>debug|info|warn|warning|error|exception|critical|log)\s*"
+    r"\(\s*(?P<quote>['\"])(?P<message>(?:\\.|(?! (?P=quote)).)*?)(?P=quote)",
+    re.MULTILINE | re.DOTALL | re.VERBOSE,
+)
 EXPRESS_ROUTE_RE = re.compile(
     r"\b(?P<router>app|router)\s*\.\s*(?P<method>get|post|put|patch|delete|options|all|use)\s*"
     r"\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_$][A-Za-z0-9_.$]*)?",
@@ -2391,6 +2396,7 @@ def _ts_graph_summary(
     framework: str,
     database: dict[str, Any] | None = None,
     tests: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -2399,7 +2405,8 @@ def _ts_graph_summary(
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
     test_count = int((tests or {}).get("file_count") or 0)
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {kinds or 'symbols:none'}"
+    log_count = int((logs or {}).get("event_count") or 0)
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; logs:{log_count}; {kinds or 'symbols:none'}"
 
 
 def _py_graph_summary(
@@ -3448,6 +3455,53 @@ def _append_ts_symbol(
     return True
 
 
+def _append_ts_log_events(
+    source: str,
+    rel: str,
+    edges: list[dict[str, Any]],
+    log_events: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    for match in TS_LOG_CALL_RE.finditer(source):
+        if len(log_events) >= MAX_LOG_EVENTS:
+            truncated = True
+            break
+        level = match.group("level").lower()
+        if level in {"warn", "log"}:
+            level = "warning" if level == "warn" else "info"
+        message = redact_secret(match.group("message") or "")
+        payload = {
+            "context": rel,
+            "logger": match.group("logger"),
+            "level": level,
+            "path": rel,
+            "line": _line_number(source, match.start()),
+            "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest() if message else "",
+            "message_length": len(message) if message else 0,
+        }
+        log_event = {key: value for key, value in payload.items() if value not in ("", None, 0)}
+        log_id_payload = json.dumps(log_event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        log_id = hashlib.sha256(log_id_payload).hexdigest()[:16]
+        log_event = {"id": f"log:{log_id}", **log_event}
+        log_events.append(log_event)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "emits_log",
+                "from": rel,
+                "to": log_event["id"],
+                "level": log_event.get("level"),
+                "logger": log_event.get("logger"),
+                "path": rel,
+                "line": log_event.get("line"),
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _build_ts_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -3467,6 +3521,7 @@ def _build_ts_graph(
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     database: dict[str, Any] = {"tables": []}
+    log_events: list[dict[str, Any]] = []
 
     for path in ts_files:
         rel = path.relative_to(workspace_root).as_posix()
@@ -3525,6 +3580,7 @@ def _build_ts_graph(
                 }
             )
 
+        truncated = _append_ts_log_events(source, rel, edges, log_events, max_edges=max_edges) or truncated
         for match in TS_IMPORT_RE.finditer(source):
             truncated = not _edge_append(
                 edges,
@@ -3625,6 +3681,13 @@ def _build_ts_graph(
         max_file_bytes=max_file_bytes,
     )
     truncated = truncated or tests_truncated
+    logs = {
+        "schema": "hades.log_map.v1",
+        "event_count": len(log_events),
+        "events": log_events[:MAX_LOG_EVENTS],
+        "truncated": len(log_events) > MAX_LOG_EVENTS,
+        "raw_source_included": False,
+    }
     graph_database = {**database, "tables": database["tables"][:500]}
     language = "prisma"
     if ts_files:
@@ -3639,6 +3702,7 @@ def _build_ts_graph(
         "edges": edges,
         "database": graph_database,
         "tests": tests,
+        "logs": logs,
         "dependency_manifests": dependency_manifests,
         "summary": "",
         "omitted": omitted,
@@ -3651,7 +3715,15 @@ def _build_ts_graph(
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database, tests=tests)
+    graph["summary"] = _ts_graph_summary(
+        graph["routes"],
+        symbols,
+        edges,
+        framework=framework,
+        database=graph_database,
+        tests=tests,
+        logs=logs,
+    )
     return graph
 
 

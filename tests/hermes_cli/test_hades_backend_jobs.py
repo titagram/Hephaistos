@@ -1073,7 +1073,7 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
         "import express from 'express';\n"
         "const router = express.Router();\n"
         "router.get('/health', healthHandler);\n"
-        "export function healthHandler() { return { ok: true }; }\n",
+        "export function healthHandler() { console.warn('health degraded'); return { ok: true }; }\n",
         encoding="utf-8",
     )
     (workspace / "components" / "OrderTable.tsx").write_text(
@@ -1101,6 +1101,7 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
     test_files = {item["path"]: item for item in artifact["tests"]["files"]}
+    log_events = {item["context"]: item for item in artifact["logs"]["events"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.code_graph.v1"
@@ -1113,6 +1114,7 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     assert ("component", "OrdersPage", "app/orders/page.tsx") in symbols
     assert ("component", "OrderTable", "components/OrderTable.tsx") in symbols
     assert ("function", "healthHandler", "server/api.ts") in symbols
+    assert ("emits_log", "server/api.ts", log_events["server/api.ts"]["id"]) in edges
     assert ("imports", "app/api/orders/route.ts", "../../../server/orders") in edges
     assert artifact["tests"]["schema"] == "hades.test_map.v1"
     assert artifact["tests"]["file_count"] == 1
@@ -1120,10 +1122,16 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     assert test_files["components/__tests__/OrderTable.test.tsx"]["symbol_refs"] == ["OrderTable"]
     assert ("test_covers_symbol", "test:components/__tests__/OrderTable.test.tsx", "OrderTable") in edges
     assert ("test_imports", "test:components/__tests__/OrderTable.test.tsx", "../OrderTable") in edges
+    assert artifact["logs"]["schema"] == "hades.log_map.v1"
+    assert artifact["logs"]["event_count"] == 1
+    assert log_events["server/api.ts"]["level"] == "warning"
+    assert log_events["server/api.ts"]["logger"] == "console"
+    assert len(log_events["server/api.ts"]["message_sha256"]) == 64
     assert "return listOrders()" not in str(artifact)
     assert "<OrderTable" not in str(artifact)
     assert "<table" not in str(artifact)
     assert "renders order table" not in str(artifact)
+    assert "health degraded" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_path):
