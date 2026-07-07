@@ -89,6 +89,9 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     ingest_log.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
     ingest_log.add_argument("--source", default=None, help="Evidence source label")
     ingest_log.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
+    backfill_note = sub.add_parser("backfill-note", help="Preview note-quality backfill for a raw chunk or note file")
+    backfill_note.add_argument("file", help="Path to a raw chunk or note file")
+    backfill_note.add_argument("--json", action="store_true", help="Emit machine-readable backfill preview")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
 
@@ -704,6 +707,31 @@ def _cmd_ingest_log(args: argparse.Namespace) -> int:
     return _cmd_ingest_evidence(args, kind="log_excerpt", retention_class="log_excerpt")
 
 
+def _cmd_backfill_note(args: argparse.Namespace) -> int:
+    from hermes_cli.hades_note_quality import analyze_note_quality, read_note_preview
+
+    try:
+        text, truncated = read_note_preview(args.file)
+        result = analyze_note_quality(text, source=str(args.file), truncated=truncated)
+    except Exception as exc:
+        print(f"Hades backend backfill-note: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
+    print("Hades note backfill preview")
+    print(f"  Classification: {result['classification']}")
+    print(f"  Raw chunk:      {result['raw_chunk']}")
+    print(f"  Candidate facts: {result['candidate_fact_count']}")
+    for fact in result["candidate_facts"][:5]:
+        print(f"  - {fact['summary']}")
+    for action in result["actions"]:
+        print(f"  Action: {action}")
+    return 0
+
+
 def _version() -> str:
     try:
         from hermes_cli import __version__
@@ -739,10 +767,12 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_ingest_test(args)
     if action == "ingest-log":
         return _cmd_ingest_log(args)
+    if action == "backfill-note":
+        return _cmd_backfill_note(args)
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|sync>",
+        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|backfill-note|sync>",
         file=sys.stderr,
     )
     return 0

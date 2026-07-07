@@ -2074,3 +2074,40 @@ Resta fuori da questa tranche:
 - Recovery/onboarding UI per nuovo device.
 - Test remoti multi-device/multi-agent.
 - Policy UI completa per source-slice ACL.
+
+## Esecuzione note-quality backfill locale Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-7 del piano "Notes And Raw Chunk
+Backfill".
+
+Agent locale:
+
+- Nuovo modulo `hermes_cli/hades_note_quality.py`.
+- Nuovo comando `hades backend backfill-note <path> [--json]`.
+- Il comando legge un file bounded, classifica raw chunks come
+  `classification=raw_chunk`, mantiene `automatic_recall_allowed=false` e
+  `memory_proposal_ready=false`.
+- Per chunk tipo `hades.backend_wiki.file_chunk.v1` con edge
+  `route:* --handled_by--> file:*`, il backfill raggruppa le route per handler
+  in candidate facts `route_handler_group` con evidence refs a batch/schema/path,
+  chunk index e sha256.
+- La preview non crea project memory e non promuove facts: serve una review
+  esplicita prima di salvare memoria condivisa.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_note_quality.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `18 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_note_quality.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Upload backend della review queue.
+- Promozione automatizzata candidate fact -> verified wiki/project memory.
+- Ranking prima/dopo backfill su dataset reale.

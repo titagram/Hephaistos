@@ -145,6 +145,12 @@ structure questions without loading source chunks.
 auto-executed by piggyback sync, stores only a selected redacted line window as
 `source_slice`, and keeps that content out of automatic project-memory recall.
 
+`hades backend backfill-note <path>` is a local note-quality preview for old raw
+chunks or ad-hoc notes. It classifies `hades.backend_wiki.file_chunk.v1`
+content as raw, extracts candidate facts such as grouped route-handler
+relationships, and keeps the result review-only. It does not create project
+memory or enable automatic recall for raw chunks.
+
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop
 reporting it as needing review.

@@ -172,6 +172,16 @@ hades doctor --report-backend
 Do not paste project bootstrap tokens, derived agent tokens, raw job payloads,
 or local absolute paths into logs or support tickets.
 
+## Note Backfill
+
+Use `hades backend backfill-note <path> --json` to inspect old raw chunks before
+turning them into project facts. The command is intentionally local and
+review-only: raw chunks stay out of automatic recall, candidate facts include
+evidence refs, and a human/backend review step must promote any verified fact.
+For route dumps, repeated `route:* --handled_by--> file:*` edges are grouped by
+handler so noisy chunks become compact candidate summaries instead of hundreds
+of memory entries.
+
 Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before
 shipping backend MVP, PyPI, Docker, website, desktop, or update artifacts.
