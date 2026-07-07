@@ -264,7 +264,9 @@ reviewable candidate facts are distinguishable before sync. Use
 `--create-proposals` to save candidate facts as pending local memory proposals,
 then run `hades backend sync` to submit them for review. Submitted note
 backfill proposals are marked as `submitted` locally and remain `pending` in the
-backend until a manual review promotes or rejects them.
+backend until a manual review promotes or rejects them. Accepting a note
+backfill proposal creates one `verified_note_fact` project-memory entry with
+the original candidate fact provenance.
 
 Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before

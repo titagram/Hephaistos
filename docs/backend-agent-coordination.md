@@ -2329,6 +2329,42 @@ Resta fuori da questa tranche:
 - Freshness specifica del candidate fact promosso.
 - Ranking prima/dopo backfill su dataset reale.
 
+## Esecuzione note-quality manual promotion Hades - 2026-07-07
+
+Stato: completata una quinta tranche P1-7 backend.
+
+Backend remoto:
+
+- L'endpoint dashboard
+  `POST /api/dashboard/admin/hades/memory-proposals/{proposal}/review` ora
+  promuove in modo idempotente una proposal `action=create` quando viene
+  accettata e non ha ancora `memory_entry_id`.
+- Per intent `note_backfill_candidate`, la memoria creata usa
+  `kind=verified_note_fact`, `source=hades_agent`, summary revisionata e payload
+  `hades.memory_proposal.v1` con provenance/candidate fact originale.
+- La promozione crea una sola riga `project_memory_entries`; review ripetute
+  `accepted` riusano lo stesso `memory_entry_id`.
+- Review `refused`/`conflicted` continuano a non creare memoria.
+
+Verifiche eseguite:
+
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM5MvpCompletionTest.php --filter=promotes`
+  passato: `1 passed (15 assertions)`.
+- Remoto syntax:
+  `php -l app/Http/Controllers/Dashboard/Api/DashboardHadesController.php`
+  passato nel container app.
+- Remoto aggregato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `63 passed (751 assertions)`.
+
+Resta fuori da questa tranche:
+
+- Freshness specifica del candidate fact promosso.
+- UI copy/controls dedicati per distinguere promote/refuse dei
+  `note_backfill_candidate`.
+- Ranking prima/dopo backfill su dataset reale.
+
 ## Esecuzione guided bug intake CLI Hades - 2026-07-07
 
 Stato: completata la prima tranche P2-1 del piano "Guided Bug Intake".
