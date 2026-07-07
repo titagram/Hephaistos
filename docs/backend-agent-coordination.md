@@ -3542,6 +3542,61 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione Hades delta-upload backend e benchmark reale - 2026-07-07
+
+Stato: completata una tranche locale/remota P2-3.
+
+Backend remoto:
+
+- Commit remoto `39db2a7 feat: deduplicate Hades artifact uploads`.
+- Aggiunta route autenticata `GET /api/hades/v1/artifacts/lookup` per verificare
+  se un artifact bounded esiste gia' per project, workspace binding, schema e
+  sha256.
+- `POST /api/hades/v1/artifacts` deduplica ora lo stesso hash server-side e
+  restituisce l'artifact esistente con `deduplicated=true` invece di creare
+  storage/search documents duplicati.
+- Aggiunto indice DB non-unique
+  `(project_id, workspace_binding_id, schema, sha256)` per lookup rapido senza
+  rompere eventuali duplicati legacy.
+
+Agent locale:
+
+- `HadesBackendClient.artifact_lookup()` espone il nuovo contratto.
+- `_upload_job_artifact()` continua a usare prima la cache locale; quando la
+  cache locale e' vuota, chiede al backend se l'hash esiste gia'. Se esiste,
+  registra `artifact.skipped`, aggiorna la cache locale con
+  `backend_artifact_id` e non invia il payload artifact.
+- Se il backend e' legacy o la lookup non e' disponibile, il sync degrada al
+  comportamento precedente e tenta l'upload normale.
+- `hades backend benchmark --workspace <path>` aggiunge casi reali read-only
+  `workspace_git_tree` e `workspace_code_graph` usando gli indexer Hades
+  esistenti, senza upload e senza raw source, accanto ai casi sintetici.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_client.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `67 passed`.
+- Locale benchmark:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_cmd.py::test_hades_backend_benchmark_reports_real_workspace_artifacts tests/hermes_cli/test_hades_backend_cmd.py::test_hades_backend_benchmark_reports_compressed_large_artifact tests/hermes_cli/test_hades_backend_cmd.py::test_backend_benchmark_command_emits_json`
+  passato: `3 passed`.
+- Locale lint/compile:
+  `ruff check` e `py_compile` sui moduli Hades benchmark/client/sync passati;
+  `json.tool docs/hades/openapi-hades-v1.json` passato.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/ArtifactController.php routes/api.php database/migrations/2026_07_07_000007_add_hades_agent_artifacts_lookup_index.php tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  passato.
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM5MvpCompletionTest.php --filter=artifacts`
+  passato: `3 passed / 44 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `67 passed / 805 assertions`.
+
+Resta fuori da questa tranche:
+
+- Tuning soglie/storage dopo benchmark su dataset reali piu' grandi e continui.
+
 ## Esecuzione dashboard guided bug intake Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-1.

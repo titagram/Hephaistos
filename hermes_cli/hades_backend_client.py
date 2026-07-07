@@ -230,6 +230,9 @@ class HadesBackendClient:
     def submit_job_result(self, job_id: str, **payload: Any) -> dict[str, Any]:
         return self._request("POST", f"agent/jobs/{job_id}/result", json_body=payload)
 
+    def artifact_lookup(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "artifacts/lookup", params=payload)
+
     def upload_artifact(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "artifacts", json_body=payload)
 

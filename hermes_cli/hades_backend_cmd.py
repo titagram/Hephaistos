@@ -189,9 +189,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
         help="Create local pending memory proposals for extracted candidate facts",
     )
     backfill_note.add_argument("--json", action="store_true", help="Emit machine-readable backfill preview")
-    benchmark = sub.add_parser("benchmark", help="Run local synthetic Hades backend artifact benchmarks")
+    benchmark = sub.add_parser("benchmark", help="Run local Hades backend artifact benchmarks")
     benchmark.add_argument("--medium-symbols", type=int, default=750, help="Synthetic medium graph symbol count")
     benchmark.add_argument("--large-symbols", type=int, default=5000, help="Synthetic large graph symbol count")
+    benchmark.add_argument("--workspace", help="Also benchmark real read-only artifacts from this workspace")
     benchmark.add_argument("--json", action="store_true", help="Emit machine-readable benchmark JSON")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
@@ -1555,22 +1556,27 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     medium_symbols = max(1, int(getattr(args, "medium_symbols", 750) or 750))
     large_symbols = max(medium_symbols, int(getattr(args, "large_symbols", 5000) or 5000))
-    report = run_hades_backend_benchmark(
-        cases=[
-            {
-                "name": "medium_code_graph",
-                "symbols": medium_symbols,
-                "routes": max(1, medium_symbols // 8),
-                "edges": max(1, medium_symbols * 2),
-            },
-            {
-                "name": "large_code_graph",
-                "symbols": large_symbols,
-                "routes": max(1, large_symbols // 10),
-                "edges": max(1, large_symbols * 2),
-            },
-        ]
-    )
+    try:
+        report = run_hades_backend_benchmark(
+            cases=[
+                {
+                    "name": "medium_code_graph",
+                    "symbols": medium_symbols,
+                    "routes": max(1, medium_symbols // 8),
+                    "edges": max(1, medium_symbols * 2),
+                },
+                {
+                    "name": "large_code_graph",
+                    "symbols": large_symbols,
+                    "routes": max(1, large_symbols // 10),
+                    "edges": max(1, large_symbols * 2),
+                },
+            ],
+            workspace=getattr(args, "workspace", None),
+        )
+    except ValueError as exc:
+        print(f"Hades backend benchmark failed: {exc}", file=sys.stderr)
+        return 1
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
         return 0 if report["status"] == "passed" else 1
@@ -1580,11 +1586,15 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     for case in report["cases"]:
         ratio = case["compression_ratio"]
         ratio_text = f"{ratio:.4f}" if isinstance(ratio, float) else "n/a"
+        source = case.get("source") or "synthetic"
+        total_ms = case.get("total_duration_ms", case["duration_ms"])
         print(
-            f"  {case['name']}: {case['upload_mode']} "
+            f"  {case['name']} [{source}]: {case['upload_mode']} "
             f"{case['original_bytes']}B -> {case['compressed_bytes']}B "
-            f"ratio={ratio_text} duration={case['duration_ms']}ms"
+            f"ratio={ratio_text} duration={total_ms}ms"
         )
+        if case.get("index_duration_ms") is not None:
+            print(f"    indexing={case['index_duration_ms']}ms schema={case.get('schema')} truncated={case.get('truncated')}")
     for warning in report["warnings"]:
         print(f"  warning: {warning}")
     return 0 if report["status"] == "passed" else 1

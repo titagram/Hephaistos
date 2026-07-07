@@ -289,6 +289,67 @@
         }
       }
     },
+    "/api/hades/v1/artifacts/lookup": {
+      "get": {
+        "summary": "Check whether a bounded Hades artifact is already stored",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace_binding_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hades.git_tree.v1",
+                "hades.symbols.v1",
+                "hades.php_graph.v1",
+                "hades.code_graph.v1"
+              ]
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact presence and delta-upload requirement"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
     "/api/hades/v1/artifacts": {
       "post": {
         "summary": "Upload a bounded Hades artifact for a linked workspace",

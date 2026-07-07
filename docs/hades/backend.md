@@ -193,6 +193,11 @@ command signatures, scheduler command/job edges, query-table edges, Eloquent
 query calls, and redacted `config()`/`env()` references. The code graph includes
 framework, route/page handlers, symbols, dependency manifests, and import edges
 so backend search can answer structure questions without loading source chunks.
+Before sending a large artifact, the local sync can call
+`/api/hades/v1/artifacts/lookup` with project, workspace binding, schema, and
+sha256. A positive lookup means the backend already has the same artifact for
+that binding, so the client records a skip instead of uploading the payload.
+The artifact POST endpoint also deduplicates repeated hashes server-side.
 
 `read_source_slice` is the bounded source-content path for diagnosis: it is not
 auto-executed by piggyback sync, stores only a selected redacted line window as

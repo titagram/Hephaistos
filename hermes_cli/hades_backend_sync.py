@@ -578,6 +578,61 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
         )
         return (0, 0, 1)
     try:
+        try:
+            lookup = client.artifact_lookup(
+                project_id=binding.project_id,
+                agent_id=agent.agent_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                schema=schema,
+                sha256=payload_hash,
+            )
+        except AttributeError:
+            lookup = None
+        except Exception:
+            lookup = None
+            logger.info(
+                "hades_backend.artifact.lookup_unavailable",
+                extra={
+                    "hades_event": "artifact.lookup_unavailable",
+                    "hades_project_id": binding.project_id,
+                    "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                    "hades_job_id": job_id,
+                    "hades_schema": schema,
+                },
+            )
+        if isinstance(lookup, dict) and lookup.get("exists") is True:
+            artifact = lookup.get("artifact") if isinstance(lookup.get("artifact"), dict) else {}
+            logger.info(
+                "hades_backend.artifact.skipped",
+                extra={
+                    "hades_event": "artifact.skipped",
+                    "hades_project_id": binding.project_id,
+                    "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                    "hades_job_id": job_id,
+                    "hades_schema": schema,
+                    "hades_reason": "unchanged_on_backend",
+                    "hades_artifact_id": artifact.get("id"),
+                    "hades_file_count": int(file_manifest.get("count") or 0),
+                    "hades_file_delta": file_delta,
+                },
+            )
+            with db.connect_closing() as conn:
+                db.record_sync_state(
+                    conn,
+                    cache_key,
+                    {
+                        "schema": schema,
+                        "sha256": payload_hash,
+                        "head_commit": head_commit,
+                        "job_id": job_id,
+                        "backend_artifact_id": artifact.get("id"),
+                        "backend_skip_reason": "unchanged_on_backend",
+                        "file_manifest": file_manifest,
+                        "file_delta": file_delta,
+                    },
+                )
+            return (0, 0, 1)
+
         artifact_fields, compression = _artifact_upload_fields(artifact_payload)
         upload_payload = {
             "project_id": binding.project_id,

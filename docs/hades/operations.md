@@ -65,19 +65,25 @@ binding. Use it as the local readiness view for memory cache, artifact upload,
 source-slice upload, and bug-evidence availability before attempting
 source-free diagnosis. It does not perform live backend calls; for backend
 freshness and coverage, use the project-awareness tool/API below.
-Artifact upload is content-addressed locally per workspace binding, schema, and
-HEAD commit. If `sync_git_tree` or `populate_backend_ast` produces the same
-artifact twice, Hades logs `artifact.skipped`, records
-`artifacts_skipped`/`skipped_unchanged_last_sync`, and avoids a duplicate
-backend upload while keeping local awareness coverage present.
+Artifact upload is content-addressed locally and on the backend per workspace
+binding, schema, HEAD commit, and artifact hash. If `sync_git_tree` or
+`populate_backend_ast` produces the same artifact twice, Hades logs
+`artifact.skipped`, records `artifacts_skipped` /
+`skipped_unchanged_last_sync`, and avoids a duplicate upload while keeping
+local awareness coverage present. On a new device with an empty local cache,
+sync first calls `/api/hades/v1/artifacts/lookup`; if the backend already has
+the same hash, the large artifact payload is not sent.
 The same sync summary records `duration_ms`; use it as the local operational
 baseline for sync cost before comparing larger projects or changing indexing
 budgets.
 Use `hades backend benchmark --json` for a repeatable source-free synthetic
-guardrail over medium and large code graph artifacts. The report includes raw
-and compressed bytes, compression ratio, payload hash, duration, and warnings
-when local serialization/compression or compression efficiency crosses the
-current thresholds.
+guardrail over medium and large code graph artifacts. Add
+`--workspace <path>` to include real read-only `sync_git_tree` and
+`populate_backend_ast` artifacts from a project workspace without uploading
+them. The report includes raw and compressed bytes, compression ratio, payload
+hash, duration, indexing time for workspace cases, and warnings when local
+serialization/compression or compression efficiency crosses the current
+thresholds.
 Its `identity` section separates local profile memory, portable backend project
 memory, and local workspace binding state so a new device can distinguish
 shared project recall from source/index freshness that must be established on

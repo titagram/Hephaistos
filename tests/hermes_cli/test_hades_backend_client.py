@@ -320,6 +320,24 @@ CLIENT_ROUTE_CASES = [
         "json_body": {"status": "completed", "result": {"summary": "done"}},
     },
     {
+        "method_name": "artifact_lookup",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/artifacts/lookup",
+        "wire_path": "/api/hades/v1/artifacts/lookup",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "schema": "hades.git_tree.v1",
+            "sha256": "a" * 64,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "schema": "hades.git_tree.v1",
+            "sha256": "a" * 64,
+        },
+    },
+    {
         "method_name": "upload_artifact",
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/artifacts",

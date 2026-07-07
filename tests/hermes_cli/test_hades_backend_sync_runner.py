@@ -706,6 +706,82 @@ def test_sync_runner_skips_unchanged_artifact_uploads(monkeypatch, tmp_path):
     assert len(client.uploads) == 1
 
 
+def test_sync_runner_skips_artifacts_already_present_on_backend(monkeypatch, tmp_path):
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _artifact_upload_cache_key, _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.lookups = []
+            self.uploads = []
+
+        def artifact_lookup(self, **payload):
+            self.lookups.append(payload)
+            return {
+                "exists": True,
+                "artifact": {
+                    "id": "artifact_backend_1",
+                    "schema": payload["schema"],
+                    "sha256": payload["sha256"],
+                },
+            }
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="b" * 40,
+        status="active",
+    )
+    result = {
+        "artifact": {
+            "schema": "hades.code_graph.v1",
+            "framework": "nextjs",
+            "routes": [{"method": "GET", "path": "/api/orders"}],
+            "symbols": [{"kind": "component", "name": "OrdersPage"}],
+            "edges": [],
+            "truncated": False,
+            "redactions": 0,
+            "raw_source_included": False,
+        }
+    }
+
+    assert _upload_job_artifact(client, agent, binding, "job_code_graph_1", result) == (0, 0, 1)
+    assert client.lookups[0]["project_id"] == "proj_1"
+    assert client.lookups[0]["workspace_binding_id"] == "wb_1"
+    assert client.lookups[0]["schema"] == "hades.code_graph.v1"
+    assert len(client.lookups[0]["sha256"]) == 64
+    assert client.uploads == []
+
+    with hdb.connect_closing() as conn:
+        cache = hdb.get_sync_state(conn, _artifact_upload_cache_key(binding, "hades.code_graph.v1"))
+    assert cache["backend_artifact_id"] == "artifact_backend_1"
+    assert cache["backend_skip_reason"] == "unchanged_on_backend"
+    assert cache["file_manifest"]["count"] == 1
+
+
 def test_sync_runner_records_file_level_artifact_delta(monkeypatch, tmp_path):
     from hermes_cli import hades_backend_db as hdb
     from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding

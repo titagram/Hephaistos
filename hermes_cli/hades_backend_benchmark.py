@@ -1,10 +1,12 @@
-"""Synthetic Hades backend performance benchmark helpers."""
+"""Hades backend performance benchmark helpers."""
 
 from __future__ import annotations
 
+from pathlib import Path
 import time
 from typing import Any
 
+from hermes_cli.hades_backend_jobs import execute_job
 from hermes_cli.hades_backend_sync import _artifact_payload_hash, _artifact_upload_fields
 
 
@@ -16,9 +18,15 @@ DURATION_WARN_MS = 1000
 LARGE_COMPRESSION_RATIO_WARN = 0.75
 
 
-def run_hades_backend_benchmark(cases: list[dict[str, int | str]] | None = None) -> dict[str, Any]:
-    selected_cases = cases or list(DEFAULT_CASES)
-    results = [_run_case(case) for case in selected_cases]
+def run_hades_backend_benchmark(
+    cases: list[dict[str, int | str]] | None = None,
+    *,
+    workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    selected_cases = list(DEFAULT_CASES) if cases is None else cases
+    results = [_run_synthetic_case(case) for case in selected_cases]
+    if workspace is not None:
+        results.extend(_run_workspace_cases(Path(workspace).expanduser()))
     warnings = [warning for result in results for warning in result["warnings"]]
 
     return {
@@ -27,17 +35,91 @@ def run_hades_backend_benchmark(cases: list[dict[str, int | str]] | None = None)
         "case_count": len(results),
         "duration_warn_ms": DURATION_WARN_MS,
         "large_compression_ratio_warn": LARGE_COMPRESSION_RATIO_WARN,
+        "has_workspace_dataset": workspace is not None,
         "warnings": warnings,
         "cases": results,
     }
 
 
-def _run_case(case: dict[str, int | str]) -> dict[str, Any]:
+def _run_synthetic_case(case: dict[str, int | str]) -> dict[str, Any]:
     name = str(case.get("name") or "code_graph")
     symbol_count = int(case.get("symbols") or 0)
     route_count = int(case.get("routes") or 0)
     edge_count = int(case.get("edges") or 0)
     artifact = _synthetic_code_graph(symbol_count=symbol_count, route_count=route_count, edge_count=edge_count)
+    result = _run_artifact_case(name=name, artifact=artifact)
+    result.update(
+        {
+            "source": "synthetic",
+            "symbol_count": symbol_count,
+            "route_count": route_count,
+            "edge_count": edge_count,
+        }
+    )
+    return result
+
+
+def _run_workspace_cases(workspace_root: Path) -> list[dict[str, Any]]:
+    root = workspace_root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"workspace does not exist or is not a directory: {root}")
+
+    cases: list[dict[str, Any]] = []
+    jobs = [
+        {
+            "name": "workspace_git_tree",
+            "capability": "sync_git_tree",
+            "payload": {"max_files": 20_000, "max_bytes": 20_000_000, "max_file_bytes": 1_000_000},
+        },
+        {
+            "name": "workspace_code_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 5_000, "max_symbols": 10_000, "max_edges": 20_000, "max_file_bytes": 512_000},
+        },
+    ]
+    for job in jobs:
+        started = time.perf_counter()
+        result = execute_job({"capability": job["capability"], "payload": job["payload"]}, workspace_root=root)
+        index_duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        artifact = result.get("artifact") if isinstance(result, dict) else None
+        if not isinstance(artifact, dict):
+            cases.append(
+                {
+                    "name": job["name"],
+                    "source": "workspace",
+                    "workspace": root.name,
+                    "job_capability": job["capability"],
+                    "schema": None,
+                    "status": "failed",
+                    "index_duration_ms": index_duration_ms,
+                    "duration_ms": 0,
+                    "total_duration_ms": index_duration_ms,
+                    "upload_mode": "none",
+                    "original_bytes": 0,
+                    "compressed_bytes": 0,
+                    "compression_ratio": None,
+                    "payload_sha256": None,
+                    "warnings": [f"{job['name']}: no artifact produced"],
+                }
+            )
+            continue
+        case = _run_artifact_case(name=job["name"], artifact=artifact)
+        case.update(
+            {
+                "source": "workspace",
+                "workspace": root.name,
+                "job_capability": job["capability"],
+                "job_status": result.get("status"),
+                "summary": result.get("summary"),
+                "index_duration_ms": index_duration_ms,
+                "total_duration_ms": index_duration_ms + int(case["duration_ms"]),
+            }
+        )
+        cases.append(case)
+    return cases
+
+
+def _run_artifact_case(*, name: str, artifact: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     upload_fields, compression = _artifact_upload_fields(artifact)
     payload_hash = _artifact_payload_hash(artifact)
@@ -57,10 +139,13 @@ def _run_case(case: dict[str, int | str]) -> dict[str, Any]:
     return {
         "name": name,
         "schema": artifact["schema"],
-        "symbol_count": symbol_count,
-        "route_count": route_count,
-        "edge_count": edge_count,
-        "raw_source_included": artifact["raw_source_included"],
+        "symbol_count": len(artifact.get("symbols") or []),
+        "route_count": len(artifact.get("routes") or []),
+        "edge_count": len(artifact.get("edges") or []),
+        "file_count": len(artifact.get("files") or []),
+        "raw_source_included": bool(artifact.get("raw_source_included", False)),
+        "truncated": bool(artifact.get("truncated", False)),
+        "redactions": int(artifact.get("redactions") or 0),
         "payload_sha256": payload_hash,
         "upload_mode": upload_mode,
         "original_bytes": original_bytes,

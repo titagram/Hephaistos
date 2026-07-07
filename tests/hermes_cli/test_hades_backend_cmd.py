@@ -208,6 +208,42 @@ def test_hades_backend_benchmark_reports_compressed_large_artifact():
     assert len(large["payload_sha256"]) == 64
 
 
+def test_hades_backend_benchmark_reports_real_workspace_artifacts(tmp_path):
+    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+
+    routes = tmp_path / "routes"
+    controller_dir = tmp_path / "app" / "Http" / "Controllers"
+    routes.mkdir()
+    controller_dir.mkdir(parents=True)
+    (routes / "api.php").write_text(
+        "<?php\n"
+        "use App\\Http\\Controllers\\OrderController;\n"
+        "Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');\n"
+    )
+    (controller_dir / "OrderController.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "class OrderController { public function show(int $order): array { return ['id' => $order]; } }\n"
+    )
+
+    report = run_hades_backend_benchmark(cases=[], workspace=tmp_path)
+
+    assert report["schema"] == "hades.backend_benchmark.v1"
+    assert report["has_workspace_dataset"] is True
+    assert report["case_count"] == 2
+    assert [case["name"] for case in report["cases"]] == ["workspace_git_tree", "workspace_code_graph"]
+    tree, graph = report["cases"]
+    assert tree["source"] == "workspace"
+    assert tree["schema"] == "hades.git_tree.v1"
+    assert tree["file_count"] >= 2
+    assert graph["source"] == "workspace"
+    assert graph["schema"] == "hades.php_graph.v1"
+    assert graph["route_count"] == 1
+    assert graph["raw_source_included"] is False
+    assert isinstance(graph["index_duration_ms"], int)
+    assert len(graph["payload_sha256"]) == 64
+
+
 def test_backend_benchmark_command_emits_json(capsys):
     import hermes_cli.hades_backend_cmd as cmd
 
