@@ -866,6 +866,12 @@ def test_hades_backend_graph_search_finds_local_query_write_edges(monkeypatch, t
         and ref["to"] == "query:orders:update"
         for ref in graph_refs
     )
+    assert any(
+        "operation=update" in item["summary"]
+        and "access=write" in item["summary"]
+        and "table=orders" in item["summary"]
+        for item in result["items"]
+    )
 
 
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):

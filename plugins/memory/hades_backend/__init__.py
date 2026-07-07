@@ -2849,7 +2849,14 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
     edge_from = str(edge.get("from") or "")
     edge_to = str(edge.get("to") or "")
     schema = str(provenance.get("schema") or "")
-    summary = _compact_text(f"{kind}: {edge_from} -> {edge_to}", max_chars=800)
+    detail_parts = []
+    for key in ("operation", "query_method", "access", "table", "model", "path", "line"):
+        value = provenance.get(key)
+        if value in ("", None, [], {}):
+            continue
+        detail_parts.append(f"{key}={value}")
+    detail_suffix = f" ({'; '.join(detail_parts)})" if detail_parts else ""
+    summary = _compact_text(f"{kind}: {edge_from} -> {edge_to}{detail_suffix}", max_chars=800)
     result = {
         "id": f"edge:{edge_id}",
         "domain": "artifacts",

@@ -4962,3 +4962,31 @@ Verifiche eseguite:
 - Locale lint/compile completo:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione graph search query-edge summaries Hades - 2026-07-07
+
+Stato: completata una tranche locale P1-3/P0-4 per retrieval quality
+source-free.
+
+Integrazione locale:
+
+- I risultati fallback di `hades_backend_graph_search` per edge locali
+  includono ora nel `summary` dettagli bounded da provenance:
+  `operation`, `query_method`, `access`, `table`, `model`, `path`, `line`.
+- Gli edge restano invariati nel payload strutturato; cambia solo il riassunto
+  leggibile dal modello, cosi' una ricerca come `orders update write` mostra
+  subito che l'edge rappresenta una write query su `orders`.
+- Non viene aggiunto source raw: i dettagli sono gli stessi metadati gia'
+  presenti nel graph ref.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_query_write_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `68 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
