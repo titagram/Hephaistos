@@ -77,6 +77,10 @@ All three require the authenticated agent, project id, and linked
 `hades backend privacy-export --json`. Delete and retention cleanup are dry-run
 by default and require `confirm=true` backend-side; the CLI sends that only when
 the user passes `--yes`.
+Each successful export, delete dry-run/delete, and retention dry-run/delete
+writes an `audit_logs` row with action, agent id, scope, counts, dry-run flag,
+and retention window metadata only. Audit payloads must not contain source
+slices, evidence payloads, diagnosis text, or other raw content.
 
 ## Project Awareness
 

@@ -28,6 +28,9 @@ maintainer has confirmed the user consent, project policy, and a secure sharing
 channel. Use `hades backend privacy-delete --json` and
 `hades backend retention-cleanup --retention-days <days> --json` as dry-runs
 before any destructive action.
+Successful privacy operations are audited backend-side with counts and scope
+metadata only. Audit rows are safe to reference by id during escalation; they
+must not be used as a source of raw evidence content.
 
 If the backend is configured and the user explicitly agrees, ask them to submit
 the compact backend report:

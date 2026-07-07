@@ -179,6 +179,10 @@ text. `privacy-delete` removes only the current linked workspace's Hades bug
 reports, evidence items, source slices, evidence packs, and diagnosis reports.
 `retention-cleanup` removes only scoped rows older than the requested retention
 window.
+The backend audits every successful privacy export/delete/retention request in
+`audit_logs` with scope, agent id, counts, dry-run flag, and retention metadata
+only; raw evidence, source slices, and diagnosis text are never copied into the
+audit payload.
 
 ## MVP Smoke
 

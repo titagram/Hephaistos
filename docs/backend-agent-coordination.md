@@ -1833,6 +1833,7 @@ retention cleanup di dati Hades content-bearing.
 Backend remoto:
 
 - Commit remoto `d383c4f feat: add Hades privacy retention controls`.
+- Follow-up remoto `6559223 feat: audit Hades privacy operations`.
 - Nuovo controller `App\Http\Controllers\Hades\DataPrivacyController`.
 - Nuove route autenticate:
   - `GET /api/hades/v1/privacy/export`;
@@ -1845,6 +1846,10 @@ Backend remoto:
   omette i campi content-bearing.
 - Delete e retention cleanup sono dry-run per default e richiedono
   `confirm=true` quando `dry_run=false`.
+- Ogni export/delete/retention riuscito scrive `audit_logs` con action,
+  `hades_agent_id`, scope, conteggi, dry-run flag e retention metadata; i test
+  verificano che payload audit non contenga source slice, evidence payload o
+  diagnosis text.
 
 Integrazione locale:
 
@@ -1871,6 +1876,9 @@ Verifiche eseguite:
 - Remoto completo Hades + plugin auth:
   `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
   passato: `55 passed / 612 assertions`.
+- Remoto follow-up audit:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `55 passed / 625 assertions`.
 - Remoto:
   `git diff --check` passato prima del commit.
 - Locale:
@@ -1883,7 +1891,6 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - Export/delete project-wide o user-wide oltre allo scope workspace linked.
-- Audit event dedicati senza payload raw.
 - Dashboard policy UI e controlli review per source/evidence retention.
 
 ## Esecuzione runtime/test evidence ingestion Hades - 2026-07-07
