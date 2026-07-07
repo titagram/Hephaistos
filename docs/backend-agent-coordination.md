@@ -2573,4 +2573,41 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Feature tests remoti no-codebase con SQLite in-memory.
+- Feature tests remoti no-codebase piu' ampi con casi insufficient-evidence e
+  stale graph.
+
+## Esecuzione no-codebase feature test backend - 2026-07-07
+
+Stato: completata prima tranche remota P0-7.
+
+Backend remoto:
+
+- Commit remoto `62691ce test: cover Hades no-codebase diagnosis path`.
+- Nuovo test `tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`.
+- Il test usa solo API Hades e fixture payload, senza leggere filesystem source:
+  registra agent, lega workspace, carica `hades.php_graph.v1`, crea bug report,
+  stack-trace evidence, source slice bounded, evidence pack, verifica
+  `project-awareness/status`, `graph/traverse`, `source-slices`,
+  `evidence-packs` e salva un diagnosis report `high/final` con freshness
+  current ed evidence refs.
+
+Verifiche eseguite:
+
+- Remoto:
+  `vendor/bin/pint --test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `1 passed / 28 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `56 passed / 653 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+
+Resta fuori da questa tranche:
+
+- Casi remoti insufficient-evidence e stale graph che devono rifiutare claim
+  precisi.
+- Valutazione remota end-to-end con modello/agent reale invece di solo API
+  contract backend.
