@@ -3804,8 +3804,85 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- FTS/vector backend vero sopra `hades_search_documents`.
-- Scheduler/cron per reindex periodico, se serve.
+- Vector search opzionale sopra `hades_search_documents`; FULLTEXT e scheduler
+  sono stati completati nelle tranche successive.
+
+## Esecuzione Hades search documents FULLTEXT backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `13e5abf feat: add Hades search fulltext index`.
+- Nuova migration
+  `2026_07_07_000006_add_hades_search_documents_fulltext_index.php`.
+- Su driver MySQL, la migration aggiunge FULLTEXT
+  `hades_search_documents_fulltext_idx` su `title`, `body` e `source_schema`.
+- `HadesSearchDocumentIndexer::matchingSourceScores()` usa
+  `MATCH(title, body, source_schema) AGAINST (... IN BOOLEAN MODE)` quando il
+  driver supporta FULLTEXT.
+- SQLite/test e ambienti senza indice restano compatibili: il servizio conserva
+  fallback LIKE e, se il percorso FULLTEXT solleva `QueryException`, ripiega al
+  percorso LIKE.
+- Runtime dev migrato con `php artisan migrate --force`.
+
+Verifiche eseguite:
+
+- Runtime migration:
+  `2026_07_07_000006_add_hades_search_documents_fulltext_index` applicata con
+  esito `DONE`.
+- Remoto syntax:
+  `php -l app/Services/Hades/HadesSearchDocumentIndexer.php` e `php -l` sulla
+  migration passati.
+- Remoto formatter:
+  `vendor/bin/pint --test app/Services/Hades/HadesSearchDocumentIndexer.php database/migrations/2026_07_07_000006_add_hades_search_documents_fulltext_index.php`
+  passato.
+- Remoto mirato materialized:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php --filter=materialized`
+  passato: `3 passed / 26 assertions`.
+- Remoto no-codebase:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `3 passed / 66 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `66 passed / 788 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Public health:
+  `https://home-sweet-home.cloud/api/hades/v1/health` ha risposto HTTP 200.
+
+Resta fuori da questa tranche:
+
+- Vector search opzionale; non e' richiesto per claim precisi finche' FTS,
+  graph, source slices e evidence refs sono disponibili.
+
+## Esecuzione Hades scheduled search reindex backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `bf5647d feat: schedule Hades search reindex`.
+- `bootstrap/app.php` pianifica
+  `php artisan hades:search-documents-reindex --limit=100000` ogni giorno alle
+  `03:45`.
+- La schedule usa `withoutOverlapping()` per evitare reindex concorrenti.
+
+Verifiche eseguite:
+
+- Remoto syntax/formatter:
+  `php -l bootstrap/app.php` e `vendor/bin/pint --test bootstrap/app.php`
+  passati.
+- Remoto schedule:
+  `php artisan schedule:list | grep hades:search-documents-reindex` mostra
+  `45 3 * * * php artisan hades:search-documents-reindex --limit=100000`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+
+Resta fuori da questa tranche:
+
+- Eventuali metriche di durata storica del reindex schedulato; il comando gia'
+  emette JSON per run manuali e output standard per schedule logs.
 
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
