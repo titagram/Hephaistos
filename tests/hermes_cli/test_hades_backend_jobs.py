@@ -1058,6 +1058,65 @@ def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_pa
     assert "@@map" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_drizzle_schema_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "db").mkdir()
+    (tmp_path / "db" / "schema.ts").write_text(
+        "import { integer, numeric, pgTable, serial, text, varchar } from 'drizzle-orm/pg-core';\n"
+        "export const customers = pgTable('customers', {\n"
+        "  id: serial('id').primaryKey(),\n"
+        "  email: varchar('email', { length: 255 }).notNull().unique(),\n"
+        "});\n"
+        "export const orders = pgTable('orders', {\n"
+        "  id: serial('id').primaryKey(),\n"
+        "  customerId: integer('customer_id').notNull().references(() => customers.id),\n"
+        "  status: text('status').default('draft'),\n"
+        "  total: numeric('total'),\n"
+        "});\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_drizzle_schema",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 20, "max_edges": 20},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["language"] == "typescript"
+    assert artifact["framework"] == "drizzle"
+    assert artifact["routes"] == []
+    assert ("model", "customers") in symbols
+    assert ("model", "orders") in symbols
+    assert set(tables) == {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} == {"id", "customer_id", "status", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "db/schema.ts",
+            "line": 8,
+        }
+    ]
+    assert ("model_table", "orders", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert "pgTable(" not in str(artifact)
+    assert ".references(" not in str(artifact)
+    assert "default('draft')" not in str(artifact)
+
+
 def test_populate_backend_ast_extracts_sql_schema_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

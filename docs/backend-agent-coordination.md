@@ -2499,8 +2499,42 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Drizzle e Doctrine adapters dedicati.
+- Doctrine adapter dedicato.
 - Prisma relation edge piu' ricchi oltre alle FK tabella/colonna.
+
+## Esecuzione Drizzle DB graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` estrae schema source-free da dichiarazioni Drizzle
+  `pgTable`, `mysqlTable` e `sqliteTable`.
+- Estrae table var, table name, factory, colonne, tipo builder, `primaryKey`,
+  `notNull`, `unique`, `default` e FK `.references(() => table.column)`.
+- Le FK risolvono il nome reale della colonna target quando la tabella target e'
+  nello stesso file.
+- Il graph include `database.tables`, simboli `drizzle_table`, edge
+  `model_table` e `foreign_key`, senza raw TS.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_drizzle_schema_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_node_react_code_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_prisma_schema_graph_without_source`
+  passato: `3 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `21 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Doctrine adapter dedicato.
+- Drizzle relation graph piu' ricco oltre alle FK tabella/colonna nello stesso
+  file.
 
 ## Esecuzione SQL raw DB graph Hades - 2026-07-07
 
@@ -2529,7 +2563,7 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Drizzle e Doctrine adapters dedicati.
+- Doctrine adapter dedicato.
 - Dialect SQL avanzato oltre a `CREATE TABLE`/FK bounded parsing.
 
 ## Esecuzione Symfony graph Hades - 2026-07-07

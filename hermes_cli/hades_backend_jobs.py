@@ -253,6 +253,17 @@ EXPRESS_ROUTE_RE = re.compile(
     r"\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_$][A-Za-z0-9_.$]*)?",
     re.IGNORECASE | re.MULTILINE,
 )
+DRIZZLE_TABLE_RE = re.compile(
+    r"(?:export\s+)?(?:const|let|var)\s+(?P<var>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+    r"(?P<fn>pgTable|mysqlTable|sqliteTable)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]\s*,\s*\{",
+    re.MULTILINE,
+)
+DRIZZLE_FIELD_RE = re.compile(r"^\s*(?P<field>[A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?P<expr>.+)$", re.DOTALL)
+DRIZZLE_COLUMN_RE = re.compile(r"(?P<type>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*['\"](?P<column>[^'\"]+)['\"]", re.DOTALL)
+DRIZZLE_REFERENCES_RE = re.compile(
+    r"\.references\s*\(\s*\(\s*\)\s*=>\s*(?P<table>[A-Za-z_$][A-Za-z0-9_$]*)\.(?P<column>[A-Za-z_$][A-Za-z0-9_$]*)",
+    re.DOTALL,
+)
 PRISMA_MODEL_RE = re.compile(r"^model\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>.*?)^\}", re.MULTILINE | re.DOTALL)
 PRISMA_FIELD_RE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+(?P<type>[A-Za-z_][A-Za-z0-9_]*(?:\[\])?\??)(?P<attrs>.*)$", re.MULTILINE)
 PRISMA_MAP_RE = re.compile(r"@@map\(\s*['\"](?P<table>[^'\"]+)['\"]\s*\)")
@@ -2172,6 +2183,220 @@ def _prisma_table_name(model_name: str, body: str) -> str:
     return match.group("table") if match else model_name
 
 
+def _balanced_end(source: str, start: int, open_char: str, close_char: str) -> int:
+    depth = 0
+    quote = ""
+    escape = False
+    for index in range(start, len(source)):
+        char = source[index]
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _split_top_level_items(body: str) -> list[tuple[str, int]]:
+    items: list[tuple[str, int]] = []
+    start = 0
+    parens = 0
+    braces = 0
+    brackets = 0
+    quote = ""
+    escape = False
+    for index, char in enumerate(body):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if char == "(":
+            parens += 1
+        elif char == ")" and parens > 0:
+            parens -= 1
+        elif char == "{":
+            braces += 1
+        elif char == "}" and braces > 0:
+            braces -= 1
+        elif char == "[":
+            brackets += 1
+        elif char == "]" and brackets > 0:
+            brackets -= 1
+        elif char == "," and parens == 0 and braces == 0 and brackets == 0:
+            raw = body[start:index]
+            stripped = raw.strip()
+            if stripped:
+                items.append((stripped, start + len(raw) - len(raw.lstrip())))
+            start = index + 1
+    raw_tail = body[start:]
+    tail = raw_tail.strip()
+    if tail:
+        items.append((tail, start + len(raw_tail) - len(raw_tail.lstrip())))
+    return items
+
+
+def _drizzle_table_declarations(source: str, rel: str) -> list[dict[str, Any]]:
+    declarations: list[dict[str, Any]] = []
+    for match in DRIZZLE_TABLE_RE.finditer(source):
+        object_start = match.end() - 1
+        object_end = _balanced_end(source, object_start, "{", "}")
+        if object_end == -1:
+            continue
+        body = source[object_start + 1 : object_end]
+        fields: list[dict[str, Any]] = []
+        for item, item_offset in _split_top_level_items(body):
+            field_match = DRIZZLE_FIELD_RE.match(item)
+            if not field_match:
+                continue
+            expr = field_match.group("expr").strip()
+            column_match = DRIZZLE_COLUMN_RE.search(expr)
+            if not column_match:
+                continue
+            field = {
+                "field": field_match.group("field"),
+                "name": column_match.group("column"),
+                "type": column_match.group("type"),
+                "path": rel,
+                "line": _line_number(source, object_start + 1 + item_offset),
+                "primary_key": ".primaryKey(" in expr,
+                "nullable": False if ".notNull(" in expr else None,
+                "unique": True if ".unique(" in expr else None,
+                "has_default": True if ".default(" in expr else None,
+            }
+            reference_match = DRIZZLE_REFERENCES_RE.search(expr)
+            if reference_match:
+                field["references_table_var"] = reference_match.group("table")
+                field["references_field"] = reference_match.group("column")
+            fields.append({key: value for key, value in field.items() if value is not None})
+        declarations.append(
+            {
+                "var": match.group("var"),
+                "table": match.group("table"),
+                "factory": match.group("fn"),
+                "path": rel,
+                "line": _line_number(source, match.start()),
+                "fields": fields,
+            }
+        )
+    return declarations
+
+
+def _drizzle_schema_graph(
+    source: str,
+    rel: str,
+    *,
+    max_symbols: int,
+    max_edges: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+    declarations = _drizzle_table_declarations(source, rel)
+    table_by_var = {item["var"]: item["table"] for item in declarations}
+    column_by_var_field = {
+        (item["var"], field["field"]): field["name"]
+        for item in declarations
+        for field in item.get("fields", [])
+    }
+    tables: list[dict[str, Any]] = []
+    symbols: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    truncated = False
+    for declaration in declarations:
+        table_name = str(declaration["table"])
+        foreign_keys: list[dict[str, Any]] = []
+        if len(symbols) < max_symbols:
+            symbols.append(
+                {
+                    "kind": "model",
+                    "name": str(declaration["var"]),
+                    "role": "drizzle_table",
+                    "path": rel,
+                    "line": declaration["line"],
+                }
+            )
+        else:
+            truncated = True
+        for field in declaration.get("fields", []):
+            target_var = field.get("references_table_var")
+            target_field = field.get("references_field")
+            if not target_var or not target_field:
+                continue
+            references_table = table_by_var.get(str(target_var), str(target_var))
+            references_column = column_by_var_field.get((str(target_var), str(target_field)), str(target_field))
+            foreign_keys.append(
+                {
+                    "table": table_name,
+                    "column": field["name"],
+                    "references_table": references_table,
+                    "references_column": references_column,
+                    "path": rel,
+                    "line": field["line"],
+                }
+            )
+        tables.append(
+            {
+                "table": table_name,
+                "model": str(declaration["var"]),
+                "orm": "drizzle",
+                "factory": str(declaration["factory"]),
+                "path": rel,
+                "line": declaration["line"],
+                "columns": [
+                    {
+                        key: value
+                        for key, value in field.items()
+                        if key not in {"references_table_var", "references_field"}
+                    }
+                    for field in declaration.get("fields", [])
+                ][:200],
+                "foreign_keys": foreign_keys[:100],
+            }
+        )
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "model_table",
+                "from": str(declaration["var"]),
+                "to": f"table:{table_name}",
+                "framework": "drizzle",
+                "path": rel,
+                "line": declaration["line"],
+            },
+            max_edges=max_edges,
+        ) or truncated
+        for foreign_key in foreign_keys:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "foreign_key",
+                    "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                    "to": f"table:{foreign_key['references_table']}",
+                    "framework": "drizzle",
+                    "path": rel,
+                    "line": foreign_key.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return tables, symbols, edges, truncated
+
+
 def _prisma_list_arg(relation_body: str, name: str) -> list[str]:
     for match in PRISMA_LIST_ARG_RE.finditer(relation_body or ""):
         if match.group("name") != name:
@@ -2653,6 +2878,17 @@ def _build_ts_graph(
             if len(symbols) >= max_symbols:
                 break
 
+        drizzle_tables, drizzle_symbols, drizzle_edges, drizzle_truncated = _drizzle_schema_graph(
+            source,
+            rel,
+            max_symbols=max(0, max_symbols - len(symbols)),
+            max_edges=max(0, max_edges - len(edges)),
+        )
+        database["tables"].extend(drizzle_tables)
+        symbols.extend(drizzle_symbols)
+        edges.extend(drizzle_edges)
+        truncated = truncated or drizzle_truncated
+
     for path in prisma_files:
         rel = path.relative_to(workspace_root).as_posix()
         try:
@@ -2684,6 +2920,14 @@ def _build_ts_graph(
         edges.extend(prisma_edges)
         truncated = truncated or prisma_truncated
 
+    if database["tables"] and framework == "node" and not routes:
+        table_orms = {str(item.get("orm") or item.get("source") or "") for item in database["tables"]}
+        if table_orms == {"drizzle"}:
+            framework = "drizzle"
+        elif table_orms == {"prisma"}:
+            framework = "prisma"
+        elif table_orms == {"sql"}:
+            framework = "sql"
     if prisma_files and not ts_files:
         framework = "prisma"
     graph_database = {**database, "tables": database["tables"][:500]}
