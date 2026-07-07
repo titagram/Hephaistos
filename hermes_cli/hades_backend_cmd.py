@@ -23,6 +23,7 @@ from hermes_cli.hades_backend_actions import (
 )
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
 from hermes_cli.hades_backend_status import load_backend_status_payload, support_report_payload
+from hermes_cli.hades_quality_report import build_hades_quality_report
 from hermes_cli import hades_backend_db as db
 
 
@@ -57,6 +58,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     status.add_argument("--json", action="store_true", help="Emit machine-readable status JSON")
     support_report = sub.add_parser("support-report", help="Emit a redacted backend support report")
     support_report.add_argument("--json", action="store_true", help="Emit machine-readable support report JSON")
+    quality_report = sub.add_parser("quality-report", help="Emit a Hades awareness quality report")
+    quality_report.add_argument("--no-codebase-eval", default=None, help="Path to a no-codebase diagnosis eval fixture JSON")
+    quality_report.add_argument("--skip-local-status", action="store_true", help="Do not include local backend support status")
+    quality_report.add_argument("--json", action="store_true", help="Emit machine-readable quality report JSON")
     profiles = sub.add_parser("profiles", help="Show curated local-only Hades coordination profiles")
     profiles.add_argument("--json", action="store_true", help="Emit machine-readable profile JSON")
     worker = sub.add_parser("worker", help="Process one batch of local plugin work items")
@@ -256,6 +261,29 @@ def _cmd_support_report(args: argparse.Namespace) -> int:
     for action in report.get("actions") or []:
         print(f"  Action:     {action}")
     return 0
+
+
+def _cmd_quality_report(args: argparse.Namespace) -> int:
+    no_codebase_report = None
+    if getattr(args, "no_codebase_eval", None):
+        from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
+
+        fixtures, runs = load_no_codebase_eval_fixture(args.no_codebase_eval)
+        no_codebase_report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+    report = build_hades_quality_report(
+        no_codebase_report=no_codebase_report,
+        support_report=None if getattr(args, "skip_local_status", False) else support_report_payload(),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print("Hades quality report")
+        print(f"  Status:   {report['status']}")
+        print(f"  Blockers: {report['summary']['blockers']}")
+        print(f"  Warnings: {report['summary']['warnings']}")
+        for action in report["action_queue"]:
+            print(f"  Action:   [{action['severity']}] {action['id']} - {action['message']}")
+    return 1 if report["status"] == "failed" else 0
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -922,6 +950,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_status(args)
     if action == "support-report":
         return _cmd_support_report(args)
+    if action == "quality-report":
+        return _cmd_quality_report(args)
     if action == "profiles":
         return _cmd_profiles(args)
     if action == "worker":
@@ -947,7 +977,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
         file=sys.stderr,
     )
     return 0

@@ -2265,3 +2265,32 @@ Resta fuori da questa tranche:
 
 - Guida end-to-end specifica per no-codebase diagnosis su un bug reale.
 - Export evidence pack completo e firmato per support escalation.
+
+## Esecuzione governance quality report Hades - 2026-07-07
+
+Stato: completata la prima tranche locale P2-5 del piano "Governance And
+Continuous Quality Review".
+
+Agent locale:
+
+- Nuovo modulo `hermes_cli/hades_quality_report.py`.
+- Nuovo comando `hades backend quality-report`.
+- Il report `hades.quality_report.v1` aggrega metriche no-codebase diagnosis e,
+  quando non escluso, support status locale.
+- L'action queue distingue `blocker` per regressioni causal/privacy
+  (`read_file` o altri source-access tool, evidence/tool/persistence coverage
+  sotto 1.0, fixture fallite) e `warning` per setup/awareness locale non pronto.
+- `--skip-local-status` rende il comando CI-friendly quando si vuole valutare
+  solo la fixture no-codebase.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_quality_report.py tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `6 passed`.
+
+Resta fuori da questa tranche:
+
+- Scheduler audit periodico.
+- Dashboard metrics/action queue nativa.
+- Review queue dedicata per stale facts e low-confidence diagnosis reali.

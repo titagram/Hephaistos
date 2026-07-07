@@ -187,6 +187,16 @@ action fields while redacting local absolute paths and likely secrets. Do not
 paste project bootstrap tokens, derived agent tokens, raw job payloads, or local
 absolute paths into logs or support tickets.
 
+For release or periodic governance checks, run:
+
+```bash
+hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json --json
+```
+
+The quality report produces `hades.quality_report.v1` with no-codebase diagnosis
+metrics, local awareness/support status when enabled, and an action queue. Causal
+quality or privacy regressions are blockers; local setup gaps are warnings.
+
 ## Note Backfill
 
 Use `hades backend backfill-note <path> --json` to inspect old raw chunks before
