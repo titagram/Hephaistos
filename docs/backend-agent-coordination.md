@@ -2690,7 +2690,44 @@ Resta fuori da questa tranche:
 
 - Benchmark dataset medio/grande con soglie automatiche.
 - Compressione payload artifact.
-- Indexing incrementale file-level.
+- Delta-upload backend per usare il file-level manifest come protocollo remoto.
+
+## Esecuzione file-level artifact delta Hades - 2026-07-07
+
+Stato: completata una terza tranche locale P2-3.
+
+Agent locale:
+
+- `_upload_job_artifact` deriva un manifest per-file source-free dagli artifact
+  (`files`, `routes`, `symbols`, `edges`, `database.tables`,
+  `columns`, `foreign_keys`).
+- La cache artifact in `sync_state` salva `file_manifest` e `file_delta` con
+  conteggi `added`, `changed`, `removed`, `unchanged` e primi path coinvolti.
+- I log `artifact.uploaded` includono `hades_file_count` e `hades_file_delta`;
+  gli skip invariati includono `hades_file_count`.
+- Il contratto backend resta invariato: questa tranche rende osservabile il
+  delta file-level e prepara un eventuale delta-upload remoto.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py::test_sync_runner_records_file_level_artifact_delta tests/hermes_cli/test_hades_backend_sync_runner.py::test_sync_runner_skips_unchanged_artifact_uploads`
+  passato: `2 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `24 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_sync.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_sync.py`
+  passato.
+- Durante il gate aggregato sono stati riallineati tre assert di status al
+  comportamento governance corrente: quando manca un quality report viene
+  proposta l'azione `hades backend quality-report --record`.
+
+Resta fuori da questa tranche:
+
+- Delta-upload backend effettivo.
+- Compressione payload artifact e benchmark dataset medio/grande.
 
 ## Esecuzione support runbook Hades - 2026-07-07
 

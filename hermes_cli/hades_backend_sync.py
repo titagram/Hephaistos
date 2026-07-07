@@ -456,6 +456,66 @@ def _artifact_payload_hash(artifact_payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _artifact_file_manifest(artifact_payload: dict[str, object]) -> dict[str, object]:
+    path_items: dict[str, list[str]] = {}
+
+    def add_item(item: object) -> None:
+        if not isinstance(item, dict):
+            return
+        path = str(item.get("path") or item.get("source_path") or "").strip()
+        if not path:
+            return
+        if "sha256" in item:
+            item_hash = str(item.get("sha256") or "")
+        else:
+            item_hash = _artifact_payload_hash(item)
+        if not item_hash:
+            return
+        path_items.setdefault(path, []).append(item_hash)
+
+    for item in artifact_payload.get("files") or []:
+        add_item(item)
+    for section in ("routes", "symbols", "edges"):
+        for item in artifact_payload.get(section) or []:
+            add_item(item)
+    database = artifact_payload.get("database")
+    if isinstance(database, dict):
+        for table in database.get("tables") or []:
+            add_item(table)
+            if isinstance(table, dict):
+                for item in table.get("columns") or []:
+                    add_item(item)
+                for item in table.get("foreign_keys") or []:
+                    add_item(item)
+
+    paths = {
+        path: hashlib.sha256("".join(sorted(hashes)).encode("utf-8")).hexdigest()
+        for path, hashes in sorted(path_items.items())
+    }
+    return {"paths": paths, "count": len(paths), "sha256": _artifact_payload_hash(paths)}
+
+
+def _artifact_file_delta(cached_manifest: object, current_manifest: dict[str, object]) -> dict[str, object]:
+    previous_paths = {}
+    if isinstance(cached_manifest, dict) and isinstance(cached_manifest.get("paths"), dict):
+        previous_paths = {str(path): str(value) for path, value in cached_manifest["paths"].items()}
+    raw_current_paths = current_manifest.get("paths")
+    current_paths = {str(path): str(value) for path, value in raw_current_paths.items()} if isinstance(raw_current_paths, dict) else {}
+    added = sorted(path for path in current_paths if path not in previous_paths)
+    removed = sorted(path for path in previous_paths if path not in current_paths)
+    changed = sorted(path for path, value in current_paths.items() if previous_paths.get(path) not in {None, value})
+    unchanged = sorted(path for path, value in current_paths.items() if previous_paths.get(path) == value)
+    return {
+        "added": len(added),
+        "changed": len(changed),
+        "removed": len(removed),
+        "unchanged": len(unchanged),
+        "added_paths": added[:100],
+        "changed_paths": changed[:100],
+        "removed_paths": removed[:100],
+    }
+
+
 def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int, int]:
     artifact = result.get("artifact") if isinstance(result, dict) else None
     if not isinstance(artifact, dict):
@@ -470,9 +530,11 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
         artifact_payload.setdefault("indexed_head_commit", head_commit)
         artifact_payload.setdefault("workspace_head_commit", head_commit)
     payload_hash = _artifact_payload_hash(artifact_payload)
+    file_manifest = _artifact_file_manifest(artifact_payload)
     cache_key = _artifact_upload_cache_key(binding, schema)
     with db.connect_closing() as conn:
         cached = db.get_sync_state(conn, cache_key) or {}
+    file_delta = _artifact_file_delta(cached.get("file_manifest"), file_manifest)
     if (
         str(cached.get("sha256") or "") == payload_hash
         and str(cached.get("head_commit") or "") == head_commit
@@ -487,6 +549,7 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                 "hades_job_id": job_id,
                 "hades_schema": schema,
                 "hades_reason": "unchanged",
+                "hades_file_count": int(file_manifest.get("count") or 0),
             },
         )
         return (0, 0, 1)
@@ -511,6 +574,8 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                 "hades_schema": schema,
                 "hades_truncated": bool(artifact_payload.get("truncated", False)),
                 "hades_redactions": int(artifact_payload.get("redactions", 0) or 0),
+                "hades_file_count": int(file_manifest.get("count") or 0),
+                "hades_file_delta": file_delta,
             },
         )
         with db.connect_closing() as conn:
@@ -522,6 +587,8 @@ def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.Wor
                     "sha256": payload_hash,
                     "head_commit": head_commit,
                     "job_id": job_id,
+                    "file_manifest": file_manifest,
+                    "file_delta": file_delta,
                 },
             )
         return (1, 0, 0)

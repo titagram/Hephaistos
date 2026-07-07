@@ -563,6 +563,99 @@ def test_sync_runner_skips_unchanged_artifact_uploads(monkeypatch, tmp_path):
     assert len(client.uploads) == 1
 
 
+def test_sync_runner_records_file_level_artifact_delta(monkeypatch, tmp_path):
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _artifact_upload_cache_key, _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="c" * 40,
+        status="active",
+    )
+    first_result = {
+        "artifact": {
+            "schema": "hades.git_tree.v1",
+            "files": [
+                {"path": "app/a.py", "sha256": "aaa", "bytes": 10},
+                {"path": "app/b.py", "sha256": "bbb", "bytes": 20},
+            ],
+            "truncated": False,
+            "redactions": 0,
+            "raw_source_included": False,
+        }
+    }
+    second_result = {
+        "artifact": {
+            "schema": "hades.git_tree.v1",
+            "files": [
+                {"path": "app/a.py", "sha256": "aaa", "bytes": 10},
+                {"path": "app/b.py", "sha256": "changed", "bytes": 21},
+                {"path": "app/c.py", "sha256": "ccc", "bytes": 30},
+            ],
+            "truncated": False,
+            "redactions": 0,
+            "raw_source_included": False,
+        }
+    }
+
+    assert _upload_job_artifact(client, agent, binding, "job_tree_1", first_result) == (1, 0, 0)
+    with hdb.connect_closing() as conn:
+        cache = hdb.get_sync_state(conn, _artifact_upload_cache_key(binding, "hades.git_tree.v1"))
+    assert cache["file_manifest"]["count"] == 2
+    assert cache["file_delta"] == {
+        "added": 2,
+        "changed": 0,
+        "removed": 0,
+        "unchanged": 0,
+        "added_paths": ["app/a.py", "app/b.py"],
+        "changed_paths": [],
+        "removed_paths": [],
+    }
+
+    assert _upload_job_artifact(client, agent, binding, "job_tree_2", second_result) == (1, 0, 0)
+    with hdb.connect_closing() as conn:
+        cache = hdb.get_sync_state(conn, _artifact_upload_cache_key(binding, "hades.git_tree.v1"))
+    assert cache["file_manifest"]["count"] == 3
+    assert cache["file_delta"] == {
+        "added": 1,
+        "changed": 1,
+        "removed": 0,
+        "unchanged": 1,
+        "added_paths": ["app/c.py"],
+        "changed_paths": ["app/b.py"],
+        "removed_paths": [],
+    }
+    assert len(client.uploads) == 2
+
+
 def test_sync_runner_uploads_source_slices():
     from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
     from hermes_cli.hades_backend_sync import _upload_job_source_slice
@@ -876,7 +969,8 @@ def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch
     assert payload["sync"]["background"]["failure_count"] == 1
     assert payload["sync"]["background"]["next_attempt_at"] == 2030
     assert payload["actions"] == [
-        "Background backend sync is backing off; run `hades backend sync` to retry now."
+        "Background backend sync is backing off; run `hades backend sync` to retry now.",
+        "Run `hades backend quality-report --record` to establish a governance baseline.",
     ]
 
 
@@ -941,7 +1035,8 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
         "bug_evidence",
     ]
     assert payload["actions"] == [
-        "Project awareness is incomplete; inspect `awareness` before source-free diagnosis."
+        "Project awareness is incomplete; inspect `awareness` before source-free diagnosis.",
+        "Run `hades backend quality-report --record` to establish a governance baseline.",
     ]
     assert identity["personal_memory"]["scope"] == "local_profile"
     assert identity["personal_memory"]["portable_between_devices"] is False
@@ -1074,7 +1169,9 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
         "degraded_bindings": 0,
         "diagnosable_without_source_bindings": 1,
     }
-    assert payload["actions"] == []
+    assert payload["actions"] == [
+        "Run `hades backend quality-report --record` to establish a governance baseline."
+    ]
     assert binding_awareness["status"] == "ready"
     assert binding_awareness["diagnosable_without_source"] is True
     assert binding_awareness["coverage"]["memory_cache"]["items"] == 1
