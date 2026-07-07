@@ -237,6 +237,20 @@ PHP_REDIRECT_CHAIN_RE = re.compile(
     r"\bredirect\s*\(\s*\)\s*->\s*(?P<method>route|to|away|back)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_SESSION_HELPER_RE = re.compile(r"\bsession\s*\(", re.IGNORECASE | re.MULTILINE)
+PHP_SESSION_CHAIN_RE = re.compile(
+    r"\bsession\s*\(\s*\)\s*->\s*(?P<method>get|put|flash|forget|has|pull|remove)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_REQUEST_SESSION_CHAIN_RE = re.compile(
+    r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*->\s*session\s*\(\s*\)\s*->\s*(?P<method>get|put|flash|forget|has|pull|remove)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_SESSION_FACADE_RE = re.compile(
+    r"\bSession::(?P<method>get|put|flash|forget|has|pull|remove)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -3991,6 +4005,177 @@ def _append_php_route_http_redirect_edges(
     return truncated
 
 
+def _php_session_operation(method: str) -> str:
+    normalized = method.lower()
+    if normalized in {"put"}:
+        return "write"
+    if normalized == "flash":
+        return "flash"
+    if normalized in {"forget", "remove"}:
+        return "delete"
+    if normalized == "pull":
+        return "read_delete"
+    if normalized == "has":
+        return "check"
+    return "read"
+
+
+def _php_session_access_items(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    session_method: str,
+    args: str,
+) -> list[dict[str, Any]]:
+    line = _line_number(source, method_body_offset + relative_call_start)
+    parts = _split_top_level_items(args)
+    method = session_method.lower()
+    items: list[dict[str, Any]] = []
+    if method == "session_helper":
+        stripped = args.strip()
+        if stripped.startswith("["):
+            for field_match in PHP_ARRAY_FIELD_KEY_RE.finditer(stripped):
+                session_key = str(field_match.group("field") or "")
+                if not session_key:
+                    continue
+                items.append(
+                    {
+                        "session_key": session_key,
+                        "session_operation": "write",
+                        "session_method": session_method,
+                        "line": line,
+                    }
+                )
+            return items
+        session_key = _php_quoted_literal(parts[0][0]) if parts else ""
+        if session_key:
+            items.append(
+                {
+                    "session_key": session_key,
+                    "session_operation": "read",
+                    "session_method": session_method,
+                    "line": line,
+                }
+            )
+        return items
+
+    session_key = _php_quoted_literal(parts[0][0]) if parts else ""
+    if not session_key:
+        return []
+    items.append(
+        {
+            "session_key": session_key,
+            "session_operation": _php_session_operation(method.removeprefix("session_").removeprefix("request_session_")),
+            "session_method": session_method,
+            "line": line,
+        }
+    )
+    return items
+
+
+def _php_session_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+
+    def append_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("session_key") or ""),
+                str(item.get("session_operation") or ""),
+                str(item.get("session_method") or ""),
+                int(item.get("line") or 0),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            accesses.append(item)
+
+    for pattern, method_prefix in (
+        (PHP_SESSION_CHAIN_RE, "session"),
+        (PHP_REQUEST_SESSION_CHAIN_RE, "request_session"),
+        (PHP_SESSION_FACADE_RE, "session"),
+    ):
+        for match in pattern.finditer(method_body):
+            open_abs = method_body_offset + match.end() - 1
+            close_abs = _balanced_end(source, open_abs, "(", ")")
+            if close_abs == -1:
+                continue
+            method = str(match.group("method") or "").lower()
+            append_items(
+                _php_session_access_items(
+                    source=source,
+                    method_body_offset=method_body_offset,
+                    relative_call_start=match.start(),
+                    session_method=f"{method_prefix}_{method}",
+                    args=source[open_abs + 1 : close_abs],
+                )
+            )
+
+    for match in PHP_SESSION_HELPER_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        chain_preview = source[close_abs + 1 : close_abs + 20]
+        if re.match(r"\s*->\s*(?:get|put|flash|forget|has|pull|remove)\s*\(", chain_preview, re.IGNORECASE):
+            continue
+        append_items(
+            _php_session_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                session_method="session_helper",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_session_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            session_key = str(access.get("session_key") or "")
+            if not session_key:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_session_access",
+                    "from": route_ref,
+                    "to": f"session_key:{session_key}",
+                    "handler": method_symbol,
+                    "session_key": session_key,
+                    "session_operation": access.get("session_operation"),
+                    "session_method": access.get("session_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -5036,6 +5221,33 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 http_redirects,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            session_accesses = _php_session_accesses_for_method(source, method_body, method_body_offset)
+            for access in session_accesses:
+                session_key = str(access.get("session_key") or "")
+                if not session_key:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "session_access",
+                        "from": method_symbol,
+                        "to": f"session_key:{session_key}",
+                        "session_key": session_key,
+                        "session_operation": access.get("session_operation"),
+                        "session_method": access.get("session_method"),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_session_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                session_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated

@@ -2017,6 +2017,87 @@ def test_hades_backend_graph_search_finds_local_http_redirect_edges(monkeypatch,
     )
 
 
+def test_hades_backend_graph_search_finds_local_session_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "session_access",
+                "from": "OrderController@show",
+                "to": "session_key:orders.notice",
+                "session_key": "orders.notice",
+                "session_operation": "flash",
+                "session_method": "session_flash",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 45,
+            },
+            {
+                "kind": "route_session_access",
+                "from": "route:orders.show",
+                "to": "session_key:orders.notice",
+                "handler": "OrderController@show",
+                "session_key": "orders.notice",
+                "session_operation": "flash",
+                "session_method": "session_flash",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 45,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders session flash orders.notice", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_session_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "session_key:orders.notice"
+        and ref["provenance"]["session_key"] == "orders.notice"
+        and ref["provenance"]["session_operation"] == "flash"
+        for ref in graph_refs
+    )
+    assert any(
+        "session_key=orders.notice" in item["summary"]
+        and "session_operation=flash" in item["summary"]
+        and "session_method=session_flash" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

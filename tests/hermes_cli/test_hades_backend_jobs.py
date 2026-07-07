@@ -672,6 +672,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        $this->orders->format($order);\n"
         "        abort_if($order->status === 'archived', 403);\n"
         "        redirect()->route('orders.index', [], 302);\n"
+        "        session()->flash('orders.notice', 'Order queued');\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1066,6 +1067,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_http_response_status", "route:invoices.update", "http_status:409") in edges
     assert ("http_redirect", "OrderController@show", "redirect_route:orders.index") in edges
     assert ("route_http_redirect", "route:orders.show", "redirect_route:orders.index") in edges
+    assert ("session_access", "OrderController@show", "session_key:orders.notice") in edges
+    assert ("route_session_access", "route:orders.show", "session_key:orders.notice") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1163,6 +1166,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 30,
+    } in artifact["edges"]
+    assert {
+        "kind": "session_access",
+        "from": "OrderController@show",
+        "to": "session_key:orders.notice",
+        "session_key": "orders.notice",
+        "session_operation": "flash",
+        "session_method": "session_flash",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 31,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_session_access",
+        "from": "route:orders.show",
+        "to": "session_key:orders.notice",
+        "handler": "OrderController@show",
+        "session_key": "orders.notice",
+        "session_operation": "flash",
+        "session_method": "session_flash",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 31,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1678,6 +1706,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "OrderLockedException();" not in str(artifact)
     assert "response()->json" not in str(artifact)
     assert "redirect()->route" not in str(artifact)
+    assert "session()->flash" not in str(artifact)
+    assert "Order queued" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)
