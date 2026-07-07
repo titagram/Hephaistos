@@ -21,6 +21,7 @@ import {
   Link2,
   Play,
   RefreshCw,
+  Search,
   Send,
   Shield,
   Server,
@@ -42,6 +43,7 @@ import type {
   HadesBackendBinding,
   HadesBackendBindingAwareness,
   HadesBackendBugIntakeRequest,
+  HadesBackendBugReportDetailResponse,
   HadesBackendCoverageItem,
   HadesBackendJob,
   HadesBackendMemoryProposal,
@@ -79,6 +81,18 @@ function valueLabel(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function stringLabel(value: unknown, fallback = "None"): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function recordItems<T extends Record<string, unknown>>(value: unknown): T[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is T => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
 }
 
 function statusTone(status?: string | null): "success" | "warning" | "destructive" | "secondary" | "outline" {
@@ -1407,6 +1421,158 @@ function BugIntakePanel({
   );
 }
 
+function BugCaseLookupPanel({
+  showToast,
+}: {
+  showToast: (message: string, tone?: "success" | "error") => void;
+}) {
+  const [bugReportId, setBugReportId] = useState("");
+  const [detail, setDetail] = useState<HadesBackendBugReportDetailResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const cleanId = bugReportId.trim();
+  const report = detail?.bug_report ?? null;
+  const evidence = recordItems(detail?.evidence ?? detail?.evidence_items);
+  const diagnoses = recordItems(detail?.diagnosis_reports);
+
+  const loadBugReport = useCallback(async () => {
+    if (!cleanId || loading) return;
+    setLoading(true);
+    try {
+      const result = await api.getHadesBackendBugReport(cleanId);
+      setDetail(result);
+      showToast(result.summary || `Bug report ${cleanId} loaded`, "success");
+    } catch (error) {
+      showToast(`Bug case lookup failed: ${error}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [cleanId, loading, showToast]);
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Search className="h-4 w-4" />
+            Bug case lookup
+          </H2>
+          <Badge tone={detail ? "success" : "outline"}>
+            {detail ? "loaded" : "idle"}
+          </Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+          <FormField label="Bug report id">
+            <input
+              className={inputClassName}
+              value={bugReportId}
+              disabled={loading}
+              placeholder="bug_..."
+              onChange={(event) => setBugReportId(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void loadBugReport();
+                }
+              }}
+            />
+          </FormField>
+          <div className="flex items-end">
+            <Button
+              className="w-full uppercase"
+              disabled={!cleanId || loading}
+              prefix={loading ? <Spinner /> : <Search className="h-4 w-4" />}
+              onClick={() => void loadBugReport()}
+            >
+              Load case
+            </Button>
+          </div>
+        </div>
+
+        {detail && (
+          <div className="grid gap-4">
+            <div className="border border-border bg-background/40 px-3 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold">
+                    {stringLabel(report?.title, stringLabel(report?.id, cleanId))}
+                  </div>
+                  <div className="mt-1 text-sm text-muted-foreground">
+                    {stringLabel(report?.symptom, "No symptom summary")}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge tone={statusTone(report?.status as string | null)}>{stringLabel(report?.status, "unknown")}</Badge>
+                  <Badge tone={statusTone(report?.severity as string | null)}>{stringLabel(report?.severity, "severity n/a")}</Badge>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                <span className="truncate font-mono">project {stringLabel(detail.project_id, "unknown")}</span>
+                <span className="truncate font-mono">binding {stringLabel(detail.workspace_binding_id, "unknown")}</span>
+                <span className="truncate font-mono">environment {stringLabel(report?.environment, "unknown")}</span>
+              </div>
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+              <div className="border border-border bg-background/40 px-3 py-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs uppercase text-muted-foreground">Evidence timeline</div>
+                  <Badge tone={evidence.length ? "success" : "warning"}>{evidence.length}</Badge>
+                </div>
+                {evidence.length > 0 ? (
+                  <div className="grid gap-2">
+                    {evidence.slice(0, 6).map((item, index) => (
+                      <div className="border border-border bg-background px-3 py-2" key={stringLabel(item.id, String(index))}>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                          <span className="min-w-0 truncate font-medium">
+                            {stringLabel(item.summary, stringLabel(item.kind, "Evidence"))}
+                          </span>
+                          <Badge tone={statusTone(item.kind as string | null)}>{stringLabel(item.kind, "unknown")}</Badge>
+                        </div>
+                        <ReviewMeta>
+                          {stringLabel(item.id, "no id")} / {stringLabel(item.source, "no source")} / {stringLabel(item.retention_class, "no retention")}
+                        </ReviewMeta>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ReviewEmpty label="No evidence returned" />
+                )}
+              </div>
+
+              <div className="border border-border bg-background/40 px-3 py-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs uppercase text-muted-foreground">Diagnosis reports</div>
+                  <Badge tone={diagnoses.length ? "success" : "outline"}>{diagnoses.length}</Badge>
+                </div>
+                {diagnoses.length > 0 ? (
+                  <div className="grid gap-2">
+                    {diagnoses.slice(0, 4).map((item, index) => (
+                      <div className="border border-border bg-background px-3 py-2" key={stringLabel(item.id, String(index))}>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                          <span className="min-w-0 truncate font-medium">
+                            {stringLabel(item.root_cause, stringLabel(item.id, "Diagnosis"))}
+                          </span>
+                          <Badge tone={statusTone(item.confidence as string | null)}>{stringLabel(item.confidence, "unknown")}</Badge>
+                        </div>
+                        <ReviewMeta>
+                          {stringLabel(item.id, "no id")} / freshness {valueLabel(item.freshness)}
+                        </ReviewMeta>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ReviewEmpty label="No diagnosis reports returned" />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function initialPromotionForm(): DiagnosisPromotionFormState {
   return {
     diagnosisReportId: "",
@@ -1779,6 +1945,7 @@ export default function BackendPage() {
         runReviewAction={runReviewAction}
       />
       <BugIntakePanel status={status} onCreated={load} showToast={showToast} />
+      <BugCaseLookupPanel showToast={showToast} />
       <DiagnosisPromotionPanel showToast={showToast} />
       <GovernanceQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />

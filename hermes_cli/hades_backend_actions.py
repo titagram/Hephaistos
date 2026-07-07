@@ -478,6 +478,42 @@ def create_bug_intake(
     )
 
 
+def get_bug_report_detail(bug_report_id: str) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+
+    clean_id = _clean_text(bug_report_id)
+    if not clean_id:
+        raise BackendActionError("bug report id is required", status_code=400)
+
+    _agent, binding = _select_workspace_binding()
+    try:
+        client = runtime.client_from_config()
+        try:
+            response = client.get_bug_report(
+                clean_id,
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+
+    payload = dict(response) if isinstance(response, dict) else {"bug_report": response}
+    payload.setdefault("project_id", binding.project_id)
+    payload.setdefault("workspace_binding_id", binding.backend_workspace_binding_id)
+    report = payload.get("bug_report") if isinstance(payload.get("bug_report"), dict) else {}
+    title = _clean_text(report.get("title")) if isinstance(report, dict) else None
+    return BackendActionResult(
+        ok=True,
+        status="loaded",
+        summary=f"Bug report {clean_id} loaded" if not title else f"Bug report loaded: {title}",
+        payload=payload,
+    )
+
+
 def promote_diagnosis_report(
     diagnosis_report_id: str,
     *,

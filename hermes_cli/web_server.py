@@ -2392,6 +2392,20 @@ def create_hades_backend_bug_intake(
             raise _hades_backend_action_error(exc) from exc
 
 
+@app.get("/api/hades/backend/bug-reports/{bug_report_id}")
+def get_hades_backend_bug_report(
+    bug_report_id: str,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import get_bug_report_detail
+
+        try:
+            return _hades_backend_action_payload(get_bug_report_detail(bug_report_id))
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
+
+
 @app.post("/api/hades/backend/promote-diagnosis")
 def promote_hades_backend_diagnosis(
     body: HadesBackendPromoteDiagnosisRequest,

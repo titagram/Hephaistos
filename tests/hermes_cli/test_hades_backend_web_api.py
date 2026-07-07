@@ -530,6 +530,115 @@ def test_hades_backend_web_route_creates_bug_intake_with_evidence(monkeypatch, t
     assert fake_client.evidence[4]["payload"]["status"] == 500
 
 
+def test_hades_backend_web_route_reads_bug_report_detail(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime
+    from hermes_cli import web_server
+
+    class FakeBackendClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def get_bug_report(self, bug_report_id, **payload):
+            self.calls.append((bug_report_id, payload))
+            return {
+                "bug_report": {
+                    "id": bug_report_id,
+                    "title": "Checkout fails",
+                    "symptom": "HTTP 500 on submit",
+                    "status": "open",
+                    "severity": "high",
+                },
+                "evidence": [
+                    {
+                        "id": "ev_1",
+                        "kind": "failing_test",
+                        "summary": "CheckoutTest failed",
+                        "source": "pytest",
+                        "retention_class": "test_failure",
+                    }
+                ],
+                "diagnosis_reports": [
+                    {
+                        "id": "diag_1",
+                        "confidence": "medium",
+                        "root_cause": "Order persistence fails after payment capture",
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeBackendClient()
+    monkeypatch.setattr(hades_backend_runtime, "client_from_config", lambda: fake_client)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="local_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(repo),
+            git_remote_display="origin",
+            git_remote_hash="hash",
+            head_commit="a" * 40,
+            backend_workspace_binding_id="wb_1",
+        )
+
+    previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    try:
+        response = client.get("/api/hades/backend/bug-reports/bug_1")
+    finally:
+        if previous_auth_required is None:
+            try:
+                delattr(web_server.app.state, "auth_required")
+            except AttributeError:
+                pass
+        else:
+            web_server.app.state.auth_required = previous_auth_required
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "loaded"
+    assert body["project_id"] == "proj_1"
+    assert body["workspace_binding_id"] == "wb_1"
+    assert body["bug_report"]["title"] == "Checkout fails"
+    assert body["evidence"][0]["id"] == "ev_1"
+    assert body["diagnosis_reports"][0]["id"] == "diag_1"
+    assert fake_client.closed is True
+    assert fake_client.calls == [
+        (
+            "bug_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+            },
+        )
+    ]
+
+
 def test_hades_backend_web_route_promotes_diagnosis(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

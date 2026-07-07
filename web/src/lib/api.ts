@@ -330,6 +330,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getHadesBackendBugReport: (bugReportId: string) =>
+    fetchJSON<HadesBackendBugReportDetailResponse>(
+      `/api/hades/backend/bug-reports/${encodeURIComponent(bugReportId)}`,
+    ),
   promoteHadesBackendDiagnosis: (body: HadesBackendPromoteDiagnosisRequest) =>
     fetchJSON<HadesBackendActionResponse>("/api/hades/backend/promote-diagnosis", {
       method: "POST",
@@ -1865,6 +1869,46 @@ export interface HadesBackendBugIntakeRequest {
   request_url?: string | null;
   request_method?: string | null;
   response_status?: number | null;
+}
+
+export interface HadesBackendBugReportDetail {
+  id?: string | null;
+  title?: string | null;
+  symptom?: string | null;
+  status?: string | null;
+  severity?: string | null;
+  environment?: string | null;
+  payload?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendBugReportEvidenceItem {
+  id?: string | null;
+  kind?: string | null;
+  summary?: string | null;
+  source?: string | null;
+  retention_class?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendDiagnosisReportSummary {
+  id?: string | null;
+  confidence?: string | null;
+  root_cause?: string | null;
+  status?: string | null;
+  final?: boolean | null;
+  evidence_refs?: Array<Record<string, unknown>>;
+  freshness?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendBugReportDetailResponse extends HadesBackendActionResponse {
+  bug_report?: HadesBackendBugReportDetail | null;
+  evidence?: HadesBackendBugReportEvidenceItem[];
+  evidence_items?: HadesBackendBugReportEvidenceItem[];
+  diagnosis_reports?: HadesBackendDiagnosisReportSummary[];
 }
 
 export interface HadesBackendPromoteDiagnosisRequest {

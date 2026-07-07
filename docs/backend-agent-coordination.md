@@ -4843,3 +4843,30 @@ Resta fuori da questa tranche:
 
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
+
+## Esecuzione dashboard bug case lookup Hades - 2026-07-07
+
+Stato: completata una tranche locale P1-4 per investigation surface.
+
+Integrazione locale/dashboard:
+
+- Nuova action condivisa `get_bug_report_detail` in
+  `hermes_cli/hades_backend_actions.py`; usa il workspace binding corrente e
+  chiama `HadesBackendClient.get_bug_report` con `project_id` e
+  `workspace_binding_id`.
+- Nuova route dashboard `GET /api/hades/backend/bug-reports/{bug_report_id}`.
+- Nuovo metodo frontend `api.getHadesBackendBugReport` e tipi per bug report,
+  evidence item e diagnosis report summary.
+- La dashboard Backend aggiunge il pannello `Bug case lookup`: carica un bug
+  report per id e mostra summary, evidence timeline e diagnosis reports
+  restituiti dal backend.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/pytest tests/hermes_cli/test_hades_backend_web_api.py::test_hades_backend_web_route_reads_bug_report_detail`
+  passato: `1 passed`.
+- Frontend:
+  `npm --prefix web run typecheck` passato.
+- Frontend lint mirato:
+  `npx eslint src/pages/BackendPage.tsx src/lib/api.ts` passato da `web/`.
