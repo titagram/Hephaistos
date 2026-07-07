@@ -2394,9 +2394,47 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Database schema adapters cross-framework.
+- Database schema adapters cross-framework oltre Django models.
 - Parser strutturati profondi per JS/TS/Python/PHP oltre ai casi AST/regex
   bounded.
+
+## Esecuzione Django DB graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` estrae metadata source-free da classi Django
+  `models.Model`.
+- Il graph Python include `database.tables` con table name, app label, model,
+  columns, field type, flag strutturali (`unique`, `db_index`, `null`,
+  `primary_key`, `max_length`) e foreign key.
+- I model-only projects senza route ora producono `hades.code_graph.v1` quando
+  hanno schema DB utile, invece di degradare a `hades.symbols.v1`.
+- Le FK risolvono `Meta.db_table` dei target nello stesso file quando
+  disponibile, cosi' l'edge punta alla tabella reale.
+- Gli artifact restano source-free: niente corpo dei model, niente chiamate
+  `models.<Field>`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_web_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_django_models_graph_without_routes tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_python_symbols_without_source`
+  passato: `3 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `17 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- SQLAlchemy, Prisma/Drizzle, Doctrine e schema SQL raw adapters.
+- Resolver FK Django cross-file/cross-app completo oltre alla mappa
+  model-table nello stesso file.
+- Parser AST piu' profondo per manager/queryset e migration operations Django.
 
 ## Esecuzione Symfony graph Hades - 2026-07-07
 
@@ -2429,7 +2467,7 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Database schema adapters cross-framework.
+- Database schema adapters cross-framework oltre Django models.
 - Parser PHP strutturati profondi oltre alle route Symfony attribute/annotation
   e al graph Laravel regex-bounded.
 

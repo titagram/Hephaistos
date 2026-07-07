@@ -257,6 +257,7 @@ NEXT_PAGE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/page\.(?:ts|tsx|js|jsx
 NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(")
 PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
 PY_DJANGO_ROUTE_FUNCS = {"path", "re_path"}
+PY_DJANGO_RELATION_FIELDS = {"ForeignKey", "OneToOneField", "ManyToManyField"}
 
 
 def _safe_relpath(path: str) -> str:
@@ -1852,13 +1853,15 @@ def _py_graph_summary(
     edges: list[dict[str, Any]],
     *,
     framework: str,
+    database: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
         kind = str(symbol.get("kind") or "symbol")
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; {kinds or 'symbols:none'}"
+    table_count = len((database or {}).get("tables") or [])
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {kinds or 'symbols:none'}"
 
 
 def _py_dotted_name(node: ast.AST | None) -> str:
@@ -1883,6 +1886,20 @@ def _py_keyword_string(node: ast.Call, name: str) -> str:
     return ""
 
 
+def _py_keyword_bool(node: ast.Call, name: str) -> bool | None:
+    for keyword in node.keywords:
+        if keyword.arg == name and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
+            return keyword.value.value
+    return None
+
+
+def _py_keyword_int(node: ast.Call, name: str) -> int | None:
+    for keyword in node.keywords:
+        if keyword.arg == name and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, int):
+            return keyword.value.value
+    return None
+
+
 def _join_url_path(prefix: str, path: str) -> str:
     if not prefix:
         return path or "/"
@@ -1893,6 +1910,132 @@ def _join_url_path(prefix: str, path: str) -> str:
 
 def _py_route_id(route: dict[str, Any]) -> str:
     return str(route.get("name") or f"{route.get('method', '')} {route.get('path', '')}".strip())
+
+
+def _snake_name(name: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", name).lower()
+
+
+def _py_app_label(rel: str) -> str:
+    parts = rel.split("/")
+    if "models" in parts:
+        index = parts.index("models")
+        if index > 0:
+            return parts[index - 1]
+    if rel.endswith("/models.py") and len(parts) >= 2:
+        return parts[-2]
+    return parts[0] if parts else "app"
+
+
+def _py_django_model_base(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        base_name = _py_dotted_name(base)
+        if base_name == "Model" or base_name.endswith(".Model"):
+            return True
+    return False
+
+
+def _py_django_meta_table(node: ast.ClassDef) -> str:
+    for item in node.body:
+        if not isinstance(item, ast.ClassDef) or item.name != "Meta":
+            continue
+        for meta_item in item.body:
+            if not isinstance(meta_item, ast.Assign):
+                continue
+            if not any(isinstance(target, ast.Name) and target.id == "db_table" for target in meta_item.targets):
+                continue
+            table = _py_string(meta_item.value)
+            if table:
+                return table
+    return ""
+
+
+def _py_django_relation_target(call: ast.Call) -> str:
+    if not call.args:
+        return ""
+    target = call.args[0]
+    if isinstance(target, ast.Constant) and isinstance(target.value, str):
+        return target.value
+    return _py_dotted_name(target)
+
+
+def _py_django_target_table(target: str, app_label: str, current_table: str, model_tables: dict[str, str]) -> str:
+    if not target:
+        return ""
+    if target == "self":
+        return current_table
+    clean = target.strip("'\"")
+    model_name = clean.rsplit(".", 1)[-1]
+    if model_name in model_tables:
+        return model_tables[model_name]
+    if "." in clean and not clean.startswith("settings."):
+        app, model = clean.rsplit(".", 1)
+        return f"{app}_{_snake_name(model)}"
+    if clean.startswith("settings."):
+        return f"setting:{clean}"
+    return f"{app_label}_{_snake_name(clean.split('.')[-1])}"
+
+
+def _py_django_model_table(node: ast.ClassDef, rel: str) -> tuple[str, str]:
+    app_label = _py_app_label(rel)
+    return _py_django_meta_table(node) or f"{app_label}_{_snake_name(node.name)}", app_label
+
+
+def _py_django_model_fields(
+    node: ast.ClassDef,
+    table: str,
+    app_label: str,
+    rel: str,
+    model_tables: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    columns: list[dict[str, Any]] = []
+    foreign_keys: list[dict[str, Any]] = []
+    for item in node.body:
+        value: ast.AST | None = None
+        field_name = ""
+        if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+            field_name = item.targets[0].id
+            value = item.value
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            field_name = item.target.id
+            value = item.value
+        if not field_name or not isinstance(value, ast.Call):
+            continue
+        field_type = _py_dotted_name(value.func).split(".")[-1]
+        if not (field_type.endswith("Field") or field_type in PY_DJANGO_RELATION_FIELDS):
+            continue
+        relation = field_type in PY_DJANGO_RELATION_FIELDS
+        column_name = f"{field_name}_id" if relation and field_type != "ManyToManyField" else field_name
+        column = {
+            "name": column_name,
+            "field": field_name,
+            "type": field_type,
+            "path": rel,
+            "line": getattr(item, "lineno", getattr(value, "lineno", 0)),
+        }
+        for keyword in ("null", "blank", "unique", "db_index", "primary_key"):
+            keyword_value = _py_keyword_bool(value, keyword)
+            if keyword_value is not None:
+                column[keyword] = keyword_value
+        max_length = _py_keyword_int(value, "max_length")
+        if max_length is not None:
+            column["max_length"] = max_length
+        target = _py_django_relation_target(value) if relation else ""
+        if target:
+            column["relation_model"] = target
+        columns.append(column)
+        references_table = _py_django_target_table(target, app_label, table, model_tables)
+        if references_table and field_type != "ManyToManyField":
+            foreign_keys.append(
+                {
+                    "table": table,
+                    "column": column_name,
+                    "references_table": references_table,
+                    "path": rel,
+                    "line": column["line"],
+                }
+            )
+    return columns, foreign_keys
 
 
 def _ts_framework(root: Path, files: list[Path], dependency_manifests: list[dict[str, Any]]) -> str:
@@ -2077,6 +2220,7 @@ def _build_python_artifact(
     symbols: list[dict[str, Any]] = []
     routes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    database: dict[str, Any] = {"tables": []}
     frameworks: set[str] = set()
     python_files = [path for path in candidates if path.suffix == ".py"]
 
@@ -2116,10 +2260,59 @@ def _build_python_artifact(
                 if isinstance(target, ast.Name):
                     router_prefixes[target.id] = prefix
 
+        django_model_tables: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and _py_django_model_base(node):
+                table, _app_label = _py_django_model_table(node, rel)
+                django_model_tables[node.name] = table
+
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
+                symbol = {"kind": "class", "name": node.name, "path": rel, "line": node.lineno}
+                if _py_django_model_base(node):
+                    table, app_label = _py_django_model_table(node, rel)
+                    columns, foreign_keys = _py_django_model_fields(node, table, app_label, rel, django_model_tables)
+                    if columns or foreign_keys:
+                        symbol["role"] = "django_model"
+                        database["tables"].append(
+                            {
+                                "table": table,
+                                "model": node.name,
+                                "app_label": app_label,
+                                "path": rel,
+                                "line": node.lineno,
+                                "columns": columns[:200],
+                                "foreign_keys": foreign_keys[:100],
+                            }
+                        )
+                        frameworks.add("django")
+                        truncated = not _edge_append(
+                            edges,
+                            {
+                                "kind": "model_table",
+                                "from": node.name,
+                                "to": f"table:{table}",
+                                "framework": "django",
+                                "path": rel,
+                                "line": node.lineno,
+                            },
+                            max_edges=max_edges,
+                        ) or truncated
+                        for foreign_key in foreign_keys:
+                            truncated = not _edge_append(
+                                edges,
+                                {
+                                    "kind": "foreign_key",
+                                    "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                                    "to": f"table:{foreign_key['references_table']}",
+                                    "framework": "django",
+                                    "path": rel,
+                                    "line": foreign_key.get("line"),
+                                },
+                                max_edges=max_edges,
+                            ) or truncated
                 if len(symbols) < max_symbols:
-                    symbols.append({"kind": "class", "name": node.name, "path": rel, "line": node.lineno})
+                    symbols.append(symbol)
                 else:
                     truncated = True
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2206,8 +2399,9 @@ def _build_python_artifact(
         if len(symbols) >= max_symbols:
             break
 
-    if routes:
+    if routes or database["tables"]:
         framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
+        graph_database = {**database, "tables": database["tables"][:500]}
         graph = {
             "schema": "hades.code_graph.v1",
             "language": "python",
@@ -2216,14 +2410,19 @@ def _build_python_artifact(
             "routes": routes[:500],
             "symbols": symbols,
             "edges": edges,
+            "database": graph_database,
             "summary": "",
             "omitted": omitted,
-            "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges or len(routes) > 500,
+            "truncated": truncated
+            or len(symbols) >= max_symbols
+            or len(edges) >= max_edges
+            or len(routes) > 500
+            or len(database["tables"]) > 500,
             "redactions": len(omitted),
             "retention_class": "source_symbols",
             "raw_source_included": False,
         }
-        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework)
+        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database)
         return graph
 
     return {

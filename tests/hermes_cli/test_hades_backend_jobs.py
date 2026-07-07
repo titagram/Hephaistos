@@ -327,6 +327,20 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
         "    pass\n",
         encoding="utf-8",
     )
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Customer(models.Model):\n"
+        "    email = models.EmailField(unique=True)\n"
+        "    class Meta:\n"
+        "        db_table = 'customers'\n"
+        "class Order(models.Model):\n"
+        "    customer = models.ForeignKey('Customer', on_delete=models.CASCADE)\n"
+        "    status = models.CharField(max_length=32, db_index=True)\n"
+        "    total = models.DecimalField(max_digits=10, decimal_places=2, null=True)\n"
+        "    class Meta:\n"
+        "        db_table = 'orders'\n",
+        encoding="utf-8",
+    )
 
     result = execute_job(
         {
@@ -341,6 +355,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     routes = {(item["framework"], item["method"], item["path"], item["handler"]) for item in artifact["routes"]}
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
     symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.code_graph.v1"
@@ -354,11 +369,63 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert ("function", "show_order", "app/api.py") in symbols
     assert ("function", "order_detail", "app/views.py") in symbols
     assert ("class", "OrderCreateView", "app/views.py") in symbols
+    assert ("class", "Customer", "app/models.py") in symbols
+    assert ("class", "Order", "app/models.py") in symbols
     assert ("route_handler", "route:orders-show", "show_order") in edges
     assert ("route_handler", "route:orders-detail", "views.order_detail") in edges
     assert ("route_handler", "route:orders-create", "views.OrderCreateView.as_view") in edges
+    assert ("model_table", "Customer", "table:customers") in edges
+    assert ("model_table", "Order", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert set(tables) >= {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} >= {"customer_id", "status", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "path": "app/models.py",
+            "line": 7,
+        }
+    ]
     assert "return {'id': order_id}" not in str(artifact)
     assert "urlpatterns" not in str(artifact)
+    assert "models.ForeignKey" not in str(artifact)
+
+
+def test_populate_backend_ast_extracts_django_models_graph_without_routes(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "billing").mkdir()
+    (tmp_path / "billing" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Invoice(models.Model):\n"
+        "    number = models.CharField(max_length=30, unique=True)\n"
+        "    paid = models.BooleanField(default=False, db_index=True)\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_django_models",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 10, "max_edges": 10},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.code_graph.v1"
+    assert artifact["framework"] == "django"
+    assert artifact["routes"] == []
+    assert "billing_invoice" in tables
+    assert {column["name"] for column in tables["billing_invoice"]["columns"]} == {"number", "paid"}
+    assert ("model_table", "Invoice", "table:billing_invoice") in edges
+    assert "models.CharField" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path):
