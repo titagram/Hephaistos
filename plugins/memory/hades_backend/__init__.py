@@ -201,8 +201,8 @@ GRAPH_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
         "Laravel routes, controller methods, class symbols, and graph edges. "
         "Use this after bug evidence search and before source slice fetch when "
         "diagnosing call paths or owner methods without local source access. "
-        "Results are live backend artifact search; there is no local cache "
-        "fallback."
+        "Results prefer live backend artifact search and fall back to synced "
+        "local graph artifacts when the backend is temporarily unavailable."
     ),
     "parameters": {
         "type": "object",
@@ -1157,6 +1157,14 @@ class HadesBackendMemoryProvider(MemoryProvider):
             result["tool_domain"] = "graph"
             return tool_result(result)
 
+        local_result = self._local_graph_search(query=query, limit=limit)
+        if local_result is not None:
+            local_result["project_id"] = self._binding.project_id
+            local_result["workspace_binding_id"] = self._binding.backend_workspace_binding_id
+            if backend_error:
+                local_result["backend_live_error"] = backend_error
+            return tool_result(local_result)
+
         result = {
             "status": "backend_unavailable",
             "project_id": self._binding.project_id,
@@ -1232,16 +1240,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
             result["backend_live_error"] = backend_error
         return tool_result(result)
 
-    def _local_graph_traverse(
-        self,
-        *,
-        start: str,
-        direction: str,
-        max_depth: int,
-        limit: int,
-    ) -> dict[str, Any] | None:
+    def _local_graph_sources(self) -> list[dict[str, Any]]:
         if self._binding is None:
-            return None
+            return []
 
         sources: list[dict[str, Any]] = []
         cache = self._load_memory_cache()
@@ -1266,11 +1267,24 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     "origin": "backend_job",
                     "job_id": job.job_id,
                     "item": job.result,
-                }
-            )
+                    }
+                )
 
+        return sources
+
+    def _local_graph_search(self, *, query: str, limit: int) -> dict[str, Any] | None:
+        return _local_graph_search_response(self._local_graph_sources(), query=query, limit=limit)
+
+    def _local_graph_traverse(
+        self,
+        *,
+        start: str,
+        direction: str,
+        max_depth: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
         return _local_graph_traverse_response(
-            sources,
+            self._local_graph_sources(),
             start=start,
             direction=direction,
             max_depth=max_depth,
@@ -2545,6 +2559,162 @@ def _local_graph_traverse(
                 queue.append((next_node, depth + 1))
 
     return list(selected_nodes.values())[:limit], selected_edges[:limit], truncated
+
+
+def _local_graph_edge_match_score(edge: dict[str, Any], query: str, tokens: set[str]) -> tuple[int, list[str]]:
+    lowered = {
+        "id": str(edge.get("id") or "").lower(),
+        "kind": str(edge.get("kind") or "").lower(),
+        "from": str(edge.get("from") or "").lower(),
+        "to": str(edge.get("to") or "").lower(),
+    }
+    provenance = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
+    lowered["provenance"] = json.dumps(provenance, sort_keys=True, default=str).lower()
+    query_lower = query.strip().lower()
+    if lowered["id"] == query_lower:
+        return 95, ["id"]
+    if lowered["from"] == query_lower or lowered["to"] == query_lower:
+        return 90, ["from", "to"]
+    if lowered["kind"] == query_lower:
+        return 70, ["kind"]
+    for field, value in lowered.items():
+        if query_lower and query_lower in value:
+            return 45, [field]
+    text = "\n".join(lowered.values())
+    if tokens and all(token in text for token in tokens):
+        return 28, ["tokens"]
+    overlap = sum(1 for token in tokens if token in text)
+    if overlap:
+        return 8 + overlap, ["tokens"]
+    return 0, []
+
+
+def _local_graph_node_search_item(node: dict[str, Any], *, score: int, match_fields: list[str]) -> dict[str, Any]:
+    attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+    node_id = str(node.get("id") or "")
+    kind = str(node.get("kind") or "graph_node")
+    schema = str(attributes.get("schema") or "")
+    path = str(node.get("path") or "")
+    summary = _compact_text(f"{kind}: {node_id}" + (f" ({path})" if path else ""), max_chars=800)
+    result = {
+        "id": f"node:{node_id}",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": schema,
+        "source": "local_graph_cache",
+        "summary": summary,
+        "score": score,
+        "raw_chunk": False,
+        "match_fields": match_fields,
+        "graph_ref": {
+            "type": "node",
+            "id": node_id,
+            "kind": kind,
+            "path": path,
+            "attributes": _bounded_payload(attributes),
+        },
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
+
+
+def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fields: list[str]) -> dict[str, Any]:
+    provenance = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
+    edge_id = str(edge.get("id") or "")
+    kind = str(edge.get("kind") or "graph_edge")
+    edge_from = str(edge.get("from") or "")
+    edge_to = str(edge.get("to") or "")
+    schema = str(provenance.get("schema") or "")
+    summary = _compact_text(f"{kind}: {edge_from} -> {edge_to}", max_chars=800)
+    result = {
+        "id": f"edge:{edge_id}",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": schema,
+        "source": "local_graph_cache",
+        "summary": summary,
+        "score": score,
+        "raw_chunk": False,
+        "match_fields": match_fields,
+        "graph_ref": {
+            "type": "edge",
+            "id": edge_id,
+            "kind": kind,
+            "from": edge_from,
+            "to": edge_to,
+            "provenance": _bounded_payload(provenance),
+        },
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
+
+
+def _local_graph_search_response(
+    sources: list[dict[str, Any]],
+    *,
+    query: str,
+    limit: int,
+) -> dict[str, Any] | None:
+    artifacts = _local_graph_artifacts(sources)
+    if not artifacts:
+        return None
+    nodes, edges = _local_graph_build(artifacts)
+    tokens = _tokenize(query)
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+
+    for node in nodes.values():
+        score, fields = _local_graph_match_score(node, query, tokens)
+        if score <= 0:
+            continue
+        scored.append((score, len(scored), _local_graph_node_search_item(node, score=score, match_fields=fields)))
+    for edge in edges:
+        score, fields = _local_graph_edge_match_score(edge, query, tokens)
+        if score <= 0:
+            continue
+        scored.append((score, len(scored), _local_graph_edge_search_item(edge, score=score, match_fields=fields)))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    items = [item for _score, _idx, item in scored[:limit]]
+    primary = artifacts[0]
+    graph = primary["artifact"]
+    provenance = {
+        "source": "local_graph_cache",
+        "artifacts": [
+            {
+                "artifact_id": artifact.get("artifact_id"),
+                "schema": artifact["artifact"].get("schema"),
+                "origin": artifact.get("origin"),
+                "cache_version": artifact.get("cache_version"),
+                "cache_updated_at": artifact.get("cache_updated_at"),
+                "job_id": artifact.get("job_id"),
+            }
+            for artifact in artifacts
+        ],
+    }
+    result: dict[str, Any] = {
+        "status": "ok",
+        "tool_domain": "graph",
+        "domain": "artifacts",
+        "searched_cache_only": True,
+        "query": query,
+        "kind": "all",
+        "include_raw_chunks": False,
+        "artifact_id": primary.get("artifact_id"),
+        "schema": graph.get("schema"),
+        "head_commit": graph.get("head_commit") or graph.get("workspace_head_commit") or graph.get("indexed_head_commit"),
+        "count": len(items),
+        "candidate_count": len(scored),
+        "graph_node_count": len(nodes),
+        "graph_edge_count": len(edges),
+        "truncated": len(scored) > len(items),
+        "raw_chunks_omitted": 0,
+        "freshness": {
+            "status": "cached",
+            "index_status": "local_graph_cache",
+            "workspace_head_commit": graph.get("workspace_head_commit") or graph.get("head_commit"),
+        },
+        "provenance": _bounded_payload(provenance),
+        "items": items,
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
 
 
 def _local_graph_traverse_response(

@@ -333,8 +333,9 @@ Use `hades_backend_graph_search` to find candidate graph artifacts by text, then
 method, file, or symbol and need bounded call-path context. Traversal results
 carry freshness and artifact provenance and should be cited before making exact
 route/controller/service claims without local source access. If the backend live
-call is unavailable, traversal can fall back to cached graph artifacts and will
-mark the result as `searched_cache_only=true` and `freshness.status=cached`.
+call is unavailable, graph search and traversal can fall back to cached graph
+artifacts and will mark the result as `searched_cache_only=true` and
+`freshness.status=cached`.
 
 Use `hades_backend_evidence_pack_search` before rebuilding an investigation
 that may already have a current pack. Use `hades_backend_evidence_pack_create`

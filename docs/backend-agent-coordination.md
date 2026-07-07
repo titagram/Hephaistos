@@ -2747,13 +2747,16 @@ Resta fuori da questa tranche:
 - Parser PHP/Laravel AST reale invece di pattern conservativi.
 - Query builder avanzato oltre ai casi gia' coperti.
 
-## Esecuzione Hades graph traversal cache fallback - 2026-07-07
+## Esecuzione Hades graph search/traversal cache fallback - 2026-07-07
 
 Stato: completata una tranche locale P1-3/P0-4 del piano "Bug Root Cause
 Awareness".
 
 Agent locale:
 
+- `hades_backend_graph_search` continua a preferire il backend live; se il live
+  fallisce, cerca nodi/edge nei graph artifact locali e restituisce `graph_ref`
+  compatti con ranking strutturato.
 - `hades_backend_graph_traverse` continua a preferire il backend live.
 - Se il backend live fallisce ma esiste un artifact locale
   `hades.php_graph.v1` o `hades.code_graph.v1` nella memory cache o nei job
@@ -2769,12 +2772,15 @@ Agent locale:
 
 Verifiche eseguite:
 
+- Locale mirato graph search:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_falls_back_to_local_graph_cache`
+  passato: `1 passed`.
 - Locale mirato:
   `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_traverse_falls_back_to_local_graph_cache`
   passato: `1 passed`.
 - Locale provider completo:
   `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
-  passato: `34 passed`.
+  passato: `35 passed`.
 - Locale diagnosis no-codebase:
   `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py`
   passato: `5 passed`.
@@ -2785,7 +2791,7 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Graph search locale fallback/FTS/rerank dedicato.
+- FTS/vector/rerank generalizzato oltre al ranking strutturato locale.
 - Freshness deploy-aware distinta dal solo commit indicizzato.
 
 ## Esecuzione Hades memory kind filter - 2026-07-07

@@ -622,6 +622,51 @@ def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp
     assert fake.closed == 1
 
 
+def test_hades_backend_graph_search_falls_back_to_local_graph_cache(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderController show", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["tool_domain"] == "graph"
+    assert result["domain"] == "artifacts"
+    assert result["searched_cache_only"] is True
+    assert result["schema"] == "hades.php_graph.v1"
+    assert result["freshness"]["status"] == "cached"
+    assert result["backend_live_error"] == "backend offline"
+    assert result["count"] >= 1
+    assert result["candidate_count"] >= result["count"]
+    assert any(ref["type"] == "node" and ref["id"] == "OrderController@show" for ref in graph_refs)
+    assert any(ref["type"] == "edge" and ref["kind"] == "route_handler" for ref in graph_refs)
+
+
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     timeouts = []
