@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { blurComposerInput } from '@/app/chat/composer/focus'
 import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
-import { AGENTS_ROUTE } from '@/app/routes'
+import { AGENTS_ROUTE, BUG_INTAKE_ROUTE } from '@/app/routes'
 import { composerDockCard } from '@/components/chat/composer-dock'
 import { StatusRow } from '@/components/chat/status-row'
 import { StatusSection } from '@/components/chat/status-section'
@@ -93,10 +93,22 @@ function useHadesBackendStatusSummary() {
 }
 
 function HadesBackendStatusSection({ summary }: { summary: HadesBackendStatusSummary }) {
+  const navigate = useNavigate()
   const danger = summary.tone === 'danger'
 
   return (
     <StatusSection
+      accessory={
+        <Button
+          className="text-muted-foreground/75 hover:text-foreground/90"
+          onClick={() => navigate(BUG_INTAKE_ROUTE)}
+          size="micro"
+          type="button"
+          variant="text"
+        >
+          Bug
+        </Button>
+      }
       defaultCollapsed={false}
       icon={<Codicon className={danger ? 'text-destructive/85' : 'text-amber-500/85'} name="database" size="0.8rem" />}
       label={summary.label}

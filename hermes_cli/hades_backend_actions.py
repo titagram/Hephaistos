@@ -37,6 +37,35 @@ def status_payload(agent: db.BackendAgent, binding: db.WorkspaceBinding, status:
     return payload
 
 
+def _clean_text(value: Any) -> str | None:
+    clean = str(value or "").strip()
+    return clean or None
+
+
+def _select_workspace_binding(workspace_binding_id: str | None = None) -> tuple[db.BackendAgent, db.WorkspaceBinding]:
+    from hermes_cli.hades_backend_cmd import _current_workspace_binding
+
+    clean_id = _clean_text(workspace_binding_id)
+    if not clean_id:
+        return _current_workspace_binding()
+
+    with db.connect_closing() as conn:
+        agent = db.get_default_agent(conn)
+        if agent is None:
+            raise BackendActionError("Hades backend is not configured", status_code=409)
+        binding = db.get_binding_for_backend_id(conn, clean_id)
+
+    if binding is None:
+        raise BackendActionError(f"Hades backend workspace binding {clean_id} is not known locally", status_code=404)
+    if binding.project_id != agent.project_id:
+        raise BackendActionError(
+            f"Hades backend workspace binding {clean_id} belongs to project {binding.project_id}, "
+            f"not configured project {agent.project_id}",
+            status_code=409,
+        )
+    return agent, binding
+
+
 def job_payload_for_display(job: db.BackendJob) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -192,6 +221,167 @@ def acknowledge_memory_proposal(proposal_id: str) -> BackendActionResult:
         status="acknowledged",
         summary=updated.reason or "acknowledged",
         payload={"proposal": proposal_payload_for_display(updated)},
+    )
+
+
+def _create_inline_bug_evidence(
+    client: object,
+    binding: db.WorkspaceBinding,
+    *,
+    bug_report_id: str | None,
+    text: str,
+    kind: str,
+    source: str,
+    retention_class: str,
+) -> str | None:
+    from hermes_cli.hades_backend_cmd import _evidence_payload, _first_interesting_line
+
+    redacted = redact_secret(text)
+    response = client.create_bug_evidence(
+        project_id=binding.project_id,
+        workspace_binding_id=binding.backend_workspace_binding_id,
+        bug_report_id=bug_report_id,
+        kind=kind,
+        summary=_first_interesting_line(redacted),
+        payload=_evidence_payload(kind, redacted, source, False),
+        source=source,
+        redactions=1 if redacted != text else 0,
+        retention_class=retention_class,
+    )
+    evidence = response.get("evidence") if isinstance(response.get("evidence"), dict) else response
+    return str(evidence.get("id")) if isinstance(evidence, dict) and evidence.get("id") else None
+
+
+def create_bug_intake(
+    *,
+    title: str,
+    symptom: str,
+    workspace_binding_id: str | None = None,
+    steps: str | None = None,
+    expected: str | None = None,
+    actual: str | None = None,
+    severity: str | None = None,
+    environment: str | None = None,
+    failing_test: str | None = None,
+    runtime_log: str | None = None,
+    deploy_commit: str | None = None,
+    workspace_head: str | None = None,
+    request_url: str | None = None,
+    request_method: str | None = None,
+    response_status: int | None = None,
+    source: str = "desktop",
+) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_cmd import (
+        _bug_report_id,
+        _clean_commit,
+        _create_deploy_version_evidence,
+        _create_http_context_evidence,
+    )
+
+    clean_title = _clean_text(title)
+    clean_symptom = _clean_text(symptom)
+    if not clean_title:
+        raise BackendActionError("bug title is required", status_code=400)
+    if not clean_symptom:
+        raise BackendActionError("bug symptom is required", status_code=400)
+
+    agent, binding = _select_workspace_binding(workspace_binding_id)
+    client = runtime.client_from_config()
+    try:
+        report_response = client.create_bug_report(
+            project_id=binding.project_id,
+            workspace_binding_id=binding.backend_workspace_binding_id,
+            title=clean_title,
+            symptom=clean_symptom,
+            payload={
+                "schema": "hades.bug_intake.v1",
+                "source": source,
+                "steps": _clean_text(steps),
+                "expected": _clean_text(expected),
+                "actual": _clean_text(actual),
+                "severity": _clean_text(severity),
+                "environment": _clean_text(environment),
+                "agent_id": agent.agent_id,
+            },
+        )
+        bug_report_id = _bug_report_id(report_response)
+        evidence_ids: list[str | None] = []
+
+        if clean_failing_test := _clean_text(failing_test):
+            evidence_ids.append(
+                _create_inline_bug_evidence(
+                    client,
+                    binding,
+                    bug_report_id=bug_report_id,
+                    text=clean_failing_test,
+                    kind="failing_test",
+                    source=f"{source}_failing_test",
+                    retention_class="test_failure",
+                )
+            )
+
+        if clean_runtime_log := _clean_text(runtime_log):
+            evidence_ids.append(
+                _create_inline_bug_evidence(
+                    client,
+                    binding,
+                    bug_report_id=bug_report_id,
+                    text=clean_runtime_log,
+                    kind="log_excerpt",
+                    source=f"{source}_runtime_log",
+                    retention_class="log_excerpt",
+                )
+            )
+
+        if clean_deploy_commit := _clean_commit(deploy_commit):
+            evidence_ids.append(
+                _create_deploy_version_evidence(
+                    client,
+                    binding,
+                    bug_report_id=bug_report_id,
+                    deploy_commit=clean_deploy_commit,
+                    workspace_head_commit=_clean_text(workspace_head) or binding.head_commit,
+                    environment=_clean_text(environment),
+                    source=f"{source}_deploy",
+                )
+            )
+
+        if _clean_text(request_url) or response_status is not None:
+            evidence_ids.extend(
+                _create_http_context_evidence(
+                    client,
+                    binding,
+                    bug_report_id=bug_report_id,
+                    method=_clean_text(request_method) or "GET",
+                    url=_clean_text(request_url) or "",
+                    status=response_status,
+                    request_file=None,
+                    response_file=None,
+                    environment=_clean_text(environment),
+                    source=f"{source}_http",
+                )
+            )
+    except BackendActionError:
+        raise
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    return BackendActionResult(
+        ok=True,
+        status="created",
+        summary="Bug report created",
+        payload={
+            "bug_report_id": bug_report_id,
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "evidence_ids": evidence_ids,
+            "agent_id": agent.agent_id,
+        },
     )
 
 

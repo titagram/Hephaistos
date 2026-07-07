@@ -5,8 +5,10 @@ export interface HadesBackendStatusPayload {
     diagnosable_without_source_bindings?: unknown
     bindings?: unknown
   }
+  bindings?: unknown
   configured?: unknown
   degraded?: unknown
+  identity?: unknown
   inbox_counts?: Record<string, unknown>
   job_counts?: Record<string, unknown>
   proposal_counts?: Record<string, unknown>

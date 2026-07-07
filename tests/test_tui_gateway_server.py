@@ -4373,6 +4373,47 @@ def test_input_detect_drop_attaches_image(monkeypatch):
     assert resp["result"]["text"] == "[User attached image: cat.png]"
 
 
+def test_backend_bug_intake_rpc_calls_shared_action(monkeypatch):
+    calls = {}
+
+    def fake_create_bug_intake(**payload):
+        calls.update(payload)
+        return types.SimpleNamespace(
+            ok=True,
+            status="created",
+            summary="Bug report created",
+            payload={
+                "bug_report_id": "bug_1",
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "evidence_ids": ["ev_1"],
+            },
+        )
+
+    import hermes_cli.hades_backend_actions as actions
+
+    monkeypatch.setattr(actions, "create_bug_intake", fake_create_bug_intake)
+
+    resp = server._methods["backend.bug_intake"](
+        "r1",
+        {
+            "title": "Checkout 500",
+            "symptom": "POST /checkout fails",
+            "workspace_binding_id": "wb_1",
+            "failing_test": "FAILED tests/test_checkout.py",
+            "runtime_log": "Bearer secret-token-123456",
+            "response_status": "500",
+        },
+    )
+
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["bug_report_id"] == "bug_1"
+    assert calls["title"] == "Checkout 500"
+    assert calls["workspace_binding_id"] == "wb_1"
+    assert calls["response_status"] == 500
+    assert calls["source"] == "desktop"
+
+
 def test_input_detect_drop_path_with_spaces(tmp_path):
     """input.detect_drop correctly handles image paths containing spaces."""
     # Create a minimal PNG file with a space in its name

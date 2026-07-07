@@ -10377,6 +10377,48 @@ def _(rid, params) -> dict:
     return _ok(rid, payload)
 
 
+@method("backend.bug_intake")
+def _(rid, params) -> dict:
+    try:
+        from hermes_cli.hades_backend_actions import create_bug_intake
+
+        raw_response_status = params.get("response_status")
+        response_status = None
+        if raw_response_status not in {None, ""}:
+            response_status = int(raw_response_status)
+
+        result = create_bug_intake(
+            title=str(params.get("title") or ""),
+            symptom=str(params.get("symptom") or ""),
+            workspace_binding_id=params.get("workspace_binding_id"),
+            steps=params.get("steps"),
+            expected=params.get("expected"),
+            actual=params.get("actual"),
+            severity=params.get("severity"),
+            environment=params.get("environment"),
+            failing_test=params.get("failing_test"),
+            runtime_log=params.get("runtime_log"),
+            deploy_commit=params.get("deploy_commit"),
+            workspace_head=params.get("workspace_head"),
+            request_url=params.get("request_url"),
+            request_method=params.get("request_method"),
+            response_status=response_status,
+            source="desktop",
+        )
+    except Exception as exc:
+        return _err(rid, -32091, f"backend bug intake failed: {exc}")
+
+    return _ok(
+        rid,
+        {
+            "ok": result.ok,
+            "status": result.status,
+            "summary": result.summary,
+            **result.payload,
+        },
+    )
+
+
 def _is_repo_junk(root: str) -> bool:
     """A git root we never auto-surface as a project: the bare home dir or
     anything under HERMES_HOME (~/.hermes by default) — config/sessions/skills,

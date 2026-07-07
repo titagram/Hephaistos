@@ -3542,6 +3542,46 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione guided bug intake desktop Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-1.
+
+Agent locale / desktop:
+
+- La logica condivisa `create_bug_intake` vive ora in
+  `hermes_cli/hades_backend_actions.py` e viene riusata sia dalla dashboard
+  FastAPI sia dal JSON-RPC desktop `backend.bug_intake`.
+- Il desktop espone `/bug-intake` e alias `/bug` come azione locale; non passa
+  dal backend slash worker e apre un overlay dedicato.
+- Nuovo overlay `apps/desktop/src/app/bug-intake/`: selezione workspace binding,
+  severity, title/symptom, expected/actual, reproduction steps, failing test e
+  runtime log con import file bounded 64 KB, HTTP context, deploy commit,
+  preview redatta locale e submit con timeout 15 secondi.
+- Lo status stack Hades mostra un ingresso contestuale `Bug` quando il backend
+  richiede attenzione.
+
+Verifiche eseguite:
+
+- Locale Python:
+  `.venv/bin/python -m pytest -q tests/test_tui_gateway_server.py::test_backend_bug_intake_rpc_calls_shared_action tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `6 passed`.
+- Locale Python:
+  `ruff check hermes_cli/hades_backend_actions.py hermes_cli/web_server.py tui_gateway/server.py tests/test_tui_gateway_server.py`
+  passato; `py_compile` sugli stessi moduli passato.
+- Desktop:
+  `npm --prefix apps/desktop run typecheck` passato.
+- Desktop:
+  `npm --prefix apps/desktop run test:ui -- src/app/bug-intake/index.test.ts src/lib/desktop-slash-commands.test.ts src/app/chat/composer/status-stack/hades-backend-status.test.ts`
+  passato: `3 passed / 21 tests`.
+- Desktop:
+  lint mirato da `apps/desktop` sui file toccati passato.
+
+Resta fuori da questa tranche:
+
+- Screenshot/manual smoke dell'overlay in Electron.
+- File upload binary/screenshot come evidence nativa; il wizard importa solo
+  testo bounded per test e log.
+
 ## Esecuzione Hades delta-upload backend e benchmark reale - 2026-07-07
 
 Stato: completata una tranche locale/remota P2-3.

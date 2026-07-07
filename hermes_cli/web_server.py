@@ -2346,182 +2346,37 @@ def run_hades_backend_sync(profile: Optional[str] = None):
         }
 
 
-def _clean_hades_backend_text(value: Optional[str]) -> Optional[str]:
-    clean = str(value or "").strip()
-    return clean or None
-
-
-def _select_hades_backend_workspace_binding(workspace_binding_id: Optional[str]):
-    from hermes_cli import hades_backend_db as hdb
-    from hermes_cli.hades_backend_cmd import _current_workspace_binding
-
-    clean_id = _clean_hades_backend_text(workspace_binding_id)
-    if not clean_id:
-        return _current_workspace_binding()
-
-    with hdb.connect_closing() as conn:
-        agent = hdb.get_default_agent(conn)
-        if agent is None:
-            raise RuntimeError("Hades backend is not configured")
-        binding = hdb.get_binding_for_backend_id(conn, clean_id)
-
-    if binding is None:
-        raise RuntimeError(f"Hades backend workspace binding {clean_id} is not known locally")
-    if binding.project_id != agent.project_id:
-        raise RuntimeError(
-            f"Hades backend workspace binding {clean_id} belongs to project {binding.project_id}, "
-            f"not configured project {agent.project_id}"
-        )
-    return agent, binding
-
-
-def _create_hades_inline_bug_evidence(
-    client: object,
-    binding: object,
-    *,
-    bug_report_id: Optional[str],
-    text: str,
-    kind: str,
-    source: str,
-    retention_class: str,
-) -> Optional[str]:
-    from hermes_cli.hades_backend_client import redact_secret
-    from hermes_cli.hades_backend_cmd import _evidence_payload, _first_interesting_line
-
-    redacted = redact_secret(text)
-    response = client.create_bug_evidence(
-        project_id=binding.project_id,
-        workspace_binding_id=binding.backend_workspace_binding_id,
-        bug_report_id=bug_report_id,
-        kind=kind,
-        summary=_first_interesting_line(redacted),
-        payload=_evidence_payload(kind, redacted, source, False),
-        source=source,
-        redactions=1 if redacted != text else 0,
-        retention_class=retention_class,
-    )
-    evidence = response.get("evidence") if isinstance(response.get("evidence"), dict) else response
-    return str(evidence.get("id")) if isinstance(evidence, dict) and evidence.get("id") else None
-
-
 @app.post("/api/hades/backend/bug-intake")
 def create_hades_backend_bug_intake(
     body: HadesBackendBugIntakeRequest,
     profile: Optional[str] = None,
 ):
     with _config_profile_scope(profile):
-        from hermes_cli import hades_backend_runtime as runtime
-        from hermes_cli.hades_backend_client import redact_secret
-        from hermes_cli.hades_backend_cmd import (
-            _bug_report_id,
-            _clean_commit,
-            _create_deploy_version_evidence,
-            _create_http_context_evidence,
-        )
-
         try:
-            title = _clean_hades_backend_text(body.title)
-            symptom = _clean_hades_backend_text(body.symptom)
-            if not title:
-                raise ValueError("bug title is required")
-            if not symptom:
-                raise ValueError("bug symptom is required")
+            from hermes_cli.hades_backend_actions import create_bug_intake
 
-            agent, binding = _select_hades_backend_workspace_binding(body.workspace_binding_id)
-            client = runtime.client_from_config()
-            try:
-                report_response = client.create_bug_report(
-                    project_id=binding.project_id,
-                    workspace_binding_id=binding.backend_workspace_binding_id,
-                    title=title,
-                    symptom=symptom,
-                    payload={
-                        "schema": "hades.bug_intake.v1",
-                        "source": "dashboard",
-                        "steps": _clean_hades_backend_text(body.steps),
-                        "expected": _clean_hades_backend_text(body.expected),
-                        "actual": _clean_hades_backend_text(body.actual),
-                        "severity": _clean_hades_backend_text(body.severity),
-                        "environment": _clean_hades_backend_text(body.environment),
-                        "agent_id": agent.agent_id,
-                    },
+            return _hades_backend_action_payload(
+                create_bug_intake(
+                    title=body.title,
+                    symptom=body.symptom,
+                    workspace_binding_id=body.workspace_binding_id,
+                    steps=body.steps,
+                    expected=body.expected,
+                    actual=body.actual,
+                    severity=body.severity,
+                    environment=body.environment,
+                    failing_test=body.failing_test,
+                    runtime_log=body.runtime_log,
+                    deploy_commit=body.deploy_commit,
+                    workspace_head=body.workspace_head,
+                    request_url=body.request_url,
+                    request_method=body.request_method,
+                    response_status=body.response_status,
+                    source="dashboard",
                 )
-                bug_report_id = _bug_report_id(report_response)
-                evidence_ids: List[Optional[str]] = []
-
-                failing_test = _clean_hades_backend_text(body.failing_test)
-                if failing_test:
-                    evidence_ids.append(
-                        _create_hades_inline_bug_evidence(
-                            client,
-                            binding,
-                            bug_report_id=bug_report_id,
-                            text=failing_test,
-                            kind="failing_test",
-                            source="dashboard_failing_test",
-                            retention_class="test_failure",
-                        )
-                    )
-
-                runtime_log = _clean_hades_backend_text(body.runtime_log)
-                if runtime_log:
-                    evidence_ids.append(
-                        _create_hades_inline_bug_evidence(
-                            client,
-                            binding,
-                            bug_report_id=bug_report_id,
-                            text=runtime_log,
-                            kind="log_excerpt",
-                            source="dashboard_runtime_log",
-                            retention_class="log_excerpt",
-                        )
-                    )
-
-                deploy_commit = _clean_commit(body.deploy_commit)
-                if deploy_commit:
-                    evidence_ids.append(
-                        _create_deploy_version_evidence(
-                            client,
-                            binding,
-                            bug_report_id=bug_report_id,
-                            deploy_commit=deploy_commit,
-                            workspace_head_commit=_clean_hades_backend_text(body.workspace_head) or binding.head_commit,
-                            environment=_clean_hades_backend_text(body.environment),
-                            source="dashboard_deploy",
-                        )
-                    )
-
-                if _clean_hades_backend_text(body.request_url) or body.response_status is not None:
-                    evidence_ids.extend(
-                        _create_http_context_evidence(
-                            client,
-                            binding,
-                            bug_report_id=bug_report_id,
-                            method=_clean_hades_backend_text(body.request_method) or "GET",
-                            url=_clean_hades_backend_text(body.request_url) or "",
-                            status=body.response_status,
-                            request_file=None,
-                            response_file=None,
-                            environment=_clean_hades_backend_text(body.environment),
-                            source="dashboard_http",
-                        )
-                    )
-            finally:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    close()
+            )
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=redact_secret(str(exc))) from exc
-
-        return {
-            "ok": True,
-            "status": "created",
-            "summary": "Bug report created",
-            "bug_report_id": bug_report_id,
-            "project_id": binding.project_id,
-            "workspace_binding_id": binding.backend_workspace_binding_id,
-            "evidence_ids": evidence_ids,
-        }
+            raise _hades_backend_action_error(exc) from exc
 
 
 @app.post("/api/hades/backend/promote-diagnosis")
