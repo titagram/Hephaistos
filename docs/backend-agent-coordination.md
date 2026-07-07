@@ -3618,6 +3618,47 @@ Resta fuori da questa tranche:
 - Storico remoto/team-wide e trend di lungo periodo; questa tranche rende
   visibile lo storico locale registrato sul device.
 
+## Esecuzione Hades artifact search documents backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `fa67a91 feat: index Hades artifacts for search`.
+- Nuova migration `2026_07_07_000005_create_hades_search_documents_table.php`.
+- Nuova tabella `hades_search_documents` con source table/id, domain, kind,
+  schema, title, body, metadata e checksum.
+- `ArtifactController` indicizza ogni artifact Hades al momento dell'upload,
+  inclusi artifact compressi dopo decompressione/verifica.
+- `MemorySearchController` usa gli indexed artifact ids come prefiltro per
+  search artifact quando disponibili, mantenendo fallback compatibile sugli
+  artifact legacy non indicizzati.
+- Feature test M5 estesi per verificare che graph/code artifact upload generi
+  documenti cercabili contenenti simboli come `OrderController`, `OrdersPage` e
+  `OrderComponent300`.
+
+Verifiche eseguite:
+
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM5MvpCompletionTest.php`
+  passato: `6 passed / 95 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `63 passed / 758 assertions`.
+- Remoto formatter:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/ArtifactController.php app/Http/Controllers/Hades/MemorySearchController.php tests/Feature/Hades/HadesM5MvpCompletionTest.php database/migrations/2026_07_07_000005_create_hades_search_documents_table.php`
+  passato nel container app.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Runtime dev:
+  `php artisan migrate --force` applicato; health pubblico
+  `https://home-sweet-home.cloud/api/hades/v1/health` ha risposto HTTP 200.
+
+Resta fuori da questa tranche:
+
+- FTS/vector backend vero per memory/wiki/evidence e backfill degli artifact
+  legacy gia' salvati prima della migration.
+
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
 Stato: completata una tranche locale P0-6.
