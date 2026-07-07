@@ -229,6 +229,14 @@ PHP_RESPONSE_HELPER_RE = re.compile(
     r"\bresponse\s*\(\s*\)\s*->\s*(?P<method>json|noContent)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_REDIRECT_HELPER_RE = re.compile(
+    r"\b(?P<helper>redirect|back)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_REDIRECT_CHAIN_RE = re.compile(
+    r"\bredirect\s*\(\s*\)\s*->\s*(?P<method>route|to|away|back)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -3815,6 +3823,174 @@ def _append_php_route_http_response_status_edges(
     return truncated
 
 
+def _php_quoted_literal(raw: str) -> str:
+    match = PHP_QUOTED_VALUE_RE.fullmatch(raw.strip())
+    return str(match.group("value") or "") if match else ""
+
+
+def _php_redirect_target_id(redirect_type: str, redirect_target: str) -> str:
+    if redirect_type == "route" and redirect_target:
+        return f"redirect_route:{redirect_target}"
+    if redirect_type == "path" and redirect_target:
+        return f"redirect_path:{redirect_target}"
+    if redirect_type == "back":
+        return "redirect:back"
+    return "redirect:unknown"
+
+
+def _php_redirect_from_call(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    helper: str,
+    args: str,
+) -> dict[str, Any] | None:
+    parts = _split_top_level_items(args)
+    redirect_type = "unknown"
+    redirect_target = ""
+    status_code: int | None = None
+    helper = helper.lower()
+    if helper == "back":
+        redirect_type = "back"
+        status_index = 0
+    elif helper == "redirect_route":
+        redirect_type = "route"
+        redirect_target = _php_quoted_literal(parts[0][0]) if parts else ""
+        status_index = 2
+    elif helper in {"redirect_to", "redirect_away"}:
+        redirect_type = "path"
+        redirect_target = _php_quoted_literal(parts[0][0]) if parts else ""
+        status_index = 1
+    elif helper == "redirect_back":
+        redirect_type = "back"
+        status_index = 0
+    else:
+        redirect_target = _php_quoted_literal(parts[0][0]) if parts else ""
+        redirect_type = "path" if redirect_target.startswith("/") else "unknown"
+        status_index = 1
+    if len(parts) > status_index:
+        status_code = _php_status_literal(parts[status_index][0])
+        if status_code is not None and not 300 <= status_code <= 399:
+            status_code = None
+    line = _line_number(source, method_body_offset + relative_call_start)
+    return {
+        "redirect_type": redirect_type,
+        "redirect_target": redirect_target,
+        "redirect_to": _php_redirect_target_id(redirect_type, redirect_target),
+        "redirect_helper": helper,
+        "redirect_status": status_code,
+        "line": line,
+    }
+
+
+def _php_http_redirects_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    redirects: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int | None, int]] = set()
+
+    for match in PHP_REDIRECT_CHAIN_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        helper = f"redirect_{str(match.group('method') or '').lower()}"
+        redirect = _php_redirect_from_call(
+            source=source,
+            method_body_offset=method_body_offset,
+            relative_call_start=match.start(),
+            helper=helper,
+            args=source[open_abs + 1 : close_abs],
+        )
+        if redirect is None:
+            continue
+        key = (
+            str(redirect.get("redirect_type") or ""),
+            str(redirect.get("redirect_target") or ""),
+            str(redirect.get("redirect_helper") or ""),
+            redirect.get("redirect_status"),
+            int(redirect.get("line") or 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        redirects.append(redirect)
+
+    for match in PHP_REDIRECT_HELPER_RE.finditer(method_body):
+        helper = str(match.group("helper") or "").lower()
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        chain_preview = source[close_abs + 1 : close_abs + 20]
+        if helper == "redirect" and re.match(r"\s*->\s*(?:route|to|away|back)\s*\(", chain_preview, re.IGNORECASE):
+            continue
+        redirect = _php_redirect_from_call(
+            source=source,
+            method_body_offset=method_body_offset,
+            relative_call_start=match.start(),
+            helper=helper,
+            args=source[open_abs + 1 : close_abs],
+        )
+        if redirect is None:
+            continue
+        key = (
+            str(redirect.get("redirect_type") or ""),
+            str(redirect.get("redirect_target") or ""),
+            str(redirect.get("redirect_helper") or ""),
+            redirect.get("redirect_status"),
+            int(redirect.get("line") or 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        redirects.append(redirect)
+    return redirects
+
+
+def _append_php_route_http_redirect_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    redirects: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not redirects:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for redirect in redirects:
+            redirect_to = str(redirect.get("redirect_to") or "")
+            if not redirect_to:
+                continue
+            edge = {
+                "kind": "route_http_redirect",
+                "from": route_ref,
+                "to": redirect_to,
+                "handler": method_symbol,
+                "redirect_type": redirect.get("redirect_type"),
+                "redirect_helper": redirect.get("redirect_helper"),
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+                "source_path": rel,
+                "source_line": redirect.get("line"),
+            }
+            if redirect.get("redirect_target"):
+                edge["redirect_target"] = redirect.get("redirect_target")
+            if redirect.get("redirect_status"):
+                edge["redirect_status"] = redirect.get("redirect_status")
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -4833,6 +5009,33 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 http_responses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            http_redirects = _php_http_redirects_for_method(source, method_body, method_body_offset)
+            for redirect in http_redirects:
+                redirect_to = str(redirect.get("redirect_to") or "")
+                if not redirect_to:
+                    continue
+                redirect_edge = {
+                    "kind": "http_redirect",
+                    "from": method_symbol,
+                    "to": redirect_to,
+                    "redirect_type": redirect.get("redirect_type"),
+                    "redirect_helper": redirect.get("redirect_helper"),
+                    "path": rel,
+                    "line": redirect.get("line"),
+                }
+                if redirect.get("redirect_target"):
+                    redirect_edge["redirect_target"] = redirect.get("redirect_target")
+                if redirect.get("redirect_status"):
+                    redirect_edge["redirect_status"] = redirect.get("redirect_status")
+                truncated = not _edge_append(edges, redirect_edge, max_edges=max_edges) or truncated
+            truncated = _append_php_route_http_redirect_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                http_redirects,
                 edges,
                 max_edges=max_edges,
             ) or truncated

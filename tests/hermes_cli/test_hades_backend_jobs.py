@@ -671,6 +671,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        $formatter->format($order);\n"
         "        $this->orders->format($order);\n"
         "        abort_if($order->status === 'archived', 403);\n"
+        "        redirect()->route('orders.index', [], 302);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1063,6 +1064,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_http_abort", "route:orders.show", "http_status:403") in edges
     assert ("http_response_status", "InvoiceController@update", "http_status:409") in edges
     assert ("route_http_response_status", "route:invoices.update", "http_status:409") in edges
+    assert ("http_redirect", "OrderController@show", "redirect_route:orders.index") in edges
+    assert ("route_http_redirect", "route:orders.show", "redirect_route:orders.index") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1133,6 +1136,33 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 29,
+    } in artifact["edges"]
+    assert {
+        "kind": "http_redirect",
+        "from": "OrderController@show",
+        "to": "redirect_route:orders.index",
+        "redirect_type": "route",
+        "redirect_target": "orders.index",
+        "redirect_helper": "redirect_route",
+        "redirect_status": 302,
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 30,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_http_redirect",
+        "from": "route:orders.show",
+        "to": "redirect_route:orders.index",
+        "handler": "OrderController@show",
+        "redirect_type": "route",
+        "redirect_target": "orders.index",
+        "redirect_helper": "redirect_route",
+        "redirect_status": 302,
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 30,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1647,6 +1677,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "throw new" not in str(artifact)
     assert "OrderLockedException();" not in str(artifact)
     assert "response()->json" not in str(artifact)
+    assert "redirect()->route" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)
