@@ -1908,3 +1908,50 @@ Resta fuori da questa tranche:
 
 - Dashboard bug case detail.
 - Invalidation symbol-level basata su graph diff; oggi lo stale e' commit-level.
+
+## Esecuzione graph traversal Hades - 2026-07-07
+
+Stato: completata la prima tranche P1-3 del piano "Bug Root Cause Awareness".
+
+Backend remoto:
+
+- Commit remoto `2fba3fb feat: add Hades graph traversal endpoint`.
+- Nuovo controller `GraphTraversalController`.
+- Nuovo endpoint `GET /api/hades/v1/graph/traverse`.
+- `health` e `capabilities` dichiarano `graph_traverse`.
+- Il traversal usa l'ultimo artifact `hades.php_graph.v1`/`hades.code_graph.v1`
+  del workspace, parte da route/symbol/file/class/method e restituisce nodes,
+  edges, `match_fields`, freshness e provenance.
+- Traversal bounded: `max_depth` 1-3, `limit` 1-50.
+
+Agent locale:
+
+- `HadesBackendClient.graph_traverse()`.
+- Nuovo tool provider `hades_backend_graph_traverse`.
+- Tool live-only con timeout 2 secondi; degrada a `unmapped_project` senza
+  workspace linkata.
+- Output compatto con nodes/edges, freshness e provenance.
+
+Verifiche eseguite:
+
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/GraphTraversalController.php app/Http/Controllers/Hades/CapabilitiesController.php app/Http/Controllers/Hades/HealthController.php routes/api.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `25 passed / 295 assertions`.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `49 passed / 511 assertions`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`
+  passato: `58 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check plugins/memory/hades_backend/__init__.py hermes_cli/hades_backend_client.py tests/agent/test_hades_backend_memory_provider.py tests/hermes_cli/test_hades_backend_client.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- FTS/vector search per evidence testuale.
+- Filtri strutturati dedicati per commit/symbol su bug evidence.
+- Traversal verso migration/log oltre agli edge gia' presenti nel graph artifact.

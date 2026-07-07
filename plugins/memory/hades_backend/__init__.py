@@ -27,6 +27,7 @@ TOOL_RESULT_LIMIT = 20
 SEARCH_TOOL_NAME = "hades_backend_project_memory_search"
 BUG_EVIDENCE_SEARCH_TOOL_NAME = "hades_backend_bug_evidence_search"
 GRAPH_SEARCH_TOOL_NAME = "hades_backend_graph_search"
+GRAPH_TRAVERSE_TOOL_NAME = "hades_backend_graph_traverse"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 DIAGNOSIS_REPORT_CREATE_TOOL_NAME = "hades_backend_diagnosis_report_create"
@@ -192,6 +193,48 @@ GRAPH_SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
             },
         },
         "required": ["query"],
+        "additionalProperties": False,
+    },
+}
+
+GRAPH_TRAVERSE_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": GRAPH_TRAVERSE_TOOL_NAME,
+    "description": (
+        "Traverse the current linked Hades backend code graph from a route, "
+        "symbol, file, class, or method. Use this after bug evidence points to "
+        "an entrypoint and before source slice fetch when you need bounded "
+        "route -> controller -> service -> model context without local source "
+        "access. Results are live backend data with freshness and provenance."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "start": {
+                "type": "string",
+                "description": "Route name/id, URI, file, class, method, or symbol to start from.",
+            },
+            "direction": {
+                "type": "string",
+                "enum": ["any", "out", "in"],
+                "default": "any",
+                "description": "Traversal direction relative to the start node.",
+            },
+            "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3,
+                "default": 2,
+                "description": "Maximum graph edge depth to traverse.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50,
+                "default": 20,
+                "description": "Maximum nodes/edges to return.",
+            },
+        },
+        "required": ["start"],
         "additionalProperties": False,
     },
 }
@@ -488,6 +531,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             SEARCH_TOOL_SCHEMA,
             BUG_EVIDENCE_SEARCH_TOOL_SCHEMA,
             GRAPH_SEARCH_TOOL_SCHEMA,
+            GRAPH_TRAVERSE_TOOL_SCHEMA,
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
             DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA,
@@ -505,6 +549,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return self._handle_source_slice_fetch(args)
         if tool_name == GRAPH_SEARCH_TOOL_NAME:
             return self._handle_graph_search(args)
+        if tool_name == GRAPH_TRAVERSE_TOOL_NAME:
+            return self._handle_graph_traverse(args)
         if tool_name == BUG_EVIDENCE_SEARCH_TOOL_NAME:
             return self._handle_bug_evidence_search(args)
         if tool_name != SEARCH_TOOL_NAME:
@@ -844,6 +890,56 @@ class HadesBackendMemoryProvider(MemoryProvider):
             result["backend_live_error"] = backend_error
         return tool_result(result)
 
+    def _handle_graph_traverse(self, args: Dict[str, Any]) -> str:
+        start = str(args.get("start") or "").strip()
+        if not start:
+            return tool_error("Missing required parameter: start")
+        direction = str(args.get("direction") or "any").strip()
+        if direction not in ("any", "out", "in"):
+            return tool_error("Unsupported graph traversal direction", allowed_directions=["any", "out", "in"])
+        max_depth = _bounded_int(args.get("max_depth"), default=2, minimum=1, maximum=3)
+        limit = _bounded_int(args.get("limit"), default=20, minimum=1, maximum=50)
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so graph traversal is unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "nodes": [],
+                    "edges": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_graph_traverse(
+            start=start,
+            direction=direction,
+            max_depth=max_depth,
+            limit=limit,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_graph_traverse(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend graph traversal is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "nodes": [],
+            "edges": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
     def _handle_bug_evidence_search(self, args: Dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()
         if not query:
@@ -993,6 +1089,35 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     query=query,
                     kind=kind or None,
                     bug_report_id=bug_report_id or None,
+                    limit=limit,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_graph_traverse(
+        self,
+        *,
+        start: str,
+        direction: str,
+        max_depth: int,
+        limit: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                response = client.graph_traverse(
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    start=start,
+                    direction=direction,
+                    max_depth=max_depth,
                     limit=limit,
                 )
             finally:
@@ -1517,6 +1642,69 @@ def _tool_result_from_backend_bug_evidence_search(response: dict[str, Any]) -> d
         "truncated": bool(response.get("truncated")),
         "server_time": response.get("server_time"),
         "items": items,
+    }
+    freshness = response.get("freshness")
+    if isinstance(freshness, dict):
+        result["freshness"] = freshness
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _graph_node_from_backend(node: dict[str, Any]) -> dict[str, Any]:
+    attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+    result: dict[str, Any] = {
+        "id": _compact_text(node.get("id"), max_chars=500),
+        "kind": _compact_text(node.get("kind"), max_chars=100),
+        "label": _compact_text(node.get("label"), max_chars=500),
+        "path": _compact_text(node.get("path"), max_chars=500),
+        "attributes": _bounded_payload(attributes),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
+
+
+def _graph_edge_from_backend(edge: dict[str, Any]) -> dict[str, Any]:
+    provenance = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
+    result: dict[str, Any] = {
+        "id": _compact_text(edge.get("id"), max_chars=500),
+        "kind": _compact_text(edge.get("kind"), max_chars=100),
+        "from": _compact_text(edge.get("from"), max_chars=500),
+        "to": _compact_text(edge.get("to"), max_chars=500),
+        "provenance": _bounded_payload(provenance),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
+
+
+def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[str, Any]:
+    nodes = [
+        _graph_node_from_backend(node)
+        for node in response.get("nodes", [])
+        if isinstance(node, dict)
+    ]
+    edges = [
+        _graph_edge_from_backend(edge)
+        for edge in response.get("edges", [])
+        if isinstance(edge, dict)
+    ]
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "backend_version": response.get("version"),
+        "backend_etag": response.get("etag"),
+        "artifact_id": response.get("artifact_id"),
+        "schema": response.get("schema"),
+        "head_commit": response.get("head_commit"),
+        "start": response.get("start"),
+        "direction": response.get("direction"),
+        "max_depth": response.get("max_depth"),
+        "limit": response.get("limit"),
+        "count": _bounded_int(response.get("count"), default=len(nodes), minimum=0, maximum=1_000_000),
+        "edge_count": _bounded_int(response.get("edge_count"), default=len(edges), minimum=0, maximum=1_000_000),
+        "truncated": bool(response.get("truncated")),
+        "match_fields": response.get("match_fields") if isinstance(response.get("match_fields"), list) else [],
+        "provenance": response.get("provenance") if isinstance(response.get("provenance"), dict) else {},
+        "server_time": response.get("server_time"),
+        "nodes": nodes,
+        "edges": edges,
     }
     freshness = response.get("freshness")
     if isinstance(freshness, dict):

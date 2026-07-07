@@ -120,6 +120,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
         "hades_backend_project_memory_search",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
+        "hades_backend_graph_traverse",
         "hades_backend_source_slice_fetch",
         "hades_backend_project_awareness_status",
         "hades_backend_diagnosis_report_create",
@@ -370,6 +371,88 @@ def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp
         }
     ]
     assert fake.closed == 1
+
+
+def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def graph_traverse(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "graph_traversal_1",
+                "etag": "graph_traversal_1",
+                "artifact_id": "artifact_1",
+                "schema": "hades.php_graph.v1",
+                "head_commit": "abc123",
+                "start": payload["start"],
+                "direction": payload["direction"],
+                "max_depth": payload["max_depth"],
+                "limit": payload["limit"],
+                "count": 2,
+                "edge_count": 1,
+                "truncated": False,
+                "match_fields": ["id", "attributes.name"],
+                "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                "provenance": {"artifact_id": "artifact_1", "schema": "hades.php_graph.v1"},
+                "nodes": [
+                    {"id": "route:orders.show", "kind": "route", "label": "orders.show"},
+                    {"id": "OrderController@show", "kind": "method", "label": "OrderController@show"},
+                ],
+                "edges": [
+                    {
+                        "id": "edge_1",
+                        "kind": "route_handler",
+                        "from": "route:orders.show",
+                        "to": "OrderController@show",
+                    }
+                ],
+                "server_time": "2026-07-07T13:00:00Z",
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "orders.show", "direction": "out", "max_depth": 2, "limit": 10},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["artifact_id"] == "artifact_1"
+    assert result["freshness"]["status"] == "current"
+    assert result["nodes"][0]["id"] == "route:orders.show"
+    assert result["edges"][0]["kind"] == "route_handler"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "start": "orders.show",
+            "direction": "out",
+            "max_depth": 2,
+            "limit": 10,
+        }
+    ]
+    assert fake.closed == 1
+    assert timeouts == [2.0]
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):
@@ -1053,6 +1136,12 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
             {"query": "stack trace"},
         )
     )
+    traversal_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "orders.show"},
+        )
+    )
     awareness_result = json.loads(
         provider.handle_tool_call(
             "hades_backend_project_awareness_status",
@@ -1077,6 +1166,9 @@ def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, 
     assert result["items"] == []
     assert bug_result["status"] == "unmapped_project"
     assert bug_result["items"] == []
+    assert traversal_result["status"] == "unmapped_project"
+    assert traversal_result["nodes"] == []
+    assert traversal_result["edges"] == []
     assert awareness_result["status"] == "unmapped_project"
     assert diagnosis_result["status"] == "unmapped_project"
     assert promote_result["status"] == "unmapped_project"

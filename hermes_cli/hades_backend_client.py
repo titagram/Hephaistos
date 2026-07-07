@@ -206,6 +206,9 @@ class HadesBackendClient:
     def bug_evidence_search(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "bug-evidence/search", params=payload)
 
+    def graph_traverse(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "graph/traverse", params=payload)
+
     def create_diagnosis_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "diagnosis-reports", json_body=payload)
 

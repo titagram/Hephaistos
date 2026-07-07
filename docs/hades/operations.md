@@ -218,6 +218,12 @@ or follow the same order manually: project awareness status, bug evidence
 search, graph search, minimal source slice fetch, then a persisted structured
 diagnosis report with evidence refs and confidence.
 
+Use `hades_backend_graph_search` to find candidate graph artifacts by text, then
+`hades_backend_graph_traverse` when you know a starting route, URI, class,
+method, file, or symbol and need bounded call-path context. Traversal results
+carry freshness and artifact provenance and should be cited before making exact
+route/controller/service claims without local source access.
+
 After the diagnosis is verified by a passing regression test or explicit user
 confirmation, promote it with the service-gated
 `hades_backend_resolved_bug_promote` tool. This stores a `resolved_bug` memory

@@ -83,6 +83,18 @@ search boosts `resolved_bug` entries for similar bug queries and marks them
 `stale` when the linked workspace HEAD no longer matches the commit captured by
 the diagnosis.
 
+## Graph Traversal
+
+`GET /api/hades/v1/graph/traverse` traverses the current stored code graph for a
+linked workspace. It starts from a route, symbol, file, class, or method and
+returns bounded nodes/edges with match fields, artifact provenance, freshness,
+and the graph artifact HEAD commit.
+
+The local agent exposes this through `hades_backend_graph_traverse`. Use it
+after bug evidence identifies an entrypoint and before source-slice fetch when
+the diagnosis needs route -> controller -> service/model context without local
+source access.
+
 ## Status
 
 Use:

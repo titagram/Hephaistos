@@ -209,6 +209,28 @@ CLIENT_ROUTE_CASES = [
         },
     },
     {
+        "method_name": "graph_traverse",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/graph/traverse",
+        "wire_path": "/api/hades/v1/graph/traverse",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "start": "orders.show",
+            "direction": "any",
+            "max_depth": 2,
+            "limit": 10,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "start": "orders.show",
+            "direction": "any",
+            "max_depth": "2",
+            "limit": "10",
+        },
+    },
+    {
         "method_name": "create_diagnosis_report",
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/diagnosis-reports",
