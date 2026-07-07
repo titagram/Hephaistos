@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
@@ -1070,6 +1071,30 @@ def _stack_frames(text: str) -> list[dict[str, Any]]:
     return frames
 
 
+def _frame_refs(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for frame in frames:
+        path = str(frame.get("path") or frame.get("file") or "").strip()
+        line = frame.get("line")
+        if not path or not isinstance(line, int):
+            continue
+        key = (path, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(
+            {
+                "type": "source_frame",
+                "path": path,
+                "line": line,
+                "graph_query": path,
+                "source_slice_hint": {"path": path, "line": line},
+            }
+        )
+    return refs[:20]
+
+
 def _clean_commit(value: str | None) -> str:
     return str(value or "").strip()
 
@@ -1188,21 +1213,29 @@ def _http_response_summary(*, method: str, url: str, status: int | None, environ
 
 
 def _evidence_payload(kind: str, text: str, source: str, truncated: bool) -> dict[str, Any]:
+    excerpt = _compact_lines(text)
+    frames = _stack_frames(text)
+    frame_refs = _frame_refs(frames)
     if kind == "failing_test":
         return {
             "schema": "hades.test_output.v1",
             "source": source,
-            "excerpt": _compact_lines(text),
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest() if excerpt else "",
             "truncated": truncated,
             "framework": _detected_test_framework(text, source),
-            "frames": _stack_frames(text),
+            "frames": frames,
+            "frame_refs": frame_refs,
         }
     return {
         "schema": "hades.runtime_log_excerpt.v1",
         "source": source,
-        "excerpt": _compact_lines(text),
+        "excerpt": excerpt,
+        "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest() if excerpt else "",
         "truncated": truncated,
-        "frames": _stack_frames(text),
+        "frames": frames,
+        "frame_refs": frame_refs,
+        "log_refs": [{"type": "runtime_log_frame", "path": ref["path"], "line": ref["line"]} for ref in frame_refs],
     }
 
 

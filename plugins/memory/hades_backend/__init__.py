@@ -2155,6 +2155,7 @@ def _bounded_payload(value: Any) -> Any:
 
 def _bug_evidence_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
     payload = _bounded_payload(item.get("payload"))
+    graph_refs = _evidence_graph_refs(payload if isinstance(payload, dict) else {})
     result: dict[str, Any] = {
         "id": _item_id(item),
         "bug_report_id": item.get("bug_report_id"),
@@ -2170,7 +2171,58 @@ def _bug_evidence_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
         "version": item.get("version"),
         "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
     }
+    if graph_refs:
+        result["graph_refs"] = graph_refs
     return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _evidence_graph_refs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = payload.get("frame_refs")
+    if isinstance(refs, list):
+        normalized_refs = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            path = str(ref.get("path") or "").strip()
+            line = _bounded_int(ref.get("line"), default=0, minimum=0, maximum=1_000_000)
+            if path and line:
+                normalized_refs.append(
+                    {
+                        "type": str(ref.get("type") or "source_frame"),
+                        "path": path,
+                        "line": line,
+                        "graph_query": str(ref.get("graph_query") or path),
+                    }
+                )
+        if normalized_refs:
+            return normalized_refs[:20]
+    frames = payload.get("frames")
+    if not isinstance(frames, list):
+        return []
+    normalized_frames = []
+    seen: set[tuple[str, int]] = set()
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        path = str(frame.get("path") or frame.get("file") or "").strip()
+        line = _bounded_int(frame.get("line"), default=0, minimum=0, maximum=1_000_000)
+        if not path or not line:
+            continue
+        key = (path, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_frames.append(
+            {
+                "type": "source_frame",
+                "path": path,
+                "line": line,
+                "graph_query": path,
+            }
+        )
+        if len(normalized_frames) >= 20:
+            break
+    return normalized_frames
 
 
 def _tool_result_from_backend_bug_evidence_search(response: dict[str, Any]) -> dict[str, Any]:

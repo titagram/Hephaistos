@@ -35,7 +35,10 @@ excerpts, failing tests, HTTP traces, browser console output, deploy versions,
 config snapshots, user reproduction steps, and screenshot references.
 Use `hades backend bug-intake --title ... --symptom ...` from a linked
 workspace to create a structured bug report and optionally attach `--test-output`
-or `--log` files as bounded, redacted evidence. Include `--deploy-commit <sha>`
+or `--log` files as bounded, redacted evidence. Test/log evidence includes
+stack frames, `frame_refs`, a redacted `excerpt_sha256`, and log frame refs so
+graph/source-slice search can correlate evidence without parsing raw log text.
+Include `--deploy-commit <sha>`
 or run `hades backend ingest-deploy --deploy-commit <sha>` to store a
 `deploy_version` item; the payload explicitly flags whether the deployed commit
 differs from the linked workspace head. Include `--request-url <url>` on

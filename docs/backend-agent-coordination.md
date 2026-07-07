@@ -3573,6 +3573,37 @@ Resta fuori da questa tranche:
 
 - Valutazione E2E con modello/agent reale e guidance visuale dedicata nelle UI.
 
+## Esecuzione runtime evidence graph refs - 2026-07-07
+
+Stato: completata una tranche locale P1-1/P1-3 sulla correlazione evidence ->
+graph.
+
+Agent locale:
+
+- `hades backend ingest-test` e `ingest-log` aggiungono `excerpt_sha256`,
+  `frame_refs` e, per runtime logs, `log_refs` ai payload evidence.
+- I refs restano metadata-only: path, line, query hint e source-slice hint; non
+  aggiungono source content.
+- `hades_backend_bug_evidence_search` espone `graph_refs` derivati da
+  `payload.frame_refs` o da `payload.frames`, cosi' l'agent puo' collegare
+  evidence runtime a graph/source-slice senza interpretare raw log text.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_cmd.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_cmd.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_cmd.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Matching automatico semantico fra runtime log message e log-template hash; i
+  refs path/line sono il primo ponte affidabile senza raw source.
+
 ## Esecuzione PHP method-level graph edges - 2026-07-07
 
 Stato: completata una tranche locale P0-4 sulla precisione del graph PHP.

@@ -1056,6 +1056,14 @@ def test_hades_backend_bug_evidence_search_tool_prefers_live_backend(monkeypatch
     assert result["freshness"]["index_status"] == "live_query"
     assert result["items"][0]["id"] == "evidence_1"
     assert result["items"][0]["payload"]["frames"][0]["line"] == 42
+    assert result["items"][0]["graph_refs"] == [
+        {
+            "type": "source_frame",
+            "path": "app/Http/Controllers/Taxonomy/SecurityActivityCategoryController.php",
+            "line": 42,
+            "graph_query": "app/Http/Controllers/Taxonomy/SecurityActivityCategoryController.php",
+        }
+    ]
     assert fake.calls == [
         {
             "project_id": "proj_1",

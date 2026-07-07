@@ -113,6 +113,10 @@ local agent can search it with the `hades_backend_bug_evidence_search` provider
 tool when diagnosing a bug. There is intentionally no local cache fallback for
 bug evidence search: stale or unavailable evidence must be surfaced as degraded
 state rather than treated as authoritative.
+Test and runtime-log evidence stores bounded excerpts plus normalized
+`frame_refs`; runtime logs also store `log_refs`. Provider search responses
+surface derived `graph_refs`, so the agent can jump from evidence to graph
+search/source-slice hints without interpreting raw log content.
 
 For guided CLI intake, run `hades backend bug-intake --title ... --symptom ...`
 from a linked workspace. Optional `--steps`, `--expected`, `--actual`,

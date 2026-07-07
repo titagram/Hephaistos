@@ -91,6 +91,11 @@ Prefer evidence that points to the execution path:
 - deployed commit versus indexed workspace head;
 - source slice references when already approved by policy.
 
+For test/log evidence, prefer entries that include `frame_refs` or provider
+`graph_refs`; those refs are path/line hints that connect runtime evidence to
+the source-free graph and source-slice policy without requiring full source
+access.
+
 Do not paste `.env`, cookies, bearer tokens, private keys, raw database dumps,
 or full source files. If evidence is rejected by policy, reduce the payload or
 redact it before retrying.

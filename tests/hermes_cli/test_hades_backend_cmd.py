@@ -1405,6 +1405,19 @@ def test_backend_ingest_log_uploads_redacted_runtime_log_evidence(monkeypatch, t
     assert payload["retention_class"] == "log_excerpt"
     assert payload["payload"]["schema"] == "hades.runtime_log_excerpt.v1"
     assert payload["payload"]["frames"] == [{"path": "app/Models/Order.php", "line": 88}]
+    assert len(payload["payload"]["excerpt_sha256"]) == 64
+    assert payload["payload"]["frame_refs"] == [
+        {
+            "type": "source_frame",
+            "path": "app/Models/Order.php",
+            "line": 88,
+            "graph_query": "app/Models/Order.php",
+            "source_slice_hint": {"path": "app/Models/Order.php", "line": 88},
+        }
+    ]
+    assert payload["payload"]["log_refs"] == [
+        {"type": "runtime_log_frame", "path": "app/Models/Order.php", "line": 88}
+    ]
     assert payload["redactions"] == 1
     assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(payload)
 
