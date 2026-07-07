@@ -2855,6 +2855,43 @@ Resta fuori da questa tranche:
 - FTS/vector/rerank generalizzato oltre al ranking strutturato locale.
 - Freshness deploy-aware distinta dal solo commit indicizzato.
 
+## Esecuzione Hades graph search BM25 locale - 2026-07-07
+
+Stato: completata una tranche locale P1-3.
+
+Agent locale:
+
+- Il fallback locale di `hades_backend_graph_search` usa ranking
+  `local_bm25` sui nodi/edge costruiti da `hades.php_graph.v1` e
+  `hades.code_graph.v1`.
+- La tokenizzazione spezza camelCase/PascalCase, snake case, FQCN PHP,
+  route/path e component names, cosi' query ambigue trovano meglio simboli e
+  edge anche senza backend live.
+- I match esatti su id/label/path continuano a vincere sul ranking testuale;
+  BM25 viene usato come boost/rerank del fallback cache e appare nei
+  `match_fields`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_falls_back_to_local_graph_cache`
+  passato: `1 passed`.
+- Locale provider completo:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `35 passed`.
+- Locale diagnosis no-codebase:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `5 passed`.
+- Locale lint/compile:
+  `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato con `.venv/bin/ruff`; `py_compile plugins/memory/hades_backend/__init__.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- FTS/vector/rerank backend per evidence testuale e query cross-domain.
+- Freshness deploy-aware distinta dal solo commit indicizzato.
+
 ## Esecuzione Hades memory kind filter - 2026-07-07
 
 Stato: completata una tranche P1-3 locale.

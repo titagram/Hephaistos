@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 import json
+import math
 import os
 import re
 import time
@@ -2589,6 +2590,82 @@ def _local_graph_edge_match_score(edge: dict[str, Any], query: str, tokens: set[
     return 0, []
 
 
+def _graph_search_terms(text: Any) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in TOKEN_RE.findall(str(text or "")):
+        parts = re.split(r"[\\\\/@:._\\-]+", token)
+        for part in parts:
+            if not part:
+                continue
+            expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", part).split()
+            for item in [part, *expanded]:
+                lowered = item.lower()
+                if len(lowered) < 2 or lowered in seen:
+                    continue
+                seen.add(lowered)
+                terms.append(lowered)
+    return terms
+
+
+def _local_graph_node_document(node: dict[str, Any]) -> str:
+    attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+    weighted_parts = [
+        str(node.get("id") or ""),
+        str(node.get("id") or ""),
+        str(node.get("label") or ""),
+        str(node.get("kind") or ""),
+        str(node.get("path") or ""),
+        json.dumps(attributes, sort_keys=True, default=str),
+    ]
+    return "\n".join(part for part in weighted_parts if part)
+
+
+def _local_graph_edge_document(edge: dict[str, Any]) -> str:
+    provenance = edge.get("provenance") if isinstance(edge.get("provenance"), dict) else {}
+    weighted_parts = [
+        str(edge.get("kind") or ""),
+        str(edge.get("kind") or ""),
+        str(edge.get("from") or ""),
+        str(edge.get("to") or ""),
+        json.dumps(provenance, sort_keys=True, default=str),
+    ]
+    return "\n".join(part for part in weighted_parts if part)
+
+
+def _bm25_scores(documents: list[list[str]], query_terms: list[str]) -> list[float]:
+    if not documents or not query_terms:
+        return [0.0 for _document in documents]
+    document_count = len(documents)
+    lengths = [len(document) for document in documents]
+    avg_len = sum(lengths) / document_count if document_count else 0.0
+    if avg_len <= 0:
+        return [0.0 for _document in documents]
+    document_frequencies: dict[str, int] = {}
+    for document in documents:
+        for term in set(document):
+            document_frequencies[term] = document_frequencies.get(term, 0) + 1
+
+    k1 = 1.2
+    b = 0.75
+    scores: list[float] = []
+    for document, length in zip(documents, lengths):
+        term_counts: dict[str, int] = {}
+        for term in document:
+            term_counts[term] = term_counts.get(term, 0) + 1
+        score = 0.0
+        for term in query_terms:
+            frequency = term_counts.get(term, 0)
+            if frequency == 0:
+                continue
+            df = document_frequencies.get(term, 0)
+            idf = math.log(1 + (document_count - df + 0.5) / (df + 0.5))
+            denominator = frequency + k1 * (1 - b + b * (length / avg_len))
+            score += idf * ((frequency * (k1 + 1)) / denominator)
+        scores.append(score)
+    return scores
+
+
 def _local_graph_node_search_item(node: dict[str, Any], *, score: int, match_fields: list[str]) -> dict[str, Any]:
     attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
     node_id = str(node.get("id") or "")
@@ -2658,18 +2735,31 @@ def _local_graph_search_response(
         return None
     nodes, edges = _local_graph_build(artifacts)
     tokens = _tokenize(query)
+    query_terms = _graph_search_terms(query)
     scored: list[tuple[int, int, dict[str, Any]]] = []
+    search_entries: list[tuple[str, dict[str, Any], int, list[str], str]] = []
 
     for node in nodes.values():
         score, fields = _local_graph_match_score(node, query, tokens)
-        if score <= 0:
-            continue
-        scored.append((score, len(scored), _local_graph_node_search_item(node, score=score, match_fields=fields)))
+        search_entries.append(("node", node, score, fields, _local_graph_node_document(node)))
     for edge in edges:
         score, fields = _local_graph_edge_match_score(edge, query, tokens)
-        if score <= 0:
+        search_entries.append(("edge", edge, score, fields, _local_graph_edge_document(edge)))
+
+    documents = [_graph_search_terms(document) for _kind, _entry, _score, _fields, document in search_entries]
+    bm25_scores = _bm25_scores(documents, query_terms)
+    for idx, ((kind, entry, lexical_score, fields, _document), bm25_score) in enumerate(zip(search_entries, bm25_scores)):
+        if lexical_score <= 0 and bm25_score <= 0:
             continue
-        scored.append((score, len(scored), _local_graph_edge_search_item(edge, score=score, match_fields=fields)))
+        ranked_score = (lexical_score * 100) + int(bm25_score * 100)
+        match_fields = list(fields)
+        if bm25_score > 0 and "bm25" not in match_fields:
+            match_fields.append("bm25")
+        if kind == "node":
+            item = _local_graph_node_search_item(entry, score=ranked_score, match_fields=match_fields)
+        else:
+            item = _local_graph_edge_search_item(entry, score=ranked_score, match_fields=match_fields)
+        scored.append((ranked_score, idx, item))
 
     scored.sort(key=lambda item: (-item[0], item[1]))
     items = [item for _score, _idx, item in scored[:limit]]
@@ -2704,6 +2794,7 @@ def _local_graph_search_response(
         "candidate_count": len(scored),
         "graph_node_count": len(nodes),
         "graph_edge_count": len(edges),
+        "ranking": "local_bm25",
         "truncated": len(scored) > len(items),
         "raw_chunks_omitted": 0,
         "freshness": {

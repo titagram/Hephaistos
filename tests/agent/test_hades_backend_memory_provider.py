@@ -659,10 +659,12 @@ def test_hades_backend_graph_search_falls_back_to_local_graph_cache(monkeypatch,
     assert result["domain"] == "artifacts"
     assert result["searched_cache_only"] is True
     assert result["schema"] == "hades.php_graph.v1"
+    assert result["ranking"] == "local_bm25"
     assert result["freshness"]["status"] == "cached"
     assert result["backend_live_error"] == "backend offline"
     assert result["count"] >= 1
     assert result["candidate_count"] >= result["count"]
+    assert any("bm25" in item["match_fields"] for item in result["items"])
     assert any(ref["type"] == "node" and ref["id"] == "OrderController@show" for ref in graph_refs)
     assert any(ref["type"] == "edge" and ref["kind"] == "route_handler" for ref in graph_refs)
 
