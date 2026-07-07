@@ -2119,6 +2119,79 @@ class TestExecuteToolCalls:
         assert messages[0]["role"] == "tool"
         assert "search result" in messages[0]["content"]
 
+    def test_no_codebase_hades_diagnosis_runs_ordered_tool_chain(self, agent):
+        required_tools = [
+            "hades_backend_project_awareness_status",
+            "hades_backend_bug_evidence_search",
+            "hades_backend_graph_search",
+            "hades_backend_source_slice_fetch",
+            "hades_backend_diagnosis_report_create",
+        ]
+        forbidden_tools = {
+            "cat",
+            "exec_command",
+            "read_file",
+            "rg",
+            "run_command",
+            "terminal",
+        }
+        agent.tools = _make_tool_defs(*required_tools)
+        agent.valid_tool_names = set(required_tools)
+        agent._persist_session = lambda *args, **kwargs: None
+        agent._save_trajectory = lambda *args, **kwargs: None
+
+        responses = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(name=name, arguments="{}", call_id=f"call-{idx}")],
+            )
+            for idx, name in enumerate(required_tools, start=1)
+        ]
+        responses.append(
+            _mock_response(
+                content=json.dumps(
+                    {
+                        "root_cause": "OrderController dereferences a missing customer relation.",
+                        "mechanism": "The show action assumes the relation is present.",
+                        "evidence_refs": ["bug_evidence:ev.order.stack", "source_slice:slice.order_controller.show"],
+                        "freshness": {"status": "current"},
+                        "confidence": "high",
+                        "next_verification": "Run the focused controller regression test.",
+                    },
+                    sort_keys=True,
+                )
+            )
+        )
+        api_requests = []
+
+        def _fake_api_call(api_kwargs):
+            api_requests.append(api_kwargs)
+            return responses.pop(0)
+
+        def _fake_tool_result(function_name, *_args, **_kwargs):
+            return json.dumps({"status": "ok", "tool": function_name})
+
+        agent._interruptible_api_call = _fake_api_call
+
+        with patch("run_agent.handle_function_call", side_effect=_fake_tool_result) as tool_call:
+            result = agent.run_conversation(
+                "Diagnose bug BUG-1 in no-codebase mode using Hades evidence only."
+            )
+
+        called_tools = [call.args[0] for call in tool_call.call_args_list]
+        exposed_tools = {
+            tool["function"]["name"]
+            for request in api_requests
+            for tool in request.get("tools", [])
+        }
+
+        assert result["completed"] is True
+        assert "OrderController dereferences" in result["final_response"]
+        assert called_tools == required_tools
+        assert set(required_tools).issubset(exposed_tools)
+        assert forbidden_tools.isdisjoint(exposed_tools)
+
     def test_sequential_memory_remove_notifies_provider_with_tool_result(self, agent):
         old_text = "stale preference entry"
         tc = _mock_tool_call(

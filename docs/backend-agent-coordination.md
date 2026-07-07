@@ -3551,6 +3551,42 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di fixture
   strutturata.
 
+## Esecuzione no-codebase agent loop test Hades - 2026-07-07
+
+Stato: completata tranche locale P0-6/P0-7.
+
+Agent locale:
+
+- `tests/run_agent/test_run_agent.py` copre ora un percorso `run_conversation`
+  completo con modello finto e dispatcher tool finto.
+- Il test espone al modello solo la toolchain Hades no-codebase:
+  `hades_backend_project_awareness_status`,
+  `hades_backend_bug_evidence_search`, `hades_backend_graph_search`,
+  `hades_backend_source_slice_fetch` e
+  `hades_backend_diagnosis_report_create`.
+- Il modello finto chiama i tool in ordine e il test verifica che il dispatcher
+  li riceva nella stessa sequenza prima della risposta finale.
+- Il payload tool inviato al modello non include tool filesystem/shell come
+  `read_file`, `rg`, `terminal` o `exec_command`.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/run_agent/test_run_agent.py::TestExecuteToolCalls::test_no_codebase_hades_diagnosis_runs_ordered_tool_chain`
+  passato: `1 passed`.
+- Locale allargato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/run_agent/test_run_agent.py::TestExecuteToolCalls::test_no_codebase_hades_diagnosis_runs_ordered_tool_chain tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `16 passed`.
+- Locale lint/compile:
+  `ruff check tests/run_agent/test_run_agent.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py hermes_cli/hades_no_codebase_eval.py hermes_cli/hades_quality_report.py`
+  passato; `py_compile tests/run_agent/test_run_agent.py` passato.
+
+Resta fuori da questa tranche:
+
+- Provider reale/LLM reale in no-codebase mode, perche' richiede credenziali,
+  costi e variabilita' esterna; il loop Hermes, i tool esposti e la sequenza
+  di dispatch sono pero' coperti localmente.
+
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
 Stato: completata una tranche locale P0-6.
