@@ -1695,7 +1695,16 @@ export interface HadesBackendIdentity {
     linked_bindings: number;
     current_workspace_binding_id: string | null;
     current_display_path: string | null;
+    current_status?: string | null;
+    current_source_free_ready?: boolean;
     source_free_ready: number;
+  };
+  login_recovery?: {
+    can_use_project_memory_without_old_device: boolean;
+    current_workspace_mapped: boolean;
+    source_free_diagnosis_ready: boolean;
+    requires_workspace_binding_for_indexing: boolean;
+    recommended_next_action: string;
   };
 }
 

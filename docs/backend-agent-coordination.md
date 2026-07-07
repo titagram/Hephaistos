@@ -2609,12 +2609,17 @@ Agent locale:
 - L'output testuale di `hades backend status` stampa `Next identity step`, cosi'
   un device nuovo o un workspace non pronto mostra direttamente link/sync/evidence
   come prossimo passo.
+- La dashboard `web/src/pages/BackendPage.tsx` mostra lo stesso recovery flow
+  nel pannello `Identity recovery`: project memory portability, workspace
+  corrente, source-free diagnosis readiness e next action.
 
 Verifiche eseguite:
 
 - Locale:
   `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py`
-  passato nella tranche finale.
+  passato: `45 passed`.
+- Frontend:
+  `npm run --prefix web typecheck` passato.
 - Locale lint/compile:
   `ruff check hermes_cli/hades_backend_status.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_hades_backend_cmd.py`
   passato; `py_compile` sugli stessi moduli passato.

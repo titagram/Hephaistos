@@ -229,6 +229,64 @@ function AwarenessPanel({ status }: { status: HadesBackendStatus }) {
   );
 }
 
+function IdentityRecoveryPanel({ status }: { status: HadesBackendStatus }) {
+  const identity = status.identity;
+  if (!identity) return null;
+  const recovery = identity.login_recovery;
+  const workspace = identity.workspace_binding;
+  const projectMemory = identity.project_memory;
+  const ready = Boolean(recovery?.source_free_diagnosis_ready);
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Link2 className="h-4 w-4" />
+            Identity recovery
+          </H2>
+          <Badge tone={ready ? "success" : "warning"}>
+            {ready ? "ready on this device" : "setup needed"}
+          </Badge>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Project memory</div>
+            <div className="mt-1 text-sm font-semibold">
+              {projectMemory.portable_between_devices ? "portable" : "local only"}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+              {projectMemory.project_id || "not configured"}
+            </div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Current workspace</div>
+            <div className="mt-1 text-sm font-semibold">
+              {recovery?.current_workspace_mapped ? "mapped" : "unmapped"}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+              {workspace.current_workspace_binding_id || "no binding"}
+            </div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Source-free diagnosis</div>
+            <div className="mt-1 text-sm font-semibold">
+              {workspace.current_source_free_ready ? "ready" : "not ready"}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+              {workspace.current_status || "unknown"}
+            </div>
+          </div>
+        </div>
+        {recovery?.recommended_next_action && (
+          <div className="border border-border bg-background/40 px-3 py-2 text-sm">
+            {recovery.recommended_next_action}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SyncSummary({ status }: { status: HadesBackendStatus }) {
   const summary = status.sync.last_summary ?? {};
   const entries = Object.entries(summary);
@@ -338,6 +396,9 @@ export default function BackendPage() {
     if (!status) return "Loading backend status";
     if (!status.configured) return "Run hades backend bootstrap";
     if (status.actions.length > 0) return status.actions[0];
+    if (status.identity?.login_recovery?.recommended_next_action) {
+      return status.identity.login_recovery.recommended_next_action;
+    }
     if (status.bindings.length === 0) return "Link a workspace with hades project link";
     return "No action needed";
   }, [status]);
@@ -453,6 +514,7 @@ export default function BackendPage() {
       </div>
 
       <AwarenessPanel status={status} />
+      <IdentityRecoveryPanel status={status} />
 
       {status.actions.length > 0 && (
         <Card>
