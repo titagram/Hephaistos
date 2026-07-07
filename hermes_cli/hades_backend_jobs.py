@@ -3430,6 +3430,23 @@ def _build_php_graph(
                     max_edges=max_edges,
                 ) or truncated
             method_body, method_body_offset = _php_method_body_slice(source, match)
+            if class_info.get("role") == "api_resource" and method_name == "toArray":
+                resource_model, resource_table = _php_resource_table_for_class(fqcn, model_table_by_class)
+                for field_info in _php_array_field_keys(source, method_body, method_body_offset):
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "api_resource_field",
+                            "from": fqcn,
+                            "to": f"response_field:{field_info['field']}",
+                            "field": field_info["field"],
+                            "model": resource_model,
+                            "table": resource_table,
+                            "path": rel,
+                            "line": field_info["line"],
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
             truncated = _php_model_attribute_edges_for_method(
                 source,
                 rel,

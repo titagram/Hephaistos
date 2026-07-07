@@ -5332,3 +5332,36 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel API Resource field graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per API Resource response-field
+awareness metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` estrae da `JsonResource::toArray()` edge
+  `api_resource_field` verso `response_field:*`.
+- Gli edge salvano solo la chiave di risposta (`field`), model/table risolti,
+  path e line; non conservano corpo `toArray`, valori restituiti o sorgente raw.
+- Il fallback locale di `hades_backend_graph_search` rende cercabili i campi
+  esposti nei Resource e mostra `field=...`, `model=...` e `table=...` nei
+  summary edge.
+- Questa tranche completa il legame source-free `controller -> resource ->
+  response_field`, utile per diagnosticare payload API mancanti o trasformati
+  senza accesso live alla codebase.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_api_resource_field_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `78 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

@@ -343,6 +343,26 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "api_resource_field",
+                "from": "App\\Http\\Resources\\OrderResource",
+                "to": "response_field:id",
+                "field": "id",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Resources/OrderResource.php",
+                "line": 6,
+            },
+            {
+                "kind": "api_resource_field",
+                "from": "App\\Http\\Resources\\OrderResource",
+                "to": "response_field:status",
+                "field": "status",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Resources/OrderResource.php",
+                "line": 6,
+            },
+            {
                 "kind": "api_resource_ref",
                 "from": "OrderController@show",
                 "to": "App\\Http\\Resources\\OrderResource",
@@ -1415,6 +1435,51 @@ def test_hades_backend_graph_search_finds_local_api_resource_edges(monkeypatch, 
         for ref in graph_refs
     )
     assert any("resource_method=make" in item["summary"] for item in result["items"])
+    assert any("model=App\\Models\\Order" in item["summary"] for item in result["items"])
+
+
+def test_hades_backend_graph_search_finds_local_api_resource_field_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderResource status response field", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "api_resource_field"
+        and ref["to"] == "response_field:status"
+        and ref["provenance"]["field"] == "status"
+        for ref in graph_refs
+    )
+    assert any("field=status" in item["summary"] for item in result["items"])
     assert any("model=App\\Models\\Order" in item["summary"] for item in result["items"])
 
 

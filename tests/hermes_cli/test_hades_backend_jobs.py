@@ -1077,8 +1077,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
     assert ("api_resource_model", "App\\Http\\Resources\\OrderResource", "App\\Models\\Order") in edges
     assert ("api_resource_table", "App\\Http\\Resources\\OrderResource", "table:orders") in edges
+    assert ("api_resource_field", "App\\Http\\Resources\\OrderResource", "response_field:id") in edges
+    assert ("api_resource_field", "App\\Http\\Resources\\OrderResource", "response_field:status") in edges
     assert ("api_resource_ref", "App\\Http\\Controllers\\OrderController", "App\\Http\\Resources\\OrderResource") in edges
     assert ("api_resource_ref", "OrderController@show", "App\\Http\\Resources\\OrderResource") in edges
+    assert {
+        "kind": "api_resource_field",
+        "from": "App\\Http\\Resources\\OrderResource",
+        "to": "response_field:status",
+        "field": "status",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "app/Http/Resources/OrderResource.php",
+        "line": 6,
+    } in artifact["edges"]
     assert {
         "kind": "api_resource_ref",
         "from": "OrderController@show",
