@@ -201,6 +201,18 @@ hades doctor
 hades logs --level WARNING --session latest
 ```
 
+When a failing test or runtime log already exists locally, turn it into typed
+bug evidence before asking for a root cause:
+
+```bash
+hades backend ingest-test ./phpunit.log --bug-report-id <bug-report-id>
+hades backend ingest-log ./storage/logs/laravel.log --bug-report-id <bug-report-id>
+```
+
+Both commands read a bounded excerpt, redact likely tokens/API keys/bearer
+headers, extract lightweight stack frames when possible, and upload
+`failing_test` or `log_excerpt` evidence to the linked backend workspace.
+
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, bug evidence
 search, graph search, minimal source slice fetch, then a persisted structured

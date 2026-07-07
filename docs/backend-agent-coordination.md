@@ -1824,3 +1824,35 @@ Resta fuori da questa slice:
 
 - Dashboard policy UI prima di abilitare source slices.
 - Delete/export project/user e retention cleanup backend.
+
+## Esecuzione runtime/test evidence ingestion Hades - 2026-07-07
+
+Stato: avviata la slice P1-1 del piano "Bug Root Cause Awareness".
+
+Integrazione locale:
+
+- Nuovi subcommand `hades backend ingest-test <file>` e
+  `hades backend ingest-log <file>`.
+- Entrambi richiedono una workspace corrente linkata al backend Hades.
+- `ingest-test` carica evidence `kind=failing_test` con
+  `retention_class=test_failure`.
+- `ingest-log` carica evidence `kind=log_excerpt` con
+  `retention_class=log_excerpt`.
+- Gli excerpt sono bounded a 64 KB, passano da `redact_secret`, includono
+  schema payload (`hades.test_output.v1` o `hades.runtime_log_excerpt.v1`) e
+  provano a estrarre frame `file:line`.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py`
+  passato: `16 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato.
+
+Resta fuori da questa slice:
+
+- Parser CI/deploy specifici.
+- Upload automatico dopo failure.
+- Normalizzazione frame verso graph symbols/source slices oltre al file:line.

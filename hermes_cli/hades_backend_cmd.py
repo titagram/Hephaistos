@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 
 from hermes_cli.config import load_config, save_config, save_env_value
 from hermes_cli.hades_coordination import hades_coordination_profiles
@@ -78,6 +79,16 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     proposals.add_argument("--json", action="store_true", help="Emit machine-readable proposal JSON")
     ack_proposal = sub.add_parser("ack-proposal", help="Acknowledge a refused or conflicted memory proposal locally")
     ack_proposal.add_argument("proposal_id", help="Local memory proposal id")
+    ingest_test = sub.add_parser("ingest-test", help="Upload a bounded failing-test output as Hades bug evidence")
+    ingest_test.add_argument("file", help="Path to a test output file")
+    ingest_test.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
+    ingest_test.add_argument("--source", default=None, help="Evidence source label")
+    ingest_test.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
+    ingest_log = sub.add_parser("ingest-log", help="Upload a bounded runtime log excerpt as Hades bug evidence")
+    ingest_log.add_argument("file", help="Path to a log file")
+    ingest_log.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
+    ingest_log.add_argument("--source", default=None, help="Evidence source label")
+    ingest_log.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
 
@@ -509,6 +520,171 @@ def _cmd_ack_proposal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _current_workspace_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
+    cwd = Path.cwd().resolve()
+    with db.connect_closing() as conn:
+        agent = db.get_default_agent(conn)
+        if agent is None:
+            raise RuntimeError("Hades backend is not configured")
+        bindings = db.list_workspace_bindings(conn, status="linked")
+    matches: list[db.WorkspaceBinding] = []
+    for binding in bindings:
+        try:
+            cwd.relative_to(Path(binding.repo_root).resolve())
+        except (OSError, ValueError):
+            continue
+        matches.append(binding)
+    if not matches:
+        raise RuntimeError("Current directory is not linked to a Hades backend workspace")
+    matches.sort(key=lambda item: len(str(Path(item.repo_root))), reverse=True)
+    return agent, matches[0]
+
+
+def _read_evidence_file(path: str, *, max_bytes: int = 64_000) -> tuple[str, bool]:
+    candidate = Path(path).expanduser()
+    with candidate.open("rb") as handle:
+        raw = handle.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes
+    return raw[:max_bytes].decode("utf-8", errors="replace"), truncated
+
+
+def _compact_lines(text: str, *, max_chars: int = 4000) -> str:
+    compact = "\n".join(line.rstrip() for line in text.splitlines() if line.strip())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 15].rstrip() + "\n... [truncated]"
+
+
+def _first_interesting_line(text: str) -> str:
+    markers = (
+        "failed",
+        "failure",
+        "error",
+        "exception",
+        "traceback",
+        "sqlstate",
+        "fatal",
+    )
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(marker in stripped.lower() for marker in markers):
+            return stripped[:1000]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:1000]
+    return "Hades bug evidence ingested from local file."
+
+
+def _detected_test_framework(text: str, source: str) -> str:
+    lowered = f"{source}\n{text[:4000]}".lower()
+    if "phpunit" in lowered or "pest" in lowered:
+        return "phpunit"
+    if "pytest" in lowered or "traceback (most recent call last)" in lowered:
+        return "pytest"
+    if "vitest" in lowered:
+        return "vitest"
+    if "jest" in lowered:
+        return "jest"
+    return "unknown"
+
+
+def _stack_frames(text: str) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    patterns = [
+        re.compile(r"(?P<path>[A-Za-z0-9_./\\-]+\.(?:php|py|js|ts|tsx)):(?P<line>\d+)"),
+        re.compile(r"File \"(?P<path>[^\"]+)\", line (?P<line>\d+)"),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            frames.append(
+                {
+                    "path": match.group("path").replace("\\\\", "/"),
+                    "line": int(match.group("line")),
+                }
+            )
+            if len(frames) >= 20:
+                return frames
+    return frames
+
+
+def _evidence_payload(kind: str, text: str, source: str, truncated: bool) -> dict[str, Any]:
+    if kind == "failing_test":
+        return {
+            "schema": "hades.test_output.v1",
+            "source": source,
+            "excerpt": _compact_lines(text),
+            "truncated": truncated,
+            "framework": _detected_test_framework(text, source),
+            "frames": _stack_frames(text),
+        }
+    return {
+        "schema": "hades.runtime_log_excerpt.v1",
+        "source": source,
+        "excerpt": _compact_lines(text),
+        "truncated": truncated,
+        "frames": _stack_frames(text),
+    }
+
+
+def _cmd_ingest_evidence(args: argparse.Namespace, *, kind: str, retention_class: str) -> int:
+    try:
+        agent, binding = _current_workspace_binding()
+        source = str(getattr(args, "source", None) or Path(args.file).name)
+        text, truncated = _read_evidence_file(args.file)
+        redacted = redact_secret(text)
+        redactions = 1 if redacted != text else 0
+        payload = _evidence_payload(kind, redacted, source, truncated)
+        summary = _first_interesting_line(redacted)
+
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            response = client.create_bug_evidence(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                bug_report_id=getattr(args, "bug_report_id", None) or None,
+                kind=kind,
+                summary=summary,
+                payload=payload,
+                source=source,
+                redactions=redactions,
+                retention_class=retention_class,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend ingest evidence: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    evidence = response.get("evidence") if isinstance(response.get("evidence"), dict) else response
+    result = {
+        "status": "ok",
+        "kind": kind,
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "evidence_id": evidence.get("id") if isinstance(evidence, dict) else None,
+        "redactions": redactions,
+        "truncated": truncated,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"Hades bug evidence stored: {result['evidence_id'] or 'created'} ({kind})")
+    return 0
+
+
+def _cmd_ingest_test(args: argparse.Namespace) -> int:
+    return _cmd_ingest_evidence(args, kind="failing_test", retention_class="test_failure")
+
+
+def _cmd_ingest_log(args: argparse.Namespace) -> int:
+    return _cmd_ingest_evidence(args, kind="log_excerpt", retention_class="log_excerpt")
+
+
 def _version() -> str:
     try:
         from hermes_cli import __version__
@@ -540,10 +716,14 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_proposals(args)
     if action == "ack-proposal":
         return _cmd_ack_proposal(args)
+    if action == "ingest-test":
+        return _cmd_ingest_test(args)
+    if action == "ingest-log":
+        return _cmd_ingest_log(args)
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|sync>",
+        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|sync>",
         file=sys.stderr,
     )
     return 0

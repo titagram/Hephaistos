@@ -755,6 +755,167 @@ def test_backend_ack_proposal_marks_refused_proposal_reviewed(monkeypatch, tmp_p
     assert reviewed.reason == "policy_denied"
 
 
+def test_backend_ingest_test_uploads_redacted_failing_test_evidence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    output_file = workspace / "phpunit.log"
+    output_file.write_text(
+        "FAILED Tests\\\\Feature\\\\OrderTest > it shows order\n"
+        "Error: Call to member function active() on null at app/Http/Controllers/OrderController.php:42\n"
+        "OPENAI_API_KEY=sk-live-secretvalue12345\n",
+        encoding="utf-8",
+    )
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.evidence = []
+            self.closed = 0
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": "ev_test_1"}}
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="ingest-test",
+            file=str(output_file),
+            bug_report_id="bug_1",
+            source=None,
+            json=True,
+        )
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    payload = fake.evidence[0]
+
+    assert rc == 0
+    assert result["evidence_id"] == "ev_test_1"
+    assert payload["project_id"] == "proj_1"
+    assert payload["workspace_binding_id"] == "wb_1"
+    assert payload["bug_report_id"] == "bug_1"
+    assert payload["kind"] == "failing_test"
+    assert payload["retention_class"] == "test_failure"
+    assert payload["payload"]["schema"] == "hades.test_output.v1"
+    assert payload["payload"]["framework"] == "phpunit"
+    assert payload["payload"]["frames"] == [
+        {"path": "app/Http/Controllers/OrderController.php", "line": 42}
+    ]
+    assert payload["redactions"] == 1
+    assert "sk-live-secretvalue12345" not in json.dumps(payload)
+    assert fake.closed == 1
+
+
+def test_backend_ingest_log_uploads_redacted_runtime_log_evidence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    log_file = workspace / "laravel.log"
+    log_file.write_text(
+        "[2026-07-07] production.ERROR: SQLSTATE[42S22]: Column not found\n"
+        "#0 app/Models/Order.php:88\n"
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n",
+        encoding="utf-8",
+    )
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.evidence = []
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": "ev_log_1"}}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="ingest-log",
+            file=str(log_file),
+            bug_report_id=None,
+            source="laravel.log",
+            json=True,
+        )
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    payload = fake.evidence[0]
+
+    assert rc == 0
+    assert result["evidence_id"] == "ev_log_1"
+    assert payload["kind"] == "log_excerpt"
+    assert payload["retention_class"] == "log_excerpt"
+    assert payload["payload"]["schema"] == "hades.runtime_log_excerpt.v1"
+    assert payload["payload"]["frames"] == [{"path": "app/Models/Order.php", "line": 88}]
+    assert payload["redactions"] == 1
+    assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(payload)
+
+
 def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
