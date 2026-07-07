@@ -285,6 +285,11 @@ PHP_REQUEST_INPUT_CHAIN_RE = re.compile(
     r"(?P<method>input|get|query|header|cookie|route)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_REQUEST_FILE_CHAIN_RE = re.compile(
+    r"(?P<receiver>request\s*\(\s*\)|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
+    r"(?P<method>file|hasFile)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_REQUEST_HELPER_RE = re.compile(r"\brequest\s*\(", re.IGNORECASE | re.MULTILINE)
 PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<receiver>\$this->[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*"
@@ -4851,6 +4856,112 @@ def _append_php_route_request_input_access_edges(
     return truncated
 
 
+def _php_request_file_operation(method: str) -> str:
+    return "check" if method.lower() == "hasfile" else "read"
+
+
+def _php_request_file_access_items(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    file_method: str,
+    args: str,
+) -> list[dict[str, Any]]:
+    parts = _split_top_level_items(args)
+    field = _php_request_input_field_literal(parts[0][0]) if parts else ""
+    if not field:
+        return []
+    method = file_method.lower().removeprefix("request_")
+    return [
+        {
+            "file_field": field,
+            "file_operation": _php_request_file_operation(method),
+            "file_method": file_method,
+            "line": _line_number(source, method_body_offset + relative_call_start),
+        }
+    ]
+
+
+def _php_request_file_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+
+    def append_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("file_field") or ""),
+                str(item.get("file_operation") or ""),
+                str(item.get("file_method") or ""),
+                int(item.get("line") or 0),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            accesses.append(item)
+
+    for match in PHP_REQUEST_FILE_CHAIN_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        method = str(match.group("method") or "").lower()
+        append_items(
+            _php_request_file_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                file_method=f"request_{method}",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_request_file_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            file_field = str(access.get("file_field") or "")
+            if not file_field:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_request_file_access",
+                    "from": route_ref,
+                    "to": f"request_file:{file_field}",
+                    "handler": method_symbol,
+                    "file_field": file_field,
+                    "file_operation": access.get("file_operation"),
+                    "file_method": access.get("file_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_class_property_type_map(
     source: str,
     classes: list[dict[str, Any]],
@@ -6037,6 +6148,33 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 request_input_accesses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            request_file_accesses = _php_request_file_accesses_for_method(source, method_body, method_body_offset)
+            for access in request_file_accesses:
+                file_field = str(access.get("file_field") or "")
+                if not file_field:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "request_file_access",
+                        "from": method_symbol,
+                        "to": f"request_file:{file_field}",
+                        "file_field": file_field,
+                        "file_operation": access.get("file_operation"),
+                        "file_method": access.get("file_method"),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_request_file_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                request_file_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated

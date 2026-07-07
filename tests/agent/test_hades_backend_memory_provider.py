@@ -2436,6 +2436,88 @@ def test_hades_backend_graph_search_finds_local_request_input_access_edges(monke
     )
 
 
+def test_hades_backend_graph_search_finds_local_request_file_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "request_file_access",
+                "from": "OrderController@show",
+                "to": "request_file:invoice_pdf",
+                "file_field": "invoice_pdf",
+                "file_operation": "check",
+                "file_method": "request_hasfile",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 49,
+            },
+            {
+                "kind": "route_request_file_access",
+                "from": "route:orders.show",
+                "to": "request_file:invoice_pdf",
+                "handler": "OrderController@show",
+                "file_field": "invoice_pdf",
+                "file_operation": "check",
+                "file_method": "request_hasfile",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 49,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders upload invoice_pdf hasFile", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_request_file_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "request_file:invoice_pdf"
+        and ref["provenance"]["file_field"] == "invoice_pdf"
+        and ref["provenance"]["file_operation"] == "check"
+        and ref["provenance"]["file_method"] == "request_hasfile"
+        for ref in graph_refs
+    )
+    assert any(
+        "file_field=invoice_pdf" in item["summary"]
+        and "file_operation=check" in item["summary"]
+        and "file_method=request_hasfile" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
