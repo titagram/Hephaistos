@@ -1948,8 +1948,13 @@ def _score_item(item: dict[str, Any], query: str, query_tokens: set[str]) -> int
             score += 4
         elif token in text:
             score += 2
-    if _first_item_value(item, ("kind",)).lower() == "resolved_bug":
+    kind = _first_item_value(item, ("kind",)).lower()
+    if kind == "resolved_bug":
         score += 12
+    if kind == "verified_note_fact":
+        score += 18
+    if _is_raw_chunk_item(item) and score > 0:
+        score = max(1, score - 8)
     return score
 
 

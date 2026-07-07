@@ -3564,6 +3564,28 @@ Verifiche eseguite:
   `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato.
 
+## Esecuzione ranking verified note fact - 2026-07-07
+
+Stato: completata una tranche locale P1-7 sulla qualita' delle note e sul
+ranking dopo backfill.
+
+Modifiche locali:
+
+- Il provider Hades locale assegna un boost a `kind=verified_note_fact`.
+- I raw chunk ricevono una penalita' leggera quando l'utente li include
+  esplicitamente con `include_raw_chunks=true`.
+- Il raw chunk resta consultabile, ma un fatto verificato e promosso dal
+  backfill ranka sopra il chunk rumoroso originario.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `36 passed`.
+- Locale lint/compile:
+  `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+
 ## Esecuzione no-codebase tool order gate Hades - 2026-07-07
 
 Stato: completata tranche locale P0-6/P0-7/P1-5.

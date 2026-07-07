@@ -1705,6 +1705,61 @@ def test_hades_backend_memory_search_tool_can_include_raw_chunks(monkeypatch, tm
     assert with_raw["items"][0]["source"] == "docs/backend.md"
 
 
+def test_hades_backend_memory_search_ranks_verified_backfill_fact_before_raw_chunk(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "chunk_1",
+                "domain": "source_chunks",
+                "schema": "hades.backend_wiki.file_chunk.v1",
+                "path": "graphify-sidecar/carnovali-facts.md",
+                "summary": (
+                    "taxonomy route taxonomy route taxonomy route "
+                    "SecurityActivityCategoryController handled_by extracted chunk"
+                ),
+            },
+            {
+                "id": "fact_1",
+                "domain": "project_memory",
+                "kind": "verified_note_fact",
+                "schema": "hades.verified_note_fact.v1",
+                "source": "note_backfill_candidate",
+                "summary": (
+                    "Verified route taxonomy_flock_vocabulary_security_activity_category_show "
+                    "is handled by SecurityActivityCategoryController."
+                ),
+                "payload": {
+                    "route": "taxonomy_flock_vocabulary_security_activity_category_show",
+                    "handler": "SecurityActivityCategoryController",
+                    "workspace_head_commit": "abc123",
+                    "index_status": "reviewed_note_fact",
+                },
+            },
+        ],
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {
+                "query": "taxonomy route SecurityActivityCategoryController",
+                "include_raw_chunks": True,
+                "limit": 2,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["raw_chunks_omitted"] == 0
+    assert [item["id"] for item in result["items"]] == ["fact_1", "chunk_1"]
+    assert result["items"][0]["kind"] == "verified_note_fact"
+    assert result["items"][0]["raw_chunk"] is False
+    assert result["items"][1]["raw_chunk"] is True
+    assert result["items"][0]["score"] > result["items"][1]["score"]
+
+
 def test_hades_backend_memory_search_tool_reports_unmapped_project(monkeypatch, tmp_path):
     from hermes_cli import hades_backend_db as db
     from plugins.memory import load_memory_provider
