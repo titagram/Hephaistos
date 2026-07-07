@@ -61,6 +61,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     quality_report = sub.add_parser("quality-report", help="Emit a Hades awareness quality report")
     quality_report.add_argument("--no-codebase-eval", default=None, help="Path to a no-codebase diagnosis eval fixture JSON")
     quality_report.add_argument("--skip-local-status", action="store_true", help="Do not include local backend support status")
+    quality_report.add_argument("--record", action="store_true", help="Store this report as the latest local Hades quality snapshot")
     quality_report.add_argument("--json", action="store_true", help="Emit machine-readable quality report JSON")
     privacy_export = sub.add_parser("privacy-export", help="Export backend diagnosis/evidence data for the current workspace")
     privacy_export.add_argument(
@@ -294,6 +295,9 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
         no_codebase_report=no_codebase_report,
         support_report=None if getattr(args, "skip_local_status", False) else support_report_payload(),
     )
+    if getattr(args, "record", False):
+        with db.connect_closing() as conn:
+            db.record_sync_state(conn, "last_quality_report", report)
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
     else:

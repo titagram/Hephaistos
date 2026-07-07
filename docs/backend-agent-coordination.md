@@ -2415,6 +2415,46 @@ Resta fuori da questa tranche:
 - Dashboard metrics/action queue nativa.
 - Review queue dedicata per stale facts e low-confidence diagnosis reali.
 
+## Esecuzione governance quality dashboard Hades - 2026-07-07
+
+Stato: completata una tranche locale/dashboard P2-5.
+
+Agent locale:
+
+- `hades backend quality-report --record` salva il report generato nello stato
+  locale `last_quality_report`.
+- `hades backend status --json` e la route dashboard status espongono
+  `quality.last_report` e `quality.last_report_updated_at`.
+- Se l'ultimo report registrato e' `failed`, lo status locale diventa degraded e
+  aggiunge un'action per rivedere i blocker del quality report.
+
+Dashboard locale:
+
+- `web/src/pages/BackendPage.tsx` mostra il pannello "Governance quality" con
+  status, blocker, warning, action count, timestamp ultimo report e prime azioni
+  della queue.
+- `web/src/lib/api.ts` tipizza `HadesBackendQualityState` e
+  `HadesBackendQualityReport`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `8 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_cmd.py hermes_cli/hades_backend_status.py tests/hermes_cli/test_hades_quality_report.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato; `py_compile` sugli stessi file passato.
+- Frontend:
+  `npm run --prefix web typecheck` passato.
+- Frontend lint mirato:
+  `npm exec eslint -- --max-warnings=0 src/pages/BackendPage.tsx src/lib/api.ts`
+  passato da `web/`.
+
+Resta fuori da questa tranche:
+
+- Scheduler periodico nativo per invocare `quality-report --record` su cadenza.
+- Review queue dedicata per stale facts e low-confidence diagnosis reali.
+
 ## Esecuzione Laravel graph metadata Hades - 2026-07-07
 
 Stato: completata una seconda tranche locale P0-4 del piano "Bug Root Cause

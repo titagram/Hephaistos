@@ -148,3 +148,29 @@ def test_backend_quality_report_command_emits_json_for_fixture(monkeypatch, tmp_
     assert payload["status"] == "passed"
     assert payload["metrics"]["no_codebase"]["total"] == 7
     assert payload["action_queue"] == []
+
+
+def test_backend_quality_report_command_records_latest_snapshot(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as db
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(FIXTURE_PATH),
+            skip_local_status=True,
+            record=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    with db.connect_closing() as conn:
+        recorded = db.get_sync_state(conn, "last_quality_report")
+        recorded_at = db.get_sync_state_updated_at(conn, "last_quality_report")
+
+    assert rc == 0
+    assert recorded == payload
+    assert recorded_at is not None

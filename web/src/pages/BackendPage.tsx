@@ -66,7 +66,7 @@ function valueLabel(value: unknown): string {
 
 function statusTone(status?: string | null): "success" | "warning" | "destructive" | "secondary" | "outline" {
   if (!status) return "outline";
-  if (["linked", "completed", "accepted", "ok", "present", "ready", "success", "high"].includes(status)) return "success";
+  if (["linked", "completed", "accepted", "ok", "present", "ready", "success", "high", "passed"].includes(status)) return "success";
   if (
     [
       "waiting_confirmation",
@@ -83,6 +83,7 @@ function statusTone(status?: string | null): "success" | "warning" | "destructiv
       "low",
       "stale",
       "blocked",
+      "attention",
     ].includes(status)
   ) return "warning";
   if (["failed", "refused", "conflicted", "degraded", "error", "insufficient"].includes(status)) return "destructive";
@@ -136,6 +137,11 @@ function latestQualityUpdate(status: HadesBackendStatus): number | null {
 function sourceFreeReadyCount(status: HadesBackendStatus): number {
   return status.awareness?.diagnosable_without_source_bindings
     ?? status.bindings.filter((binding) => Boolean(binding.awareness?.diagnosable_without_source)).length;
+}
+
+function reportSummaryValue(summary: Record<string, number> | undefined, key: string): number {
+  const value = summary?.[key];
+  return typeof value === "number" ? value : 0;
 }
 
 function Metric({
@@ -350,6 +356,76 @@ function DiagnosisQualityPanel({ status }: { status: HadesBackendStatus }) {
             </div>
           </div>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function GovernanceQualityPanel({ status }: { status: HadesBackendStatus }) {
+  const quality = status.quality;
+  const report = quality?.last_report ?? null;
+  const reportStatus = report?.status || "not recorded";
+  const summary = report?.summary;
+  const actions = Array.isArray(report?.action_queue) ? report.action_queue.slice(0, 4) : [];
+  const blockers = reportSummaryValue(summary, "blockers");
+  const warnings = reportSummaryValue(summary, "warnings");
+  const actionCount = reportSummaryValue(summary, "actions");
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <CheckCircle2 className="h-4 w-4" />
+            Governance quality
+          </H2>
+          <Badge tone={report ? statusTone(reportStatus) : "outline"}>{reportStatus}</Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Blockers</div>
+            <div className="mt-1 text-lg font-semibold">{blockers}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Warnings</div>
+            <div className="mt-1 text-lg font-semibold">{warnings}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Actions</div>
+            <div className="mt-1 text-lg font-semibold">{actionCount}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Last report</div>
+            <div className="mt-1 text-lg font-semibold">{formatAgo(quality?.last_report_updated_at)}</div>
+          </div>
+        </div>
+
+        {report ? (
+          actions.length > 0 ? (
+            <div className="grid gap-2">
+              {actions.map((action, index) => (
+                <div className="border border-border bg-background/40 px-3 py-2" key={action.id || index}>
+                  <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                    <span className="min-w-0 truncate">{action.id || "quality_action"}</span>
+                    <Badge tone={statusTone(action.severity)}>{action.severity || "unknown"}</Badge>
+                  </div>
+                  {action.message && (
+                    <div className="mt-1 text-sm text-muted-foreground">{action.message}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="border border-border bg-background/40 px-3 py-2 text-sm">
+              No governance actions
+            </div>
+          )
+        ) : (
+          <div className="border border-border bg-background/40 px-3 py-2 text-sm">
+            Run `hades backend quality-report --record`
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -641,6 +717,7 @@ export default function BackendPage() {
 
       <AwarenessPanel status={status} />
       <DiagnosisQualityPanel status={status} />
+      <GovernanceQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />
 
       {status.actions.length > 0 && (

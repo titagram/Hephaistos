@@ -59,6 +59,23 @@ def test_hades_backend_status_web_route_reports_canonical_payload(monkeypatch, t
             payload={"message": "hello"},
         )
         hdb.record_sync_state(conn, "last_sync_summary", {"completed": 1, "waiting": 1})
+        hdb.record_sync_state(
+            conn,
+            "last_quality_report",
+            {
+                "schema": "hades.quality_report.v1",
+                "status": "failed",
+                "summary": {"blockers": 1, "warnings": 0, "actions": 1},
+                "metrics": {"no_codebase": {"accuracy": 0.5}},
+                "action_queue": [
+                    {
+                        "id": "fix_no_codebase_eval_failures",
+                        "severity": "blocker",
+                        "message": "Fix failing no-codebase diagnosis fixtures before release.",
+                    }
+                ],
+            },
+        )
 
     previous_auth_required = getattr(web_server.app.state, "auth_required", None)
     web_server.app.state.auth_required = False
@@ -86,8 +103,12 @@ def test_hades_backend_status_web_route_reports_canonical_payload(monkeypatch, t
     assert body["inbox_counts"] == {"total": 1, "unread": 1}
     assert body["sync"]["last_summary"] == {"completed": 1, "waiting": 1}
     assert isinstance(body["sync"]["last_summary_updated_at"], int)
+    assert body["quality"]["last_report"]["status"] == "failed"
+    assert body["quality"]["last_report"]["summary"]["blockers"] == 1
+    assert isinstance(body["quality"]["last_report_updated_at"], int)
     assert any("backend job" in action for action in body["actions"])
     assert any("memory proposal" in action for action in body["actions"])
+    assert any("quality report" in action for action in body["actions"])
 
 
 def test_hades_backend_web_routes_review_jobs_and_proposals(monkeypatch, tmp_path):

@@ -1728,12 +1728,33 @@ export interface HadesBackendSyncState {
   background_updated_at?: number | null;
 }
 
+export interface HadesBackendQualityReport {
+  schema?: string | null;
+  status?: string | null;
+  summary?: Record<string, number>;
+  metrics?: Record<string, unknown>;
+  action_queue?: Array<{
+    id?: string;
+    severity?: string;
+    message?: string;
+    count?: number;
+    value?: number;
+    status?: string;
+  }>;
+}
+
+export interface HadesBackendQualityState {
+  last_report: HadesBackendQualityReport | null;
+  last_report_updated_at?: number | null;
+}
+
 export interface HadesBackendStatus {
   configured: boolean;
   agent: HadesBackendAgent | null;
   bindings: HadesBackendBinding[];
   awareness?: HadesBackendAwarenessSummary;
   identity?: HadesBackendIdentity;
+  quality?: HadesBackendQualityState;
   job_counts: Record<string, number>;
   proposal_counts: Record<string, number>;
   inbox_counts: Record<string, number>;

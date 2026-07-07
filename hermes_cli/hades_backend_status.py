@@ -38,9 +38,11 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_summary = db.get_sync_state(conn, "last_sync_summary")
             last_error = db.get_sync_state(conn, "last_sync_error")
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
+            last_quality_report = db.get_sync_state(conn, "last_quality_report")
             last_summary_updated_at = db.get_sync_state_updated_at(conn, "last_sync_summary")
             last_error_updated_at = db.get_sync_state_updated_at(conn, "last_sync_error")
             background_sync_updated_at = db.get_sync_state_updated_at(conn, BACKGROUND_SYNC_STATE_KEY)
+            last_quality_report_updated_at = db.get_sync_state_updated_at(conn, "last_quality_report")
         else:
             bindings = []
             memory_caches = {}
@@ -50,9 +52,11 @@ def load_backend_status_payload() -> dict[str, Any]:
             last_summary = None
             last_error = None
             background_sync = None
+            last_quality_report = None
             last_summary_updated_at = None
             last_error_updated_at = None
             background_sync_updated_at = None
+            last_quality_report_updated_at = None
 
     return backend_status_payload(
         agent=agent,
@@ -68,6 +72,8 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_summary_updated_at=last_summary_updated_at,
         last_error_updated_at=last_error_updated_at,
         background_sync_updated_at=background_sync_updated_at,
+        last_quality_report=last_quality_report,
+        last_quality_report_updated_at=last_quality_report_updated_at,
     )
 
 
@@ -172,10 +178,14 @@ def backend_status_payload(
     last_summary_updated_at: int | None = None,
     last_error_updated_at: int | None = None,
     background_sync_updated_at: int | None = None,
+    last_quality_report: dict[str, Any] | None = None,
+    last_quality_report_updated_at: int | None = None,
 ) -> dict[str, Any]:
     refused = _count(proposal_counts, "refused") + _count(proposal_counts, "conflicted")
     waiting = _count(job_counts, "waiting_confirmation")
     background_failed = bool(background_sync and background_sync.get("status") == "failed")
+    quality_failed = bool(last_quality_report and last_quality_report.get("status") == "failed")
+    quality_attention = bool(last_quality_report and last_quality_report.get("status") == "attention")
     actions: list[str] = []
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
@@ -210,6 +220,10 @@ def backend_status_payload(
     )
     if awareness["status"] in {"partial", "degraded", "unmapped"} and not last_error and not background_failed:
         actions.append("Project awareness is incomplete; inspect `awareness` before source-free diagnosis.")
+    if quality_failed:
+        actions.append("Review latest Hades quality report blocker(s).")
+    elif quality_attention:
+        actions.append("Review latest Hades quality report warning(s).")
     return {
         "configured": agent is not None,
         "agent": None if agent is None else {
@@ -222,6 +236,7 @@ def backend_status_payload(
         "bindings": binding_payloads,
         "awareness": awareness,
         "identity": identity,
+        "quality": _quality_payload(last_quality_report, last_quality_report_updated_at),
         "job_counts": job_counts,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
@@ -233,8 +248,27 @@ def backend_status_payload(
             "background": background_sync,
             "background_updated_at": background_sync_updated_at,
         },
-        "degraded": bool(waiting or refused or last_error or background_failed),
+        "degraded": bool(waiting or refused or last_error or background_failed or quality_failed),
         "actions": actions,
+    }
+
+
+def _quality_payload(report: dict[str, Any] | None, updated_at: int | None) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        return {
+            "last_report": None,
+            "last_report_updated_at": None,
+        }
+    action_queue = report.get("action_queue") if isinstance(report.get("action_queue"), list) else []
+    return {
+        "last_report": {
+            "schema": report.get("schema"),
+            "status": report.get("status"),
+            "summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
+            "metrics": report.get("metrics") if isinstance(report.get("metrics"), dict) else {},
+            "action_queue": [action for action in action_queue if isinstance(action, dict)][:10],
+        },
+        "last_report_updated_at": updated_at,
     }
 
 
