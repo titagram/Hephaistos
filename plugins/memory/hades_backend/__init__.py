@@ -53,6 +53,7 @@ RAW_CHUNK_MARKERS = (
     "backend_wiki.file_chunk",
     "---begin_content---",
 )
+SEARCH_FILTER_KEYS = ("kind", "schema", "source", "symbol", "path")
 DOMAIN_ALIASES = {
     "agent_note": "agent_notes",
     "agent-notes": "agent_notes",
@@ -119,6 +120,22 @@ SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
             "kind": {
                 "type": "string",
                 "description": "Optional memory item kind filter, for example resolved_bug, agent_note, or wiki_entry.",
+            },
+            "schema": {
+                "type": "string",
+                "description": "Optional structured schema filter, for example hades.resolved_bug.v1 or hades.php_graph.v1.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Optional source/provenance filter, for example hades_diagnosis_report or wiki_revision.",
+            },
+            "symbol": {
+                "type": "string",
+                "description": "Optional code symbol filter, for example OrderController@show or App\\Service\\Class::method.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional path filter for source-backed memory, graph nodes, wiki chunks, or artifacts.",
             },
             "limit": {
                 "type": "integer",
@@ -577,7 +594,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, _backend_error = self._backend_memory_search(
             query=query,
             domain="all",
-            kind="",
+            filters={},
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
         )
@@ -593,7 +610,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             cache.items,
             query,
             domain="all",
-            kind="",
+            filters={},
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
         )
@@ -683,7 +700,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         domain = _normalize_domain(args.get("domain") or "all")
         if domain not in SEARCH_DOMAINS:
             return tool_error(f"Unsupported domain: {domain}", allowed_domains=list(SEARCH_DOMAINS))
-        kind = str(args.get("kind") or "").strip()
+        filters = _search_filters_from_args(args)
         limit = _bounded_int(args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT)
         include_raw_chunks = bool(args.get("include_raw_chunks"))
 
@@ -707,12 +724,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain=domain,
-            kind=kind,
+            filters=filters,
             limit=limit,
             include_raw_chunks=include_raw_chunks,
         )
         if backend_result is not None:
-            backend_result = _filter_backend_search_response_by_kind(backend_result, kind)
+            backend_result = _filter_backend_search_response(backend_result, filters)
             return tool_result(_tool_result_from_backend_search(backend_result))
 
         cache = self._load_memory_cache()
@@ -733,7 +750,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             cache.items,
             query,
             domain=domain,
-            kind=kind,
+            filters=filters,
             limit=limit,
             include_raw_chunks=include_raw_chunks,
         )
@@ -749,7 +766,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "cache_updated_at": cache.updated_at,
             "query": query,
             "domain": domain,
-            "kind": kind or "all",
+            "kind": filters.get("kind") or "all",
+            "filters": filters,
             "include_raw_chunks": include_raw_chunks,
             "searched_cache_only": True,
             "count": len(items),
@@ -1127,7 +1145,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain="artifacts",
-            kind="",
+            filters={},
             limit=limit,
             include_raw_chunks=False,
         )
@@ -1304,7 +1322,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         *,
         query: str,
         domain: str,
-        kind: str,
+        filters: dict[str, str],
         limit: int,
         include_raw_chunks: bool,
     ) -> tuple[dict[str, Any] | None, str | None]:
@@ -1321,8 +1339,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     "limit": limit,
                     "include_raw_chunks": include_raw_chunks,
                 }
-                if kind:
-                    payload["kind"] = kind
+                payload.update(filters)
                 response = client.memory_search(**payload)
             finally:
                 close = getattr(client, "close", None)
@@ -1749,15 +1766,75 @@ def _kind_matches(item: dict[str, Any], requested: str) -> bool:
     return _first_item_value(item, ("kind",)).strip().lower() == expected
 
 
-def _filter_backend_search_response_by_kind(response: dict[str, Any], kind: str) -> dict[str, Any]:
-    requested = str(kind or "").strip()
-    if not requested:
+def _search_filters_from_args(args: dict[str, Any]) -> dict[str, str]:
+    filters: dict[str, str] = {}
+    for key in SEARCH_FILTER_KEYS:
+        value = str(args.get(key) or "").strip()
+        if value:
+            filters[key] = value
+    return filters
+
+
+def _stable_filter_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value)
+
+
+def _item_filter_text(item: dict[str, Any], key: str) -> str:
+    if key == "kind":
+        return _first_item_value(item, ("kind",))
+    if key == "schema":
+        return _item_schema(item)
+    if key == "source":
+        return _item_source(item)
+    fields = {
+        "path": ("path", "source_path", "file", "uri"),
+        "symbol": ("symbol", "symbols", "affected_symbols", "name", "class", "handler"),
+    }.get(key, (key,))
+    values: list[str] = []
+    containers = (
+        item,
+        _nested_dict(item, "metadata"),
+        _nested_dict(item, "payload"),
+        _nested_dict(item, "provenance"),
+    )
+    for container in containers:
+        for field in fields:
+            value = container.get(field)
+            rendered = _stable_filter_value(value).strip()
+            if rendered:
+                values.append(rendered)
+    return "\n".join(values)
+
+
+def _item_matches_filters(item: dict[str, Any], filters: dict[str, str]) -> bool:
+    for key, requested in filters.items():
+        expected = str(requested or "").strip().lower()
+        if not expected:
+            continue
+        actual = _item_filter_text(item, key).lower()
+        if key == "kind":
+            if actual != expected:
+                return False
+        elif expected not in actual:
+            return False
+    return True
+
+
+def _filter_backend_search_response(response: dict[str, Any], filters: dict[str, str]) -> dict[str, Any]:
+    clean_filters = {key: str(value).strip() for key, value in filters.items() if str(value).strip()}
+    if not clean_filters:
         return response
     response_items = _backend_items(response)
-    items = [item for item in response_items if _kind_matches(item, requested)]
+    items = [item for item in response_items if _item_matches_filters(item, clean_filters)]
     filtered = dict(response)
     filtered["items"] = items
-    filtered["kind"] = requested
+    filtered["filters"] = clean_filters
+    for key, value in clean_filters.items():
+        filtered[key] = value
     filtered["count"] = len(items)
     filtered["truncated"] = bool(response.get("truncated")) and len(items) >= len(response_items)
     return filtered
@@ -1805,12 +1882,12 @@ def _search_memory_items(
     query: str,
     *,
     domain: str,
-    kind: str,
+    filters: dict[str, str],
     limit: int,
     include_raw_chunks: bool,
 ) -> tuple[list[tuple[int, int, bool, dict[str, Any]]], int, int]:
     requested_domain = _normalize_domain(domain or "all")
-    requested_kind = str(kind or "").strip()
+    clean_filters = {key: str(value).strip() for key, value in filters.items() if str(value).strip()}
     query_tokens = _tokenize(query)
     raw_omitted = 0
     candidates: list[tuple[int, int, bool, dict[str, Any]]] = []
@@ -1819,7 +1896,7 @@ def _search_memory_items(
         raw = _is_raw_chunk_item(item)
         if not _domain_matches(item_domain, requested_domain):
             continue
-        if requested_kind and not _kind_matches(item, requested_kind):
+        if clean_filters and not _item_matches_filters(item, clean_filters):
             continue
         if raw and not include_raw_chunks:
             raw_omitted += 1
@@ -1901,6 +1978,7 @@ def _tool_result_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
         "stale_reason",
         "updated_at",
         "version",
+        "match_fields",
     ):
         value = item.get(key)
         if value not in ("", None):
@@ -1927,6 +2005,7 @@ def _tool_result_from_backend_search(response: dict[str, Any]) -> dict[str, Any]
         "query": response.get("query", ""),
         "domain": _normalize_domain(response.get("domain") or "all"),
         "kind": response.get("kind") or "all",
+        "filters": response.get("filters") if isinstance(response.get("filters"), dict) else {},
         "include_raw_chunks": bool(response.get("include_raw_chunks")),
         "searched_cache_only": False,
         "count": count,

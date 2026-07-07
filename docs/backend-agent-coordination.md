@@ -2667,6 +2667,52 @@ Resta fuori da questa tranche:
 - FTS/ranking backend per text evidence e query ambigue.
 - Structured filters backend per commit/symbol oltre al filtro kind locale.
 
+## Esecuzione Hades structured memory search filters - 2026-07-07
+
+Stato: completata una tranche P1-3 locale/backend.
+
+Agent locale:
+
+- `hades_backend_project_memory_search` accetta ora anche `schema`, `source`,
+  `symbol` e `path`, oltre a `kind`.
+- Il provider passa i filtri al backend live e applica comunque un filtro
+  difensivo sul risultato, cosi' un backend non aggiornato non mescola domini o
+  memory kind non richiesti.
+- Il fallback cache locale applica gli stessi filtri su payload/provenance
+  annidati, incluse liste come `affected_symbols`.
+- Il risultato tool espone `filters` e conserva `match_fields` quando arrivano
+  dal backend.
+
+Backend remoto:
+
+- Commit remoto `6927013 feat: add Hades structured memory search filters`.
+- `GET /api/hades/v1/memory/search` accetta `kind`, `schema`, `source`, `symbol`
+  e `path`.
+- `MemorySearchController` applica i filtri a project memory, wiki revisions e
+  artifacts; gli item ritornano `match_fields` e uno score boost per match
+  strutturati.
+- I graph artifacts possono essere cercati per schema/symbol/path senza dover
+  dipendere solo dalla query testuale.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `33 passed`.
+- Remoto:
+  `vendor/bin/pint --test app/Http/Controllers/Hades/MemorySearchController.php tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato.
+- Remoto:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades`
+  passato: `52 passed / 680 assertions`.
+- Remoto:
+  `git diff --check` passato prima del commit.
+
+Resta fuori da questa tranche:
+
+- FTS/BM25 o vector rerank per testo libero ambiguo.
+- Filtri espliciti per commit/versione oltre alla freshness gia' restituita.
+
 ## Esecuzione no-codebase freshness eval Hades - 2026-07-07
 
 Stato: completata una tranche P0-7 locale del piano "Bug Root Cause Awareness".

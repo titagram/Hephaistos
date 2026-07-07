@@ -337,7 +337,11 @@ over the safety limit.
 
 For similar historical bugs, call `hades_backend_project_memory_search` with
 `kind=resolved_bug` so generic project notes do not crowd out verified causal
-memory.
+memory. When you already know a route, class, method, file, or diagnosis source,
+also pass structured filters such as `symbol=OrderController@show`,
+`path=OrderController.php`, `schema=hades.resolved_bug.v1`, or
+`source=hades_diagnosis_report`; results include `match_fields` so the agent can
+cite why the memory matched.
 
 After the diagnosis is verified by a passing regression test or explicit user
 confirmation, promote it with the service-gated

@@ -325,6 +325,151 @@ def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatc
     assert result["items"][0]["stale_reason"] == "workspace_head_changed"
 
 
+def test_hades_backend_memory_search_tool_passes_structured_filters(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def memory_search(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "version": "search_v1",
+                "etag": "search_v1",
+                "query": payload["query"],
+                "domain": payload["domain"],
+                "include_raw_chunks": payload["include_raw_chunks"],
+                "count": 2,
+                "candidate_count": 2,
+                "truncated": False,
+                "raw_chunks_omitted": 0,
+                "items": [
+                    {
+                        "id": "mem_bug_1",
+                        "domain": "project_memory",
+                        "kind": "resolved_bug",
+                        "schema": "hades.resolved_bug.v1",
+                        "source": "hades_diagnosis_report",
+                        "summary": "Resolved bug: active() on null in OrderController.",
+                        "payload": {
+                            "affected_symbols": ["App\\Http\\Controllers\\OrderController@show"],
+                            "path": "app/Http/Controllers/OrderController.php",
+                        },
+                        "match_fields": ["payload.affected_symbols", "payload.path"],
+                        "score": 64,
+                        "raw_chunk": False,
+                    },
+                    {
+                        "id": "mem_note_1",
+                        "domain": "project_memory",
+                        "kind": "agent_note",
+                        "schema": "hades.agent_note.v1",
+                        "source": "hades_agent",
+                        "summary": "OrderController note without diagnosis status.",
+                        "score": 10,
+                        "raw_chunk": False,
+                    },
+                ],
+            }
+
+        def close(self):
+            pass
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {
+                "query": "order active null",
+                "domain": "project_memory",
+                "kind": "resolved_bug",
+                "schema": "hades.resolved_bug.v1",
+                "source": "hades_diagnosis_report",
+                "symbol": "OrderController@show",
+                "path": "OrderController.php",
+                "limit": 5,
+            },
+        )
+    )
+
+    assert fake.calls[0]["kind"] == "resolved_bug"
+    assert fake.calls[0]["schema"] == "hades.resolved_bug.v1"
+    assert fake.calls[0]["source"] == "hades_diagnosis_report"
+    assert fake.calls[0]["symbol"] == "OrderController@show"
+    assert fake.calls[0]["path"] == "OrderController.php"
+    assert result["filters"] == {
+        "kind": "resolved_bug",
+        "schema": "hades.resolved_bug.v1",
+        "source": "hades_diagnosis_report",
+        "symbol": "OrderController@show",
+        "path": "OrderController.php",
+    }
+    assert result["count"] == 1
+    assert result["items"][0]["id"] == "mem_bug_1"
+    assert result["items"][0]["match_fields"] == ["payload.affected_symbols", "payload.path"]
+
+
+def test_hades_backend_memory_search_tool_filters_cache_by_structured_fields(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "mem_bug_1",
+                "domain": "project_memory",
+                "kind": "resolved_bug",
+                "schema": "hades.resolved_bug.v1",
+                "source": "hades_diagnosis_report",
+                "summary": "Resolved bug: active() on null in OrderController.",
+                "payload": {
+                    "affected_symbols": ["App\\Http\\Controllers\\OrderController@show"],
+                    "path": "app/Http/Controllers/OrderController.php",
+                },
+            },
+            {
+                "id": "mem_bug_2",
+                "domain": "project_memory",
+                "kind": "resolved_bug",
+                "schema": "hades.resolved_bug.v1",
+                "source": "hades_diagnosis_report",
+                "summary": "Resolved bug: checkout timeout in PaymentController.",
+                "payload": {
+                    "affected_symbols": ["App\\Http\\Controllers\\PaymentController@store"],
+                    "path": "app/Http/Controllers/PaymentController.php",
+                },
+            },
+        ],
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_project_memory_search",
+            {
+                "query": "active null",
+                "domain": "project_memory",
+                "kind": "resolved_bug",
+                "schema": "hades.resolved_bug.v1",
+                "symbol": "OrderController@show",
+                "path": "OrderController.php",
+                "limit": 5,
+            },
+        )
+    )
+
+    assert result["searched_cache_only"] is True
+    assert result["filters"]["symbol"] == "OrderController@show"
+    assert result["filters"]["path"] == "OrderController.php"
+    assert result["count"] == 1
+    assert result["items"][0]["id"] == "mem_bug_1"
+
+
 def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
