@@ -1339,6 +1339,94 @@ def test_backend_ingest_deploy_uploads_mismatch_evidence(monkeypatch, tmp_path, 
     assert fake.closed == 1
 
 
+def test_backend_ingest_http_uploads_redacted_request_response_evidence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    request_file = workspace / "request.txt"
+    request_file.write_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n", encoding="utf-8")
+    response_file = workspace / "response.txt"
+    response_file.write_text("HTTP/1.1 500\napi_key=secretvalue12345\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.evidence = []
+            self.closed = 0
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": f"ev_{len(self.evidence)}"}}
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="ingest-http",
+            bug_report_id="bug_1",
+            environment="production",
+            json=True,
+            method="post",
+            request_file=str(request_file),
+            response_file=str(response_file),
+            source=None,
+            status=500,
+            url="https://app.example/orders/1?token=supersecret12345",
+        )
+    )
+
+    result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert result["evidence_ids"] == ["ev_1", "ev_2"]
+    assert result["kinds"] == ["http_request", "http_response"]
+    assert [item["kind"] for item in fake.evidence] == ["http_request", "http_response"]
+    assert fake.evidence[0]["retention_class"] == "http_trace"
+    assert fake.evidence[0]["payload"]["schema"] == "hades.http_request.v1"
+    assert fake.evidence[0]["payload"]["method"] == "POST"
+    assert fake.evidence[0]["payload"]["url"] == "https://app.example/orders/1?token=***"
+    assert fake.evidence[0]["redactions"] == 2
+    assert fake.evidence[1]["payload"]["schema"] == "hades.http_response.v1"
+    assert fake.evidence[1]["payload"]["status"] == 500
+    assert fake.evidence[1]["redactions"] == 2
+    assert "supersecret12345" not in json.dumps(fake.evidence)
+    assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(fake.evidence)
+    assert "secretvalue12345" not in json.dumps(fake.evidence)
+    assert fake.closed == 1
+
+
 def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     workspace = tmp_path / "repo"
@@ -1353,6 +1441,8 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
     )
     runtime_log = workspace / "runtime.log"
     runtime_log.write_text("production.ERROR Null active() token=secretvalue12345\n", encoding="utf-8")
+    response_file = workspace / "response.txt"
+    response_file.write_text("HTTP/1.1 500\n", encoding="utf-8")
 
     from hermes_cli import hades_backend_db as hdb
     import hermes_cli.hades_backend_cmd as cmd
@@ -1412,6 +1502,11 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
             expected="HTTP 200",
             json=True,
             log=[str(runtime_log)],
+            request_file=None,
+            request_method="GET",
+            request_url="https://app.example/orders/1",
+            response_file=str(response_file),
+            response_status=500,
             severity="high",
             steps="Open /orders/1",
             symptom="Opening order detail returns HTTP 500",
@@ -1424,15 +1519,22 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
 
     assert rc == 0
     assert result["bug_report_id"] == "bug_1"
-    assert result["evidence_ids"] == ["ev_1", "ev_2", "ev_3"]
+    assert result["evidence_ids"] == ["ev_1", "ev_2", "ev_3", "ev_4", "ev_5"]
     assert fake.closed == 1
     assert fake.reports[0]["title"] == "Order detail 500"
     assert fake.reports[0]["payload"]["schema"] == "hades.bug_intake.v1"
     assert fake.reports[0]["payload"]["steps"] == "Open /orders/1"
-    assert [item["kind"] for item in fake.evidence] == ["failing_test", "log_excerpt", "deploy_version"]
+    assert [item["kind"] for item in fake.evidence] == [
+        "failing_test",
+        "log_excerpt",
+        "deploy_version",
+        "http_request",
+        "http_response",
+    ]
     assert all(item["bug_report_id"] == "bug_1" for item in fake.evidence)
     assert fake.evidence[2]["payload"]["mismatch"] is True
     assert fake.evidence[2]["payload"]["environment"] == "staging"
+    assert fake.evidence[4]["payload"]["status"] == 500
     assert "sk-live-secretvalue12345" not in json.dumps(fake.evidence)
     assert "secretvalue12345" not in json.dumps(fake.evidence)
 

@@ -116,7 +116,9 @@ to attach redacted `failing_test` and `log_excerpt` evidence to the created bug
 report. Add `--deploy-commit <sha>` when the affected environment may be
 running a different version from the indexed workspace; Hades stores a
 `deploy_version` evidence item and marks `mismatch=true` when the deployed
-commit differs from the linked workspace head.
+commit differs from the linked workspace head. Add `--request-url <url>`,
+`--request-method <method>`, and optional `--response-status <code>` to attach
+bounded HTTP request/response context to the same report.
 
 Diagnosis outcomes should be persisted with
 `hades_backend_diagnosis_report_create` / `POST /api/hades/v1/diagnosis-reports`
@@ -321,6 +323,7 @@ bug evidence before asking for a root cause:
 hades backend ingest-test ./phpunit.log --bug-report-id <bug-report-id>
 hades backend ingest-log ./storage/logs/laravel.log --bug-report-id <bug-report-id>
 hades backend ingest-deploy --deploy-commit <deployed-sha> --bug-report-id <bug-report-id>
+hades backend ingest-http --url <affected-url> --method GET --status 500 --bug-report-id <bug-report-id>
 ```
 
 `ingest-test` and `ingest-log` read a bounded excerpt, redact likely
@@ -328,7 +331,9 @@ tokens/API keys/bearer headers, extract lightweight stack frames when possible,
 and upload `failing_test` or `log_excerpt` evidence to the linked backend
 workspace. `ingest-deploy` uploads a `hades.deploy_version.v1` payload with the
 deployed commit, the indexed workspace head when known, and an explicit mismatch
-flag.
+flag. `ingest-http` uploads `hades.http_request.v1` and, when status or
+response excerpt is present, `hades.http_response.v1`; URL, request excerpt and
+response excerpt pass through the same secret redaction path before upload.
 
 For legacy raw chunk notes, use `hades backend backfill-note <file> --json`
 first. Add `--create-proposals` only after reviewing the candidate facts. The

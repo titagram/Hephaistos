@@ -1921,6 +1921,17 @@ Follow-up locale completato:
   cosi' una diagnosi senza source code puo' rilevare che sta guardando una
   fotografia progetto diversa da quella deployata.
 
+Secondo follow-up locale completato:
+
+- Nuovo subcommand `hades backend ingest-http --url <url>`.
+- `bug-intake` accetta `--request-url`, `--request-method`,
+  `--response-status`, `--request-file` e `--response-file`.
+- Payload `hades.http_request.v1` e `hades.http_response.v1` con URL redatta,
+  excerpt bounded e `retention_class=http_trace`.
+- Questo chiude la parte locale del "request context" P1-1: il backend puo'
+  cercare il sintomo HTTP e collegarlo a route/graph/source slices senza
+  dipendere da descrizioni libere dell'utente.
+
 Verifiche eseguite:
 
 - Locale:

@@ -38,7 +38,10 @@ workspace to create a structured bug report and optionally attach `--test-output
 or `--log` files as bounded, redacted evidence. Include `--deploy-commit <sha>`
 or run `hades backend ingest-deploy --deploy-commit <sha>` to store a
 `deploy_version` item; the payload explicitly flags whether the deployed commit
-differs from the linked workspace head.
+differs from the linked workspace head. Include `--request-url <url>` on
+`bug-intake` or run `hades backend ingest-http --url <url>` to store
+`http_request`/`http_response` context with redacted URL and bounded request or
+response excerpts.
 
 The Hades v1 backend exposes:
 

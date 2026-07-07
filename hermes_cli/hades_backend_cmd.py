@@ -128,6 +128,16 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     ingest_deploy.add_argument("--environment", default=None, help="Affected environment label")
     ingest_deploy.add_argument("--source", default=None, help="Evidence source label")
     ingest_deploy.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
+    ingest_http = sub.add_parser("ingest-http", help="Upload HTTP request/response context as Hades bug evidence")
+    ingest_http.add_argument("--url", required=True, help="Affected request URL")
+    ingest_http.add_argument("--method", default="GET", help="HTTP method")
+    ingest_http.add_argument("--status", type=int, default=None, help="Optional response status code")
+    ingest_http.add_argument("--request-file", default=None, help="Optional raw request excerpt file")
+    ingest_http.add_argument("--response-file", default=None, help="Optional raw response excerpt file")
+    ingest_http.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
+    ingest_http.add_argument("--environment", default=None, help="Affected environment label")
+    ingest_http.add_argument("--source", default=None, help="Evidence source label")
+    ingest_http.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
     bug_intake = sub.add_parser("bug-intake", help="Create a structured Hades bug report with optional evidence files")
     bug_intake.add_argument("--title", required=True, help="Short bug title")
     bug_intake.add_argument("--symptom", required=True, help="Observed symptom")
@@ -141,6 +151,11 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     bug_intake.add_argument("--deploy-commit", default=None, help="Commit currently deployed in the affected environment")
     bug_intake.add_argument("--workspace-head", default=None, help="Indexed workspace commit; defaults to the linked workspace head")
     bug_intake.add_argument("--deploy-source", default=None, help="Source label for deploy-version evidence")
+    bug_intake.add_argument("--request-url", default=None, help="Affected request URL")
+    bug_intake.add_argument("--request-method", default="GET", help="Affected request method")
+    bug_intake.add_argument("--response-status", type=int, default=None, help="Observed HTTP response status")
+    bug_intake.add_argument("--request-file", default=None, help="Optional raw request excerpt file")
+    bug_intake.add_argument("--response-file", default=None, help="Optional raw response excerpt file")
     bug_intake.add_argument("--json", action="store_true", help="Emit machine-readable intake result")
     backfill_note = sub.add_parser("backfill-note", help="Preview note-quality backfill for a raw chunk or note file")
     backfill_note.add_argument("file", help="Path to a raw chunk or note file")
@@ -945,6 +960,67 @@ def _deploy_version_payload(
     }
 
 
+def _redacted_optional_file(path: str | None) -> tuple[str | None, bool, int]:
+    if not path:
+        return None, False, 0
+    text, truncated = _read_evidence_file(path)
+    redacted = redact_secret(text)
+    return _compact_lines(redacted), truncated, 1 if redacted != text else 0
+
+
+def _http_request_payload(
+    *,
+    method: str,
+    url: str,
+    request_excerpt: str | None,
+    request_truncated: bool,
+    environment: str | None,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "hades.http_request.v1",
+        "source": source,
+        "environment": environment,
+        "method": method,
+        "url": url,
+        "request_excerpt": request_excerpt,
+        "request_truncated": request_truncated,
+    }
+
+
+def _http_response_payload(
+    *,
+    method: str,
+    url: str,
+    status: int | None,
+    response_excerpt: str | None,
+    response_truncated: bool,
+    environment: str | None,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "hades.http_response.v1",
+        "source": source,
+        "environment": environment,
+        "method": method,
+        "url": url,
+        "status": status,
+        "response_excerpt": response_excerpt,
+        "response_truncated": response_truncated,
+    }
+
+
+def _http_request_summary(*, method: str, url: str, environment: str | None) -> str:
+    env = f" ({environment})" if environment else ""
+    return f"HTTP request{env}: {method} {url}"[:1000]
+
+
+def _http_response_summary(*, method: str, url: str, status: int | None, environment: str | None) -> str:
+    env = f" ({environment})" if environment else ""
+    status_text = str(status) if status is not None else "unknown status"
+    return f"HTTP response{env}: {status_text} for {method} {url}"[:1000]
+
+
 def _evidence_payload(kind: str, text: str, source: str, truncated: bool) -> dict[str, Any]:
     if kind == "failing_test":
         return {
@@ -1109,6 +1185,138 @@ def _cmd_ingest_deploy(args: argparse.Namespace) -> int:
         elif result["mismatch"] is False:
             suffix = f"matches {_short_commit(deploy_commit)}"
         print(f"Hades bug evidence stored: {evidence_id or 'created'} (deploy_version, {suffix})")
+    return 0
+
+
+def _create_http_context_evidence(
+    client: object,
+    binding: db.WorkspaceBinding,
+    *,
+    bug_report_id: str | None,
+    method: str,
+    url: str,
+    status: int | None,
+    request_file: str | None,
+    response_file: str | None,
+    environment: str | None,
+    source: str,
+) -> list[str | None]:
+    method = str(method or "GET").strip().upper() or "GET"
+    raw_url = str(url or "").strip()
+    if not raw_url:
+        raise ValueError("request URL is required")
+    redacted_url = redact_secret(raw_url)
+    url_redactions = 1 if redacted_url != raw_url else 0
+    request_excerpt, request_truncated, request_redactions = _redacted_optional_file(request_file)
+    response_excerpt, response_truncated, response_redactions = _redacted_optional_file(response_file)
+
+    evidence_ids: list[str | None] = []
+    request_response = client.create_bug_evidence(
+        project_id=binding.project_id,
+        workspace_binding_id=binding.backend_workspace_binding_id,
+        bug_report_id=bug_report_id,
+        kind="http_request",
+        summary=_http_request_summary(method=method, url=redacted_url, environment=environment),
+        payload=_http_request_payload(
+            method=method,
+            url=redacted_url,
+            request_excerpt=request_excerpt,
+            request_truncated=request_truncated,
+            environment=environment,
+            source=source,
+        ),
+        source=source,
+        redactions=url_redactions + request_redactions,
+        retention_class="http_trace",
+    )
+    request_evidence = (
+        request_response.get("evidence") if isinstance(request_response.get("evidence"), dict) else request_response
+    )
+    evidence_ids.append(
+        str(request_evidence.get("id"))
+        if isinstance(request_evidence, dict) and request_evidence.get("id")
+        else None
+    )
+
+    if status is not None or response_excerpt is not None:
+        response_response = client.create_bug_evidence(
+            project_id=binding.project_id,
+            workspace_binding_id=binding.backend_workspace_binding_id,
+            bug_report_id=bug_report_id,
+            kind="http_response",
+            summary=_http_response_summary(
+                method=method,
+                url=redacted_url,
+                status=status,
+                environment=environment,
+            ),
+            payload=_http_response_payload(
+                method=method,
+                url=redacted_url,
+                status=status,
+                response_excerpt=response_excerpt,
+                response_truncated=response_truncated,
+                environment=environment,
+                source=source,
+            ),
+            source=source,
+            redactions=url_redactions + response_redactions,
+            retention_class="http_trace",
+        )
+        response_evidence = (
+            response_response.get("evidence")
+            if isinstance(response_response.get("evidence"), dict)
+            else response_response
+        )
+        evidence_ids.append(
+            str(response_evidence.get("id"))
+            if isinstance(response_evidence, dict) and response_evidence.get("id")
+            else None
+        )
+
+    return evidence_ids
+
+
+def _cmd_ingest_http(args: argparse.Namespace) -> int:
+    try:
+        _agent, binding = _current_workspace_binding()
+        source = str(getattr(args, "source", None) or "http")
+
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            evidence_ids = _create_http_context_evidence(
+                client,
+                binding,
+                bug_report_id=getattr(args, "bug_report_id", None) or None,
+                method=str(getattr(args, "method", None) or "GET"),
+                url=str(getattr(args, "url", None) or ""),
+                status=getattr(args, "status", None),
+                request_file=getattr(args, "request_file", None),
+                response_file=getattr(args, "response_file", None),
+                environment=getattr(args, "environment", None),
+                source=source,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend ingest HTTP: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    result = {
+        "status": "ok",
+        "kinds": ["http_request"] + (["http_response"] if len(evidence_ids) > 1 else []),
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "evidence_ids": evidence_ids,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"Hades bug evidence stored: {len(evidence_ids)} HTTP item(s)")
     return 0
 
 
@@ -1301,6 +1509,26 @@ def _cmd_bug_intake(args: argparse.Namespace) -> int:
                         source=str(getattr(args, "deploy_source", None) or "deploy"),
                     )
                 )
+            if (
+                getattr(args, "request_url", None)
+                or getattr(args, "request_file", None)
+                or getattr(args, "response_file", None)
+                or getattr(args, "response_status", None) is not None
+            ):
+                evidence_ids.extend(
+                    _create_http_context_evidence(
+                        client,
+                        binding,
+                        bug_report_id=bug_report_id,
+                        method=str(getattr(args, "request_method", None) or "GET"),
+                        url=str(getattr(args, "request_url", None) or ""),
+                        status=getattr(args, "response_status", None),
+                        request_file=getattr(args, "request_file", None),
+                        response_file=getattr(args, "response_file", None),
+                        environment=getattr(args, "environment", None),
+                        source="http",
+                    )
+                )
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1401,6 +1629,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_ingest_log(args)
     if action == "ingest-deploy":
         return _cmd_ingest_deploy(args)
+    if action == "ingest-http":
+        return _cmd_ingest_http(args)
     if action == "bug-intake":
         return _cmd_bug_intake(args)
     if action == "backfill-note":
@@ -1410,7 +1640,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0
