@@ -875,6 +875,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
     assert ("route_model_binding", "route:orders.show", "App\\Models\\Order") in edges
     assert ("route_model_table", "route:orders.show", "table:orders") in edges
+    assert ("route_uses_form_request", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
+    assert ("route_request_validation", "route:orders.show", "validation:customer_id") in edges
+    assert ("route_request_validation", "route:orders.show", "validation:status") in edges
     assert {
         "kind": "route_model_binding",
         "from": "route:orders.show",
@@ -882,6 +885,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "handler": "OrderController@show",
         "param": "order",
         "table": "orders",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 3,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_request_validation",
+        "from": "route:orders.show",
+        "to": "validation:customer_id",
+        "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+        "validation_path": "app/Http/Requests/StoreOrderRequest.php",
+        "validation_line": 6,
+        "handler": "OrderController@show",
+        "param": "request",
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",

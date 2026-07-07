@@ -2850,7 +2850,22 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
     edge_to = str(edge.get("to") or "")
     schema = str(provenance.get("schema") or "")
     detail_parts = []
-    for key in ("operation", "query_method", "access", "table", "model", "param", "handler", "uri", "path", "line"):
+    for key in (
+        "operation",
+        "query_method",
+        "access",
+        "table",
+        "model",
+        "request_class",
+        "param",
+        "handler",
+        "source",
+        "uri",
+        "validation_path",
+        "validation_line",
+        "path",
+        "line",
+    ):
         value = provenance.get(key)
         if value in ("", None, [], {}):
             continue

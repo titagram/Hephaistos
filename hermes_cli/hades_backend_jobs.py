@@ -2431,6 +2431,130 @@ def _append_php_route_model_binding_edges(
     return truncated
 
 
+def _php_form_request_validation_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, list[dict[str, Any]]]:
+    validation_fields: dict[str, list[dict[str, Any]]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        rules_body = _php_rules_method_body(source)
+        if rules_body is None:
+            continue
+        body, base_offset = rules_body
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            if _php_role(rel, fqcn, extends_fqcn) != "form_request":
+                continue
+            validation_fields[fqcn] = [
+                {"field": field_info["field"], "path": rel, "line": field_info["line"]}
+                for field_info in _php_array_field_keys(source, body, base_offset)
+            ]
+    return validation_fields
+
+
+def _append_php_route_form_request_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    param_name: str,
+    request_class: str,
+    fields: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        route_payload = {
+            "handler": method_symbol,
+            "param": param_name,
+            "method": route.get("method"),
+            "uri": route.get("uri"),
+            "path": route.get("path"),
+            "line": route.get("line"),
+        }
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_uses_form_request",
+                "from": route_ref,
+                "to": request_class,
+                **route_payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+        for field in fields:
+            field_name = str(field.get("field") or "")
+            if not field_name:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_request_validation",
+                    "from": route_ref,
+                    "to": f"validation:{field_name}",
+                    "request_class": request_class,
+                    "validation_path": field.get("path"),
+                    "validation_line": field.get("line"),
+                    **route_payload,
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
+def _append_php_route_inline_validation_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    field_info: dict[str, Any],
+    validation_path: str,
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    field_name = str(field_info.get("field") or "")
+    if not field_name:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_request_validation",
+                "from": f"route:{_php_route_id(route)}",
+                "to": f"validation:{field_name}",
+                "handler": method_symbol,
+                "source": "inline_validate",
+                "validation_path": validation_path,
+                "validation_line": field_info.get("line"),
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2444,6 +2568,11 @@ def _build_php_graph(
     php_files = [path for path in candidates if path.suffix.lower() == ".php"]
     file_refs = [{"path": path.relative_to(workspace_root).as_posix()} for path in php_files]
     model_table_by_class = _php_laravel_model_table_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    form_request_validation_by_class = _php_form_request_validation_index(
         workspace_root,
         php_files,
         max_file_bytes=max_file_bytes,
@@ -2689,6 +2818,15 @@ def _build_php_graph(
                         },
                         max_edges=max_edges,
                     ) or truncated
+                    truncated = _append_php_route_form_request_edges(
+                        routes_by_handler,
+                        method_symbol,
+                        str(param_match.group("name") or ""),
+                        param_class,
+                        form_request_validation_by_class.get(param_class) or [],
+                        edges,
+                        max_edges=max_edges,
+                    ) or truncated
                 else:
                     truncated = not _edge_append(
                         edges,
@@ -2761,6 +2899,7 @@ def _build_php_graph(
 
         for match in PHP_VALIDATE_ARRAY_RE.finditer(source):
             class_info = _class_context(classes, match.start())
+            method_context = _php_method_context_id(source, classes, match.start(), rel)
             for field_info in _php_array_field_keys(source, match.group("body"), match.start()):
                 edge = {
                     "kind": "request_validation",
@@ -2777,6 +2916,14 @@ def _build_php_graph(
                     match.start(),
                     edges,
                     edge,
+                    max_edges=max_edges,
+                ) or truncated
+                truncated = _append_php_route_inline_validation_edges(
+                    routes_by_handler,
+                    method_context,
+                    field_info,
+                    rel,
+                    edges,
                     max_edges=max_edges,
                 ) or truncated
 
