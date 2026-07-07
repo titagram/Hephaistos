@@ -3542,6 +3542,42 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione source-free test map graph - 2026-07-07
+
+Stato: completata una tranche locale P2-2 sull'indicizzazione vera dei
+progetti.
+
+Agent locale:
+
+- `populate_backend_ast` aggiunge una sezione `tests` source-free agli artifact
+  `hades.php_graph.v1`, `hades.code_graph.v1` e al fallback `hades.symbols.v1`.
+- La test map contiene file test riconosciuti, framework test, conteggio casi,
+  nomi/linee dei casi, target candidate e refs a route/symbol/import gia'
+  indicizzati.
+- Il graph aggiunge edge metadata-only `test_covers_symbol`,
+  `test_covers_route` e `test_imports`.
+- I file test non vengono piu' mescolati nel symbol graph applicativo: restano
+  separati come nodi `test:<path>`.
+- Il fallback locale di `hades_backend_graph_search` costruisce nodi
+  `test_file`, quindi un agent senza source code puo' cercare test rilevanti
+  partendo da nome file, symbol o route indicizzati.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `65 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Log map strutturata e parser AST piu' profondi; questa tranche collega gia'
+  test->route/symbol/import ma non estrae stack/log assertion semantics.
+
 ## Esecuzione note backfill quality gate - 2026-07-07
 
 Stato: completata una tranche locale P1-7 sulla qualita' delle note e sulla

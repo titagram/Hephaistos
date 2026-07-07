@@ -437,9 +437,12 @@ edges, query-table edges, Eloquent query calls, and redacted config/env
 references. On Node/TypeScript/React/Next/Express workspaces it produces
 `hades.code_graph.v1` with framework detection, route/page handlers, symbols,
 dependency manifests, and import edges. On Python workspaces it keeps the
-existing `hades.symbols.v1` class/function symbol output. All artifact jobs
-report omission reasons instead of following path escapes or failing the whole
-sync.
+existing `hades.symbols.v1` class/function symbol output when no web graph is
+available. PHP, TypeScript, and Python graph artifacts include a `tests` map
+for recognized test files plus `test_covers_symbol`, `test_covers_route`, and
+`test_imports` edges, while keeping test source bodies out of the artifact. All
+artifact jobs report omission reasons instead of following path escapes or
+failing the whole sync.
 
 `read_source_slice` is intentionally policy-gated/manual-review source access:
 it reads only a bounded line window, redacts likely secrets, uploads

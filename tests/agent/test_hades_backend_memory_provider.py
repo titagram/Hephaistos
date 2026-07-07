@@ -131,7 +131,32 @@ def _php_graph_artifact():
                 "path": "resources/views/orders/show.blade.php",
                 "line": 4,
             },
+            {
+                "kind": "test_covers_symbol",
+                "from": "test:tests/Feature/OrderControllerTest.php",
+                "to": "OrderController@show",
+                "path": "tests/Feature/OrderControllerTest.php",
+            },
         ],
+        "tests": {
+            "schema": "hades.test_map.v1",
+            "file_count": 1,
+            "files": [
+                {
+                    "path": "tests/Feature/OrderControllerTest.php",
+                    "language": "php",
+                    "framework": "phpunit",
+                    "test_count": 1,
+                    "cases": [{"name": "test_show_order", "line": 12, "ordinal": 1}],
+                    "target_candidates": ["OrderController"],
+                    "symbol_refs": ["OrderController@show"],
+                    "route_refs": ["route:orders.show"],
+                    "import_count": 1,
+                }
+            ],
+            "truncated": False,
+            "raw_source_included": False,
+        },
         "raw_source_included": False,
     }
 
@@ -669,6 +694,49 @@ def test_hades_backend_graph_search_falls_back_to_local_graph_cache(monkeypatch,
     assert any(ref["type"] == "edge" and ref["kind"] == "route_handler" for ref in graph_refs)
 
 
+def test_hades_backend_graph_search_finds_local_test_map_nodes(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderControllerTest", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "node"
+        and ref["id"] == "test:tests/Feature/OrderControllerTest.php"
+        and ref["kind"] == "test_file"
+        for ref in graph_refs
+    )
+    assert any(ref["type"] == "edge" and ref["kind"] == "test_covers_symbol" for ref in graph_refs)
+
+
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     timeouts = []
@@ -791,7 +859,7 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     assert result["freshness"]["status"] == "cached"
     assert result["freshness"]["index_status"] == "local_graph_cache"
     assert result["backend_live_error"] == "backend offline"
-    assert result["match_fields"] == ["id"]
+    assert "id" in result["match_fields"]
     assert {
         "route:orders.show",
         "OrderController@show",

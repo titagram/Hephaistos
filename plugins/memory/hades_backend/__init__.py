@@ -2330,7 +2330,8 @@ def _local_graph_route_id(route: dict[str, Any]) -> str:
     name = str(route.get("name") or "").strip()
     if name:
         return f"route:{name}"
-    method_uri = f"{route.get('method', '')} {route.get('uri', '')}".strip()
+    route_path = str(route.get("uri") or route.get("path") or "").strip()
+    method_uri = f"{route.get('method', '')} {route_path}".strip()
     return f"route:{method_uri}" if method_uri else ""
 
 
@@ -2356,7 +2357,7 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                 path=route.get("path"),
                 attributes={
                     "method": route.get("method"),
-                    "uri": route.get("uri"),
+                    "uri": route.get("uri") or route.get("path"),
                     "handler": route.get("handler"),
                     "name": route.get("name"),
                     "middleware": route.get("middleware"),
@@ -2384,6 +2385,32 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                     if key not in {"name", "kind", "short_name", "path"}
                 }
                 | {"schema": schema, "artifact_id": artifact_id},
+            )
+
+        test_map = graph.get("tests") if isinstance(graph.get("tests"), dict) else {}
+        for test_file in test_map.get("files") or []:
+            if not isinstance(test_file, dict):
+                continue
+            path = str(test_file.get("path") or "").strip()
+            if not path:
+                continue
+            _local_graph_add_node(
+                nodes,
+                f"test:{path}",
+                kind="test_file",
+                label=Path(path).name,
+                path=path,
+                attributes={
+                    "framework": test_file.get("framework"),
+                    "language": test_file.get("language"),
+                    "test_count": test_file.get("test_count"),
+                    "cases": test_file.get("cases"),
+                    "target_candidates": test_file.get("target_candidates"),
+                    "symbol_refs": test_file.get("symbol_refs"),
+                    "route_refs": test_file.get("route_refs"),
+                    "schema": schema,
+                    "artifact_id": artifact_id,
+                },
             )
 
         database = graph.get("database") if isinstance(graph.get("database"), dict) else {}

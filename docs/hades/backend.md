@@ -193,6 +193,9 @@ command signatures, scheduler command/job edges, query-table edges, Eloquent
 query calls, and redacted `config()`/`env()` references. The code graph includes
 framework, route/page handlers, symbols, dependency manifests, and import edges
 so backend search can answer structure questions without loading source chunks.
+Graph artifacts also include a source-free `tests` map for recognized test
+files, with test framework, case names/lines, target candidates, and edges from
+`test:<path>` nodes to already-indexed routes, symbols, and imports.
 Before sending a large artifact, the local sync can call
 `/api/hades/v1/artifacts/lookup` with project, workspace binding, schema, and
 sha256. A positive lookup means the backend already has the same artifact for

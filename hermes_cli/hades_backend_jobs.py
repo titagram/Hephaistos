@@ -300,10 +300,18 @@ SQL_TABLE_FOREIGN_KEY_RE = re.compile(
 NEXT_ROUTE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/route\.(?:ts|tsx|js|jsx)$")
 NEXT_PAGE_FILE_RE = re.compile(r"(?:^|/)app/(?P<route>.+)/page\.(?:ts|tsx|js|jsx)$")
 NEXT_HTTP_EXPORT_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS)\s*\(")
+PHP_TEST_METHOD_RE = re.compile(r"\bfunction\s+(?P<name>test[A-Za-z0-9_]*|it_[A-Za-z0-9_]+)\s*\(")
+PY_TEST_FUNCTION_RE = re.compile(r"\b(?:async\s+)?def\s+(?P<name>test_[A-Za-z0-9_]+)\s*\(")
+JS_TEST_CALL_RE = re.compile(r"\b(?:it|test)\s*\(")
+PY_IMPORT_LINE_RE = re.compile(r"^\s*(?:from\s+(?P<from>[A-Za-z0-9_.]+)\s+import|import\s+(?P<import>[A-Za-z0-9_., ]+))", re.MULTILINE)
 PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
 PY_DJANGO_ROUTE_FUNCS = {"path", "re_path"}
 PY_DJANGO_RELATION_FIELDS = {"ForeignKey", "OneToOneField", "ManyToManyField"}
 PY_SQLALCHEMY_COLUMN_CALLS = {"Column", "mapped_column"}
+TEST_FILE_SUFFIXES = {".php", ".py", ".js", ".jsx", ".ts", ".tsx"}
+MAX_TEST_FILES = 500
+MAX_TEST_CASES_PER_FILE = 50
+MAX_TEST_REFS_PER_FILE = 25
 
 
 def _safe_relpath(path: str) -> str:
@@ -474,6 +482,264 @@ def _dependency_manifests(root: Path, files: list[dict[str, Any]]) -> list[dict[
             packages = []
         manifests.append({"manager": manager, "path": rel, "packages": packages[:200]})
     return sorted(manifests, key=lambda item: (item["manager"], item["path"]))
+
+
+def _is_test_path(rel: str) -> bool:
+    path = _safe_relpath(rel)
+    lowered = path.lower()
+    suffix = Path(path).suffix.lower()
+    if suffix not in TEST_FILE_SUFFIXES:
+        return False
+    parts = lowered.split("/")
+    if any(part in {"tests", "test", "spec", "__tests__", "__specs__"} for part in parts):
+        return True
+    stem = Path(lowered).stem
+    return (
+        stem.startswith("test_")
+        or stem.startswith("test-")
+        or stem.endswith("_test")
+        or stem.endswith("-test")
+        or stem.endswith(".test")
+        or stem.endswith(".spec")
+        or stem.endswith("test")
+        or stem.endswith("spec")
+    )
+
+
+def _test_framework_for_path(rel: str) -> str:
+    path = _safe_relpath(rel)
+    suffix = Path(path).suffix.lower()
+    lowered = path.lower()
+    if suffix == ".php":
+        return "phpunit"
+    if suffix == ".py":
+        return "pytest"
+    if "/cypress/" in lowered or lowered.startswith("cypress/"):
+        return "cypress"
+    if "/playwright/" in lowered or lowered.startswith("playwright/"):
+        return "playwright"
+    return "js_test"
+
+
+def _test_cases_from_source(source: str, rel: str) -> list[dict[str, Any]]:
+    suffix = Path(rel).suffix.lower()
+    cases: list[dict[str, Any]] = []
+    if suffix == ".php":
+        pattern = PHP_TEST_METHOD_RE
+    elif suffix == ".py":
+        pattern = PY_TEST_FUNCTION_RE
+    else:
+        pattern = JS_TEST_CALL_RE
+    for index, match in enumerate(pattern.finditer(source)):
+        if len(cases) >= MAX_TEST_CASES_PER_FILE:
+            break
+        name = match.groupdict().get("name") or f"test@{_line_number(source, match.start())}"
+        cases.append(
+            {
+                "name": str(name)[:120],
+                "line": _line_number(source, match.start()),
+                "ordinal": index + 1,
+            }
+        )
+    return cases
+
+
+def _test_import_refs(source: str, rel: str) -> list[dict[str, Any]]:
+    suffix = Path(rel).suffix.lower()
+    refs: list[dict[str, Any]] = []
+    if suffix == ".php":
+        for match in PHP_USE_RE.finditer(source):
+            refs.append({"target": match.group("class").strip("\\"), "line": _line_number(source, match.start())})
+    elif suffix == ".py":
+        for match in PY_IMPORT_LINE_RE.finditer(source):
+            raw = match.group("from") or match.group("import") or ""
+            for target in raw.split(","):
+                clean = target.strip().split(" ", 1)[0]
+                if clean:
+                    refs.append({"target": clean, "line": _line_number(source, match.start())})
+    else:
+        for match in TS_IMPORT_RE.finditer(source):
+            refs.append({"target": match.group("target"), "line": _line_number(source, match.start())})
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        target = str(ref.get("target") or "").strip()
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        deduped.append(ref)
+        if len(deduped) >= MAX_TEST_REFS_PER_FILE:
+            break
+    return deduped
+
+
+def _test_target_candidates_from_path(rel: str) -> list[str]:
+    path = _safe_relpath(rel)
+    name = Path(path).name
+    stem = name
+    for suffix in (".test.tsx", ".test.ts", ".test.jsx", ".test.js", ".spec.tsx", ".spec.ts", ".spec.jsx", ".spec.js"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if stem == name:
+        stem = Path(path).stem
+    candidates = {stem}
+    for prefix in ("test_", "test-"):
+        if stem.lower().startswith(prefix):
+            candidates.add(stem[len(prefix) :])
+    for suffix in ("Test", "Tests", "_test", "-test", ".test", ".spec", "Spec"):
+        if stem.endswith(suffix):
+            candidates.add(stem[: -len(suffix)])
+    parent = Path(path).parent.name
+    if parent and parent not in {"tests", "test", "spec", "__tests__", "__specs__"}:
+        candidates.add(parent)
+    return sorted(candidate for candidate in candidates if candidate)
+
+
+def _match_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _symbol_refs_for_test(candidates: list[str], symbols: list[dict[str, Any]], *, test_path: str) -> list[str]:
+    candidate_keys = {_match_key(candidate) for candidate in candidates if _match_key(candidate)}
+    refs: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        name = str(symbol.get("name") or "").strip()
+        if not name:
+            continue
+        if str(symbol.get("path") or "") == test_path:
+            continue
+        values = [
+            name,
+            symbol.get("short_name"),
+            symbol.get("class"),
+            symbol.get("method"),
+            Path(str(symbol.get("path") or "")).stem,
+        ]
+        symbol_keys = {_match_key(value) for value in values if _match_key(value)}
+        if not any(
+            candidate == symbol_key
+            or (len(candidate) >= 4 and candidate in symbol_key)
+            for candidate in candidate_keys
+            for symbol_key in symbol_keys
+        ):
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        refs.append(name)
+        if len(refs) >= MAX_TEST_REFS_PER_FILE:
+            break
+    return refs
+
+
+def _route_ref(route: dict[str, Any]) -> str:
+    name = str(route.get("name") or "").strip()
+    if name:
+        return f"route:{name}"
+    route_path = str(route.get("uri") or route.get("path") or "").strip()
+    method = str(route.get("method") or "").strip()
+    return f"route:{method} {route_path}".strip()
+
+
+def _route_refs_for_test(source: str, routes: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for route in routes:
+        route_path = str(route.get("uri") or route.get("path") or "").strip()
+        ref = _route_ref(route)
+        if not route_path or not ref or route_path not in source or ref in seen:
+            continue
+        seen.add(ref)
+        refs.append(ref)
+        if len(refs) >= MAX_TEST_REFS_PER_FILE:
+            break
+    return refs
+
+
+def _build_test_map(
+    workspace_root: Path,
+    candidates: list[Path],
+    routes: list[dict[str, Any]],
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+    max_file_bytes: int,
+) -> tuple[dict[str, Any], bool]:
+    files: list[dict[str, Any]] = []
+    truncated = False
+    for path in candidates:
+        rel = path.relative_to(workspace_root).as_posix()
+        if not _is_test_path(rel):
+            continue
+        if len(files) >= MAX_TEST_FILES:
+            truncated = True
+            break
+        try:
+            if path.stat().st_size > max_file_bytes:
+                truncated = True
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+            if was_truncated:
+                truncated = True
+                continue
+        except OSError:
+            truncated = True
+            continue
+
+        cases = _test_cases_from_source(source, rel)
+        import_refs = _test_import_refs(source, rel)
+        target_candidates = _test_target_candidates_from_path(rel)
+        symbol_refs = _symbol_refs_for_test(target_candidates, symbols, test_path=rel)
+        route_refs = _route_refs_for_test(source, routes)
+        test_node = f"test:{rel}"
+        for ref in symbol_refs:
+            truncated = not _edge_append(
+                edges,
+                {"kind": "test_covers_symbol", "from": test_node, "to": ref, "path": rel},
+                max_edges=max_edges,
+            ) or truncated
+        for ref in route_refs:
+            truncated = not _edge_append(
+                edges,
+                {"kind": "test_covers_route", "from": test_node, "to": ref, "path": rel},
+                max_edges=max_edges,
+            ) or truncated
+        for ref in import_refs:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "test_imports",
+                    "from": test_node,
+                    "to": str(ref.get("target") or ""),
+                    "path": rel,
+                    "line": ref.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        files.append(
+            {
+                "path": rel,
+                "language": _language_for_path(rel),
+                "framework": _test_framework_for_path(rel),
+                "test_count": len(cases),
+                "cases": cases,
+                "target_candidates": target_candidates[:MAX_TEST_REFS_PER_FILE],
+                "symbol_refs": symbol_refs,
+                "route_refs": route_refs,
+                "import_count": len(import_refs),
+            }
+        )
+    return {
+        "schema": "hades.test_map.v1",
+        "file_count": len(files),
+        "files": files,
+        "truncated": truncated,
+        "raw_source_included": False,
+    }, truncated
 
 
 def _normalize_laravel_handler(raw: str) -> str:
@@ -1389,6 +1655,7 @@ def _php_graph_summary(
     symbols: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     database: dict[str, Any] | None = None,
+    tests: dict[str, Any] | None = None,
 ) -> str:
     role_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -1396,7 +1663,8 @@ def _php_graph_summary(
         role_counts[role] = role_counts.get(role, 0) + 1
     roles = ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
-    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {roles or 'roles:none'}"
+    test_count = int((tests or {}).get("file_count") or 0)
+    return f"PHP graph; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {roles or 'roles:none'}"
 
 
 def _php_route_edges(routes: list[dict[str, Any]], edges: list[dict[str, Any]], *, max_edges: int) -> bool:
@@ -1460,6 +1728,8 @@ def _build_php_graph(
 
     for path in php_files:
         rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -2080,6 +2350,16 @@ def _build_php_graph(
     else:
         framework = "php"
 
+    tests, tests_truncated = _build_test_map(
+        workspace_root,
+        candidates,
+        routes,
+        symbols,
+        edges,
+        max_edges=max_edges,
+        max_file_bytes=max_file_bytes,
+    )
+    truncated = truncated or tests_truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",
@@ -2089,6 +2369,7 @@ def _build_php_graph(
         "symbols": symbols,
         "edges": edges,
         "database": database,
+        "tests": tests,
         "summary": "",
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges,
@@ -2096,7 +2377,7 @@ def _build_php_graph(
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _php_graph_summary(routes, symbols, edges, database)
+    graph["summary"] = _php_graph_summary(routes, symbols, edges, database, tests)
     return graph
 
 
@@ -2107,6 +2388,7 @@ def _ts_graph_summary(
     *,
     framework: str,
     database: dict[str, Any] | None = None,
+    tests: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -2114,7 +2396,8 @@ def _ts_graph_summary(
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {kinds or 'symbols:none'}"
+    test_count = int((tests or {}).get("file_count") or 0)
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {kinds or 'symbols:none'}"
 
 
 def _py_graph_summary(
@@ -2124,6 +2407,7 @@ def _py_graph_summary(
     *,
     framework: str,
     database: dict[str, Any] | None = None,
+    tests: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -2131,7 +2415,8 @@ def _py_graph_summary(
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; {kinds or 'symbols:none'}"
+    test_count = int((tests or {}).get("file_count") or 0)
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {kinds or 'symbols:none'}"
 
 
 def _py_dotted_name(node: ast.AST | None) -> str:
@@ -3023,6 +3308,8 @@ def _build_ts_graph(
 
     for path in ts_files:
         rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -3166,6 +3453,16 @@ def _build_ts_graph(
             framework = "sql"
     if prisma_files and not ts_files:
         framework = "prisma"
+    tests, tests_truncated = _build_test_map(
+        workspace_root,
+        candidates,
+        routes,
+        symbols,
+        edges,
+        max_edges=max_edges,
+        max_file_bytes=max_file_bytes,
+    )
+    truncated = truncated or tests_truncated
     graph_database = {**database, "tables": database["tables"][:500]}
     language = "prisma"
     if ts_files:
@@ -3179,6 +3476,7 @@ def _build_ts_graph(
         "symbols": symbols,
         "edges": edges,
         "database": graph_database,
+        "tests": tests,
         "dependency_manifests": dependency_manifests,
         "summary": "",
         "omitted": omitted,
@@ -3191,7 +3489,7 @@ def _build_ts_graph(
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
-    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database)
+    graph["summary"] = _ts_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database, tests=tests)
     return graph
 
 
@@ -3214,6 +3512,8 @@ def _build_python_artifact(
 
     for path in python_files:
         rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -3430,6 +3730,16 @@ def _build_python_artifact(
         if len(symbols) >= max_symbols:
             break
 
+    tests, tests_truncated = _build_test_map(
+        workspace_root,
+        candidates,
+        routes,
+        symbols,
+        edges,
+        max_edges=max_edges,
+        max_file_bytes=max_file_bytes,
+    )
+    truncated = truncated or tests_truncated
     if routes or database["tables"]:
         framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
         graph_database = {**database, "tables": database["tables"][:500]}
@@ -3442,6 +3752,7 @@ def _build_python_artifact(
             "symbols": symbols,
             "edges": edges,
             "database": graph_database,
+            "tests": tests,
             "summary": "",
             "omitted": omitted,
             "truncated": truncated
@@ -3453,12 +3764,13 @@ def _build_python_artifact(
             "retention_class": "source_symbols",
             "raw_source_included": False,
         }
-        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database)
+        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database, tests=tests)
         return graph
 
     return {
         "schema": "hades.symbols.v1",
         "symbols": symbols,
+        "tests": tests,
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols,
         "redactions": len(omitted),

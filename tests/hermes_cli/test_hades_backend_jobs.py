@@ -341,6 +341,13 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
         "        db_table = 'orders'\n",
         encoding="utf-8",
     )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_show_order.py").write_text(
+        "from app.api import show_order\n"
+        "def test_show_order(client):\n"
+        "    client.get('/api/orders/{order_id}')\n",
+        encoding="utf-8",
+    )
 
     result = execute_job(
         {
@@ -356,6 +363,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
     symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
     tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    test_files = {item["path"]: item for item in artifact["tests"]["files"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.code_graph.v1"
@@ -377,6 +385,13 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert ("model_table", "Customer", "table:customers") in edges
     assert ("model_table", "Order", "table:orders") in edges
     assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert artifact["tests"]["file_count"] == 1
+    assert test_files["tests/test_show_order.py"]["test_count"] == 1
+    assert test_files["tests/test_show_order.py"]["symbol_refs"] == ["show_order"]
+    assert test_files["tests/test_show_order.py"]["route_refs"] == ["route:orders-show"]
+    assert ("test_covers_symbol", "test:tests/test_show_order.py", "show_order") in edges
+    assert ("test_covers_route", "test:tests/test_show_order.py", "route:orders-show") in edges
+    assert ("test_imports", "test:tests/test_show_order.py", "app.api") in edges
     assert set(tables) >= {"customers", "orders"}
     assert {column["name"] for column in tables["orders"]["columns"]} >= {"customer_id", "status", "total"}
     assert tables["orders"]["foreign_keys"] == [
@@ -391,6 +406,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert "return {'id': order_id}" not in str(artifact)
     assert "urlpatterns" not in str(artifact)
     assert "models.ForeignKey" not in str(artifact)
+    assert "client.get" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_django_models_graph_without_routes(tmp_path):
@@ -1039,6 +1055,12 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
         "export const OrderTable = () => <table />;\n",
         encoding="utf-8",
     )
+    (workspace / "components" / "__tests__").mkdir()
+    (workspace / "components" / "__tests__" / "OrderTable.test.tsx").write_text(
+        "import { OrderTable } from '../OrderTable';\n"
+        "test('renders order table', () => expect(OrderTable).toBeDefined());\n",
+        encoding="utf-8",
+    )
 
     result = execute_job(
         {
@@ -1053,6 +1075,7 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     routes = {(item["framework"], item["method"], item["path"]) for item in artifact["routes"]}
     symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
     edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+    test_files = {item["path"]: item for item in artifact["tests"]["files"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.code_graph.v1"
@@ -1066,9 +1089,16 @@ def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_
     assert ("component", "OrderTable", "components/OrderTable.tsx") in symbols
     assert ("function", "healthHandler", "server/api.ts") in symbols
     assert ("imports", "app/api/orders/route.ts", "../../../server/orders") in edges
+    assert artifact["tests"]["schema"] == "hades.test_map.v1"
+    assert artifact["tests"]["file_count"] == 1
+    assert test_files["components/__tests__/OrderTable.test.tsx"]["test_count"] == 1
+    assert test_files["components/__tests__/OrderTable.test.tsx"]["symbol_refs"] == ["OrderTable"]
+    assert ("test_covers_symbol", "test:components/__tests__/OrderTable.test.tsx", "OrderTable") in edges
+    assert ("test_imports", "test:components/__tests__/OrderTable.test.tsx", "../OrderTable") in edges
     assert "return listOrders()" not in str(artifact)
     assert "<OrderTable" not in str(artifact)
     assert "<table" not in str(artifact)
+    assert "renders order table" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_path):
