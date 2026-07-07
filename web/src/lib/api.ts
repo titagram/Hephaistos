@@ -326,6 +326,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  promoteHadesBackendDiagnosis: (body: HadesBackendPromoteDiagnosisRequest) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/promote-diagnosis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   getHadesBackendJobs: () =>
     fetchJSON<HadesBackendJobsResponse>("/api/hades/backend/jobs"),
   approveHadesBackendJob: (jobId: string) =>
@@ -1839,6 +1845,16 @@ export interface HadesBackendBugIntakeRequest {
   response_status?: number | null;
 }
 
+export interface HadesBackendPromoteDiagnosisRequest {
+  diagnosis_report_id: string;
+  verification_status: string;
+  fix_commit?: string | null;
+  fix_pr_url?: string | null;
+  affected_symbols?: string[];
+  regression_tests?: string[];
+  notes?: string | null;
+}
+
 export interface HadesBackendActionResponse {
   ok: boolean;
   status: string;
@@ -1849,6 +1865,9 @@ export interface HadesBackendActionResponse {
   evidence_ids?: Array<string | null>;
   project_id?: string | null;
   workspace_binding_id?: string | null;
+  diagnosis_report_id?: string | null;
+  resolved_bug_memory_id?: string | null;
+  resolved_bug?: Record<string, unknown>;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

@@ -42,6 +42,7 @@ import type {
   HadesBackendCoverageItem,
   HadesBackendJob,
   HadesBackendMemoryProposal,
+  HadesBackendPromoteDiagnosisRequest,
   HadesBackendStatus,
 } from "@/lib/api";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -754,6 +755,16 @@ interface BugIntakeFormState {
   responseStatus: string;
 }
 
+interface DiagnosisPromotionFormState {
+  diagnosisReportId: string;
+  verificationStatus: string;
+  fixCommit: string;
+  fixPrUrl: string;
+  affectedSymbols: string;
+  regressionTests: string;
+  notes: string;
+}
+
 function optionalText(value: string): string | undefined {
   const clean = value.trim();
   return clean || undefined;
@@ -764,6 +775,13 @@ function optionalNumber(value: string): number | undefined {
   if (!clean) return undefined;
   const parsed = Number(clean);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function splitOptionalList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function redactPreviewText(value: string): { text: string; redactions: number } {
@@ -1197,6 +1215,168 @@ function BugIntakePanel({
   );
 }
 
+function initialPromotionForm(): DiagnosisPromotionFormState {
+  return {
+    diagnosisReportId: "",
+    verificationStatus: "test_passed",
+    fixCommit: "",
+    fixPrUrl: "",
+    affectedSymbols: "",
+    regressionTests: "",
+    notes: "",
+  };
+}
+
+function DiagnosisPromotionPanel({
+  showToast,
+}: {
+  showToast: (message: string, tone?: "success" | "error") => void;
+}) {
+  const [form, setForm] = useState<DiagnosisPromotionFormState>(() => initialPromotionForm());
+  const [submitting, setSubmitting] = useState(false);
+  const canSubmit = Boolean(form.diagnosisReportId.trim() && form.verificationStatus && !submitting);
+
+  const setField = useCallback((field: keyof DiagnosisPromotionFormState, value: string) => {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }, []);
+
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!canSubmit) return;
+      const payload: HadesBackendPromoteDiagnosisRequest = {
+        diagnosis_report_id: form.diagnosisReportId.trim(),
+        verification_status: form.verificationStatus,
+        fix_commit: optionalText(form.fixCommit),
+        fix_pr_url: optionalText(form.fixPrUrl),
+        affected_symbols: splitOptionalList(form.affectedSymbols),
+        regression_tests: splitOptionalList(form.regressionTests),
+        notes: optionalText(form.notes),
+      };
+      setSubmitting(true);
+      try {
+        const result = await api.promoteHadesBackendDiagnosis(payload);
+        showToast(
+          `Diagnosis ${result.diagnosis_report_id || payload.diagnosis_report_id} promoted to ${result.resolved_bug_memory_id || "resolved bug memory"}`,
+          "success",
+        );
+        setForm(initialPromotionForm());
+      } catch (error) {
+        showToast(`Diagnosis promotion failed: ${error}`, "error");
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [canSubmit, form, showToast],
+  );
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <CheckCircle2 className="h-4 w-4" />
+            Diagnosis promotion
+          </H2>
+          <Badge tone="outline">manual review</Badge>
+        </div>
+
+        <form className="grid gap-4" onSubmit={handleSubmit}>
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_14rem]">
+            <FormField label="Diagnosis report id">
+              <input
+                className={inputClassName}
+                value={form.diagnosisReportId}
+                disabled={submitting}
+                placeholder="diag_..."
+                onChange={(event) => setField("diagnosisReportId", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Verification">
+              <select
+                className={inputClassName}
+                value={form.verificationStatus}
+                disabled={submitting}
+                onChange={(event) => setField("verificationStatus", event.target.value)}
+              >
+                <option value="test_passed">test_passed</option>
+                <option value="user_confirmed">user_confirmed</option>
+                <option value="manual_review">manual_review</option>
+              </select>
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <FormField label="Fix commit">
+              <input
+                className={inputClassName}
+                value={form.fixCommit}
+                disabled={submitting}
+                placeholder="optional SHA"
+                onChange={(event) => setField("fixCommit", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Fix PR URL">
+              <input
+                className={inputClassName}
+                value={form.fixPrUrl}
+                disabled={submitting}
+                placeholder="https://..."
+                onChange={(event) => setField("fixPrUrl", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <FormField label="Affected symbols">
+              <textarea
+                className={textareaClassName}
+                value={form.affectedSymbols}
+                disabled={submitting}
+                placeholder="One per line"
+                onChange={(event) => setField("affectedSymbols", event.target.value)}
+              />
+            </FormField>
+            <FormField label="Regression tests">
+              <textarea
+                className={textareaClassName}
+                value={form.regressionTests}
+                disabled={submitting}
+                placeholder="One per line"
+                onChange={(event) => setField("regressionTests", event.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <FormField label="Notes">
+            <textarea
+              className={textareaClassName}
+              value={form.notes}
+              disabled={submitting}
+              placeholder="Verification notes"
+              onChange={(event) => setField("notes", event.target.value)}
+            />
+          </FormField>
+
+          <div className="flex justify-end">
+            <Button
+              className="uppercase"
+              type="submit"
+              disabled={!canSubmit}
+              prefix={submitting ? <Spinner /> : <CheckCircle2 className="h-4 w-4" />}
+            >
+              Promote diagnosis
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function BackendPage() {
   const [status, setStatus] = useState<HadesBackendStatus | null>(null);
   const [jobs, setJobs] = useState<HadesBackendJob[]>([]);
@@ -1402,6 +1582,7 @@ export default function BackendPage() {
         runReviewAction={runReviewAction}
       />
       <BugIntakePanel status={status} onCreated={load} showToast={showToast} />
+      <DiagnosisPromotionPanel showToast={showToast} />
       <GovernanceQualityPanel status={status} />
       <IdentityRecoveryPanel status={status} />
 

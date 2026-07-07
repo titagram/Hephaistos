@@ -2306,6 +2306,16 @@ class HadesBackendBugIntakeRequest(BaseModel):
     response_status: Optional[int] = None
 
 
+class HadesBackendPromoteDiagnosisRequest(BaseModel):
+    diagnosis_report_id: str
+    verification_status: str
+    fix_commit: Optional[str] = None
+    fix_pr_url: Optional[str] = None
+    affected_symbols: Optional[List[str]] = None
+    regression_tests: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+
 def _hades_backend_action_payload(result: Any) -> Dict[str, Any]:
     return {
         "ok": bool(result.ok),
@@ -2498,6 +2508,30 @@ def create_hades_backend_bug_intake(
             "workspace_binding_id": binding.backend_workspace_binding_id,
             "evidence_ids": evidence_ids,
         }
+
+
+@app.post("/api/hades/backend/promote-diagnosis")
+def promote_hades_backend_diagnosis(
+    body: HadesBackendPromoteDiagnosisRequest,
+    profile: Optional[str] = None,
+):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_actions import promote_diagnosis_report
+
+        try:
+            return _hades_backend_action_payload(
+                promote_diagnosis_report(
+                    body.diagnosis_report_id,
+                    verification_status=body.verification_status,
+                    fix_commit=body.fix_commit,
+                    fix_pr_url=body.fix_pr_url,
+                    affected_symbols=body.affected_symbols or [],
+                    regression_tests=body.regression_tests or [],
+                    notes=body.notes,
+                )
+            )
+        except Exception as exc:
+            raise _hades_backend_action_error(exc) from exc
 
 
 @app.get("/api/hades/backend/jobs")

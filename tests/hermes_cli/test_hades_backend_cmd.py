@@ -285,6 +285,68 @@ def test_backend_schedule_quality_creates_and_updates_cron_job(monkeypatch, tmp_
     assert jobs[0]["schedule"]["minutes"] == 120
 
 
+def test_backend_promote_diagnosis_command_calls_backend(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def promote_diagnosis_report(self, diagnosis_report_id, **payload):
+            self.calls.append((diagnosis_report_id, payload))
+            return {
+                "diagnosis_report_id": diagnosis_report_id,
+                "already_promoted": False,
+                "resolved_bug_memory": {"id": "mem_bug_1", "kind": "resolved_bug"},
+            }
+
+        def close(self):
+            self.closed = True
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="promote-diagnosis",
+            diagnosis_report_id="diag_1",
+            verification_status="test_passed",
+            fix_commit="abc123",
+            fix_pr_url="https://example.test/pr/1",
+            affected_symbol=["OrderController@show"],
+            regression_test=["OrderControllerTest::test_missing_customer"],
+            notes="Regression passed with OPENAI_API_KEY=sk-live-secretvalue12345",
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["status"] == "promoted"
+    assert payload["resolved_bug_memory_id"] == "mem_bug_1"
+    assert fake.closed is True
+    assert fake.calls == [
+        (
+            "diag_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "verification_status": "test_passed",
+                "fix_commit": "abc123",
+                "fix_pr_url": "https://example.test/pr/1",
+                "affected_symbols": ["OrderController@show"],
+                "regression_tests": ["OrderControllerTest::test_missing_customer"],
+                "payload": {"notes": "Regression passed with OPENAI_API_KEY=***"},
+                "redactions": 1,
+            },
+        )
+    ]
+
+
 def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

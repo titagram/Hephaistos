@@ -361,3 +361,106 @@ def test_hades_backend_web_route_creates_bug_intake_with_evidence(monkeypatch, t
     assert fake_client.evidence[2]["payload"]["mismatch"] is True
     assert fake_client.evidence[3]["payload"]["method"] == "POST"
     assert fake_client.evidence[4]["payload"]["status"] == 500
+
+
+def test_hades_backend_web_route_promotes_diagnosis(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime
+    from hermes_cli import web_server
+
+    class FakeBackendClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def promote_diagnosis_report(self, diagnosis_report_id, **payload):
+            self.calls.append((diagnosis_report_id, payload))
+            return {
+                "diagnosis_report_id": diagnosis_report_id,
+                "already_promoted": False,
+                "resolved_bug_memory": {"id": "mem_bug_1", "kind": "resolved_bug"},
+            }
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeBackendClient()
+    monkeypatch.setattr(hades_backend_runtime, "client_from_config", lambda: fake_client)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="local_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(repo),
+            git_remote_display="origin",
+            git_remote_hash="hash",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    try:
+        response = client.post(
+            "/api/hades/backend/promote-diagnosis",
+            json={
+                "diagnosis_report_id": "diag_1",
+                "verification_status": "test_passed",
+                "fix_commit": "abc123",
+                "fix_pr_url": "https://example.test/pr/1",
+                "affected_symbols": ["OrderController@show"],
+                "regression_tests": ["OrderControllerTest::test_missing_customer"],
+                "notes": "Regression passed with OPENAI_API_KEY=sk-live-secretvalue12345",
+            },
+        )
+    finally:
+        if previous_auth_required is None:
+            try:
+                delattr(web_server.app.state, "auth_required")
+            except AttributeError:
+                pass
+        else:
+            web_server.app.state.auth_required = previous_auth_required
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "promoted"
+    assert body["resolved_bug_memory_id"] == "mem_bug_1"
+    assert fake_client.closed is True
+    assert fake_client.calls == [
+        (
+            "diag_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "verification_status": "test_passed",
+                "fix_commit": "abc123",
+                "fix_pr_url": "https://example.test/pr/1",
+                "affected_symbols": ["OrderController@show"],
+                "regression_tests": ["OrderControllerTest::test_missing_customer"],
+                "payload": {"notes": "Regression passed with OPENAI_API_KEY=***"},
+                "redactions": 1,
+            },
+        )
+    ]

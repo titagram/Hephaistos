@@ -20,6 +20,7 @@ from hermes_cli.hades_backend_actions import (
     approve_backend_job,
     list_backend_jobs,
     list_memory_proposals,
+    promote_diagnosis_report,
     refuse_backend_job,
 )
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
@@ -120,6 +121,20 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     proposals.add_argument("--json", action="store_true", help="Emit machine-readable proposal JSON")
     ack_proposal = sub.add_parser("ack-proposal", help="Acknowledge a refused or conflicted memory proposal locally")
     ack_proposal.add_argument("proposal_id", help="Local memory proposal id")
+    promote_diagnosis = sub.add_parser("promote-diagnosis", help="Promote a verified diagnosis report to resolved bug memory")
+    promote_diagnosis.add_argument("diagnosis_report_id", help="Backend diagnosis report id")
+    promote_diagnosis.add_argument(
+        "--verification-status",
+        required=True,
+        choices=("user_confirmed", "test_passed", "manual_review"),
+        help="How the resolved bug was verified",
+    )
+    promote_diagnosis.add_argument("--fix-commit", default=None, help="Optional fix commit")
+    promote_diagnosis.add_argument("--fix-pr-url", default=None, help="Optional PR or review URL")
+    promote_diagnosis.add_argument("--affected-symbol", action="append", default=None, help="Affected symbol; repeatable")
+    promote_diagnosis.add_argument("--regression-test", action="append", default=None, help="Regression test; repeatable")
+    promote_diagnosis.add_argument("--notes", default=None, help="Optional bounded promotion notes")
+    promote_diagnosis.add_argument("--json", action="store_true", help="Emit machine-readable promotion result")
     ingest_test = sub.add_parser("ingest-test", help="Upload a bounded failing-test output as Hades bug evidence")
     ingest_test.add_argument("file", help="Path to a test output file")
     ingest_test.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
@@ -935,6 +950,34 @@ def _cmd_ack_proposal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_promote_diagnosis(args: argparse.Namespace) -> int:
+    diagnosis_report_id = str(getattr(args, "diagnosis_report_id", "") or "").strip()
+    try:
+        result = promote_diagnosis_report(
+            diagnosis_report_id,
+            verification_status=str(getattr(args, "verification_status", "") or ""),
+            fix_commit=getattr(args, "fix_commit", None),
+            fix_pr_url=getattr(args, "fix_pr_url", None),
+            affected_symbols=getattr(args, "affected_symbol", None) or [],
+            regression_tests=getattr(args, "regression_test", None) or [],
+            notes=getattr(args, "notes", None),
+        )
+    except Exception as exc:
+        print(f"Hades backend promote-diagnosis: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+    payload = {
+        "status": result.status,
+        "summary": result.summary,
+        **result.payload,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        memory_id = payload.get("resolved_bug_memory_id") or "created"
+        print(f"Hades diagnosis promoted: {diagnosis_report_id} -> {memory_id}")
+    return 0
+
+
 def _current_workspace_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
     cwd = Path.cwd().resolve()
     with db.connect_closing() as conn:
@@ -1744,6 +1787,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_proposals(args)
     if action == "ack-proposal":
         return _cmd_ack_proposal(args)
+    if action == "promote-diagnosis":
+        return _cmd_promote_diagnosis(args)
     if action == "ingest-test":
         return _cmd_ingest_test(args)
     if action == "ingest-log":
@@ -1761,7 +1806,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

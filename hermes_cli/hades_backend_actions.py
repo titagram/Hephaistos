@@ -9,6 +9,8 @@ from hermes_cli import hades_backend_db as db
 from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_backend_jobs import execute_job
 
+RESOLVED_BUG_VERIFICATION_STATUSES = {"user_confirmed", "test_passed", "manual_review"}
+
 
 @dataclass(frozen=True)
 class BackendActionResult:
@@ -190,4 +192,71 @@ def acknowledge_memory_proposal(proposal_id: str) -> BackendActionResult:
         status="acknowledged",
         summary=updated.reason or "acknowledged",
         payload={"proposal": proposal_payload_for_display(updated)},
+    )
+
+
+def promote_diagnosis_report(
+    diagnosis_report_id: str,
+    *,
+    verification_status: str,
+    fix_commit: str | None = None,
+    fix_pr_url: str | None = None,
+    affected_symbols: list[str] | None = None,
+    regression_tests: list[str] | None = None,
+    notes: str | None = None,
+) -> BackendActionResult:
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_cmd import _current_workspace_binding
+
+    clean_id = str(diagnosis_report_id or "").strip()
+    if not clean_id:
+        raise BackendActionError("diagnosis report id is required", status_code=400)
+    clean_verification = str(verification_status or "").strip()
+    if clean_verification not in RESOLVED_BUG_VERIFICATION_STATUSES:
+        raise BackendActionError(
+            f"unsupported verification status: {clean_verification}",
+            status_code=400,
+        )
+    agent, binding = _current_workspace_binding()
+    redacted_notes = redact_secret(notes or "").strip()
+    payload = {"notes": redacted_notes} if redacted_notes else None
+    redactions = 1 if notes and redacted_notes != notes else 0
+    try:
+        client = runtime.client_from_config()
+        try:
+            response = client.promote_diagnosis_report(
+                clean_id,
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+                verification_status=clean_verification,
+                fix_commit=str(fix_commit or "").strip() or None,
+                fix_pr_url=str(fix_pr_url or "").strip() or None,
+                affected_symbols=[str(item).strip() for item in affected_symbols or [] if str(item).strip()],
+                regression_tests=[str(item).strip() for item in regression_tests or [] if str(item).strip()],
+                payload=payload,
+                redactions=redactions,
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+
+    memory = response.get("resolved_bug_memory") if isinstance(response, dict) else None
+    memory_id = memory.get("id") if isinstance(memory, dict) else None
+    already_promoted = bool(response.get("already_promoted")) if isinstance(response, dict) else False
+    status = "already_promoted" if already_promoted else "promoted"
+    return BackendActionResult(
+        ok=True,
+        status=status,
+        summary=f"Diagnosis {clean_id} promoted to resolved bug memory",
+        payload={
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "diagnosis_report_id": clean_id,
+            "resolved_bug_memory_id": memory_id,
+            "resolved_bug": response,
+            "agent_id": agent.agent_id,
+        },
     )

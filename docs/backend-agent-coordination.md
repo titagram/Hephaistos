@@ -3605,6 +3605,45 @@ Resta fuori da questa tranche:
 
 - Tutorial desktop in-app.
 
+## Esecuzione diagnosis promotion controls Hades - 2026-07-07
+
+Stato: completata una tranche locale P1-4.
+
+Agent locale:
+
+- Nuova action condivisa `promote_diagnosis_report` in
+  `hermes_cli/hades_backend_actions.py`.
+- Nuovo comando `hades backend promote-diagnosis <diagnosis_report_id>`.
+- Nuova route dashboard `POST /api/hades/backend/promote-diagnosis`.
+- Nuovo pannello dashboard `Diagnosis promotion` con diagnosis id,
+  verification status, fix commit/PR, affected symbols, regression tests e
+  notes.
+- Le note vengono redatte lato Python prima della chiamata backend.
+- Il payload usa il contratto gia' esposto dal provider tool
+  `hades_backend_resolved_bug_promote`, senza aggiungere model tool al core.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m py_compile hermes_cli/hades_backend_actions.py hermes_cli/hades_backend_cmd.py hermes_cli/web_server.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m ruff check hermes_cli/hades_backend_actions.py hermes_cli/hades_backend_cmd.py hermes_cli/web_server.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `33 passed`.
+- Frontend:
+  `npm run typecheck` in `web/` passato.
+- Frontend:
+  `npx eslint src/pages/BackendPage.tsx src/lib/api.ts --max-warnings=0` in
+  `web/` passato.
+
+Resta fuori da questa tranche:
+
+- Request reindex granulare.
+- Lista dashboard dei diagnosis report disponibili.
+
 ## Esecuzione scheduled quality audit Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-5.
