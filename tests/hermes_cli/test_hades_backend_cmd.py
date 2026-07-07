@@ -428,6 +428,85 @@ def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tm
     assert last_error is None
 
 
+def test_backend_sync_marks_backend_pending_proposals_as_submitted(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        proposal = hdb.create_memory_proposal(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            action="create",
+            intent="note_backfill_candidate",
+            summary="Controller.php handles 3 taxonomy routes.",
+            provenance={"source": "hades_note_quality"},
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.proposals = []
+
+        def memory_snapshot(self, **payload):
+            return {"version": "mem_v1", "items": []}
+
+        def create_memory_proposal(self, **payload):
+            self.proposals.append(payload)
+            assert payload["intent"] == "note_backfill_candidate"
+            return {"proposal": {"status": "pending", "reason_code": "manual_review_required"}}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    first_rc = cmd.hades_backend_command(SimpleNamespace(backend_action="sync"))
+    capsys.readouterr()
+    second_rc = cmd.hades_backend_command(SimpleNamespace(backend_action="sync"))
+    capsys.readouterr()
+
+    with hdb.connect_closing() as conn:
+        proposals = hdb.list_memory_proposals(conn)
+        summary = hdb.get_sync_state(conn, "last_sync_summary")
+
+    assert first_rc == 0
+    assert second_rc == 0
+    assert proposals[0].id == proposal.id
+    assert proposals[0].status == "submitted"
+    assert proposals[0].reason == "manual_review_required"
+    assert len(fake.proposals) == 1
+    assert summary["proposals_synced"] == 0
+
+
 def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
@@ -578,6 +657,7 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
         "Review 1 backend job(s) waiting for confirmation.",
         "Review 1 refused/conflicted memory proposal(s).",
         "Inspect last backend sync error and rerun `hades backend sync`.",
+        "Run `hades backend quality-report --record` to establish a governance baseline.",
     ]
 
 

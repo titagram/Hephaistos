@@ -2271,6 +2271,64 @@ Resta fuori da questa tranche:
 - Promozione automatizzata candidate fact -> verified wiki/project memory.
 - Ranking prima/dopo backfill su dataset reale.
 
+## Esecuzione note-quality backend review gate Hades - 2026-07-07
+
+Stato: completata una quarta tranche P1-7 local+backend.
+
+Problema corretto:
+
+- Il comando locale `hades backend backfill-note --create-proposals` creava
+  correttamente candidate facts review-only, ma il backend auto-accettava ogni
+  proposal `action=create`. Di conseguenza un `note_backfill_candidate` poteva
+  finire subito in `project_memory_entries`, contro la policy raw-chunk
+  quarantined/review-only.
+
+Agent locale:
+
+- `_sync_memory` ora interpreta una risposta backend `proposal.status=pending`
+  come `submitted` locale, con reason backend conservata.
+- Questo evita reinvii infiniti: la proposal e' stata consegnata al backend e
+  resta in review remota, non nel backlog locale da ripostare.
+- I flussi auto-accepted normali (`memory_write` low-risk) restano invariati:
+  se il backend risponde `accepted`, la proposal locale diventa `accepted`.
+
+Backend remoto:
+
+- `MemoryProposalController` mantiene l'auto-accept per create low-risk.
+- L'intent `note_backfill_candidate` richiede review manuale: status `pending`,
+  `reason_code=manual_review_required`, nessun `memory_entry_id` e nessuna
+  riga in `project_memory_entries`.
+- Idempotency resta invariata su `workspace_binding_id + local_proposal_id`:
+  un retry ritorna la stessa proposal pending senza duplicare memoria.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py::test_backend_sync_updates_memory_cache_and_pending_proposals tests/hermes_cli/test_hades_backend_cmd.py::test_backend_sync_marks_backend_pending_proposals_as_submitted`
+  passato: `2 passed`.
+- Locale aggregato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_note_quality.py`
+  passato: `27 passed`.
+- Locale lint:
+  `.venv/bin/ruff check hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_note_quality.py`
+  passato.
+- Remoto mirato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php --filter=backfill`
+  passato: `1 passed (16 assertions)`.
+- Remoto aggregato:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `61 passed (729 assertions)`.
+- Remoto syntax:
+  `php -l app/Http/Controllers/Hades/MemoryProposalController.php`
+  passato nel container app.
+
+Resta fuori da questa tranche:
+
+- UI/backend admin action per promuovere esplicitamente un
+  `note_backfill_candidate` in verified wiki/project memory.
+- Freshness specifica del candidate fact promosso.
+- Ranking prima/dopo backfill su dataset reale.
+
 ## Esecuzione guided bug intake CLI Hades - 2026-07-07
 
 Stato: completata la prima tranche P2-1 del piano "Guided Bug Intake".

@@ -612,6 +612,9 @@ def _sync_memory(client, binding: db.WorkspaceBinding) -> tuple[int, int, int]:
                 provenance=proposal.provenance,
             )
             status, reason = _proposal_response_status(response)
+            if status == "pending":
+                status = "submitted"
+                reason = reason or "backend_pending_review"
             with db.connect_closing() as conn:
                 db.mark_memory_proposal_status(conn, proposal.id, status, reason)
             proposals_synced += 1

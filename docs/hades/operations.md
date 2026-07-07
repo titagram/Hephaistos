@@ -262,7 +262,9 @@ of memory entries. The preview includes `quality_score`, `quality_grade`,
 `quality_issues`, and `promotion_state` so raw chunks, weak freeform notes, and
 reviewable candidate facts are distinguishable before sync. Use
 `--create-proposals` to save candidate facts as pending local memory proposals,
-then run `hades backend sync` to submit them for review.
+then run `hades backend sync` to submit them for review. Submitted note
+backfill proposals are marked as `submitted` locally and remain `pending` in the
+backend until a manual review promotes or rejects them.
 
 Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before
@@ -319,7 +321,8 @@ first. Add `--create-proposals` only after reviewing the candidate facts. The
 command assigns stable fingerprints to extracted facts and skips local duplicate
 proposals on repeated runs; raw chunks remain outside automatic recall. Inspect
 `quality_grade`, `quality_issues`, and `promotion_state` before creating
-proposals from legacy material.
+proposals from legacy material. Backend sync submits those proposals for review
+without turning them into project memory automatically.
 
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, existing evidence
