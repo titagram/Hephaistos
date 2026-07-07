@@ -3520,6 +3520,37 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione no-codebase tool order gate Hades - 2026-07-07
+
+Stato: completata tranche locale P0-6/P0-7/P1-5.
+
+Agent locale:
+
+- `hades_no_codebase_eval` espone ora `tool_order_coverage`.
+- La suite accetta tool extra, ma richiede che i `required_tool_calls` della
+  fixture compaiano come sottosequenza ordinata nel run di diagnosi.
+- Un run che usa tutti gli strumenti corretti ma inverte il workflow fallisce
+  con `required Hades tool calls out of order`, mantenendo `tool_coverage=1.0`
+  e abbassando solo `tool_order_coverage`.
+- `hades_quality_report` propaga `tool_order_coverage` e genera il blocker
+  `repair_hades_tool_order`.
+- Il piano production-readiness chiarisce che presence e order sono gate
+  distinti per la diagnosi source-free.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `15 passed`.
+- Locale fixture:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m json.tool tests/fixtures/hades/no_codebase_bug_cases.json`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Valutazione remota end-to-end con modello/agent reale invece di fixture
+  strutturata.
+
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
 Stato: completata una tranche locale P0-6.
