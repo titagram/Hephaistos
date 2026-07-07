@@ -133,6 +133,14 @@ PHP_ROUTE_NAME_RE = re.compile(r"->name\(\s*['\"](?P<name>[^'\"]+)['\"]\s*\)")
 PHP_ROUTE_MIDDLEWARE_RE = re.compile(r"->middleware\(\s*(?P<value>.*?)\s*\)", re.DOTALL)
 PHP_ROUTE_PARAM_RE = re.compile(r"\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\?)?[^}]*\}")
 PHP_QUOTED_VALUE_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
+PHP_THIS_AUTHORIZE_RE = re.compile(
+    r"\$this->authorize\s*\(\s*['\"](?P<ability>[^'\"]+)['\"]\s*,\s*\$(?P<var>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+PHP_GATE_AUTHORIZATION_RE = re.compile(
+    r"\bGate::(?P<method>authorize|allows|denies|check)\s*\(\s*['\"](?P<ability>[^'\"]+)['\"]\s*,\s*\$(?P<var>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
 PHP_ARRAY_ENTRY_CLASS_RE = re.compile(
     r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class"
 )
@@ -2555,6 +2563,124 @@ def _append_php_route_inline_validation_edges(
     return truncated
 
 
+def _php_method_body_slice(source: str, method_match: re.Match[str]) -> tuple[str, int]:
+    start = method_match.end()
+    next_method = PHP_METHOD_RE.search(source, start)
+    end = next_method.start() if next_method else len(source)
+    return source[start:end], start
+
+
+def _append_php_authorization_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    source_line: int,
+    *,
+    ability: str,
+    source: str,
+    target_param: str,
+    target_class: str,
+    model_table: str,
+    edges: list[dict[str, Any]],
+    max_edges: int,
+) -> bool:
+    ability = ability.strip()
+    if not ability:
+        return False
+    ability_ref = f"ability:{ability}"
+    truncated = False
+    base_payload = {
+        "ability": ability,
+        "source": source,
+        "target_param": target_param,
+        "target_model": target_class,
+        "table": model_table,
+        "path": rel,
+        "line": source_line,
+    }
+    truncated = not _edge_append(
+        edges,
+        {
+            "kind": "authorization_check",
+            "from": method_symbol,
+            "to": ability_ref,
+            **base_payload,
+        },
+        max_edges=max_edges,
+    ) or truncated
+    if target_class:
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "authorization_model",
+                "from": method_symbol,
+                "to": target_class,
+                **base_payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+    if model_table:
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "authorization_table",
+                "from": method_symbol,
+                "to": f"table:{model_table}",
+                **base_payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        route_payload = {
+            "handler": method_symbol,
+            "ability": ability,
+            "source": source,
+            "target_param": target_param,
+            "target_model": target_class,
+            "table": model_table,
+            "method": route.get("method"),
+            "uri": route.get("uri"),
+            "path": route.get("path"),
+            "line": route.get("line"),
+            "source_path": rel,
+            "source_line": source_line,
+        }
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "route_authorization",
+                "from": route_ref,
+                "to": ability_ref,
+                **route_payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+        if target_class:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_authorization_model",
+                    "from": route_ref,
+                    "to": target_class,
+                    **route_payload,
+                },
+                max_edges=max_edges,
+            ) or truncated
+        if model_table:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_authorization_table",
+                    "from": route_ref,
+                    "to": f"table:{model_table}",
+                    **route_payload,
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _build_php_graph(
     workspace_root: Path,
     candidates: list[Path],
@@ -2803,8 +2929,12 @@ def _build_php_graph(
                 )
             else:
                 truncated = True
+            typed_params: dict[str, str] = {}
             for param_match in PHP_TYPED_PARAM_RE.finditer(match.group("params") or ""):
+                param_name = str(param_match.group("name") or "")
                 param_class = _php_fqcn_resolved(namespace, param_match.group("class"), uses)
+                if param_name:
+                    typed_params[param_name] = param_class
                 param_short = _php_short_name(param_class)
                 if param_short.endswith("Request"):
                     truncated = not _edge_append(
@@ -2846,6 +2976,29 @@ def _build_php_graph(
                         param_class,
                         model_table_by_class,
                         edges,
+                        max_edges=max_edges,
+                    ) or truncated
+
+            method_body, method_body_offset = _php_method_body_slice(source, match)
+            for auth_pattern, auth_source in (
+                (PHP_THIS_AUTHORIZE_RE, "this_authorize"),
+                (PHP_GATE_AUTHORIZATION_RE, "gate_authorize"),
+            ):
+                for auth_match in auth_pattern.finditer(method_body):
+                    target_param = str(auth_match.group("var") or "")
+                    target_class = typed_params.get(target_param, "")
+                    model_table = _php_model_table_for_class(target_class, model_table_by_class) if target_class else ""
+                    truncated = _append_php_authorization_edges(
+                        routes_by_handler,
+                        method_symbol,
+                        rel,
+                        _line_number(source, method_body_offset + auth_match.start()),
+                        ability=str(auth_match.group("ability") or ""),
+                        source=auth_source,
+                        target_param=target_param,
+                        target_class=target_class,
+                        model_table=model_table,
+                        edges=edges,
                         max_edges=max_edges,
                     ) or truncated
 

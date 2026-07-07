@@ -160,6 +160,40 @@ def _php_graph_artifact():
                 "line": 4,
             },
             {
+                "kind": "route_authorization",
+                "from": "route:orders.show",
+                "to": "ability:view",
+                "handler": "OrderController@show",
+                "ability": "view",
+                "source": "this_authorize",
+                "target_param": "order",
+                "target_model": "App\\Models\\Order",
+                "table": "orders",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 13,
+            },
+            {
+                "kind": "route_authorization_table",
+                "from": "route:orders.show",
+                "to": "table:orders",
+                "handler": "OrderController@show",
+                "ability": "view",
+                "source": "this_authorize",
+                "target_param": "order",
+                "target_model": "App\\Models\\Order",
+                "table": "orders",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 13,
+            },
+            {
                 "kind": "view_ref",
                 "from": "OrderController@show",
                 "to": "view:orders.show",
@@ -1016,6 +1050,55 @@ def test_hades_backend_graph_search_finds_local_route_validation_edges(monkeypat
     assert any(
         "request_class=App\\Http\\Requests\\StoreOrderRequest" in item["summary"]
         and "validation_path=app/Http/Requests/StoreOrderRequest.php" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_authorization_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders authorization view policy", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(ref["type"] == "edge" and ref["kind"] == "route_authorization" for ref in graph_refs)
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_authorization_table"
+        and ref["to"] == "table:orders"
+        for ref in graph_refs
+    )
+    assert any(
+        "ability=view" in item["summary"]
+        and "target_model=App\\Models\\Order" in item["summary"]
+        and "source=this_authorize" in item["summary"]
         for item in result["items"]
     )
 

@@ -612,6 +612,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "class OrderController extends Controller {\n"
         "    public function __construct(OrderService $orders) {}\n"
         "    public function show(StoreOrderRequest $request, Order $order) {\n"
+        "        $this->authorize('view', $order);\n"
         "        $request->validate(['status' => 'required|string']);\n"
         "        config('services.orders.cache');\n"
         "        env('ORDER_DEBUG');\n"
@@ -878,6 +879,12 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_uses_form_request", "route:orders.show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("route_request_validation", "route:orders.show", "validation:customer_id") in edges
     assert ("route_request_validation", "route:orders.show", "validation:status") in edges
+    assert ("authorization_check", "OrderController@show", "ability:view") in edges
+    assert ("authorization_model", "OrderController@show", "App\\Models\\Order") in edges
+    assert ("authorization_table", "OrderController@show", "table:orders") in edges
+    assert ("route_authorization", "route:orders.show", "ability:view") in edges
+    assert ("route_authorization_model", "route:orders.show", "App\\Models\\Order") in edges
+    assert ("route_authorization_table", "route:orders.show", "table:orders") in edges
     assert {
         "kind": "route_model_binding",
         "from": "route:orders.show",
@@ -889,6 +896,23 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "uri": "/orders/{order}",
         "path": "routes/web.php",
         "line": 3,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_authorization",
+        "from": "route:orders.show",
+        "to": "ability:view",
+        "handler": "OrderController@show",
+        "ability": "view",
+        "source": "this_authorize",
+        "target_param": "order",
+        "target_model": "App\\Models\\Order",
+        "table": "orders",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 3,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 13,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",
@@ -933,7 +957,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "operation": "update",
         "access": "write",
         "path": "app/Http/Controllers/OrderController.php",
-        "line": 20,
+        "line": 21,
     } in artifact["edges"]
     assert {
         "kind": "query_read",
@@ -943,7 +967,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "model": "App\\Models\\Order",
         "query_method": "first",
         "path": "app/Http/Controllers/OrderController.php",
-        "line": 21,
+        "line": 22,
     } in artifact["edges"]
     assert {
         "kind": "query_operation",
@@ -955,7 +979,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "operation": "update",
         "access": "write",
         "path": "app/Http/Controllers/OrderController.php",
-        "line": 22,
+        "line": 23,
     } in artifact["edges"]
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges
@@ -1021,6 +1045,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "Schema::create" not in str(artifact)
     assert "config('services.orders.cache')" not in str(artifact)
     assert "order payment gateway degraded" not in str(artifact)
+    assert "$this->authorize" not in str(artifact)
     assert "pending" not in str(artifact)
     assert "paid" not in str(artifact)
     assert "$request->validate" not in str(artifact)
