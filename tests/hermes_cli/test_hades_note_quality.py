@@ -59,3 +59,63 @@ def test_backfill_note_command_emits_json_preview(tmp_path, capsys):
     assert payload["classification"] == "raw_chunk"
     assert payload["candidate_fact_count"] == 1
     assert payload["candidate_facts"][0]["object_count"] == 3
+
+
+def test_backfill_note_command_can_create_review_proposals(monkeypatch, tmp_path, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_runtime import workspace_fingerprint
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint=workspace_fingerprint(workspace, "proj_1"),
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    note = workspace / "raw-note.md"
+    note.write_text(RAW_ROUTE_CHUNK, encoding="utf-8")
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="backfill-note",
+            create_proposals=True,
+            file=str(note),
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    with hdb.connect_closing() as conn:
+        proposals = hdb.list_memory_proposals(conn)
+
+    assert rc == 0
+    assert payload["created_proposal_count"] == 1
+    assert payload["created_proposal_ids"] == [proposals[0].id]
+    assert proposals[0].status == "pending"
+    assert proposals[0].intent == "note_backfill_candidate"
+    assert proposals[0].summary.endswith("handles 3 routes in the taxonomy_flock_vocabulary_security_activity_category family.")
+    assert proposals[0].provenance["source"] == "hades_note_quality"
+    assert proposals[0].provenance["candidate_fact"]["review_status"] == "candidate"

@@ -180,7 +180,8 @@ review-only: raw chunks stay out of automatic recall, candidate facts include
 evidence refs, and a human/backend review step must promote any verified fact.
 For route dumps, repeated `route:* --handled_by--> file:*` edges are grouped by
 handler so noisy chunks become compact candidate summaries instead of hundreds
-of memory entries.
+of memory entries. Use `--create-proposals` to save candidate facts as pending
+local memory proposals, then run `hades backend sync` to submit them for review.
 
 Production release gate mapping is tracked in
 [`docs/RELEASE_GATES.md`](../RELEASE_GATES.md). Use that checklist before

@@ -149,7 +149,9 @@ auto-executed by piggyback sync, stores only a selected redacted line window as
 chunks or ad-hoc notes. It classifies `hades.backend_wiki.file_chunk.v1`
 content as raw, extracts candidate facts such as grouped route-handler
 relationships, and keeps the result review-only. It does not create project
-memory or enable automatic recall for raw chunks.
+memory or enable automatic recall for raw chunks. Add `--create-proposals` only
+when running from a linked workspace and you want those candidate facts saved as
+pending memory proposals for backend review.
 
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop

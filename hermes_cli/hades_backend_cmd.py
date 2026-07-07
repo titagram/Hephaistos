@@ -91,6 +91,11 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     ingest_log.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
     backfill_note = sub.add_parser("backfill-note", help="Preview note-quality backfill for a raw chunk or note file")
     backfill_note.add_argument("file", help="Path to a raw chunk or note file")
+    backfill_note.add_argument(
+        "--create-proposals",
+        action="store_true",
+        help="Create local pending memory proposals for extracted candidate facts",
+    )
     backfill_note.add_argument("--json", action="store_true", help="Emit machine-readable backfill preview")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
@@ -713,6 +718,33 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     try:
         text, truncated = read_note_preview(args.file)
         result = analyze_note_quality(text, source=str(args.file), truncated=truncated)
+        created_proposals: list[str] = []
+        if getattr(args, "create_proposals", False):
+            _agent, binding = _current_workspace_binding()
+            with db.connect_closing() as conn:
+                for fact in result["candidate_facts"]:
+                    proposal = db.create_memory_proposal(
+                        conn,
+                        project_id=binding.project_id,
+                        workspace_binding_id=binding.backend_workspace_binding_id,
+                        action="create",
+                        intent="note_backfill_candidate",
+                        summary=str(fact.get("summary") or ""),
+                        provenance={
+                            "source": "hades_note_quality",
+                            "note_source": str(args.file),
+                            "fact_kind": fact.get("kind"),
+                            "evidence_ref": fact.get("evidence_ref"),
+                            "candidate_fact": fact,
+                        },
+                    )
+                    created_proposals.append(proposal.id)
+        else:
+            created_proposals = []
+        result["created_proposal_count"] = len(created_proposals)
+        result["created_proposal_ids"] = created_proposals
+        if created_proposals:
+            result["actions"] = [*result["actions"], "Run `hades backend sync` to submit created proposals for review."]
     except Exception as exc:
         print(f"Hades backend backfill-note: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
@@ -725,6 +757,7 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     print(f"  Classification: {result['classification']}")
     print(f"  Raw chunk:      {result['raw_chunk']}")
     print(f"  Candidate facts: {result['candidate_fact_count']}")
+    print(f"  Created proposals: {result['created_proposal_count']}")
     for fact in result["candidate_facts"][:5]:
         print(f"  - {fact['summary']}")
     for action in result["actions"]:

@@ -2087,6 +2087,9 @@ Agent locale:
 - Il comando legge un file bounded, classifica raw chunks come
   `classification=raw_chunk`, mantiene `automatic_recall_allowed=false` e
   `memory_proposal_ready=false`.
+- Con `--create-proposals`, salva i candidate facts come local
+  `memory_proposals` pending con intent `note_backfill_candidate`; resta una
+  review queue, non memoria accettata.
 - Per chunk tipo `hades.backend_wiki.file_chunk.v1` con edge
   `route:* --handled_by--> file:*`, il backfill raggruppa le route per handler
   in candidate facts `route_handler_group` con evidence refs a batch/schema/path,
@@ -2097,17 +2100,21 @@ Agent locale:
 Verifiche eseguite:
 
 - Locale:
-  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_note_quality.py tests/hermes_cli/test_hades_backend_cmd.py`
-  passato: `18 passed`.
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_note_quality.py tests/hermes_cli/test_hades_backend_cmd.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `49 passed`.
 - Locale:
   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_note_quality.py`
   passato.
 - Locale:
   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_note_quality.py hermes_cli/hades_backend_cmd.py`
   passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/docs_audit.py`
+  passato.
 
 Resta fuori da questa tranche:
 
-- Upload backend della review queue.
+- Upload backend della review queue via sync e' disponibile come proposal flow;
+  resta da implementare una review queue dedicata lato backend.
 - Promozione automatizzata candidate fact -> verified wiki/project memory.
 - Ranking prima/dopo backfill su dataset reale.
