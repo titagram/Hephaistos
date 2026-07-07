@@ -3659,6 +3659,58 @@ Resta fuori da questa tranche:
 - FTS/vector backend vero per memory/wiki/evidence e backfill degli artifact
   legacy gia' salvati prima della migration.
 
+## Esecuzione Hades materialized search documents backend - 2026-07-07
+
+Stato: completata tranche remota P1-3.
+
+Backend remoto:
+
+- Commit remoto `b9a2a2c feat: materialize Hades search documents`.
+- Nuovo servizio `App\Services\Hades\HadesSearchDocumentIndexer`.
+- `hades_search_documents` non indicizza piu' solo artifact: ora indicizza
+  project memory, wiki revisions, bug evidence, source slices ed evidence packs.
+- I documenti di project memory sono project-level
+  (`workspace_binding_id=null`) per restare portabili tra device; il workspace
+  binding resta nel payload/provenance della memoria.
+- `MemorySearchController` usa i documenti indicizzati come candidate set per
+  memory/wiki/artifact e conserva fallback LIKE quando non esistono documenti
+  indicizzati per record legacy.
+- `BugEvidenceController`, `SourceSliceController` ed `EvidencePackController`
+  indicizzano al momento della scrittura e usano gli indexed source ids come
+  prefiltro nelle rispettive search.
+- `WikiRevisionService`, `MemoryProposalController`,
+  `DiagnosisReportController` e la review dashboard Hades indicizzano le
+  revisioni/wiki facts/memorie risolte appena vengono create.
+
+Verifiche eseguite:
+
+- Remoto mirato materialized search:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php --filter=materialized`
+  passato: `2 passed / 13 assertions`.
+- Remoto no-codebase:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `3 passed / 66 assertions`.
+- Remoto M3 completo:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades/HadesM3SharedMemoryTest.php`
+  passato: `36 passed / 459 assertions`.
+- Remoto completo Hades + plugin auth:
+  `APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= php artisan test tests/Feature/Hades tests/Feature/PluginAuthTest.php`
+  passato: `65 passed / 775 assertions`.
+- Remoto formatter:
+  `vendor/bin/pint --test` sui 12 file modificati passato.
+- Remoto:
+  `git diff --check` passato prima del commit.
+- Runtime dev:
+  health pubblico `https://home-sweet-home.cloud/api/hades/v1/health` ha
+  risposto HTTP 200 dopo il commit.
+
+Resta fuori da questa tranche:
+
+- FTS/vector backend vero sopra `hades_search_documents`.
+- Backfill dei record legacy creati prima dei documenti indicizzati.
+- Ranking derivato direttamente dai documenti indicizzati invece del ranking
+  finale ancora calcolato sul record sorgente restituito.
+
 ## Esecuzione Hades agent timeout budgets - 2026-07-07
 
 Stato: completata una tranche locale P0-6.
