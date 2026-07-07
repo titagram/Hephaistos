@@ -548,7 +548,24 @@ function PolicyControlsPanel({
             <ShieldCheck className="h-4 w-4" />
             Policy controls
           </H2>
-          <Badge tone={statusTone(panelStatus)}>{panelStatus}</Badge>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busyAction !== null}
+              prefix={busyAction === "backend:sync" ? <Spinner /> : <RefreshCw className="h-4 w-4" />}
+              onClick={() =>
+                void runReviewAction(
+                  "backend:sync",
+                  () => api.runHadesBackendSync(),
+                  "Backend sync completed",
+                )
+              }
+            >
+              Sync now
+            </Button>
+            <Badge tone={statusTone(panelStatus)}>{panelStatus}</Badge>
+          </div>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

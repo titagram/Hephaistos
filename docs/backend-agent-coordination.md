@@ -3641,8 +3641,45 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Request reindex granulare.
+- Eventuale contratto backend dedicato per reindex selettivo per artifact/slice.
 - Lista dashboard dei diagnosis report disponibili.
+
+## Esecuzione dashboard sync-now controls Hades - 2026-07-07
+
+Stato: completata una tranche locale P1-4.
+
+Agent locale:
+
+- Nuova route dashboard `POST /api/hades/backend/sync`.
+- La route invoca `run_backend_sync(quiet=True)` e restituisce `ok/status` piu'
+  summary sync.
+- Il pannello dashboard `Policy controls` aggiunge `Sync now`, vicino a source
+  slices, bug evidence e policy blockers.
+- Il pulsante riusa `runReviewAction`, quindi mostra busy state, toast e refresh
+  dello status come le altre action.
+- Questa copre il controllo manuale di reindex/refresh usando il sync runner
+  esistente, senza inventare un nuovo contratto backend.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m py_compile hermes_cli/web_server.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m ruff check hermes_cli/web_server.py tests/hermes_cli/test_hades_backend_web_api.py`
+  passato.
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_web_api.py`
+  passato: `5 passed`.
+- Frontend:
+  `npm run typecheck` in `web/` passato.
+- Frontend:
+  `npx eslint src/pages/BackendPage.tsx src/lib/api.ts --max-warnings=0` in
+  `web/` passato.
+
+Resta fuori da questa tranche:
+
+- Eventuale contratto backend dedicato per reindex selettivo per artifact/slice.
 
 ## Esecuzione scheduled quality audit Hades - 2026-07-07
 

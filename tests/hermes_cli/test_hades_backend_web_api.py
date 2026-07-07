@@ -232,6 +232,45 @@ def test_hades_backend_web_routes_review_jobs_and_proposals(monkeypatch, tmp_pat
     assert fake_client.results[0][0] == "job_approve"
 
 
+def test_hades_backend_web_route_runs_sync(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_sync
+    from hermes_cli import web_server
+
+    calls = []
+
+    def fake_sync(*, quiet=False):
+        calls.append({"quiet": quiet})
+        return hades_backend_sync.SyncResult({"pulled": 1, "completed": 1}, 0)
+
+    monkeypatch.setattr(hades_backend_sync, "run_backend_sync", fake_sync)
+
+    previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+    try:
+        response = client.post("/api/hades/backend/sync")
+    finally:
+        if previous_auth_required is None:
+            try:
+                delattr(web_server.app.state, "auth_required")
+            except AttributeError:
+                pass
+        else:
+            web_server.app.state.auth_required = previous_auth_required
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "status": "completed",
+        "summary": "Backend sync completed",
+        "sync": {"pulled": 1, "completed": 1},
+    }
+    assert calls == [{"quiet": True}]
+
+
 def test_hades_backend_web_route_creates_bug_intake_with_evidence(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

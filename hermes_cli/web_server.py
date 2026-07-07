@@ -2332,6 +2332,20 @@ def _hades_backend_action_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
+@app.post("/api/hades/backend/sync")
+def run_hades_backend_sync(profile: Optional[str] = None):
+    with _config_profile_scope(profile):
+        from hermes_cli.hades_backend_sync import run_backend_sync
+
+        result = run_backend_sync(quiet=True)
+        return {
+            "ok": result.exit_code == 0,
+            "status": "completed" if result.exit_code == 0 else "failed",
+            "summary": "Backend sync completed" if result.exit_code == 0 else "Backend sync failed",
+            "sync": result.summary,
+        }
+
+
 def _clean_hades_backend_text(value: Optional[str]) -> Optional[str]:
     clean = str(value or "").strip()
     return clean or None

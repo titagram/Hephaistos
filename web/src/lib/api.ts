@@ -320,6 +320,10 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getHadesBackendStatus: () =>
     fetchJSON<HadesBackendStatus>("/api/hades/backend/status"),
+  runHadesBackendSync: () =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/sync", {
+      method: "POST",
+    }),
   createHadesBackendBugIntake: (body: HadesBackendBugIntakeRequest) =>
     fetchJSON<HadesBackendActionResponse>("/api/hades/backend/bug-intake", {
       method: "POST",
@@ -1868,6 +1872,7 @@ export interface HadesBackendActionResponse {
   diagnosis_report_id?: string | null;
   resolved_bug_memory_id?: string | null;
   resolved_bug?: Record<string, unknown>;
+  sync?: Record<string, number>;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */
