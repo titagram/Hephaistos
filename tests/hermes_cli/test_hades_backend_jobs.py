@@ -702,6 +702,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Models" / "Order.php").write_text(
         "<?php\n"
         "namespace App\\Models;\n"
+        "use Illuminate\\Database\\Eloquent\\Casts\\Attribute;\n"
         "use Illuminate\\Database\\Eloquent\\Model;\n"
         "class Order extends Model {\n"
         "    protected $table = 'orders';\n"
@@ -710,6 +711,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    protected $casts = ['status' => 'string'];\n"
         "    public function casts(): array {\n"
         "        return ['customer_id' => 'integer'];\n"
+        "    }\n"
+        "    public function getDisplayStatusAttribute($value) {\n"
+        "        return strtoupper($value);\n"
+        "    }\n"
+        "    protected function normalizedStatus(): Attribute {\n"
+        "        return Attribute::make(\n"
+        "            get: fn ($value) => trim($value),\n"
+        "            set: fn ($value) => strtolower($value),\n"
+        "        );\n"
         "    }\n"
         "    public function customer() {\n"
         "        return $this->belongsTo(Customer::class);\n"
@@ -834,7 +844,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 60, "max_symbols": 70, "max_edges": 220},
+            "payload": {"max_files": 60, "max_symbols": 80, "max_edges": 260},
         },
         workspace_root=workspace,
     )
@@ -1034,6 +1044,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_guarded", "App\\Models\\Order", "table:orders.internal_note") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert ("model_accessor", "App\\Models\\Order", "table:orders.display_status") in edges
+    assert ("model_accessor", "App\\Models\\Order", "table:orders.normalized_status") in edges
+    assert ("model_mutator", "App\\Models\\Order", "table:orders.normalized_status") in edges
     assert ("model_scope", "App\\Models\\Order", "scope:App\\Models\\Order.recent") in edges
     assert ("scope_method", "scope:App\\Models\\Order.recent", "Order@scopeRecent") in edges
     assert ("eloquent_scope_call", "App\\Http\\Controllers\\OrderController", "scope:App\\Models\\Order.recent") in edges
@@ -1046,7 +1059,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "cast_type": "string",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 8,
+        "line": 9,
     } in artifact["edges"]
     assert {
         "kind": "model_cast",
@@ -1056,7 +1069,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "cast_type": "integer",
         "table": "orders",
         "path": "app/Models/Order.php",
-        "line": 10,
+        "line": 11,
+    } in artifact["edges"]
+    assert {
+        "kind": "model_accessor",
+        "from": "App\\Models\\Order",
+        "to": "table:orders.display_status",
+        "field": "display_status",
+        "direction": "get",
+        "attribute_style": "classic",
+        "attribute_method": "getDisplayStatusAttribute",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 13,
+    } in artifact["edges"]
+    assert {
+        "kind": "model_mutator",
+        "from": "App\\Models\\Order",
+        "to": "table:orders.normalized_status",
+        "field": "normalized_status",
+        "direction": "set",
+        "attribute_style": "attribute_object",
+        "attribute_method": "normalizedStatus",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 16,
     } in artifact["edges"]
     assert {
         "kind": "eloquent_scope_call",
@@ -1131,6 +1168,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "protected $guarded" not in str(artifact)
     assert "protected $casts" not in str(artifact)
     assert "return ['customer_id'" not in str(artifact)
+    assert "strtoupper" not in str(artifact)
+    assert "Attribute::make" not in str(artifact)
     assert "return $query->latest" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
     assert "middlewareAliases" not in str(artifact)

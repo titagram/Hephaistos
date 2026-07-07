@@ -2416,6 +2416,89 @@ def _php_model_scope_id(model_class: str, scope_name: str) -> str:
     return f"scope:{model_class}.{scope_name}"
 
 
+def _php_model_attribute_edges_for_method(
+    source: str,
+    rel: str,
+    class_info: dict[str, Any],
+    method_name: str,
+    method_match: re.Match[str],
+    method_body: str,
+    model_table_by_class: dict[str, str],
+    fallback_model_table: str,
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if class_info.get("role") != "model":
+        return False
+    model_class = str(class_info["name"])
+    table = _php_model_table_for_class(model_class, model_table_by_class) or fallback_model_table
+    attributes: list[dict[str, str]] = []
+    classic_match = re.fullmatch(r"(?P<direction>get|set)(?P<field>[A-Z][A-Za-z0-9_]*)Attribute", method_name)
+    if classic_match:
+        direction = "get" if classic_match.group("direction") == "get" else "set"
+        attributes.append(
+            {
+                "kind": "model_accessor" if direction == "get" else "model_mutator",
+                "field": _snake_name(classic_match.group("field")),
+                "direction": direction,
+                "attribute_style": "classic",
+            }
+        )
+
+    brace = source.find("{", method_match.end())
+    signature_tail = source[method_match.end() : brace if brace != -1 else min(len(source), method_match.end() + 160)]
+    if (
+        method_name not in {"casts", "boot", "booted"}
+        and not method_name.startswith("scope")
+        and ("Attribute" in signature_tail or "Attribute::" in method_body or "new Attribute" in method_body)
+    ):
+        field = _snake_name(method_name)
+        if re.search(r"\bget\s*:", method_body) or "Attribute::get" in method_body:
+            attributes.append(
+                {
+                    "kind": "model_accessor",
+                    "field": field,
+                    "direction": "get",
+                    "attribute_style": "attribute_object",
+                }
+            )
+        if re.search(r"\bset\s*:", method_body) or "Attribute::set" in method_body:
+            attributes.append(
+                {
+                    "kind": "model_mutator",
+                    "field": field,
+                    "direction": "set",
+                    "attribute_style": "attribute_object",
+                }
+            )
+
+    truncated = False
+    seen: set[tuple[str, str, str]] = set()
+    for attribute in attributes:
+        key = (attribute["kind"], attribute["field"], attribute["attribute_style"])
+        if key in seen:
+            continue
+        seen.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": attribute["kind"],
+                "from": model_class,
+                "to": _php_model_field_target(model_class, table, attribute["field"]),
+                "field": attribute["field"],
+                "direction": attribute["direction"],
+                "attribute_style": attribute["attribute_style"],
+                "attribute_method": method_name,
+                "table": table,
+                "path": rel,
+                "line": _line_number(source, method_match.start()),
+            },
+            max_edges=max_edges,
+        ) or truncated
+    return truncated
+
+
 def _php_laravel_model_scope_index(
     workspace_root: Path,
     php_files: list[Path],
@@ -3220,6 +3303,19 @@ def _build_php_graph(
                     },
                     max_edges=max_edges,
                 ) or truncated
+            method_body, method_body_offset = _php_method_body_slice(source, match)
+            truncated = _php_model_attribute_edges_for_method(
+                source,
+                rel,
+                class_info,
+                method_name,
+                match,
+                method_body,
+                model_table_by_class,
+                model_table,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
             typed_params: dict[str, str] = {}
             for param_match in PHP_TYPED_PARAM_RE.finditer(match.group("params") or ""):
                 param_name = str(param_match.group("name") or "")
@@ -3270,7 +3366,6 @@ def _build_php_graph(
                         max_edges=max_edges,
                     ) or truncated
 
-            method_body, method_body_offset = _php_method_body_slice(source, match)
             for auth_pattern, auth_source in (
                 (PHP_THIS_AUTHORIZE_RE, "this_authorize"),
                 (PHP_GATE_AUTHORIZATION_RE, "gate_authorize"),
@@ -3399,6 +3494,7 @@ def _build_php_graph(
                 "Schema",
                 "Gate",
                 "DB",
+                "Attribute",
                 "Broadcast",
                 "View",
                 "Inertia",
