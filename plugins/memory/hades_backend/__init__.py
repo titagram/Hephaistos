@@ -2413,6 +2413,31 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                 },
             )
 
+        log_map = graph.get("logs") if isinstance(graph.get("logs"), dict) else {}
+        for log_event in log_map.get("events") or []:
+            if not isinstance(log_event, dict):
+                continue
+            event_id = str(log_event.get("id") or "").strip()
+            if not event_id:
+                continue
+            _local_graph_add_node(
+                nodes,
+                event_id,
+                kind="log_event",
+                label=f"{log_event.get('level', 'log')} {log_event.get('logger', '')}".strip(),
+                path=log_event.get("path"),
+                attributes={
+                    "context": log_event.get("context"),
+                    "logger": log_event.get("logger"),
+                    "level": log_event.get("level"),
+                    "line": log_event.get("line"),
+                    "message_sha256": log_event.get("message_sha256"),
+                    "message_length": log_event.get("message_length"),
+                    "schema": schema,
+                    "artifact_id": artifact_id,
+                },
+            )
+
         database = graph.get("database") if isinstance(graph.get("database"), dict) else {}
         for table in database.get("tables") or []:
             if not isinstance(table, dict):

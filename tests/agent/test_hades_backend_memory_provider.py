@@ -137,6 +137,15 @@ def _php_graph_artifact():
                 "to": "OrderController@show",
                 "path": "tests/Feature/OrderControllerTest.php",
             },
+            {
+                "kind": "emits_log",
+                "from": "OrderController@show",
+                "to": "log:order-show-warning",
+                "level": "warning",
+                "logger": "Log",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 47,
+            },
         ],
         "tests": {
             "schema": "hades.test_map.v1",
@@ -152,6 +161,24 @@ def _php_graph_artifact():
                     "symbol_refs": ["OrderController@show"],
                     "route_refs": ["route:orders.show"],
                     "import_count": 1,
+                }
+            ],
+            "truncated": False,
+            "raw_source_included": False,
+        },
+        "logs": {
+            "schema": "hades.log_map.v1",
+            "event_count": 1,
+            "events": [
+                {
+                    "id": "log:order-show-warning",
+                    "context": "OrderController@show",
+                    "logger": "Log",
+                    "level": "warning",
+                    "path": "app/Http/Controllers/OrderController.php",
+                    "line": 47,
+                    "message_sha256": "a" * 64,
+                    "message_length": 28,
                 }
             ],
             "truncated": False,
@@ -735,6 +762,49 @@ def test_hades_backend_graph_search_finds_local_test_map_nodes(monkeypatch, tmp_
         for ref in graph_refs
     )
     assert any(ref["type"] == "edge" and ref["kind"] == "test_covers_symbol" for ref in graph_refs)
+
+
+def test_hades_backend_graph_search_finds_local_log_map_nodes(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "warning Log OrderController", "limit": 5},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "node"
+        and ref["id"] == "log:order-show-warning"
+        and ref["kind"] == "log_event"
+        for ref in graph_refs
+    )
+    assert any(ref["type"] == "edge" and ref["kind"] == "emits_log" for ref in graph_refs)
 
 
 def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):

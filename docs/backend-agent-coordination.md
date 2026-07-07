@@ -3609,6 +3609,37 @@ Resta fuori da questa tranche:
 - Risoluzione type-aware/data-flow e call graph intermodulo profondo; questa
   tranche e' volutamente conservativa e metadata-only.
 
+## Esecuzione Python log map graph - 2026-07-07
+
+Stato: completata una tranche locale P2-2 sulla log map metadata-only.
+
+Agent locale:
+
+- Il graph Python include `logs.schema=hades.log_map.v1` con eventi logging
+  source-free.
+- Ogni evento conserva context, logger, level, path, line, lunghezza e SHA-256
+  del messaggio redatto; non viene salvato il template raw.
+- Il graph aggiunge edge `emits_log` dal context Python al nodo `log:<hash>`.
+- Il fallback locale di `hades_backend_graph_search` indicizza nodi `log_event`
+  con level/logger/hash, quindi l'agent puo' cercare punti di emissione log
+  anche quando il backend live non risponde.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `66 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Log map PHP/TS e correlazione automatica con runtime log evidence; questa
+  tranche prepara il nodo/edge model senza importare log raw in memory.
+
 ## Esecuzione note backfill quality gate - 2026-07-07
 
 Stato: completata una tranche locale P1-7 sulla qualita' delle note e sulla

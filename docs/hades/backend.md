@@ -199,6 +199,9 @@ files, with test framework, case names/lines, target candidates, and edges from
 Python web graphs include AST-derived `imports` and `calls` edges so handlers
 can be connected to service/repository/client calls without storing function
 bodies or arguments.
+Python graph artifacts also include a metadata-only `logs` map for logging
+calls, storing level/logger/context/path/line and a redacted message hash rather
+than the message template.
 Before sending a large artifact, the local sync can call
 `/api/hades/v1/artifacts/lookup` with project, workspace binding, schema, and
 sha256. A positive lookup means the backend already has the same artifact for

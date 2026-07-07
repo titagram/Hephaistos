@@ -300,13 +300,16 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     (tmp_path / "app").mkdir()
     (tmp_path / "project").mkdir()
     (tmp_path / "app" / "api.py").write_text(
+        "import logging\n"
         "from fastapi import APIRouter, FastAPI\n"
         "from app.services import OrderService\n"
+        "logger = logging.getLogger(__name__)\n"
         "app = FastAPI()\n"
         "router = APIRouter(prefix='/api')\n"
         "@router.get('/orders/{order_id}', name='orders-show')\n"
         "async def show_order(order_id: int):\n"
         "    service = OrderService()\n"
+        "    logger.warning('order lookup failed')\n"
         "    return service.load(order_id)\n"
         "@app.post('/health')\n"
         "def health():\n"
@@ -361,7 +364,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
         {
             "job_id": "job_py_web_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 10, "max_symbols": 20, "max_edges": 20},
+            "payload": {"max_files": 10, "max_symbols": 20, "max_edges": 30},
         },
         workspace_root=tmp_path,
     )
@@ -372,6 +375,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     symbols = {(item["kind"], item["name"], item["path"]) for item in artifact["symbols"]}
     tables = {item["table"]: item for item in artifact["database"]["tables"]}
     test_files = {item["path"]: item for item in artifact["tests"]["files"]}
+    log_events = {item["context"]: item for item in artifact["logs"]["events"]}
 
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.code_graph.v1"
@@ -394,6 +398,8 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert ("route_handler", "route:orders-create", "views.OrderCreateView.as_view") in edges
     assert ("calls", "show_order", "app.services.OrderService") in edges
     assert ("calls", "show_order", "service.load") in edges
+    assert ("calls", "show_order", "logger.warning") in edges
+    assert any(edge[0] == "emits_log" and edge[1] == "show_order" for edge in edges)
     assert ("model_table", "Customer", "table:customers") in edges
     assert ("model_table", "Order", "table:orders") in edges
     assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
@@ -404,6 +410,11 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     assert ("test_covers_symbol", "test:tests/test_show_order.py", "show_order") in edges
     assert ("test_covers_route", "test:tests/test_show_order.py", "route:orders-show") in edges
     assert ("test_imports", "test:tests/test_show_order.py", "app.api") in edges
+    assert artifact["logs"]["schema"] == "hades.log_map.v1"
+    assert artifact["logs"]["event_count"] == 1
+    assert log_events["show_order"]["level"] == "warning"
+    assert log_events["show_order"]["logger"] == "logger"
+    assert len(log_events["show_order"]["message_sha256"]) == 64
     assert set(tables) >= {"customers", "orders"}
     assert {column["name"] for column in tables["orders"]["columns"]} >= {"customer_id", "status", "total"}
     assert tables["orders"]["foreign_keys"] == [
@@ -417,6 +428,7 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     ]
     assert "return service.load" not in str(artifact)
     assert "return {'id': order_id}" not in str(artifact)
+    assert "order lookup failed" not in str(artifact)
     assert "urlpatterns" not in str(artifact)
     assert "models.ForeignKey" not in str(artifact)
     assert "client.get" not in str(artifact)

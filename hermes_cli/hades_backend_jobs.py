@@ -312,6 +312,8 @@ TEST_FILE_SUFFIXES = {".php", ".py", ".js", ".jsx", ".ts", ".tsx"}
 MAX_TEST_FILES = 500
 MAX_TEST_CASES_PER_FILE = 50
 MAX_TEST_REFS_PER_FILE = 25
+MAX_LOG_EVENTS = 500
+PY_LOG_LEVELS = {"debug", "info", "warning", "warn", "error", "exception", "critical"}
 
 
 def _safe_relpath(path: str) -> str:
@@ -2408,6 +2410,7 @@ def _py_graph_summary(
     framework: str,
     database: dict[str, Any] | None = None,
     tests: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
 ) -> str:
     kind_counts: dict[str, int] = {}
     for symbol in symbols:
@@ -2416,7 +2419,8 @@ def _py_graph_summary(
     kinds = ", ".join(f"{kind}:{count}" for kind, count in sorted(kind_counts.items())[:8])
     table_count = len((database or {}).get("tables") or [])
     test_count = int((tests or {}).get("file_count") or 0)
-    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; {kinds or 'symbols:none'}"
+    log_count = int((logs or {}).get("event_count") or 0)
+    return f"Code graph; framework:{framework}; routes:{len(routes)}; symbols:{len(symbols)}; edges:{len(edges)}; tables:{table_count}; tests:{test_count}; logs:{log_count}; {kinds or 'symbols:none'}"
 
 
 def _py_dotted_name(node: ast.AST | None) -> str:
@@ -2518,6 +2522,40 @@ def _py_resolve_call_name(call_name: str, imports: dict[str, str]) -> str:
     return f"{target}{separator}{tail}" if separator else target
 
 
+def _py_log_event_from_call(
+    call: ast.Call,
+    *,
+    call_name: str,
+    context: str,
+    rel: str,
+) -> dict[str, Any] | None:
+    parts = call_name.split(".")
+    level = parts[-1].lower() if parts else ""
+    if level not in PY_LOG_LEVELS:
+        return None
+    logger = ".".join(parts[:-1]) or "logger"
+    if not (
+        logger == "logging"
+        or logger.endswith(".logging")
+        or logger.endswith(".logger")
+        or logger in {"logger", "log", "self.logger"}
+    ):
+        return None
+    message = ""
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+        message = redact_secret(call.args[0].value)
+    payload = {
+        "context": context,
+        "logger": logger,
+        "level": "warning" if level == "warn" else level,
+        "path": rel,
+        "line": getattr(call, "lineno", 0),
+        "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest() if message else "",
+        "message_length": len(message) if message else 0,
+    }
+    return {key: value for key, value in payload.items() if value not in ("", None, 0)}
+
+
 def _py_callable_contexts(tree: ast.AST) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
     contexts: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
     body = getattr(tree, "body", [])
@@ -2536,6 +2574,7 @@ def _append_python_call_edges(
     rel: str,
     imports: dict[str, str],
     edges: list[dict[str, Any]],
+    log_events: list[dict[str, Any]],
     *,
     max_edges: int,
 ) -> bool:
@@ -2561,6 +2600,29 @@ def _append_python_call_edges(
                     "to": call_name,
                     "path": rel,
                     "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+            log_event = _py_log_event_from_call(child, call_name=call_name, context=context, rel=rel)
+            if log_event is None:
+                continue
+            if len(log_events) >= MAX_LOG_EVENTS:
+                truncated = True
+                continue
+            log_id_payload = json.dumps(log_event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            log_id = hashlib.sha256(log_id_payload).hexdigest()[:16]
+            log_event = {"id": f"log:{log_id}", **log_event}
+            log_events.append(log_event)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "emits_log",
+                    "from": context,
+                    "to": log_event["id"],
+                    "level": log_event.get("level"),
+                    "logger": log_event.get("logger"),
+                    "path": rel,
+                    "line": log_event.get("line"),
                 },
                 max_edges=max_edges,
             ) or truncated
@@ -3607,6 +3669,7 @@ def _build_python_artifact(
     routes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     database: dict[str, Any] = {"tables": []}
+    log_events: list[dict[str, Any]] = []
     frameworks: set[str] = set()
     python_files = [path for path in candidates if path.suffix == ".py"]
 
@@ -3829,7 +3892,14 @@ def _build_python_artifact(
                 max_edges=max_edges,
             ) or truncated
 
-        truncated = _append_python_call_edges(tree, rel, py_imports, edges, max_edges=max_edges) or truncated
+        truncated = _append_python_call_edges(
+            tree,
+            rel,
+            py_imports,
+            edges,
+            log_events,
+            max_edges=max_edges,
+        ) or truncated
         if len(symbols) >= max_symbols:
             break
 
@@ -3843,6 +3913,13 @@ def _build_python_artifact(
         max_file_bytes=max_file_bytes,
     )
     truncated = truncated or tests_truncated
+    logs = {
+        "schema": "hades.log_map.v1",
+        "event_count": len(log_events),
+        "events": log_events[:MAX_LOG_EVENTS],
+        "truncated": len(log_events) > MAX_LOG_EVENTS,
+        "raw_source_included": False,
+    }
     if routes or database["tables"]:
         framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
         graph_database = {**database, "tables": database["tables"][:500]}
@@ -3856,6 +3933,7 @@ def _build_python_artifact(
             "edges": edges,
             "database": graph_database,
             "tests": tests,
+            "logs": logs,
             "summary": "",
             "omitted": omitted,
             "truncated": truncated
@@ -3867,13 +3945,22 @@ def _build_python_artifact(
             "retention_class": "source_symbols",
             "raw_source_included": False,
         }
-        graph["summary"] = _py_graph_summary(graph["routes"], symbols, edges, framework=framework, database=graph_database, tests=tests)
+        graph["summary"] = _py_graph_summary(
+            graph["routes"],
+            symbols,
+            edges,
+            framework=framework,
+            database=graph_database,
+            tests=tests,
+            logs=logs,
+        )
         return graph
 
     return {
         "schema": "hades.symbols.v1",
         "symbols": symbols,
         "tests": tests,
+        "logs": logs,
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols,
         "redactions": len(omitted),
