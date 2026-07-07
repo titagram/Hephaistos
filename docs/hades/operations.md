@@ -328,6 +328,10 @@ packs are source-free bundles: they store refs and bounded structured payload,
 not raw repository dumps, and the backend rejects unredacted secrets or payloads
 over the safety limit.
 
+For similar historical bugs, call `hades_backend_project_memory_search` with
+`kind=resolved_bug` so generic project notes do not crowd out verified causal
+memory.
+
 After the diagnosis is verified by a passing regression test or explicit user
 confirmation, promote it with the service-gated
 `hades_backend_resolved_bug_promote` tool. This stores a `resolved_bug` memory

@@ -2613,6 +2613,32 @@ Resta fuori da questa tranche:
 - Blade template dependency graph oltre ai view refs.
 - Query builder avanzato oltre ai casi gia' coperti.
 
+## Esecuzione Hades memory kind filter - 2026-07-07
+
+Stato: completata una tranche P1-3 locale.
+
+Agent locale:
+
+- `hades_backend_project_memory_search` accetta ora `kind`, ad esempio
+  `resolved_bug`, per restringere il recall a memoria strutturata.
+- Il provider passa `kind` al backend live solo quando valorizzato, mantenendo
+  invariati prefetch e graph search.
+- Il risultato live viene filtrato anche lato provider quando necessario, cosi'
+  un backend vecchio che ignora `kind` non mescola note generiche in una ricerca
+  strutturata.
+- Il fallback cache usa lo stesso filtro `kind`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `31 passed`.
+
+Resta fuori da questa tranche:
+
+- FTS/ranking backend per text evidence e query ambigue.
+- Structured filters backend per commit/symbol oltre al filtro kind locale.
+
 ## Esecuzione no-codebase freshness eval Hades - 2026-07-07
 
 Stato: completata una tranche P0-7 locale del piano "Bug Root Cause Awareness".

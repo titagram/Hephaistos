@@ -259,7 +259,11 @@ def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatc
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
     class FakeClient:
+        def __init__(self):
+            self.calls = []
+
         def memory_search(self, **payload):
+            self.calls.append(payload)
             return {
                 "project_id": payload["project_id"],
                 "workspace_binding_id": payload["workspace_binding_id"],
@@ -267,9 +271,10 @@ def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatc
                 "etag": "search_v1",
                 "query": payload["query"],
                 "domain": payload["domain"],
+                "kind": payload["kind"],
                 "include_raw_chunks": payload["include_raw_chunks"],
-                "count": 1,
-                "candidate_count": 1,
+                "count": 2,
+                "candidate_count": 2,
                 "truncated": False,
                 "raw_chunks_omitted": 0,
                 "items": [
@@ -284,6 +289,14 @@ def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatc
                         "raw_chunk": False,
                         "stale": True,
                         "stale_reason": "workspace_head_changed",
+                    },
+                    {
+                        "id": "mem_note_1",
+                        "domain": "project_memory",
+                        "kind": "agent_note",
+                        "summary": "Generic note that should not survive kind filtering.",
+                        "score": 10,
+                        "raw_chunk": False,
                     }
                 ],
             }
@@ -291,17 +304,22 @@ def test_hades_backend_memory_search_tool_exposes_resolved_bug_status(monkeypatc
         def close(self):
             pass
 
+    fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: FakeClient())
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
 
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_project_memory_search",
-            {"query": "active null", "domain": "project_memory", "limit": 5},
+            {"query": "active null", "domain": "project_memory", "kind": "resolved_bug", "limit": 5},
         )
     )
 
+    assert fake.calls[0]["kind"] == "resolved_bug"
+    assert result["kind"] == "resolved_bug"
+    assert result["count"] == 1
+    assert len(result["items"]) == 1
     assert result["items"][0]["kind"] == "resolved_bug"
     assert result["items"][0]["stale"] is True
     assert result["items"][0]["stale_reason"] == "workspace_head_changed"

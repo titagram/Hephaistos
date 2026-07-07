@@ -116,6 +116,10 @@ SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
                 "default": "all",
                 "description": "Restrict search to a project-brain domain.",
             },
+            "kind": {
+                "type": "string",
+                "description": "Optional memory item kind filter, for example resolved_bug, agent_note, or wiki_entry.",
+            },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
@@ -573,6 +577,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, _backend_error = self._backend_memory_search(
             query=query,
             domain="all",
+            kind="",
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
         )
@@ -588,6 +593,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             cache.items,
             query,
             domain="all",
+            kind="",
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
         )
@@ -677,6 +683,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         domain = _normalize_domain(args.get("domain") or "all")
         if domain not in SEARCH_DOMAINS:
             return tool_error(f"Unsupported domain: {domain}", allowed_domains=list(SEARCH_DOMAINS))
+        kind = str(args.get("kind") or "").strip()
         limit = _bounded_int(args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT)
         include_raw_chunks = bool(args.get("include_raw_chunks"))
 
@@ -700,10 +707,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain=domain,
+            kind=kind,
             limit=limit,
             include_raw_chunks=include_raw_chunks,
         )
         if backend_result is not None:
+            backend_result = _filter_backend_search_response_by_kind(backend_result, kind)
             return tool_result(_tool_result_from_backend_search(backend_result))
 
         cache = self._load_memory_cache()
@@ -724,6 +733,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             cache.items,
             query,
             domain=domain,
+            kind=kind,
             limit=limit,
             include_raw_chunks=include_raw_chunks,
         )
@@ -739,6 +749,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "cache_updated_at": cache.updated_at,
             "query": query,
             "domain": domain,
+            "kind": kind or "all",
             "include_raw_chunks": include_raw_chunks,
             "searched_cache_only": True,
             "count": len(items),
@@ -1116,6 +1127,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain="artifacts",
+            kind="",
             limit=limit,
             include_raw_chunks=False,
         )
@@ -1292,6 +1304,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         *,
         query: str,
         domain: str,
+        kind: str,
         limit: int,
         include_raw_chunks: bool,
     ) -> tuple[dict[str, Any] | None, str | None]:
@@ -1300,14 +1313,17 @@ class HadesBackendMemoryProvider(MemoryProvider):
         try:
             client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
             try:
-                response = client.memory_search(
-                    project_id=self._binding.project_id,
-                    workspace_binding_id=self._binding.backend_workspace_binding_id,
-                    query=query,
-                    domain=domain,
-                    limit=limit,
-                    include_raw_chunks=include_raw_chunks,
-                )
+                payload = {
+                    "project_id": self._binding.project_id,
+                    "workspace_binding_id": self._binding.backend_workspace_binding_id,
+                    "query": query,
+                    "domain": domain,
+                    "limit": limit,
+                    "include_raw_chunks": include_raw_chunks,
+                }
+                if kind:
+                    payload["kind"] = kind
+                response = client.memory_search(**payload)
             finally:
                 close = getattr(client, "close", None)
                 if callable(close):
@@ -1726,6 +1742,27 @@ def _domain_matches(item_domain: str, requested: str) -> bool:
     return item_domain == requested
 
 
+def _kind_matches(item: dict[str, Any], requested: str) -> bool:
+    expected = str(requested or "").strip().lower()
+    if not expected:
+        return True
+    return _first_item_value(item, ("kind",)).strip().lower() == expected
+
+
+def _filter_backend_search_response_by_kind(response: dict[str, Any], kind: str) -> dict[str, Any]:
+    requested = str(kind or "").strip()
+    if not requested:
+        return response
+    response_items = _backend_items(response)
+    items = [item for item in response_items if _kind_matches(item, requested)]
+    filtered = dict(response)
+    filtered["items"] = items
+    filtered["kind"] = requested
+    filtered["count"] = len(items)
+    filtered["truncated"] = bool(response.get("truncated")) and len(items) >= len(response_items)
+    return filtered
+
+
 def _tokenize(text: str) -> set[str]:
     return {token.lower() for token in TOKEN_RE.findall(text or "")}
 
@@ -1768,10 +1805,12 @@ def _search_memory_items(
     query: str,
     *,
     domain: str,
+    kind: str,
     limit: int,
     include_raw_chunks: bool,
 ) -> tuple[list[tuple[int, int, bool, dict[str, Any]]], int, int]:
     requested_domain = _normalize_domain(domain or "all")
+    requested_kind = str(kind or "").strip()
     query_tokens = _tokenize(query)
     raw_omitted = 0
     candidates: list[tuple[int, int, bool, dict[str, Any]]] = []
@@ -1779,6 +1818,8 @@ def _search_memory_items(
         item_domain = _item_domain(item)
         raw = _is_raw_chunk_item(item)
         if not _domain_matches(item_domain, requested_domain):
+            continue
+        if requested_kind and not _kind_matches(item, requested_kind):
             continue
         if raw and not include_raw_chunks:
             raw_omitted += 1
@@ -1885,6 +1926,7 @@ def _tool_result_from_backend_search(response: dict[str, Any]) -> dict[str, Any]
         "backend_etag": response.get("etag"),
         "query": response.get("query", ""),
         "domain": _normalize_domain(response.get("domain") or "all"),
+        "kind": response.get("kind") or "all",
         "include_raw_chunks": bool(response.get("include_raw_chunks")),
         "searched_cache_only": False,
         "count": count,
