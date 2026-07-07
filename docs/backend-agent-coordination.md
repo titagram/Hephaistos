@@ -3542,6 +3542,28 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione timeout live Hades agent - 2026-07-07
+
+Stato: completata una tranche locale P2-3 sui timeout del provider Hades usato
+nel loop agent.
+
+Modifiche locali:
+
+- Lookup/search/status live Hades (`project_memory_search`,
+  `bug_evidence_search`, `graph_traverse`, `evidence_pack_search`,
+  `project_awareness_status`) passano da 1.0s a 0.75s.
+- `source_slice_fetch` passa da 1.5s a 1.25s.
+- I write live (`evidence_pack_create`, `diagnosis_report_create`,
+  `resolved_bug_promote`) restano a 2.0s per non perdere persistenza utile.
+
+Verifiche eseguite:
+
+- Locale: `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `35 passed`.
+- Locale lint/compile:
+  `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+
 ## Esecuzione no-codebase tool order gate Hades - 2026-07-07
 
 Stato: completata tranche locale P0-6/P0-7/P1-5.

@@ -748,7 +748,7 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
         }
     ]
     assert fake.closed == 1
-    assert timeouts == [1.0]
+    assert timeouts == [0.75]
 
 
 def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatch, tmp_path):
@@ -836,7 +836,7 @@ def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_pa
         {"query": "Hades routes"},
     )
 
-    assert timeouts == [1.0]
+    assert timeouts == [0.75]
 
 
 def test_hades_backend_bug_evidence_search_tool_prefers_live_backend(monkeypatch, tmp_path):
@@ -963,7 +963,7 @@ def test_hades_backend_bug_evidence_search_tool_uses_short_timeout(monkeypatch, 
         {"query": "stack trace"},
     )
 
-    assert timeouts == [1.0]
+    assert timeouts == [0.75]
 
 
 def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch, tmp_path):
@@ -1062,7 +1062,7 @@ def test_hades_backend_source_slice_fetch_tool_prefers_live_backend(monkeypatch,
         }
     ]
     assert fake.closed == 1
-    assert timeouts == [1.5]
+    assert timeouts == [1.25]
 
 
 def test_hades_backend_source_slice_fetch_tool_requires_scope(monkeypatch, tmp_path):
@@ -1154,7 +1154,7 @@ def test_hades_backend_evidence_pack_search_tool_prefers_live_backend(monkeypatc
         }
     ]
     assert fake.closed == 1
-    assert timeouts == [1.0]
+    assert timeouts == [0.75]
 
 
 def test_hades_backend_evidence_pack_search_tool_requires_scope(monkeypatch, tmp_path):
@@ -1617,7 +1617,7 @@ def test_hades_backend_project_awareness_status_tool_uses_short_timeout(monkeypa
 
     provider.handle_tool_call("hades_backend_project_awareness_status", {})
 
-    assert timeouts == [1.0]
+    assert timeouts == [0.75]
 
 
 def test_hades_backend_memory_search_tool_allows_artifacts_domain(monkeypatch, tmp_path):
