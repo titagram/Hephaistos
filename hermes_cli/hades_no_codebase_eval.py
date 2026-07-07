@@ -33,6 +33,7 @@ class NoCodebaseDiagnosisFixture:
     title: str
     expected_root_cause_id: str | None
     expected_confidence: str
+    expected_freshness_status: str = ""
     required_evidence_refs: tuple[str, ...] = ()
     required_tool_calls: tuple[str, ...] = ()
     expected_missing_evidence: tuple[str, ...] = ()
@@ -48,6 +49,7 @@ class NoCodebaseDiagnosisRun:
     fixture_id: str
     root_cause_id: str | None
     confidence: str
+    freshness_status: str = ""
     evidence_refs: tuple[str, ...] = ()
     tool_calls: tuple[str, ...] = ()
     missing_evidence: tuple[str, ...] = ()
@@ -63,6 +65,8 @@ class NoCodebaseFixtureResult:
     actual_root_cause_id: str | None = None
     expected_confidence: str = ""
     actual_confidence: str = ""
+    expected_freshness_status: str = ""
+    actual_freshness_status: str = ""
     expected_evidence_refs: tuple[str, ...] = ()
     actual_evidence_refs: tuple[str, ...] = ()
 
@@ -81,6 +85,7 @@ class NoCodebaseEvaluationReport:
     root_cause_accuracy: float
     insufficient_accuracy: float
     evidence_ref_coverage: float
+    freshness_coverage: float
     tool_coverage: float
     persistence_coverage: float
     no_codebase_violations: tuple[dict[str, str], ...] = ()
@@ -100,6 +105,7 @@ class NoCodebaseEvaluationReport:
             "root_cause_accuracy": self.root_cause_accuracy,
             "insufficient_accuracy": self.insufficient_accuracy,
             "evidence_ref_coverage": self.evidence_ref_coverage,
+            "freshness_coverage": self.freshness_coverage,
             "tool_coverage": self.tool_coverage,
             "persistence_coverage": self.persistence_coverage,
             "no_codebase_violations": list(self.no_codebase_violations),
@@ -112,6 +118,8 @@ class NoCodebaseEvaluationReport:
                     "actual_root_cause_id": result.actual_root_cause_id,
                     "expected_confidence": result.expected_confidence,
                     "actual_confidence": result.actual_confidence,
+                    "expected_freshness_status": result.expected_freshness_status,
+                    "actual_freshness_status": result.actual_freshness_status,
                     "expected_evidence_refs": list(result.expected_evidence_refs),
                     "actual_evidence_refs": list(result.actual_evidence_refs),
                 }
@@ -139,6 +147,8 @@ def evaluate_no_codebase_diagnoses(
     violations: list[dict[str, str]] = []
     evidence_checks = 0
     evidence_hits = 0
+    freshness_checks = 0
+    freshness_hits = 0
     tool_checks = 0
     tool_hits = 0
     persistence_checks = 0
@@ -154,6 +164,7 @@ def evaluate_no_codebase_diagnoses(
                     failures=("missing diagnosis run",),
                     expected_root_cause_id=fixture.expected_root_cause_id,
                     expected_confidence=fixture.expected_confidence,
+                    expected_freshness_status=fixture.expected_freshness_status,
                     expected_evidence_refs=fixture.required_evidence_refs,
                 )
             )
@@ -179,6 +190,20 @@ def evaluate_no_codebase_diagnoses(
                 failures.append("root cause id mismatch")
             if run.confidence != fixture.expected_confidence:
                 failures.append("confidence mismatch")
+
+        expected_freshness = fixture.expected_freshness_status
+        if expected_freshness:
+            freshness_checks += 1
+            if run.freshness_status == expected_freshness:
+                freshness_hits += 1
+            else:
+                failures.append("freshness status mismatch")
+        elif run.confidence in {"high", "medium"}:
+            freshness_checks += 1
+            if run.freshness_status == "current":
+                freshness_hits += 1
+        if run.confidence in {"high", "medium"} and run.freshness_status != "current":
+            failures.append("precise diagnosis requires current freshness")
 
         required_refs = set(fixture.required_evidence_refs)
         actual_refs = set(run.evidence_refs)
@@ -210,6 +235,8 @@ def evaluate_no_codebase_diagnoses(
                 actual_root_cause_id=run.root_cause_id,
                 expected_confidence=fixture.expected_confidence,
                 actual_confidence=run.confidence,
+                expected_freshness_status=fixture.expected_freshness_status,
+                actual_freshness_status=run.freshness_status,
                 expected_evidence_refs=fixture.required_evidence_refs,
                 actual_evidence_refs=run.evidence_refs,
             )
@@ -236,6 +263,7 @@ def evaluate_no_codebase_diagnoses(
         root_cause_accuracy=_ratio(complete_passed, len(complete_fixtures)),
         insufficient_accuracy=_ratio(insufficient_passed, len(insufficient_fixtures)),
         evidence_ref_coverage=_ratio(evidence_hits, evidence_checks),
+        freshness_coverage=_ratio(freshness_hits, freshness_checks),
         tool_coverage=_ratio(tool_hits, tool_checks),
         persistence_coverage=_ratio(persistence_hits, persistence_checks),
         no_codebase_violations=tuple(violations),
@@ -249,6 +277,7 @@ def _fixture_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisFixture
         title=str(data.get("title") or data["id"]),
         expected_root_cause_id=_optional_str(data.get("expected_root_cause_id")),
         expected_confidence=str(data["expected_confidence"]),
+        expected_freshness_status=str(data.get("expected_freshness_status") or ""),
         required_evidence_refs=tuple(_string_values(data.get("required_evidence_refs", []))),
         required_tool_calls=tuple(_string_values(data.get("required_tool_calls", []))),
         expected_missing_evidence=tuple(_string_values(data.get("expected_missing_evidence", []))),
@@ -261,6 +290,7 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
         fixture_id=str(data["fixture_id"]),
         root_cause_id=_optional_str(data.get("root_cause_id")),
         confidence=str(data.get("confidence") or ""),
+        freshness_status=str(data.get("freshness_status") or ""),
         evidence_refs=tuple(_evidence_refs(data.get("evidence_refs", []))),
         tool_calls=tuple(_tool_names(data.get("tool_calls", []))),
         missing_evidence=tuple(_string_values(data.get("missing_evidence", []))),
@@ -326,4 +356,3 @@ def _ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 1.0
     return round(numerator / denominator, 4)
-

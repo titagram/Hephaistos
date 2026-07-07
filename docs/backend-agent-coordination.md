@@ -2472,3 +2472,34 @@ Resta fuori da questa tranche:
   references.
 - Query builder avanzato oltre a table/from/join e principali Eloquent static
   query calls.
+
+## Esecuzione no-codebase freshness eval Hades - 2026-07-07
+
+Stato: completata una tranche P0-7 locale del piano "Bug Root Cause Awareness".
+
+Agent locale:
+
+- `hades_no_codebase_eval` ora valuta anche `freshness_status` per ogni run.
+- I casi high/medium falliscono se la freshness non e' `current`, anche quando
+  root cause ed evidence refs sono presenti.
+- La fixture canonica `tests/fixtures/hades/no_codebase_bug_cases.json` include
+  expected/run freshness: i 5 casi completi sono `current`, il caso missing
+  source slice resta `current`, il caso stale graph e' `stale`.
+- `hades_quality_report` espone `freshness_coverage` e produce il blocker
+  `repair_freshness_coverage` quando un run preciso usa evidence stale o la
+  freshness non corrisponde alla fixture.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `8 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_no_codebase_eval.py hermes_cli/hades_quality_report.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato; `py_compile hermes_cli/hades_no_codebase_eval.py
+  hermes_cli/hades_quality_report.py` passato.
+
+Resta fuori da questa tranche:
+
+- Feature tests remoti no-codebase con SQLite in-memory.
+- CI workflow dedicato leggero che esegue quality-report come gate separato.

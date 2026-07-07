@@ -28,6 +28,7 @@ def test_hades_no_codebase_eval_suite_reports_accuracy_and_coverage():
     assert payload["root_cause_accuracy"] == 1.0
     assert payload["insufficient_accuracy"] == 1.0
     assert payload["evidence_ref_coverage"] == 1.0
+    assert payload["freshness_coverage"] == 1.0
     assert payload["tool_coverage"] == 1.0
     assert payload["persistence_coverage"] == 1.0
     assert payload["no_codebase_violations"] == []
@@ -47,6 +48,7 @@ def test_hades_no_codebase_eval_fails_on_source_file_tool_access():
         fixture_id=first.fixture_id,
         root_cause_id=first.root_cause_id,
         confidence=first.confidence,
+        freshness_status=first.freshness_status,
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls + ("read_file",),
         missing_evidence=first.missing_evidence,
@@ -82,6 +84,7 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_evidence_is_missing():
                 fixture_id=run.fixture_id,
                 root_cause_id="rc.guessed.from.memory",
                 confidence="high",
+                freshness_status="current",
                 evidence_refs=run.evidence_refs,
                 tool_calls=run.tool_calls,
                 missing_evidence=(),
@@ -100,3 +103,34 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_evidence_is_missing():
         "missing evidence classification does not match fixture",
     ]
 
+
+def test_hades_no_codebase_eval_blocks_precise_claim_when_freshness_is_stale():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+        load_no_codebase_eval_fixture,
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(FIXTURE_PATH)
+    first = runs[0]
+    runs[0] = NoCodebaseDiagnosisRun(
+        fixture_id=first.fixture_id,
+        root_cause_id=first.root_cause_id,
+        confidence="high",
+        freshness_status="stale",
+        evidence_refs=first.evidence_refs,
+        tool_calls=first.tool_calls,
+        missing_evidence=first.missing_evidence,
+        persisted_report=first.persisted_report,
+    )
+
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+    failed = [result for result in report["results"] if not result["passed"]]
+
+    assert report["status"] == "failed"
+    assert report["freshness_coverage"] < 1.0
+    assert failed[0]["fixture_id"] == "laravel_service_dependency_null"
+    assert failed[0]["failures"] == [
+        "freshness status mismatch",
+        "precise diagnosis requires current freshness",
+    ]
