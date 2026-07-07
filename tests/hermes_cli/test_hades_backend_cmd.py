@@ -547,6 +547,59 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
     ]
 
 
+def test_backend_support_report_json_redacts_paths_and_secrets(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="a" * 40,
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_error",
+            {"message": f"token=super-secret-token failed while reading {workspace / '.env'}"},
+        )
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="support-report", json=True))
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert rc == 0
+    assert payload["schema"] == "hades.backend_support_report.v1"
+    assert payload["configured"] is True
+    assert payload["agent"]["base_url"] == "https://backend.example"
+    assert payload["bindings"][0]["display_path"] == {"present": True, "kind": "absolute_redacted"}
+    assert payload["bindings"][0]["head_commit_short"] == "a" * 12
+    assert payload["sync"]["last_error"]["message"] == "token=*** failed while reading [path]"
+    assert "super-secret-token" not in output
+    assert str(workspace) not in output
+    assert ".env" not in output
+
+
 def test_backend_jobs_json_lists_waiting_jobs(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

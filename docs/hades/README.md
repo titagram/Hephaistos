@@ -42,7 +42,7 @@ Run:
 
 ```bash
 hades doctor
-hades backend status --json
+hades backend support-report --json
 hades backend sync
 ```
 

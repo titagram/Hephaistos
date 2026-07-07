@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from hermes_cli import hades_backend_db as db
 from hermes_cli.config import load_config
+from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_backend_sync import BACKGROUND_SYNC_STATE_KEY
+
+ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:/])(?:/[^\s,;:]+)+")
+WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
 
 
 def load_backend_status_payload() -> dict[str, Any]:
@@ -64,6 +69,92 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_error_updated_at=last_error_updated_at,
         background_sync_updated_at=background_sync_updated_at,
     )
+
+
+def support_report_payload(status: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a token-free, source-free report suitable for support tickets."""
+    payload = status if status is not None else load_backend_status_payload()
+    agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else None
+    bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
+    sync = payload.get("sync") if isinstance(payload.get("sync"), dict) else {}
+    last_error = sync.get("last_error") if isinstance(sync.get("last_error"), dict) else None
+    background = sync.get("background") if isinstance(sync.get("background"), dict) else None
+    return {
+        "schema": "hades.backend_support_report.v1",
+        "configured": bool(payload.get("configured")),
+        "degraded": bool(payload.get("degraded")),
+        "agent": None if agent is None else {
+            "project_id": agent.get("project_id"),
+            "agent_id": agent.get("agent_id"),
+            "label": agent.get("label"),
+            "base_url": _safe_text(agent.get("base_url")),
+            "capabilities": sorted((agent.get("capabilities") or {}).keys())
+            if isinstance(agent.get("capabilities"), dict)
+            else [],
+        },
+        "awareness": payload.get("awareness") if isinstance(payload.get("awareness"), dict) else {},
+        "bindings": [_support_binding(binding) for binding in bindings if isinstance(binding, dict)],
+        "job_counts": payload.get("job_counts") if isinstance(payload.get("job_counts"), dict) else {},
+        "proposal_counts": payload.get("proposal_counts") if isinstance(payload.get("proposal_counts"), dict) else {},
+        "inbox_counts": payload.get("inbox_counts") if isinstance(payload.get("inbox_counts"), dict) else {},
+        "sync": {
+            "last_summary": _numeric_summary(sync.get("last_summary")),
+            "last_summary_updated_at": sync.get("last_summary_updated_at"),
+            "last_error": None if last_error is None else {
+                "present": True,
+                "project_id": last_error.get("project_id"),
+                "workspace_binding_id": last_error.get("workspace_binding_id"),
+                "message": _safe_text(last_error.get("message")),
+            },
+            "last_error_updated_at": sync.get("last_error_updated_at"),
+            "background": None if background is None else {
+                "status": background.get("status"),
+                "failure_count": background.get("failure_count"),
+                "next_attempt_at": background.get("next_attempt_at"),
+                "exit_code": background.get("exit_code"),
+            },
+        },
+        "actions": [_safe_text(action) for action in payload.get("actions", []) if isinstance(action, str)],
+    }
+
+
+def _support_binding(binding: dict[str, Any]) -> dict[str, Any]:
+    head_commit = str(binding.get("head_commit") or "")
+    return {
+        "workspace_binding_id": binding.get("workspace_binding_id"),
+        "project_id": binding.get("project_id"),
+        "local_project_id": binding.get("local_project_id"),
+        "status": binding.get("status"),
+        "head_commit_short": head_commit[:12] if head_commit else None,
+        "display_path": _path_shape(binding.get("display_path")),
+        "awareness": binding.get("awareness") if isinstance(binding.get("awareness"), dict) else {},
+    }
+
+
+def _numeric_summary(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, item in value.items():
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            result[str(key)] = item
+    return result
+
+
+def _path_shape(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    return {
+        "present": bool(text),
+        "kind": "home_relative" if text.startswith("~/") else ("absolute_redacted" if Path(text).is_absolute() else "relative_or_label"),
+    }
+
+
+def _safe_text(value: Any) -> str:
+    redacted = redact_secret(value)
+    redacted = WINDOWS_PATH_RE.sub("[path]", redacted)
+    return ABSOLUTE_PATH_RE.sub("[path]", redacted)
 
 
 def backend_status_payload(

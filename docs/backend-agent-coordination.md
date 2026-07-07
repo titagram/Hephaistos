@@ -2239,3 +2239,29 @@ Resta fuori da questa tranche:
 - Indexing incrementale file-level invece di rigenerare graph/tree completi.
 - Compressione payload artifact e benchmark dataset medio/grande.
 - Retention/cleanup dedicata delle chiavi cache di workspace non piu' linkati.
+
+## Esecuzione support runbook Hades - 2026-07-07
+
+Stato: completata la prima tranche locale P2-4 del piano "Documentation,
+Runbooks And Support".
+
+Agent locale:
+
+- Nuovo comando `hades backend support-report [--json]`.
+- Il report usa lo stato locale backend ma rimuove path assoluti, non include
+  raw source/job payloads/token e redige segreti probabili nei messaggi errore.
+- Il payload `hades.backend_support_report.v1` conserva setup, sync, awareness,
+  binding readiness, azioni consigliate e contatori necessari al supporto.
+- I runbook indicano `support-report --json` come evidenza preferita per ticket,
+  lasciando `status --json` al debugging locale.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py::test_backend_support_report_json_redacts_paths_and_secrets`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Guida end-to-end specifica per no-codebase diagnosis su un bug reale.
+- Export evidence pack completo e firmato per support escalation.

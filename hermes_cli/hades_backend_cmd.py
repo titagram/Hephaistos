@@ -22,7 +22,7 @@ from hermes_cli.hades_backend_actions import (
     refuse_backend_job,
 )
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
-from hermes_cli.hades_backend_status import load_backend_status_payload
+from hermes_cli.hades_backend_status import load_backend_status_payload, support_report_payload
 from hermes_cli import hades_backend_db as db
 
 
@@ -55,6 +55,8 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
 
     status = sub.add_parser("status", help="Show backend registration status")
     status.add_argument("--json", action="store_true", help="Emit machine-readable status JSON")
+    support_report = sub.add_parser("support-report", help="Emit a redacted backend support report")
+    support_report.add_argument("--json", action="store_true", help="Emit machine-readable support report JSON")
     profiles = sub.add_parser("profiles", help="Show curated local-only Hades coordination profiles")
     profiles.add_argument("--json", action="store_true", help="Emit machine-readable profile JSON")
     worker = sub.add_parser("worker", help="Process one batch of local plugin work items")
@@ -237,6 +239,22 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
         print(f"    Selector:      {routing.get('selector', 'local')}")
         print(f"    Budget:        {budget.get('max_turns', '?')} turns / {budget.get('max_runtime_seconds', '?')}s")
         print(f"    Toolsets:      {', '.join(str(item) for item in toolsets)}")
+    return 0
+
+
+def _cmd_support_report(args: argparse.Namespace) -> int:
+    report = support_report_payload()
+    if getattr(args, "json", False):
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    print("Hades backend support report")
+    print(f"  Configured: {report['configured']}")
+    print(f"  Degraded:   {report['degraded']}")
+    awareness = report.get("awareness") if isinstance(report.get("awareness"), dict) else {}
+    print(f"  Awareness:  {awareness.get('status', 'unknown')}")
+    print(f"  Bindings:   {len(report.get('bindings') or [])}")
+    for action in report.get("actions") or []:
+        print(f"  Action:     {action}")
     return 0
 
 
@@ -902,6 +920,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_bootstrap(args)
     if action == "status":
         return _cmd_status(args)
+    if action == "support-report":
+        return _cmd_support_report(args)
     if action == "profiles":
         return _cmd_profiles(args)
     if action == "worker":
@@ -927,7 +947,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
         file=sys.stderr,
     )
     return 0

@@ -177,12 +177,15 @@ bootstrap command for a test project. Then run:
 
 ```bash
 hades backend status --json
+hades backend support-report --json
 hades backend sync
 hades doctor --report-backend
 ```
 
-Do not paste project bootstrap tokens, derived agent tokens, raw job payloads,
-or local absolute paths into logs or support tickets.
+Use `support-report` for tickets; it keeps backend status, awareness, sync, and
+action fields while redacting local absolute paths and likely secrets. Do not
+paste project bootstrap tokens, derived agent tokens, raw job payloads, or local
+absolute paths into logs or support tickets.
 
 ## Note Backfill
 
