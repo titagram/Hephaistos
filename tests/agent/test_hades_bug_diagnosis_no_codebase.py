@@ -114,6 +114,128 @@ def test_hades_no_codebase_eval_detects_namespaced_real_trajectory_tool_shapes(t
     ]
 
 
+def test_hades_no_codebase_eval_loads_sharegpt_trajectory_runs(tmp_path):
+    from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
+
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "conversations": [
+                    {"from": "system", "value": "tools available"},
+                    {"from": "human", "value": "Diagnose BUG-1 in no-codebase mode."},
+                    {
+                        "from": "gpt",
+                        "value": "\n".join(
+                            [
+                                "<tool_call>",
+                                json.dumps({"name": "hades_backend_project_awareness_status", "arguments": {}}),
+                                "</tool_call>",
+                                "<tool_call>",
+                                json.dumps({"name": "hades_backend_bug_evidence_search", "arguments": {"query": "BUG-1"}}),
+                                "</tool_call>",
+                            ]
+                        ),
+                    },
+                    {"from": "tool", "value": "<tool_response>{}</tool_response>"},
+                    {
+                        "from": "gpt",
+                        "value": "\n".join(
+                            [
+                                "<tool_call>",
+                                json.dumps({"name": "hades_backend_graph_search", "arguments": {"query": "OrderController"}}),
+                                "</tool_call>",
+                                "<tool_call>",
+                                json.dumps(
+                                    {
+                                        "name": "hades_backend_source_slice_fetch",
+                                        "arguments": {"source_slice_id": "slice.order_controller.show"},
+                                    }
+                                ),
+                                "</tool_call>",
+                                "<tool_call>",
+                                json.dumps(
+                                    {
+                                        "name": "hades_backend_diagnosis_report_create",
+                                        "arguments": {
+                                            "root_cause": "rc.trajectory.order_customer_null",
+                                            "confidence": "high",
+                                            "evidence_refs": [
+                                                {"type": "bug_evidence", "id": "ev.order.stack"},
+                                                {"type": "source_slice", "id": "slice.order_controller.show"},
+                                            ],
+                                            "freshness": {"status": "current"},
+                                            "awareness": {"diagnosable_without_source": True},
+                                        },
+                                    }
+                                ),
+                                "</tool_call>",
+                            ]
+                        ),
+                    },
+                    {
+                        "from": "gpt",
+                        "value": json.dumps(
+                            {
+                                "root_cause_id": "rc.trajectory.order_customer_null",
+                                "confidence": "high",
+                                "freshness": {"status": "current"},
+                                "awareness": {"diagnosable_without_source": True},
+                                "evidence_refs": [
+                                    "bug_evidence:ev.order.stack",
+                                    "source_slice:slice.order_controller.show",
+                                ],
+                            }
+                        ),
+                    },
+                ],
+                "completed": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "schema": "hades.no_codebase_eval.v1",
+                "fixtures": [
+                    {
+                        "id": "trajectory_case",
+                        "title": "Trajectory case",
+                        "expected_root_cause_id": "rc.trajectory.order_customer_null",
+                        "expected_confidence": "high",
+                        "expected_freshness_status": "current",
+                        "expected_diagnosable_without_source": True,
+                        "required_evidence_refs": [
+                            "bug_evidence:ev.order.stack",
+                            "source_slice:slice.order_controller.show",
+                        ],
+                        "required_tool_calls": [
+                            "hades_backend_project_awareness_status",
+                            "hades_backend_bug_evidence_search",
+                            "hades_backend_graph_search",
+                            "hades_backend_source_slice_fetch",
+                            "hades_backend_diagnosis_report_create",
+                        ],
+                    }
+                ],
+                "trajectory_runs": [{"fixture_id": "trajectory_case", "trajectory_path": "trajectory.jsonl"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(eval_file)
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+
+    assert report["status"] == "passed"
+    assert report["total"] == 1
+    assert report["tool_order_coverage"] == 1.0
+    assert report["persistence_coverage"] == 1.0
+
+
 def test_hades_no_codebase_eval_fails_when_hades_tools_are_out_of_order():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisRun,

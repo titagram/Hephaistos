@@ -185,6 +185,78 @@ def test_backend_quality_report_command_emits_json_for_fixture(monkeypatch, tmp_
     assert payload["action_queue"] == []
 
 
+def test_backend_quality_report_command_accepts_trajectory_runs(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "conversations": [
+                    {"from": "human", "value": "Diagnose without source."},
+                    {
+                        "from": "gpt",
+                        "value": "\n".join(
+                            [
+                                "<tool_call>",
+                                json.dumps({"name": "hades_backend_project_awareness_status", "arguments": {}}),
+                                "</tool_call>",
+                            ]
+                        ),
+                    },
+                    {
+                        "from": "gpt",
+                        "value": json.dumps(
+                            {
+                                "confidence": "insufficient",
+                                "missing_evidence": ["source_slice"],
+                            }
+                        ),
+                    },
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "schema": "hades.no_codebase_eval.v1",
+                "fixtures": [
+                    {
+                        "id": "trajectory_insufficient",
+                        "expected_root_cause_id": None,
+                        "expected_confidence": "insufficient",
+                        "required_tool_calls": ["hades_backend_project_awareness_status"],
+                        "expected_missing_evidence": ["source_slice"],
+                        "requires_persisted_report": False,
+                    }
+                ],
+                "trajectory_runs": [{"fixture_id": "trajectory_insufficient", "trajectory_path": "trajectory.jsonl"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import hermes_cli.hades_backend_cmd as cmd
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(eval_file),
+            skip_local_status=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["status"] == "passed"
+    assert payload["metrics"]["no_codebase"]["total"] == 1
+    assert payload["metrics"]["no_codebase"]["tool_coverage"] == 1.0
+
+
 def test_backend_quality_report_command_records_latest_snapshot(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

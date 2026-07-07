@@ -4419,8 +4419,38 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Ingestione automatica di trajectory JSON reali da sessioni/agent run; questa
-  tranche rafforza il parser/gate usato dalla fixture loader esistente.
+- Collegamento automatico dal database sessioni al file eval; i trajectory run
+  reali sono supportati nella fixture, ma vanno ancora referenziati nel JSON.
+
+## Esecuzione no-codebase trajectory-runs quality gate - 2026-07-07
+
+Stato: completata una tranche locale P0-7/P0-6.
+
+Agent locale:
+
+- `load_no_codebase_eval_fixture` supporta ora `trajectory_runs` oltre a
+  `runs`, con path relativo al file eval verso `.json` o `.jsonl` di trajectory
+  salvate.
+- Il loader normalizza ShareGPT `<tool_call>` e shape OpenAI `tool_calls` /
+  `function_call`, estrae il JSON finale della diagnosi e ricava confidence,
+  root cause, evidence refs, freshness, awareness e persistence.
+- `hades backend quality-report --no-codebase-eval <file>` puo' quindi
+  valutare run agent reali senza trascrivere a mano ogni tool call.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `19 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_no_codebase_eval.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato; `py_compile` sugli stessi file passato.
+
+Resta fuori da questa tranche:
+
+- Discovery automatica dei file trajectory da session id o cartella; il gate
+  accetta path espliciti nel JSON eval per mantenere ripetibilita' e scope
+  chiaro.
 
 ## Esecuzione no-codebase feature test backend - 2026-07-07
 

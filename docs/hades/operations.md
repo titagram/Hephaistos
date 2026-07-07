@@ -258,6 +258,9 @@ diagnosis reports, forbidden source-access tool use, and diagnosis freshness
 coverage plus source-free awareness coverage. Local awareness/support status is
 included when enabled. Causal quality, stale precise-claim, undiagnosable
 awareness, or privacy regressions are blockers; local setup gaps are warnings.
+The `--no-codebase-eval` file may contain normalized `runs` or `trajectory_runs`
+that point to saved `.json`/`.jsonl` trajectories, so release gates can evaluate
+real agent runs without hand-transcribing every tool call.
 Use the dashboard `Diagnosis quality` panel for the current workspace snapshot;
 use `quality-report` for release gates and periodic governance. Add `--record`
 when running the report from an audit job so `hades backend status --json` and

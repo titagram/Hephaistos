@@ -143,6 +143,12 @@ hades backend schedule-quality \
   --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json
 ```
 
+The eval JSON can include normalized `runs` or `trajectory_runs` entries that
+point to saved `.json`/`.jsonl` trajectories. Trajectory runs are parsed for
+ShareGPT `<tool_call>` blocks, OpenAI-style tool calls, final diagnosis JSON,
+forbidden source/file/shell tool use, evidence refs, freshness, awareness, and
+diagnosis persistence.
+
 The quality report records blocker/warning actions locally. A failed report
 should block claims that the project is ready for source-free diagnosis.
 

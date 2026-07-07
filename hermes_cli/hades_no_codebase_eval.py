@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -25,6 +26,9 @@ FORBIDDEN_NO_CODEBASE_TOOLS = {
     "terminal",
     "view_file",
 }
+
+TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -142,9 +146,11 @@ def load_no_codebase_eval_fixture(path: str | Path) -> tuple[
     list[NoCodebaseDiagnosisFixture],
     list[NoCodebaseDiagnosisRun],
 ]:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    fixture_path = Path(path)
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
     fixtures = [_fixture_from_mapping(item) for item in data.get("fixtures", [])]
     runs = [_run_from_mapping(item) for item in data.get("runs", [])]
+    runs.extend(_trajectory_run_from_mapping(item, base_dir=fixture_path.parent) for item in data.get("trajectory_runs", []))
     return fixtures, runs
 
 
@@ -336,6 +342,183 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
         missing_evidence=tuple(_string_values(data.get("missing_evidence", []))),
         persisted_report=bool(data.get("persisted_report", False)),
     )
+
+
+def _trajectory_run_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> NoCodebaseDiagnosisRun:
+    fixture_id = str(data["fixture_id"])
+    trajectory_path = data.get("trajectory_path") or data.get("path")
+    if not trajectory_path:
+        raise ValueError(f"trajectory_runs entry for {fixture_id} is missing trajectory_path")
+    path = Path(str(trajectory_path)).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    entry = _load_trajectory_entry(path, index=data.get("index"))
+    conversations = _trajectory_conversations(entry)
+    tool_calls = _trajectory_tool_calls(conversations)
+    final_payload = _trajectory_final_payload(conversations)
+    diagnosis_args = _last_tool_arguments(tool_calls, "hades_backend_diagnosis_report_create")
+    freshness = _mapping_value(final_payload.get("freshness")) or _mapping_value(diagnosis_args.get("freshness"))
+    awareness = _mapping_value(final_payload.get("awareness")) or _mapping_value(diagnosis_args.get("awareness"))
+    confidence = final_payload.get("confidence") or diagnosis_args.get("confidence") or ""
+    evidence_refs = final_payload.get("evidence_refs")
+    if evidence_refs is None:
+        evidence_refs = diagnosis_args.get("evidence_refs", [])
+    persisted_report = data.get("persisted_report")
+    if persisted_report is None:
+        persisted_report = bool(diagnosis_args)
+    return NoCodebaseDiagnosisRun(
+        fixture_id=fixture_id,
+        root_cause_id=_optional_str(
+            final_payload.get("root_cause_id")
+            or diagnosis_args.get("root_cause_id")
+            or final_payload.get("root_cause")
+            or diagnosis_args.get("root_cause")
+        ),
+        confidence=str(confidence or ""),
+        freshness_status=str(final_payload.get("freshness_status") or freshness.get("status") or ""),
+        diagnosable_without_source=_optional_bool(
+            final_payload.get("diagnosable_without_source") if "diagnosable_without_source" in final_payload else awareness.get("diagnosable_without_source")
+        ),
+        evidence_refs=tuple(_evidence_refs(evidence_refs if isinstance(evidence_refs, Iterable) and not isinstance(evidence_refs, (str, bytes)) else [])),
+        tool_calls=tuple(name for name, _args in tool_calls),
+        missing_evidence=tuple(_string_values(final_payload.get("missing_evidence", []))),
+        persisted_report=bool(persisted_report),
+    )
+
+
+def _load_trajectory_entry(path: Path, *, index: Any = None) -> Any:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".jsonl":
+        entries = [json.loads(line) for line in text.splitlines() if line.strip()]
+        if not entries:
+            raise ValueError(f"trajectory file is empty: {path}")
+        selected = int(index) if index is not None else -1
+        return entries[selected]
+    return json.loads(text)
+
+
+def _trajectory_conversations(entry: Any) -> list[Mapping[str, Any]]:
+    if isinstance(entry, list):
+        raw = entry
+    elif isinstance(entry, Mapping):
+        raw = entry.get("conversations") or entry.get("messages") or entry.get("trajectory") or []
+    else:
+        raw = []
+    return [item for item in raw if isinstance(item, Mapping)]
+
+
+def _trajectory_tool_calls(conversations: Sequence[Mapping[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for message in conversations:
+        raw_tool_calls = message.get("tool_calls")
+        if isinstance(raw_tool_calls, Iterable) and not isinstance(raw_tool_calls, (str, bytes, Mapping)):
+            for raw_call in raw_tool_calls:
+                call = _tool_call_from_mapping(raw_call)
+                if call is not None:
+                    calls.append(call)
+        function_call = message.get("function_call")
+        if isinstance(function_call, Mapping):
+            call = _tool_call_from_mapping(function_call)
+            if call is not None:
+                calls.append(call)
+        content = _message_text(message)
+        if content:
+            calls.extend(_tool_calls_from_text(content))
+    return calls
+
+
+def _tool_call_from_mapping(value: Any) -> tuple[str, dict[str, Any]] | None:
+    if not isinstance(value, Mapping):
+        return None
+    function = value.get("function")
+    function_args = function.get("arguments") if isinstance(function, Mapping) else None
+    raw_args = value.get("arguments", function_args)
+    name = value.get("name") or value.get("tool") or value.get("tool_name") or value.get("recipient_name")
+    if not name and isinstance(function, Mapping):
+        name = function.get("name")
+    text = str(name or "").strip()
+    if not text:
+        return None
+    return text, _json_object(raw_args)
+
+
+def _tool_calls_from_text(value: str) -> list[tuple[str, dict[str, Any]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for match in TOOL_CALL_RE.finditer(value):
+        payload = _json_object(match.group(1))
+        call = _tool_call_from_mapping(payload)
+        if call is not None:
+            calls.append(call)
+    return calls
+
+
+def _trajectory_final_payload(conversations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    for message in reversed(conversations):
+        role = str(message.get("role") or message.get("from") or "").lower()
+        if role not in {"assistant", "gpt"}:
+            continue
+        payload = _json_object(_strip_trajectory_markup(_message_text(message)))
+        if payload:
+            return payload
+    return {}
+
+
+def _last_tool_arguments(tool_calls: Sequence[tuple[str, dict[str, Any]]], tool_name: str) -> dict[str, Any]:
+    for name, args in reversed(tool_calls):
+        if name == tool_name:
+            return args
+    return {}
+
+
+def _message_text(message: Mapping[str, Any]) -> str:
+    value = message.get("value")
+    if value is None:
+        value = message.get("content")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for part in value:
+            if isinstance(part, Mapping):
+                text = part.get("text") or part.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return ""
+
+
+def _strip_trajectory_markup(value: str) -> str:
+    stripped = THINK_RE.sub("", value)
+    stripped = TOOL_CALL_RE.sub("", stripped)
+    return stripped.strip()
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            parsed = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _mapping_value(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _optional_str(value: Any) -> str | None:
