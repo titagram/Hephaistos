@@ -123,7 +123,9 @@ and the graph artifact HEAD commit.
 The local agent exposes this through `hades_backend_graph_traverse`. Use it
 after bug evidence identifies an entrypoint and before source-slice fetch when
 the diagnosis needs route -> controller -> service/model context without local
-source access.
+source access. When the live backend call is unavailable, the provider can fall
+back to synced local graph artifacts; fallback responses are explicitly marked
+as cached and should not be treated as fresh/live evidence.
 
 ## Status
 

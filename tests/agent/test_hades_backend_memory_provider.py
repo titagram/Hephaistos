@@ -52,6 +52,90 @@ def _create_linked_provider(monkeypatch, tmp_path, *, items=None):
     return provider
 
 
+def _php_graph_artifact():
+    return {
+        "schema": "hades.php_graph.v1",
+        "head_commit": "abc123",
+        "workspace_head_commit": "abc123",
+        "routes": [
+            {
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "name": "orders.show",
+                "handler": "OrderController@show",
+                "path": "routes/web.php",
+                "line": 4,
+            }
+        ],
+        "symbols": [
+            {
+                "kind": "method",
+                "name": "OrderController@show",
+                "class": "App\\Http\\Controllers\\OrderController",
+                "method": "show",
+                "role": "controller",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 41,
+            },
+            {
+                "kind": "blade_view",
+                "name": "view:orders.show",
+                "view": "orders.show",
+                "role": "blade_view",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_view",
+                "name": "view:layouts.app",
+                "view": "layouts.app",
+                "role": "blade_view",
+                "path": "resources/views/layouts/app.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component",
+                "name": "component:alert",
+                "component": "alert",
+                "role": "blade_component",
+                "path": "resources/views/components/alert.blade.php",
+                "line": 1,
+            },
+        ],
+        "edges": [
+            {
+                "kind": "route_handler",
+                "from": "route:orders.show",
+                "to": "OrderController@show",
+                "path": "routes/web.php",
+                "line": 4,
+            },
+            {
+                "kind": "view_ref",
+                "from": "OrderController@show",
+                "to": "view:orders.show",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 45,
+            },
+            {
+                "kind": "blade_extends",
+                "from": "view:orders.show",
+                "to": "view:layouts.app",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component",
+                "from": "view:orders.show",
+                "to": "component:alert",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 4,
+            },
+        ],
+        "raw_source_included": False,
+    }
+
+
 def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypatch, tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_backend_runtime import workspace_fingerprint
@@ -618,6 +702,58 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
     ]
     assert fake.closed == 1
     assert timeouts == [1.0]
+
+
+def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "route:orders.show", "direction": "out", "max_depth": 3, "limit": 20},
+        )
+    )
+
+    node_ids = {node["id"] for node in result["nodes"]}
+    edge_kinds = {edge["kind"] for edge in result["edges"]}
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert result["artifact_id"] == "artifact_1"
+    assert result["schema"] == "hades.php_graph.v1"
+    assert result["freshness"]["status"] == "cached"
+    assert result["freshness"]["index_status"] == "local_graph_cache"
+    assert result["backend_live_error"] == "backend offline"
+    assert result["match_fields"] == ["id"]
+    assert {
+        "route:orders.show",
+        "OrderController@show",
+        "view:orders.show",
+        "view:layouts.app",
+        "component:alert",
+    } <= node_ids
+    assert {"route_handler", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
+    assert result["provenance"]["artifacts"][0]["origin"] == "memory_cache"
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import json
 import os
 import re
@@ -77,6 +78,7 @@ DOMAIN_ALIASES = {
     "wiki_revision": "wiki",
 }
 SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks", "artifacts")
+GRAPH_ARTIFACT_SCHEMAS = {"hades.php_graph.v1", "hades.code_graph.v1"}
 BUG_EVIDENCE_KINDS = (
     "all",
     "stack_trace",
@@ -229,7 +231,8 @@ GRAPH_TRAVERSE_TOOL_SCHEMA: Dict[str, Any] = {
         "symbol, file, class, or method. Use this after bug evidence points to "
         "an entrypoint and before source slice fetch when you need bounded "
         "route -> controller -> service -> model context without local source "
-        "access. Results are live backend data with freshness and provenance."
+        "access. Results prefer live backend data and fall back to the local "
+        "synced graph cache when the backend is temporarily unavailable."
     ),
     "parameters": {
         "type": "object",
@@ -1203,6 +1206,19 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if backend_result is not None:
             return tool_result(_tool_result_from_backend_graph_traverse(backend_result))
 
+        local_result = self._local_graph_traverse(
+            start=start,
+            direction=direction,
+            max_depth=max_depth,
+            limit=limit,
+        )
+        if local_result is not None:
+            local_result["project_id"] = self._binding.project_id
+            local_result["workspace_binding_id"] = self._binding.backend_workspace_binding_id
+            if backend_error:
+                local_result["backend_live_error"] = backend_error
+            return tool_result(local_result)
+
         result = {
             "status": "backend_unavailable",
             "project_id": self._binding.project_id,
@@ -1215,6 +1231,51 @@ class HadesBackendMemoryProvider(MemoryProvider):
         if backend_error:
             result["backend_live_error"] = backend_error
         return tool_result(result)
+
+    def _local_graph_traverse(
+        self,
+        *,
+        start: str,
+        direction: str,
+        max_depth: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        if self._binding is None:
+            return None
+
+        sources: list[dict[str, Any]] = []
+        cache = self._load_memory_cache()
+        if cache is not None:
+            for item in cache.items:
+                sources.append(
+                    {
+                        "origin": "memory_cache",
+                        "cache_version": cache.version,
+                        "cache_updated_at": cache.updated_at,
+                        "item": item,
+                    }
+                )
+
+        with db.connect_closing() as conn:
+            jobs = db.list_jobs(conn, statuses=["completed"])
+        for job in reversed(jobs):
+            if job.workspace_binding_id != self._binding.backend_workspace_binding_id or not job.result:
+                continue
+            sources.append(
+                {
+                    "origin": "backend_job",
+                    "job_id": job.job_id,
+                    "item": job.result,
+                }
+            )
+
+        return _local_graph_traverse_response(
+            sources,
+            start=start,
+            direction=direction,
+            max_depth=max_depth,
+            limit=limit,
+        )
 
     def _handle_bug_evidence_search(self, args: Dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()
@@ -2145,6 +2206,412 @@ def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[s
     if isinstance(freshness, dict):
         result["freshness"] = freshness
     return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _iter_graph_candidates(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if not isinstance(value, dict) or depth > 2:
+        return []
+    candidates = [value]
+    for key in ("artifact", "payload", "result"):
+        child = value.get(key)
+        if isinstance(child, dict):
+            candidates.extend(_iter_graph_candidates(child, depth=depth + 1))
+    return candidates
+
+
+def _graph_artifact_from_source(source: dict[str, Any]) -> dict[str, Any] | None:
+    item = source.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_schema = _item_schema(item)
+    for candidate in _iter_graph_candidates(item):
+        graph = dict(candidate)
+        schema = str(graph.get("schema") or item_schema or "").strip()
+        if schema not in GRAPH_ARTIFACT_SCHEMAS:
+            continue
+        if not any(isinstance(graph.get(key), list) for key in ("routes", "symbols", "edges")):
+            continue
+        graph["schema"] = schema
+        return graph
+    return None
+
+
+def _local_graph_artifacts(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    seen_schemas: set[str] = set()
+    for source in sources:
+        graph = _graph_artifact_from_source(source)
+        if graph is None:
+            continue
+        schema = str(graph.get("schema") or "")
+        if schema in seen_schemas:
+            continue
+        seen_schemas.add(schema)
+        artifact_id = _item_id(source.get("item") if isinstance(source.get("item"), dict) else {})
+        if not artifact_id:
+            artifact_id = str(source.get("job_id") or schema)
+        artifacts.append(
+            {
+                "artifact": graph,
+                "artifact_id": artifact_id,
+                "origin": source.get("origin"),
+                "cache_version": source.get("cache_version"),
+                "cache_updated_at": source.get("cache_updated_at"),
+                "job_id": source.get("job_id"),
+            }
+        )
+    return artifacts
+
+
+def _local_graph_node_kind(node_id: str) -> str:
+    if node_id.startswith("route:"):
+        return "route"
+    if node_id.startswith("table:"):
+        return "database_table"
+    if node_id.startswith("view:"):
+        return "blade_view"
+    if node_id.startswith("component:"):
+        return "blade_component"
+    if node_id.startswith("livewire:"):
+        return "livewire_component"
+    if node_id.startswith("middleware:"):
+        return "middleware"
+    if node_id.startswith("config:"):
+        return "config"
+    if node_id.startswith("env:"):
+        return "env"
+    return "symbol"
+
+
+def _local_graph_add_node(
+    nodes: dict[str, dict[str, Any]],
+    node_id: Any,
+    *,
+    kind: str,
+    label: Any = "",
+    path: Any = "",
+    attributes: dict[str, Any] | None = None,
+) -> None:
+    clean_id = _compact_text(node_id, max_chars=500)
+    if not clean_id or clean_id in nodes:
+        return
+    attrs = {key: value for key, value in (attributes or {}).items() if value not in ("", None, [], {})}
+    node = {
+        "id": clean_id,
+        "kind": _compact_text(kind, max_chars=100),
+        "label": _compact_text(label or clean_id, max_chars=500),
+        "path": _compact_text(path, max_chars=500),
+        "attributes": _bounded_payload(attrs),
+    }
+    nodes[clean_id] = {key: value for key, value in node.items() if value not in ("", None, {})}
+
+
+def _local_graph_route_id(route: dict[str, Any]) -> str:
+    name = str(route.get("name") or "").strip()
+    if name:
+        return f"route:{name}"
+    method_uri = f"{route.get('method', '')} {route.get('uri', '')}".strip()
+    return f"route:{method_uri}" if method_uri else ""
+
+
+def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    seen_edges: set[tuple[str, str, str, str, str]] = set()
+
+    for artifact_source in artifacts:
+        graph = artifact_source["artifact"]
+        schema = str(graph.get("schema") or "")
+        artifact_id = str(artifact_source.get("artifact_id") or schema)
+
+        for route in graph.get("routes") or []:
+            if not isinstance(route, dict):
+                continue
+            node_id = _local_graph_route_id(route)
+            _local_graph_add_node(
+                nodes,
+                node_id,
+                kind="route",
+                label=str(route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}").strip(),
+                path=route.get("path"),
+                attributes={
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "handler": route.get("handler"),
+                    "name": route.get("name"),
+                    "middleware": route.get("middleware"),
+                    "line": route.get("line"),
+                    "schema": schema,
+                    "artifact_id": artifact_id,
+                },
+            )
+
+        for symbol in graph.get("symbols") or []:
+            if not isinstance(symbol, dict):
+                continue
+            node_id = str(symbol.get("name") or "").strip()
+            if not node_id:
+                continue
+            _local_graph_add_node(
+                nodes,
+                node_id,
+                kind=str(symbol.get("kind") or symbol.get("role") or "symbol"),
+                label=symbol.get("short_name") or symbol.get("name"),
+                path=symbol.get("path"),
+                attributes={
+                    key: value
+                    for key, value in symbol.items()
+                    if key not in {"name", "kind", "short_name", "path"}
+                }
+                | {"schema": schema, "artifact_id": artifact_id},
+            )
+
+        database = graph.get("database") if isinstance(graph.get("database"), dict) else {}
+        for table in database.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            table_name = str(table.get("table") or "").strip()
+            if not table_name:
+                continue
+            _local_graph_add_node(
+                nodes,
+                f"table:{table_name}",
+                kind="database_table",
+                label=f"table:{table_name}",
+                path=table.get("path"),
+                attributes={
+                    "columns": table.get("columns"),
+                    "foreign_keys": table.get("foreign_keys"),
+                    "indexes": table.get("indexes"),
+                    "line": table.get("line"),
+                    "schema": schema,
+                    "artifact_id": artifact_id,
+                },
+            )
+
+        for idx, edge in enumerate(graph.get("edges") or []):
+            if not isinstance(edge, dict):
+                continue
+            edge_kind = _compact_text(edge.get("kind"), max_chars=100)
+            edge_from = _compact_text(edge.get("from"), max_chars=500)
+            edge_to = _compact_text(edge.get("to"), max_chars=500)
+            if not edge_kind or not edge_from or not edge_to:
+                continue
+            provenance = {
+                key: value
+                for key, value in edge.items()
+                if key not in {"id", "kind", "from", "to"} and value not in ("", None, [], {})
+            }
+            provenance.update({"schema": schema, "artifact_id": artifact_id})
+            key = (
+                edge_kind,
+                edge_from,
+                edge_to,
+                str(provenance.get("path") or ""),
+                str(provenance.get("line") or ""),
+            )
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            _local_graph_add_node(
+                nodes,
+                edge_from,
+                kind=_local_graph_node_kind(edge_from),
+                label=edge_from,
+                attributes={"schema": schema, "artifact_id": artifact_id},
+            )
+            _local_graph_add_node(
+                nodes,
+                edge_to,
+                kind=_local_graph_node_kind(edge_to),
+                label=edge_to,
+                attributes={"schema": schema, "artifact_id": artifact_id},
+            )
+            edges.append(
+                {
+                    "id": _compact_text(edge.get("id") or f"{artifact_id}:edge:{idx}", max_chars=500),
+                    "kind": edge_kind,
+                    "from": edge_from,
+                    "to": edge_to,
+                    "provenance": _bounded_payload(provenance),
+                }
+            )
+
+    return nodes, edges
+
+
+def _local_graph_match_score(node: dict[str, Any], start: str, tokens: set[str]) -> tuple[int, list[str]]:
+    query = start.strip().lower()
+    if not query:
+        return 0, []
+    node_id = str(node.get("id") or "")
+    label = str(node.get("label") or "")
+    path = str(node.get("path") or "")
+    attributes = node.get("attributes") if isinstance(node.get("attributes"), dict) else {}
+    rendered_attributes = json.dumps(attributes, sort_keys=True, default=str)
+    fields = {
+        "id": node_id,
+        "label": label,
+        "path": path,
+        "attributes": rendered_attributes,
+    }
+    lowered = {key: value.lower() for key, value in fields.items() if value}
+    if lowered.get("id") == query:
+        return 100, ["id"]
+    if lowered.get("id") == f"route:{query}":
+        return 95, ["id"]
+    if lowered.get("label") == query:
+        return 90, ["label"]
+    if lowered.get("path") == query or lowered.get("path", "").endswith(query):
+        return 80, ["path"]
+    for key, value in lowered.items():
+        if query in value:
+            return 50, [key]
+    text = "\n".join(lowered.values())
+    if tokens and all(token in text for token in tokens):
+        return 30, ["tokens"]
+    overlap = sum(1 for token in tokens if token in text)
+    if overlap:
+        return 10 + overlap, ["tokens"]
+    return 0, []
+
+
+def _local_graph_start_matches(
+    nodes: dict[str, dict[str, Any]],
+    *,
+    start: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    tokens = _tokenize(start)
+    scored: list[tuple[int, str, list[str], dict[str, Any]]] = []
+    for node_id, node in nodes.items():
+        score, fields = _local_graph_match_score(node, start, tokens)
+        if score > 0:
+            scored.append((score, node_id, fields, node))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected = scored[:limit]
+    match_fields = list(dict.fromkeys(field for _score, _node_id, fields, _node in selected for field in fields))
+    return [node for _score, _node_id, _fields, node in selected], match_fields, len(scored) > len(selected)
+
+
+def _local_graph_traverse(
+    nodes: dict[str, dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    start_nodes: list[dict[str, Any]],
+    direction: str,
+    max_depth: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    selected_nodes: dict[str, dict[str, Any]] = {}
+    selected_edges: list[dict[str, Any]] = []
+    seen_edges: set[str] = set()
+    queue: deque[tuple[str, int]] = deque()
+
+    for node in start_nodes:
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            continue
+        selected_nodes[node_id] = node
+        queue.append((node_id, 0))
+
+    truncated = len(selected_nodes) > limit
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for edge in edges:
+            edge_id = str(edge.get("id") or f"{edge.get('kind')}:{edge.get('from')}->{edge.get('to')}")
+            edge_from = str(edge.get("from") or "")
+            edge_to = str(edge.get("to") or "")
+            next_node = ""
+            if direction in {"out", "any"} and edge_from == current:
+                next_node = edge_to
+            elif direction in {"in", "any"} and edge_to == current:
+                next_node = edge_from
+            if not next_node:
+                continue
+            if edge_id not in seen_edges:
+                if len(selected_edges) >= limit:
+                    truncated = True
+                    continue
+                selected_edges.append(edge)
+                seen_edges.add(edge_id)
+            if next_node not in selected_nodes and next_node in nodes:
+                if len(selected_nodes) >= limit:
+                    truncated = True
+                    continue
+                selected_nodes[next_node] = nodes[next_node]
+                queue.append((next_node, depth + 1))
+
+    return list(selected_nodes.values())[:limit], selected_edges[:limit], truncated
+
+
+def _local_graph_traverse_response(
+    sources: list[dict[str, Any]],
+    *,
+    start: str,
+    direction: str,
+    max_depth: int,
+    limit: int,
+) -> dict[str, Any] | None:
+    artifacts = _local_graph_artifacts(sources)
+    if not artifacts:
+        return None
+    nodes, edges = _local_graph_build(artifacts)
+    start_nodes, match_fields, match_truncated = _local_graph_start_matches(nodes, start=start, limit=limit)
+    selected_nodes, selected_edges, traverse_truncated = _local_graph_traverse(
+        nodes,
+        edges,
+        start_nodes=start_nodes,
+        direction=direction,
+        max_depth=max_depth,
+        limit=limit,
+    )
+    primary = artifacts[0]
+    graph = primary["artifact"]
+    provenance = {
+        "source": "local_graph_cache",
+        "artifacts": [
+            {
+                "artifact_id": artifact.get("artifact_id"),
+                "schema": artifact["artifact"].get("schema"),
+                "origin": artifact.get("origin"),
+                "cache_version": artifact.get("cache_version"),
+                "cache_updated_at": artifact.get("cache_updated_at"),
+                "job_id": artifact.get("job_id"),
+            }
+            for artifact in artifacts
+        ],
+    }
+    result: dict[str, Any] = {
+        "status": "ok",
+        "searched_cache_only": True,
+        "backend_version": None,
+        "artifact_id": primary.get("artifact_id"),
+        "schema": graph.get("schema"),
+        "head_commit": graph.get("head_commit") or graph.get("workspace_head_commit") or graph.get("indexed_head_commit"),
+        "start": start,
+        "direction": direction,
+        "max_depth": max_depth,
+        "limit": limit,
+        "count": len(selected_nodes),
+        "edge_count": len(selected_edges),
+        "candidate_count": len(start_nodes),
+        "graph_node_count": len(nodes),
+        "graph_edge_count": len(edges),
+        "truncated": match_truncated or traverse_truncated,
+        "match_fields": match_fields,
+        "provenance": _bounded_payload(provenance),
+        "freshness": {
+            "status": "cached",
+            "index_status": "local_graph_cache",
+            "workspace_head_commit": graph.get("workspace_head_commit") or graph.get("head_commit"),
+        },
+        "nodes": selected_nodes,
+        "edges": selected_edges,
+    }
+    return {key: value for key, value in result.items() if value not in ("", None, {})}
 
 
 def _source_slice_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:

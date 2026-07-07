@@ -2746,7 +2746,47 @@ Resta fuori da questa tranche:
 
 - Parser PHP/Laravel AST reale invece di pattern conservativi.
 - Query builder avanzato oltre ai casi gia' coperti.
-- Graph query dedicata per traversal causale su artifact live.
+
+## Esecuzione Hades graph traversal cache fallback - 2026-07-07
+
+Stato: completata una tranche locale P1-3/P0-4 del piano "Bug Root Cause
+Awareness".
+
+Agent locale:
+
+- `hades_backend_graph_traverse` continua a preferire il backend live.
+- Se il backend live fallisce ma esiste un artifact locale
+  `hades.php_graph.v1` o `hades.code_graph.v1` nella memory cache o nei job
+  completati, il provider esegue traversal BFS bounded direttamente sul grafo
+  locale.
+- Il risultato fallback e' marcato esplicitamente con
+  `searched_cache_only=true`, `freshness.status=cached` e
+  `freshness.index_status=local_graph_cache`; non viene presentato come
+  evidenza live/current.
+- Il traversal normalizza route, simboli, tabelle, view Blade, componenti,
+  middleware, config/env e nodi inferiti dagli edge, mantenendo solo metadati,
+  path/linee e provenance.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_traverse_falls_back_to_local_graph_cache`
+  passato: `1 passed`.
+- Locale provider completo:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py`
+  passato: `34 passed`.
+- Locale diagnosis no-codebase:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `5 passed`.
+- Locale lint/compile:
+  `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato con `.venv/bin/ruff`; `py_compile plugins/memory/hades_backend/__init__.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Graph search locale fallback/FTS/rerank dedicato.
+- Freshness deploy-aware distinta dal solo commit indicizzato.
 
 ## Esecuzione Hades memory kind filter - 2026-07-07
 
@@ -2865,8 +2905,9 @@ Agent locale:
   lookup/status/search/traversal a 1 secondo, source-slice fetch a 1.5 secondi,
   write/create/promote a 2 secondi.
 - Restano live-only e senza fallback cache autorevole i tool di bug evidence,
-  graph traversal, source slice, evidence pack, diagnosis report, resolved bug e
-  project awareness.
+  source slice, evidence pack, diagnosis report, resolved bug e project
+  awareness. `graph traversal` ha ora un fallback locale separato e marcato
+  come cached.
 - Il comportamento desiderato in caso di timeout e' degradare esplicitamente a
   backend unavailable/unmapped invece di bloccare il loop agent o presentare
   memoria generica come evidenza corrente.
