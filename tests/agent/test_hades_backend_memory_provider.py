@@ -359,6 +359,17 @@ def _php_graph_artifact():
                 "line": 45,
             },
             {
+                "kind": "calls_method",
+                "from": "OrderController@show",
+                "to": "OrderService@format",
+                "target_class": "App\\Services\\OrderService",
+                "call_type": "property",
+                "receiver": "orders",
+                "target_method": "format",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 46,
+            },
+            {
                 "kind": "view_ref",
                 "from": "OrderController@show",
                 "to": "view:orders.show",
@@ -1413,6 +1424,56 @@ def test_hades_backend_graph_search_finds_local_instance_method_call_edges(monke
         "call_type=instance" in item["summary"]
         and "target_method=format" in item["summary"]
         and "receiver=formatter" in item["summary"]
+        for item in result["items"]
+    )
+
+
+def test_hades_backend_graph_search_finds_local_property_method_call_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders property OrderService format", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "calls_method"
+        and ref["to"] == "OrderService@format"
+        and ref["provenance"]["call_type"] == "property"
+        and ref["provenance"]["receiver"] == "orders"
+        for ref in graph_refs
+    )
+    assert any(
+        "call_type=property" in item["summary"]
+        and "target_method=format" in item["summary"]
+        and "receiver=orders" in item["summary"]
         for item in result["items"]
     )
 

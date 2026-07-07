@@ -641,7 +641,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Illuminate\\Support\\Facades\\DB;\n"
         "use Illuminate\\Support\\Facades\\Log;\n"
         "class OrderController extends Controller {\n"
-        "    public function __construct(OrderService $orders) {}\n"
+        "    public function __construct(private OrderService $orders) {}\n"
         "    public function show(StoreOrderRequest $request, Order $order, OrderService $formatter) {\n"
         "        $this->authorize('view', $order);\n"
         "        $request->validate(['status' => 'required|string']);\n"
@@ -658,6 +658,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        App\\Http\\Resources\\OrderResource::make($order);\n"
         "        OrderService::format($order);\n"
         "        $formatter->format($order);\n"
+        "        $this->orders->format($order);\n"
         "        abort_if($order->status === 'archived', 403);\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
@@ -1032,7 +1033,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "status_code": 403,
         "abort_helper": "abort_if",
         "path": "app/Http/Controllers/OrderController.php",
-        "line": 28,
+        "line": 29,
     } in artifact["edges"]
     assert {
         "kind": "route_http_abort",
@@ -1046,7 +1047,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "path": "routes/web.php",
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
-        "source_line": 28,
+        "source_line": 29,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1069,6 +1070,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "target_method": "format",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 27,
+    } in artifact["edges"]
+    assert {
+        "kind": "calls_method",
+        "from": "OrderController@show",
+        "to": "OrderService@format",
+        "target_class": "App\\Services\\OrderService",
+        "call_type": "property",
+        "receiver": "orders",
+        "target_method": "format",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 28,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",
@@ -1395,6 +1407,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "return $this->belongsTo" not in str(artifact)
     assert "return OrderService::format" not in str(artifact)
     assert "$formatter->format" not in str(artifact)
+    assert "$this->orders->format" not in str(artifact)
+    assert "private OrderService" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)
     assert "Order::observe" not in str(artifact)

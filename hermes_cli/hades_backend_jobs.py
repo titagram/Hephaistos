@@ -197,11 +197,18 @@ PHP_GATE_POLICY_RE = re.compile(
     re.MULTILINE,
 )
 PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+PHP_PROMOTED_PROPERTY_PARAM_RE = re.compile(
+    r"\b(?:public|protected|private)\s+(?:readonly\s+)?"
+    r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
 PHP_PROPERTY_RE = re.compile(
     r"\b(?P<visibility>public|protected|private)\s+"
     r"(?:readonly\s+)?(?P<type>\??[A-Za-z_\\][A-Za-z0-9_\\|]*)?\s*"
     r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
+)
+PHP_THIS_PROPERTY_ASSIGN_RE = re.compile(
+    r"\$this->(?P<property>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$(?P<param>[A-Za-z_][A-Za-z0-9_]*)\s*;"
 )
 PHP_VALIDATE_ARRAY_RE = re.compile(
     r"(?:\$[A-Za-z_][A-Za-z0-9_]*|request\s*\(\))->validate\s*\(\s*\[(?P<body>.*?)\]\s*\)",
@@ -979,6 +986,15 @@ def _php_fqcn_resolved(namespace: str, name: str, uses: dict[str, str]) -> str:
     if "\\" in clean:
         return clean
     return uses.get(clean) or _php_fqcn(namespace, clean)
+
+
+def _php_resolved_simple_type(namespace: str, type_name: str, uses: dict[str, str]) -> str:
+    clean = type_name.strip().lstrip("?").strip("\\")
+    if not clean or "|" in clean:
+        return ""
+    if not _php_short_name(clean)[:1].isupper():
+        return ""
+    return _php_fqcn_resolved(namespace, clean, uses)
 
 
 def _php_short_name(name: str) -> str:
@@ -3447,6 +3463,53 @@ def _append_php_route_http_abort_edges(
     return truncated
 
 
+def _php_class_property_type_map(
+    source: str,
+    classes: list[dict[str, Any]],
+    namespace: str,
+    uses: dict[str, str],
+) -> dict[str, dict[str, str]]:
+    property_types: dict[str, dict[str, str]] = {}
+    for property_match in PHP_PROPERTY_RE.finditer(source):
+        class_info = _class_context(classes, property_match.start())
+        if not class_info:
+            continue
+        target_class = _php_resolved_simple_type(namespace, str(property_match.group("type") or ""), uses)
+        if not target_class:
+            continue
+        property_types.setdefault(str(class_info["name"]), {})[str(property_match.group("name") or "")] = target_class
+
+    for method_match in PHP_METHOD_RE.finditer(source):
+        if method_match.group("name") != "__construct":
+            continue
+        class_info = _class_context(classes, method_match.start())
+        if not class_info:
+            continue
+        class_name = str(class_info["name"])
+        constructor_param_types: dict[str, str] = {}
+        params = method_match.group("params") or ""
+        for param_match in PHP_TYPED_PARAM_RE.finditer(params):
+            param_name = str(param_match.group("name") or "")
+            target_class = _php_resolved_simple_type(namespace, str(param_match.group("class") or ""), uses)
+            if param_name and target_class:
+                constructor_param_types[param_name] = target_class
+        for promoted_match in PHP_PROMOTED_PROPERTY_PARAM_RE.finditer(params):
+            property_name = str(promoted_match.group("name") or "")
+            target_class = _php_resolved_simple_type(namespace, str(promoted_match.group("class") or ""), uses)
+            if property_name and target_class:
+                property_types.setdefault(class_name, {})[property_name] = target_class
+        if not constructor_param_types:
+            continue
+        method_body, _ = _php_method_body_slice(source, method_match)
+        for assign_match in PHP_THIS_PROPERTY_ASSIGN_RE.finditer(method_body):
+            property_name = str(assign_match.group("property") or "")
+            param_name = str(assign_match.group("param") or "")
+            target_class = constructor_param_types.get(param_name, "")
+            if property_name and target_class:
+                property_types.setdefault(class_name, {})[property_name] = target_class
+    return property_types
+
+
 def _append_php_instance_method_call_edges(
     source: str,
     rel: str,
@@ -3454,6 +3517,7 @@ def _append_php_instance_method_call_edges(
     method_body: str,
     method_body_offset: int,
     method_symbol: str,
+    class_property_types: dict[str, str],
     typed_params: dict[str, str],
     php_method_symbols: dict[tuple[str, str], str],
     edges: list[dict[str, Any]],
@@ -3465,10 +3529,16 @@ def _append_php_instance_method_call_edges(
     truncated = False
     for match in PHP_INSTANCE_METHOD_CALL_RE.finditer(method_body):
         receiver = str(match.group("receiver") or "")
-        if not receiver.startswith("$") or receiver.startswith("$this->"):
+        call_type = "instance"
+        if receiver.startswith("$this->"):
+            receiver_name = receiver.split("->", 1)[1]
+            target_class = class_property_types.get(receiver_name, "")
+            call_type = "property"
+        elif receiver.startswith("$"):
+            receiver_name = receiver[1:]
+            target_class = typed_params.get(receiver_name, "")
+        else:
             continue
-        receiver_name = receiver[1:]
-        target_class = typed_params.get(receiver_name, "")
         if not target_class:
             continue
         target_method = str(match.group("method") or "")
@@ -3480,7 +3550,7 @@ def _append_php_instance_method_call_edges(
             "from": method_symbol,
             "to": target_method_symbol,
             "target_class": target_class,
-            "call_type": "instance",
+            "call_type": call_type,
             "receiver": receiver_name,
             "target_method": target_method,
             "path": rel,
@@ -3922,6 +3992,8 @@ def _build_php_graph(
             max_edges=max_edges,
         ) or truncated
 
+        property_types_by_class = _php_class_property_type_map(source, classes, namespace, uses)
+
         for match in PHP_METHOD_RE.finditer(source):
             class_info = _class_context(classes, match.start())
             if class_info is None:
@@ -4104,6 +4176,7 @@ def _build_php_graph(
                 method_body,
                 method_body_offset,
                 method_symbol,
+                property_types_by_class.get(fqcn, {}),
                 typed_params,
                 php_method_symbols,
                 edges,

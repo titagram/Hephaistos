@@ -5573,3 +5573,40 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel property method call graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per call graph su proprieta'
+tipizzate e constructor-injected services.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` costruisce una mappa metadata-only delle proprieta'
+  tipizzate da property declaration, constructor promotion e assegnazioni
+  `$this->prop = $param` quando `$param` ha un type hint semplice.
+- Le chiamate `$this->prop->method(...)` producono `calls_method` verso il
+  simbolo metodo reale quando target class/method sono indicizzati.
+- Il payload salva solo receiver, target class, target method, call type
+  `property` e path/line; non conserva argomenti, constructor body o corpo
+  metodo.
+- La fixture Laravel copre constructor promotion `private OrderService $orders`
+  e `$this->orders->format($order)`, verificando che le espressioni raw non
+  compaiano nell'artifact.
+- Il fallback locale di `hades_backend_graph_search` puo' distinguere
+  `call_type=property` e `receiver=orders`, rendendo traversabile
+  `route -> controller -> property-injected service method` senza source.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/search:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_property_method_call_edges tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_instance_method_call_edges tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_method_call_edges`
+  passato: `3 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `87 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
