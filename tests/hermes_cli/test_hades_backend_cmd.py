@@ -916,6 +916,99 @@ def test_backend_ingest_log_uploads_redacted_runtime_log_evidence(monkeypatch, t
     assert "abcdefghijklmnopqrstuvwxyz" not in json.dumps(payload)
 
 
+def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    test_output = workspace / "phpunit.log"
+    test_output.write_text(
+        "FAILED Feature OrderTest\n"
+        "Error: Call to member function active() on null at app/Http/Controllers/OrderController.php:42\n"
+        "OPENAI_API_KEY=sk-live-secretvalue12345\n",
+        encoding="utf-8",
+    )
+    runtime_log = workspace / "runtime.log"
+    runtime_log.write_text("production.ERROR Null active() token=secretvalue12345\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.reports = []
+            self.evidence = []
+            self.closed = 0
+
+        def create_bug_report(self, **payload):
+            self.reports.append(payload)
+            return {"bug_report": {"id": "bug_1"}}
+
+        def create_bug_evidence(self, **payload):
+            self.evidence.append(payload)
+            return {"evidence": {"id": f"ev_{len(self.evidence)}"}}
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            actual="HTTP 500",
+            backend_action="bug-intake",
+            environment="staging",
+            expected="HTTP 200",
+            json=True,
+            log=[str(runtime_log)],
+            severity="high",
+            steps="Open /orders/1",
+            symptom="Opening order detail returns HTTP 500",
+            test_output=[str(test_output)],
+            title="Order detail 500",
+        )
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert result["bug_report_id"] == "bug_1"
+    assert result["evidence_ids"] == ["ev_1", "ev_2"]
+    assert fake.closed == 1
+    assert fake.reports[0]["title"] == "Order detail 500"
+    assert fake.reports[0]["payload"]["schema"] == "hades.bug_intake.v1"
+    assert fake.reports[0]["payload"]["steps"] == "Open /orders/1"
+    assert [item["kind"] for item in fake.evidence] == ["failing_test", "log_excerpt"]
+    assert all(item["bug_report_id"] == "bug_1" for item in fake.evidence)
+    assert "sk-live-secretvalue12345" not in json.dumps(fake.evidence)
+    assert "secretvalue12345" not in json.dumps(fake.evidence)
+
+
 def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

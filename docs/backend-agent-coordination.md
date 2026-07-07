@@ -2118,3 +2118,39 @@ Resta fuori da questa tranche:
   resta da implementare una review queue dedicata lato backend.
 - Promozione automatizzata candidate fact -> verified wiki/project memory.
 - Ranking prima/dopo backfill su dataset reale.
+
+## Esecuzione guided bug intake CLI Hades - 2026-07-07
+
+Stato: completata la prima tranche P2-1 del piano "Guided Bug Intake".
+
+Agent locale:
+
+- Nuovo comando `hades backend bug-intake`.
+- Il comando richiede `--title` e `--symptom`, accetta `--steps`,
+  `--expected`, `--actual`, `--severity`, `--environment`, e crea un bug report
+  backend dal workspace linkato.
+- `--test-output` e `--log` sono ripetibili e creano evidence redatte
+  rispettivamente `failing_test` e `log_excerpt` legate al bug report creato.
+- Il payload intake usa schema `hades.bug_intake.v1`; test/log riusano i limiti
+  e la redazione gia' usati da `ingest-test`/`ingest-log`.
+
+Verifiche eseguite:
+
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py tests/hermes_cli/test_hades_backend_client.py tests/test_docs_hades_mvp.py`
+  passato: `57 passed`.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile hermes_cli/hades_backend_cmd.py`
+  passato.
+- Locale:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/docs_audit.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Wizard desktop/dashboard.
+- Privacy preview visuale prima dell'invio.
+- Intake di screenshot/browser console/http trace da UI.

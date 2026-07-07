@@ -89,6 +89,17 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     ingest_log.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
     ingest_log.add_argument("--source", default=None, help="Evidence source label")
     ingest_log.add_argument("--json", action="store_true", help="Emit machine-readable ingestion result")
+    bug_intake = sub.add_parser("bug-intake", help="Create a structured Hades bug report with optional evidence files")
+    bug_intake.add_argument("--title", required=True, help="Short bug title")
+    bug_intake.add_argument("--symptom", required=True, help="Observed symptom")
+    bug_intake.add_argument("--steps", default=None, help="Reproduction steps")
+    bug_intake.add_argument("--expected", default=None, help="Expected behavior")
+    bug_intake.add_argument("--actual", default=None, help="Actual behavior")
+    bug_intake.add_argument("--severity", default=None, help="Optional severity label")
+    bug_intake.add_argument("--environment", default=None, help="Environment or deploy context")
+    bug_intake.add_argument("--test-output", action="append", default=None, help="Failing test output file; repeatable")
+    bug_intake.add_argument("--log", action="append", default=None, help="Runtime log file; repeatable")
+    bug_intake.add_argument("--json", action="store_true", help="Emit machine-readable intake result")
     backfill_note = sub.add_parser("backfill-note", help="Preview note-quality backfill for a raw chunk or note file")
     backfill_note.add_argument("file", help="Path to a raw chunk or note file")
     backfill_note.add_argument(
@@ -765,6 +776,114 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bug_report_id(response: dict[str, Any]) -> str | None:
+    source = response.get("bug_report") if isinstance(response.get("bug_report"), dict) else response
+    if not isinstance(source, dict):
+        return None
+    value = source.get("id") or source.get("bug_report_id")
+    return str(value) if value else None
+
+
+def _cmd_bug_intake(args: argparse.Namespace) -> int:
+    try:
+        agent, binding = _current_workspace_binding()
+        payload = {
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "title": str(args.title).strip(),
+            "symptom": str(args.symptom).strip(),
+            "payload": {
+                "schema": "hades.bug_intake.v1",
+                "steps": getattr(args, "steps", None),
+                "expected": getattr(args, "expected", None),
+                "actual": getattr(args, "actual", None),
+                "severity": getattr(args, "severity", None),
+                "environment": getattr(args, "environment", None),
+                "agent_id": agent.agent_id,
+            },
+        }
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            response = client.create_bug_report(**payload)
+            bug_report_id = _bug_report_id(response)
+            evidence_ids: list[str | None] = []
+            for file_path in getattr(args, "test_output", None) or []:
+                evidence_ids.append(
+                    _create_intake_evidence(
+                        client,
+                        binding,
+                        bug_report_id=bug_report_id,
+                        file_path=file_path,
+                        kind="failing_test",
+                        retention_class="test_failure",
+                    )
+                )
+            for file_path in getattr(args, "log", None) or []:
+                evidence_ids.append(
+                    _create_intake_evidence(
+                        client,
+                        binding,
+                        bug_report_id=bug_report_id,
+                        file_path=file_path,
+                        kind="log_excerpt",
+                        retention_class="log_excerpt",
+                    )
+                )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend bug-intake: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    result = {
+        "status": "ok",
+        "bug_report_id": bug_report_id,
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "evidence_ids": evidence_ids,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"Hades bug report created: {bug_report_id or 'created'}")
+        if evidence_ids:
+            print(f"  Evidence: {len(evidence_ids)} item(s)")
+    return 0
+
+
+def _create_intake_evidence(
+    client: object,
+    binding: db.WorkspaceBinding,
+    *,
+    bug_report_id: str | None,
+    file_path: str,
+    kind: str,
+    retention_class: str,
+) -> str | None:
+    text, truncated = _read_evidence_file(file_path)
+    redacted = redact_secret(text)
+    redactions = 1 if redacted != text else 0
+    source = Path(file_path).name
+    payload = _evidence_payload(kind, redacted, source, truncated)
+    response = client.create_bug_evidence(
+        project_id=binding.project_id,
+        workspace_binding_id=binding.backend_workspace_binding_id,
+        bug_report_id=bug_report_id,
+        kind=kind,
+        summary=_first_interesting_line(redacted),
+        payload=payload,
+        source=source,
+        redactions=redactions,
+        retention_class=retention_class,
+    )
+    evidence = response.get("evidence") if isinstance(response.get("evidence"), dict) else response
+    return str(evidence.get("id")) if isinstance(evidence, dict) and evidence.get("id") else None
+
+
 def _version() -> str:
     try:
         from hermes_cli import __version__
@@ -800,12 +919,14 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_ingest_test(args)
     if action == "ingest-log":
         return _cmd_ingest_log(args)
+    if action == "bug-intake":
+        return _cmd_bug_intake(args)
     if action == "backfill-note":
         return _cmd_backfill_note(args)
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|backfill-note|sync>",
+        "usage: hades backend <setup|bootstrap|status|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
         file=sys.stderr,
     )
     return 0

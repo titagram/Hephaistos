@@ -93,6 +93,13 @@ tool when diagnosing a bug. There is intentionally no local cache fallback for
 bug evidence search: stale or unavailable evidence must be surfaced as degraded
 state rather than treated as authoritative.
 
+For guided CLI intake, run `hades backend bug-intake --title ... --symptom ...`
+from a linked workspace. Optional `--steps`, `--expected`, `--actual`,
+`--severity`, and `--environment` fields are stored in a bounded
+`hades.bug_intake.v1` payload. Repeat `--test-output <file>` and `--log <file>`
+to attach redacted `failing_test` and `log_excerpt` evidence to the created bug
+report.
+
 Diagnosis outcomes should be persisted with
 `hades_backend_diagnosis_report_create` / `POST /api/hades/v1/diagnosis-reports`
 once the workflow reaches either a supported root cause or a useful

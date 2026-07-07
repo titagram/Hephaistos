@@ -33,6 +33,9 @@ Bug reports and bug evidence are stored separately from generic shared memory.
 Use bug evidence for root-cause investigation inputs such as stack traces, log
 excerpts, failing tests, HTTP traces, browser console output, deploy versions,
 config snapshots, user reproduction steps, and screenshot references.
+Use `hades backend bug-intake --title ... --symptom ...` from a linked
+workspace to create a structured bug report and optionally attach `--test-output`
+or `--log` files as bounded, redacted evidence.
 
 The Hades v1 backend exposes:
 
