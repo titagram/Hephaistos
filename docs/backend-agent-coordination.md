@@ -2532,9 +2532,41 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Doctrine adapter dedicato.
+- Parser ORM piu' profondi oltre alle FK tabella/colonna bounded.
 - Drizzle relation graph piu' ricco oltre alle FK tabella/colonna nello stesso
   file.
+
+## Esecuzione Doctrine DB graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-2.
+
+Agent locale:
+
+- `populate_backend_ast` estrae schema source-free da entity Doctrine attribute.
+- Supporta `#[ORM\Entity]`, `#[ORM\Table(name: ...)]`,
+  `#[ORM\Column(...)]`, `#[ORM\Id]`, `#[ORM\ManyToOne(...)]` e
+  `#[ORM\JoinColumn(...)]`.
+- Il graph PHP marca `framework: doctrine` per progetti PHP Doctrine-only e
+  aggiunge `database.tables`, `model_table` e `foreign_key`.
+- Gli artifact restano source-free: niente attribute raw e niente corpo entity.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_doctrine_schema_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_symfony_php_graph_without_source tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `3 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py`
+  passato: `22 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Doctrine annotations legacy, embeddables e relation graph piu' ricco oltre
+  alle FK tabella/colonna bounded.
 
 ## Esecuzione SQL raw DB graph Hades - 2026-07-07
 
@@ -2563,7 +2595,7 @@ Verifiche eseguite:
 
 Resta fuori da questa tranche:
 
-- Doctrine adapter dedicato.
+- Parser ORM piu' profondi oltre agli adapter completati.
 - Dialect SQL avanzato oltre a `CREATE TABLE`/FK bounded parsing.
 
 ## Esecuzione Symfony graph Hades - 2026-07-07

@@ -139,6 +139,12 @@ PHP_GATE_POLICY_RE = re.compile(
     re.MULTILINE,
 )
 PHP_TYPED_PARAM_RE = re.compile(r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$[A-Za-z_][A-Za-z0-9_]*")
+PHP_PROPERTY_RE = re.compile(
+    r"\b(?P<visibility>public|protected|private)\s+"
+    r"(?:readonly\s+)?(?P<type>\??[A-Za-z_\\][A-Za-z0-9_\\|]*)?\s*"
+    r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
 PHP_VALIDATE_ARRAY_RE = re.compile(
     r"(?:\$[A-Za-z_][A-Za-z0-9_]*|request\s*\(\))->validate\s*\(\s*\[(?P<body>.*?)\]\s*\)",
     re.DOTALL,
@@ -199,6 +205,14 @@ PHP_ROUTE_METHODS_ARG_RE = re.compile(
     r"\bmethods\s*[:=]\s*(?P<value>\[[^\]]*\]|\{[^}]*\}|['\"][^'\"]+['\"])",
     re.DOTALL,
 )
+PHP_ATTRIBUTE_RE = re.compile(
+    r"#\[\s*(?P<name>[A-Za-z0-9_\\]+)\s*(?:\((?P<args>.*?)\))?\s*\]",
+    re.DOTALL,
+)
+PHP_NAMED_ATTR_STRING_RE = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*['\"](?P<value>[^'\"]+)['\"]")
+PHP_NAMED_ATTR_BOOL_RE = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>true|false)", re.IGNORECASE)
+PHP_NAMED_ATTR_INT_RE = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>\d+)")
+PHP_NAMED_ATTR_CLASS_RE = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>\\?[A-Za-z0-9_\\]+)::class")
 BLADE_EXTENDS_RE = re.compile(r"@extends\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 BLADE_INCLUDE_RE = re.compile(
     r"@(?:include|includeIf|each)\s*\(\s*['\"](?P<view>[^'\"]+)['\"]",
@@ -678,6 +692,141 @@ def _php_symfony_route(
     if name:
         route["name"] = name
     return route
+
+
+def _php_attribute_short_name(name: str) -> str:
+    return str(name or "").split("\\")[-1]
+
+
+def _php_attributes_before(source: str, offset: int) -> list[dict[str, Any]]:
+    start = max(0, offset - 2_000)
+    segment = source[start:offset]
+    attrs: list[dict[str, Any]] = []
+    tail_start = 0
+    for match in PHP_ATTRIBUTE_RE.finditer(segment):
+        if segment[tail_start : match.start()].strip():
+            attrs = []
+        attrs.append(
+            {
+                "name": match.group("name"),
+                "short_name": _php_attribute_short_name(match.group("name")),
+                "args": match.group("args") or "",
+                "line": _line_number(source, start + match.start()),
+            }
+        )
+        tail_start = match.end()
+    if segment[tail_start:].strip():
+        return []
+    return attrs
+
+
+def _php_attr_by_short_name(attrs: list[dict[str, Any]], *names: str) -> dict[str, Any] | None:
+    wanted = set(names)
+    for attr in attrs:
+        if attr.get("short_name") in wanted:
+            return attr
+    return None
+
+
+def _php_attr_string(args: str, name: str) -> str:
+    for match in PHP_NAMED_ATTR_STRING_RE.finditer(args or ""):
+        if match.group("name") == name:
+            return match.group("value")
+    stripped = str(args or "").lstrip()
+    if name == "name" and stripped.startswith(("'", '"')):
+        match = PHP_QUOTED_VALUE_RE.match(stripped)
+        return match.group("value") if match else ""
+    return ""
+
+
+def _php_attr_bool(args: str, name: str) -> bool | None:
+    for match in PHP_NAMED_ATTR_BOOL_RE.finditer(args or ""):
+        if match.group("name") == name:
+            return match.group("value").lower() == "true"
+    return None
+
+
+def _php_attr_int(args: str, name: str) -> int | None:
+    for match in PHP_NAMED_ATTR_INT_RE.finditer(args or ""):
+        if match.group("name") == name:
+            return int(match.group("value"))
+    return None
+
+
+def _php_attr_class(args: str, name: str) -> str:
+    for match in PHP_NAMED_ATTR_CLASS_RE.finditer(args or ""):
+        if match.group("name") == name:
+            return match.group("value")
+    return ""
+
+
+def _php_doctrine_table_name(attrs: list[dict[str, Any]], class_name: str) -> str:
+    table_attr = _php_attr_by_short_name(attrs, "Table")
+    if table_attr:
+        table = _php_attr_string(str(table_attr.get("args") or ""), "name")
+        if table:
+            return table
+    return _snake_name(class_name) + "s"
+
+
+def _php_doctrine_entity_meta(source: str, offset: int, class_name: str) -> dict[str, Any] | None:
+    attrs = _php_attributes_before(source, offset)
+    if not _php_attr_by_short_name(attrs, "Entity") and not _php_attr_by_short_name(attrs, "Table"):
+        return None
+    return {"table": _php_doctrine_table_name(attrs, class_name), "line": attrs[0]["line"] if attrs else _line_number(source, offset)}
+
+
+def _php_doctrine_column(attrs: list[dict[str, Any]], prop_name: str, rel: str, line: int) -> dict[str, Any] | None:
+    column_attr = _php_attr_by_short_name(attrs, "Column")
+    if column_attr is None:
+        return None
+    args = str(column_attr.get("args") or "")
+    column = {
+        "name": _php_attr_string(args, "name") or prop_name,
+        "field": prop_name,
+        "type": _php_attr_string(args, "type"),
+        "path": rel,
+        "line": line,
+    }
+    for key in ("nullable", "unique"):
+        value = _php_attr_bool(args, key)
+        if value is not None:
+            column[key] = value
+    for key in ("length", "precision", "scale"):
+        value = _php_attr_int(args, key)
+        if value is not None:
+            column[key] = value
+    if _php_attr_by_short_name(attrs, "Id"):
+        column["primary_key"] = True
+    return {key: value for key, value in column.items() if value not in ("", None)}
+
+
+def _php_doctrine_relation_target(attrs: list[dict[str, Any]], prop_type: str, namespace: str, uses: dict[str, str]) -> str:
+    relation_attr = _php_attr_by_short_name(attrs, "ManyToOne", "OneToOne")
+    if relation_attr:
+        target = _php_attr_class(str(relation_attr.get("args") or ""), "targetEntity")
+        if target:
+            return _php_fqcn_resolved(namespace, target, uses)
+    clean_type = prop_type.lstrip("?")
+    if clean_type and "\\" not in clean_type and clean_type[:1].isupper():
+        return _php_fqcn_resolved(namespace, clean_type, uses)
+    if "\\" in clean_type:
+        return clean_type.strip("\\")
+    return ""
+
+
+def _php_doctrine_join_column(attrs: list[dict[str, Any]], prop_name: str, rel: str, line: int) -> dict[str, Any] | None:
+    join_attr = _php_attr_by_short_name(attrs, "JoinColumn")
+    if join_attr is None:
+        return None
+    args = str(join_attr.get("args") or "")
+    return {
+        "column": _php_attr_string(args, "name") or f"{prop_name}_id",
+        "references_column": _php_attr_string(args, "referencedColumnName") or "id",
+        "nullable": _php_attr_bool(args, "nullable"),
+        "path": rel,
+        "line": line,
+    }
 
 
 def _php_array_field_keys(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
@@ -1343,12 +1492,25 @@ def _build_php_graph(
         uses = _php_use_map(source)
         classes: list[dict[str, Any]] = []
         symfony_class_routes: dict[str, list[dict[str, Any]]] = {}
+        doctrine_tables: dict[str, dict[str, Any]] = {}
         for match in PHP_CLASS_RE.finditer(source):
             class_name = match.group("name")
             extends = match.group("extends") or ""
             fqcn = _php_fqcn(namespace, class_name)
             extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else None
             role = _php_role(rel, fqcn, extends)
+            doctrine_meta = _php_doctrine_entity_meta(source, match.start(), class_name)
+            if doctrine_meta is not None:
+                role = "doctrine_entity"
+                doctrine_tables[fqcn] = {
+                    "table": doctrine_meta["table"],
+                    "model": fqcn,
+                    "orm": "doctrine",
+                    "path": rel,
+                    "line": doctrine_meta["line"],
+                    "columns": [],
+                    "foreign_keys": [],
+                }
             class_symbol = {
                 "kind": match.group("kind"),
                 "name": fqcn,
@@ -1381,6 +1543,77 @@ def _build_php_graph(
                 ) or truncated
 
         classes.sort(key=lambda item: int(item["offset"]))
+
+        doctrine_table_by_class = {class_name: info["table"] for class_name, info in doctrine_tables.items()}
+        for class_info in classes:
+            table_info = doctrine_tables.get(str(class_info["name"]))
+            if not table_info:
+                continue
+            database["tables"].append(table_info)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "model_table",
+                    "from": class_info["name"],
+                    "to": f"table:{table_info['table']}",
+                    "framework": "doctrine",
+                    "path": rel,
+                    "line": table_info["line"],
+                },
+                max_edges=max_edges,
+            ) or truncated
+
+        for match in PHP_PROPERTY_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            if class_info is None:
+                continue
+            table_info = doctrine_tables.get(str(class_info["name"]))
+            if not table_info:
+                continue
+            attrs = _php_attributes_before(source, match.start())
+            prop_name = match.group("name")
+            line = _line_number(source, match.start())
+            column = _php_doctrine_column(attrs, prop_name, rel, line)
+            if column is not None:
+                table_info["columns"].append(column)
+            target_class = _php_doctrine_relation_target(attrs, match.group("type") or "", namespace, uses)
+            join_column = _php_doctrine_join_column(attrs, prop_name, rel, line)
+            if target_class and join_column is not None:
+                table_info["columns"].append(
+                    {
+                        "name": join_column["column"],
+                        "field": prop_name,
+                        "type": "relation",
+                        "relation_model": target_class,
+                        "path": rel,
+                        "line": join_column["line"],
+                        **({"nullable": join_column["nullable"]} if join_column.get("nullable") is not None else {}),
+                    }
+                )
+                references_table = doctrine_table_by_class.get(target_class) or _snake_name(_php_short_name(target_class)) + "s"
+                foreign_key = {
+                    "table": table_info["table"],
+                    "column": join_column["column"],
+                    "references_table": references_table,
+                    "references_column": join_column["references_column"],
+                    "path": rel,
+                    "line": join_column["line"],
+                }
+                if join_column.get("nullable") is not None:
+                    foreign_key["nullable"] = join_column["nullable"]
+                table_info["foreign_keys"].append(foreign_key)
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "foreign_key",
+                        "from": f"table:{foreign_key['table']}.{foreign_key['column']}",
+                        "to": f"table:{foreign_key['references_table']}",
+                        "framework": "doctrine",
+                        "path": rel,
+                        "line": foreign_key["line"],
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         model_table = ""
         model_table_match = PHP_MODEL_TABLE_RE.search(source)
@@ -1835,12 +2068,15 @@ def _build_php_graph(
     route_frameworks = {str(route.get("framework")) for route in routes if route.get("framework")}
     has_laravel = "laravel" in route_frameworks or (workspace_root / "artisan").exists()
     has_symfony = "symfony" in route_frameworks or (workspace_root / "bin" / "console").exists()
-    if has_laravel and has_symfony:
+    has_doctrine = any(str(table.get("orm") or "") == "doctrine" for table in database.get("tables", []))
+    if sum(1 for item in (has_laravel, has_symfony, has_doctrine) if item) > 1:
         framework = "php_web"
     elif has_laravel:
         framework = "laravel"
     elif has_symfony:
         framework = "symfony"
+    elif has_doctrine:
+        framework = "doctrine"
     else:
         framework = "php"
 

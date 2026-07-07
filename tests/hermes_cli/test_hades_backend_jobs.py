@@ -931,6 +931,80 @@ def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path
     assert "return new Response" not in str(artifact)
 
 
+def test_populate_backend_ast_extracts_doctrine_schema_graph_without_source(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "doctrine"
+    workspace.mkdir()
+    (workspace / "src" / "Entity").mkdir(parents=True)
+    (workspace / "src" / "Entity" / "Order.php").write_text(
+        "<?php\n"
+        "namespace App\\Entity;\n"
+        "use Doctrine\\ORM\\Mapping as ORM;\n"
+        "#[ORM\\Entity]\n"
+        "#[ORM\\Table(name: 'customers')]\n"
+        "class Customer {\n"
+        "    #[ORM\\Id]\n"
+        "    #[ORM\\Column(type: 'integer')]\n"
+        "    private int $id;\n"
+        "    #[ORM\\Column(type: 'string', length: 255, unique: true)]\n"
+        "    private string $email;\n"
+        "}\n"
+        "#[ORM\\Entity]\n"
+        "#[ORM\\Table(name: 'orders')]\n"
+        "class Order {\n"
+        "    #[ORM\\Id]\n"
+        "    #[ORM\\Column(type: 'integer')]\n"
+        "    private int $id;\n"
+        "    #[ORM\\ManyToOne(targetEntity: Customer::class)]\n"
+        "    #[ORM\\JoinColumn(name: 'customer_id', referencedColumnName: 'id', nullable: false)]\n"
+        "    private Customer $customer;\n"
+        "    #[ORM\\Column(type: 'decimal', precision: 10, scale: 2, nullable: true)]\n"
+        "    private string $total;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_doctrine_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10, "max_symbols": 20, "max_edges": 20},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    tables = {item["table"]: item for item in artifact["database"]["tables"]}
+    symbols = {(item["kind"], item["name"]) for item in artifact["symbols"]}
+    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
+
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.php_graph.v1"
+    assert artifact["framework"] == "doctrine"
+    assert artifact["raw_source_included"] is False
+    assert ("class", "App\\Entity\\Customer") in symbols
+    assert ("class", "App\\Entity\\Order") in symbols
+    assert set(tables) == {"customers", "orders"}
+    assert {column["name"] for column in tables["orders"]["columns"]} == {"id", "customer_id", "total"}
+    assert tables["orders"]["foreign_keys"] == [
+        {
+            "table": "orders",
+            "column": "customer_id",
+            "references_table": "customers",
+            "references_column": "id",
+            "path": "src/Entity/Order.php",
+            "line": 21,
+            "nullable": False,
+        }
+    ]
+    assert ("model_table", "App\\Entity\\Order", "table:orders") in edges
+    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert "#[ORM" not in str(artifact)
+    assert "ORM\\Column" not in str(artifact)
+    assert "ORM\\JoinColumn" not in str(artifact)
+
+
 def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
