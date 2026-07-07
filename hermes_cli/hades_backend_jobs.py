@@ -184,6 +184,21 @@ PHP_BROADCAST_CHANNEL_RE = re.compile(
     r"\bBroadcast::channel\s*\(\s*['\"](?P<channel>[^'\"]+)['\"]\s*,\s*(?P<handler>.*?)\)",
     re.DOTALL,
 )
+BLADE_EXTENDS_RE = re.compile(r"@extends\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
+BLADE_INCLUDE_RE = re.compile(
+    r"@(?:include|includeIf|each)\s*\(\s*['\"](?P<view>[^'\"]+)['\"]",
+    re.MULTILINE,
+)
+BLADE_CONDITIONAL_INCLUDE_RE = re.compile(
+    r"@(?:includeWhen|includeUnless)\s*\(\s*[^,]+,\s*['\"](?P<view>[^'\"]+)['\"]",
+    re.MULTILINE,
+)
+BLADE_COMPONENT_DIRECTIVE_RE = re.compile(r"@component\s*\(\s*['\"](?P<component>[^'\"]+)['\"]", re.MULTILINE)
+BLADE_ANONYMOUS_COMPONENT_RE = re.compile(r"<x[-:](?P<component>[A-Za-z0-9_.:-]+)\b", re.MULTILINE)
+BLADE_LIVEWIRE_RE = re.compile(
+    r"(?:@livewire\s*\(\s*['\"](?P<directive>[^'\"]+)['\"]|<livewire:(?P<tag>[A-Za-z0-9_.:-]+)\b)",
+    re.MULTILINE,
+)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -545,6 +560,116 @@ def _php_schedule_cadence(chain: str) -> str:
 
 def _php_command_name(signature: str) -> str:
     return str(signature or "").split(maxsplit=1)[0].strip()
+
+
+def _blade_view_name(path: str) -> str:
+    prefix = "resources/views/"
+    suffix = ".blade.php"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return ""
+    return path[len(prefix) : -len(suffix)].replace("/", ".")
+
+
+def _blade_component_symbol(view_name: str) -> str:
+    prefix = "components."
+    if not view_name.startswith(prefix):
+        return ""
+    component = view_name[len(prefix) :].replace("::", ".").replace(":", ".")
+    return f"component:{component}" if component else ""
+
+
+def _blade_component_target(raw: str) -> str:
+    component = (raw or "").strip().replace("::", ".").replace(":", ".")
+    if component in {"dynamic-component", "slot"}:
+        return ""
+    if component.startswith("components."):
+        component = component[len("components.") :]
+    return f"component:{component}" if component else ""
+
+
+def _append_blade_view_graph(
+    source: str,
+    rel: str,
+    symbols: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_symbols: int,
+    max_edges: int,
+) -> bool:
+    view_name = _blade_view_name(rel)
+    if not view_name:
+        return False
+
+    truncated = False
+    view_id = f"view:{view_name}"
+    if len(symbols) < max_symbols:
+        symbols.append(
+            {
+                "kind": "blade_view",
+                "name": view_id,
+                "view": view_name,
+                "role": "blade_view",
+                "path": rel,
+                "line": 1,
+            }
+        )
+    else:
+        truncated = True
+
+    component_symbol = _blade_component_symbol(view_name)
+    if component_symbol:
+        if len(symbols) < max_symbols:
+            symbols.append(
+                {
+                    "kind": "blade_component",
+                    "name": component_symbol,
+                    "component": component_symbol.removeprefix("component:"),
+                    "role": "blade_component",
+                    "path": rel,
+                    "line": 1,
+                }
+            )
+        else:
+            truncated = True
+
+    seen_edges: set[tuple[str, str, int]] = set()
+
+    def append_edge(kind: str, target: str, offset: int) -> None:
+        nonlocal truncated
+        if not target:
+            return
+        line = _line_number(source, offset)
+        key = (kind, target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": kind,
+                "from": view_id,
+                "to": target,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    for match in BLADE_EXTENDS_RE.finditer(source):
+        append_edge("blade_extends", f"view:{match.group('view')}", match.start())
+    for match in BLADE_INCLUDE_RE.finditer(source):
+        append_edge("blade_include", f"view:{match.group('view')}", match.start())
+    for match in BLADE_CONDITIONAL_INCLUDE_RE.finditer(source):
+        append_edge("blade_include", f"view:{match.group('view')}", match.start())
+    for match in BLADE_COMPONENT_DIRECTIVE_RE.finditer(source):
+        append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
+    for match in BLADE_ANONYMOUS_COMPONENT_RE.finditer(source):
+        append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
+    for match in BLADE_LIVEWIRE_RE.finditer(source):
+        livewire_name = match.group("directive") or match.group("tag") or ""
+        append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
+
+    return truncated
 
 
 def _laravel_routes(root: Path, files: list[dict[str, Any]], *, max_routes: int = 500) -> list[dict[str, Any]]:
@@ -1051,6 +1176,15 @@ def _build_php_graph(
         except OSError as exc:
             omitted.append({"path": rel, "reason": _io_error_reason("read_error", exc)})
             continue
+
+        truncated = _append_blade_view_graph(
+            source,
+            rel,
+            symbols,
+            edges,
+            max_symbols=max_symbols,
+            max_edges=max_edges,
+        ) or truncated
 
         namespace = _php_namespace(source)
         uses = _php_use_map(source)

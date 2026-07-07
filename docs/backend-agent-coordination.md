@@ -2707,8 +2707,46 @@ Verifiche eseguite:
 Resta fuori da questa tranche:
 
 - Parser PHP/Laravel AST reale invece di pattern conservativi.
-- Blade template dependency graph oltre ai view refs.
 - Query builder avanzato oltre ai casi gia' coperti.
+
+## Esecuzione PHP graph Blade dependency Hades - 2026-07-07
+
+Stato: completata una tranche P0-4 locale del piano "Bug Root Cause Awareness".
+
+Agent locale:
+
+- `hades.php_graph.v1` aggiunge simboli metadata-only per Blade views e Blade
+  components sotto `resources/views`.
+- I controller che gia' producevano `view_ref` verso `view:<name>` ora possono
+  essere attraversati verso layout, partial include, componenti Blade e
+  componenti Livewire referenziati dai template.
+- Gli edge restano source-free: vengono salvati solo `view:*`, `component:*`,
+  `livewire:*`, path e linee, non direttive Blade o markup.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale aggregato:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_sync_runner.py`
+  passato: `37 passed`.
+- Locale diagnosis no-codebase:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_bug_diagnosis_no_codebase.py`
+  passato: `5 passed`.
+- Locale lint/compile:
+  `ruff check hermes_cli/hades_backend_jobs.py tests/hermes_cli/test_hades_backend_jobs.py`
+  passato con `.venv/bin/ruff`; `py_compile hermes_cli/hades_backend_jobs.py`
+  passato.
+- Controllo remoto SSH:
+  backend `fase-2` accetta gia' `hades.php_graph.v1` in ArtifactController,
+  search/traversal e test Hades; non e' servita una patch Laravel.
+
+Resta fuori da questa tranche:
+
+- Parser PHP/Laravel AST reale invece di pattern conservativi.
+- Query builder avanzato oltre ai casi gia' coperti.
+- Graph query dedicata per traversal causale su artifact live.
 
 ## Esecuzione Hades memory kind filter - 2026-07-07
 

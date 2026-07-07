@@ -315,6 +315,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Observers").mkdir(parents=True)
     (workspace / "app" / "Broadcasting").mkdir(parents=True)
     (workspace / "database" / "migrations").mkdir(parents=True)
+    (workspace / "resources" / "views" / "orders" / "partials").mkdir(parents=True)
+    (workspace / "resources" / "views" / "layouts").mkdir(parents=True)
+    (workspace / "resources" / "views" / "shared").mkdir(parents=True)
+    (workspace / "resources" / "views" / "components" / "orders").mkdir(parents=True)
     (workspace / "routes" / "web.php").write_text(
         "<?php\n"
         "use App\\Http\\Controllers\\OrderController;\n"
@@ -495,6 +499,41 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "};\n",
         encoding="utf-8",
     )
+    (workspace / "resources" / "views" / "orders" / "show.blade.php").write_text(
+        "@extends('layouts.app')\n"
+        "@section('content')\n"
+        "@include('orders.partials.summary')\n"
+        "<x-alert type=\"info\" />\n"
+        "@livewire('orders-status')\n"
+        "@endsection\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "orders" / "partials" / "summary.blade.php").write_text(
+        "<x-orders.card />\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "layouts" / "app.blade.php").write_text(
+        "@includeIf('shared.flash')\n"
+        "@includeWhen($showBanner, 'shared.banner')\n"
+        "@yield('content')\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "shared" / "flash.blade.php").write_text(
+        "<div>{{ session('status') }}</div>\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "shared" / "banner.blade.php").write_text(
+        "<div>{{ $headline }}</div>\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "components" / "alert.blade.php").write_text(
+        "<div>{{ $slot }}</div>\n",
+        encoding="utf-8",
+    )
+    (workspace / "resources" / "views" / "components" / "orders" / "card.blade.php").write_text(
+        "<article>{{ $slot }}</article>\n",
+        encoding="utf-8",
+    )
 
     result = execute_job(
         {
@@ -528,6 +567,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("interface", "App\\Contracts\\OrderFormatter") in symbols
     assert ("class", "App\\Observers\\OrderObserver") in symbols
     assert ("class", "App\\Broadcasting\\OrderChannel") in symbols
+    assert ("blade_view", "view:orders.show") in symbols
+    assert ("blade_view", "view:orders.partials.summary") in symbols
+    assert ("blade_view", "view:layouts.app") in symbols
+    assert ("blade_component", "component:alert") in symbols
+    assert ("blade_component", "component:orders.card") in symbols
     assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
@@ -552,6 +596,13 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("query_table", "App\\Http\\Controllers\\OrderController", "table:customers") in edges
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("view_ref", "App\\Http\\Controllers\\OrderController", "view:orders.show") in edges
+    assert ("blade_extends", "view:orders.show", "view:layouts.app") in edges
+    assert ("blade_include", "view:orders.show", "view:orders.partials.summary") in edges
+    assert ("blade_include", "view:layouts.app", "view:shared.flash") in edges
+    assert ("blade_include", "view:layouts.app", "view:shared.banner") in edges
+    assert ("blade_component", "view:orders.show", "component:alert") in edges
+    assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
+    assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
@@ -599,6 +650,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "$request->validate" not in str(artifact)
     assert "DB::table" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
+    assert "@extends" not in str(artifact)
+    assert "@include" not in str(artifact)
+    assert "<x-alert" not in str(artifact)
+    assert "@livewire" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_node_react_code_graph_without_source(tmp_path):
