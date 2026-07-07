@@ -2878,6 +2878,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "source_line",
         "validation_path",
         "validation_line",
+        "validation_rules",
         "path",
         "line",
     ):

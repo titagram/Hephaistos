@@ -663,7 +663,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Illuminate\\Foundation\\Http\\FormRequest;\n"
         "class StoreOrderRequest extends FormRequest {\n"
         "    public function rules(): array {\n"
-        "        return ['customer_id' => 'required|integer', 'status' => 'required|string'];\n"
+        "        return ['customer_id' => 'required|integer|exists:customers,id', 'status' => 'required|string'];\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -983,6 +983,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "from": "route:orders.show",
         "to": "validation:customer_id",
         "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+        "validation_rules": ["required", "integer", "exists"],
         "validation_path": "app/Http/Requests/StoreOrderRequest.php",
         "validation_line": 6,
         "handler": "OrderController@show",
@@ -995,6 +996,14 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("request_validation", "App\\Http\\Requests\\StoreOrderRequest", "validation:customer_id") in edges
     assert ("request_validation", "App\\Http\\Controllers\\OrderController", "validation:status") in edges
     assert ("request_validation", "OrderController@show", "validation:status") in edges
+    assert {
+        "kind": "request_validation",
+        "from": "App\\Http\\Requests\\StoreOrderRequest",
+        "to": "validation:customer_id",
+        "validation_rules": ["required", "integer", "exists"],
+        "path": "app/Http/Requests/StoreOrderRequest.php",
+        "line": 6,
+    } in artifact["edges"]
     assert ("dispatches_job", "App\\Http\\Controllers\\OrderController", "App\\Jobs\\SyncOrderJob") in edges
     assert ("dispatches_job", "OrderController@show", "App\\Jobs\\SyncOrderJob") in edges
     assert ("emits_event", "App\\Http\\Controllers\\OrderController", "App\\Events\\OrderPlaced") in edges
@@ -1210,6 +1219,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "pending" not in str(artifact)
     assert "paid" not in str(artifact)
     assert "$request->validate" not in str(artifact)
+    assert "exists:customers,id" not in str(artifact)
     assert "DB::table" not in str(artifact)
     assert "protected $fillable" not in str(artifact)
     assert "protected $guarded" not in str(artifact)

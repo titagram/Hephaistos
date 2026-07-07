@@ -179,6 +179,7 @@ def _php_graph_artifact():
                 "from": "route:orders.show",
                 "to": "validation:customer_id",
                 "request_class": "App\\Http\\Requests\\StoreOrderRequest",
+                "validation_rules": ["required", "integer", "exists"],
                 "validation_path": "app/Http/Requests/StoreOrderRequest.php",
                 "validation_line": 6,
                 "handler": "OrderController@show",
@@ -1510,6 +1511,7 @@ def test_hades_backend_graph_search_finds_local_route_validation_edges(monkeypat
     assert any(
         "request_class=App\\Http\\Requests\\StoreOrderRequest" in item["summary"]
         and "validation_path=app/Http/Requests/StoreOrderRequest.php" in item["summary"]
+        and "validation_rules=['required', 'integer', 'exists']" in item["summary"]
         for item in result["items"]
     )
 

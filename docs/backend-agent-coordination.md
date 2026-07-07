@@ -5300,3 +5300,35 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel validation rule metadata graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per validation rule awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` arricchisce ora edge `request_validation` e
+  `route_request_validation` con `validation_rules`.
+- Il parser estrae solo nomi regola bounded come `required`, `integer`,
+  `string`, `exists` da FormRequest e inline `$request->validate([...])`.
+- Parametri raw e sorgente regole non vengono salvati: ad esempio
+  `exists:customers,id` viene ridotto a `exists`.
+- Il fallback locale di `hades_backend_graph_search` mostra
+  `validation_rules=...` nei summary edge, utile per diagnosticare bug 422 e
+  input contract mismatch senza leggere source live.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_route_validation_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `77 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

@@ -1425,6 +1425,49 @@ def _php_array_field_keys(source: str, body: str, base_offset: int) -> list[dict
     return fields
 
 
+def _php_validation_rule_names(value: str) -> list[str]:
+    rules: list[str] = []
+    seen: set[str] = set()
+
+    def add_rule(raw: str) -> None:
+        name = raw.split(":", 1)[0].strip()
+        if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return
+        normalized = _snake_name(name).lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            rules.append(normalized)
+
+    quoted_rule_source = re.sub(r"\bRule::[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", "", value)
+    for quoted in PHP_QUOTED_VALUE_RE.finditer(quoted_rule_source):
+        for part in quoted.group("value").split("|"):
+            add_rule(part)
+    for rule_call in re.finditer(r"\bRule::(?P<rule>[A-Za-z_][A-Za-z0-9_]*)\s*\(", value):
+        add_rule(rule_call.group("rule"))
+    return rules
+
+
+def _php_array_validation_fields(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
+    fields: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    matches = list(PHP_ARRAY_FIELD_KEY_RE.finditer(body))
+    for index, match in enumerate(matches):
+        field = match.group("field")
+        if field in seen:
+            continue
+        seen.add(field)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        value_segment = body[match.end() : end]
+        fields.append(
+            {
+                "field": field,
+                "line": _line_number(source, base_offset + match.start()),
+                "rules": _php_validation_rule_names(value_segment),
+            }
+        )
+    return fields
+
+
 def _php_rules_method_body(source: str) -> tuple[str, int] | None:
     match = re.search(r"\bfunction\s+rules\s*\([^)]*\)", source)
     if not match:
@@ -2850,8 +2893,13 @@ def _php_form_request_validation_index(
             if _php_role(rel, fqcn, extends_fqcn) != "form_request":
                 continue
             validation_fields[fqcn] = [
-                {"field": field_info["field"], "path": rel, "line": field_info["line"]}
-                for field_info in _php_array_field_keys(source, body, base_offset)
+                {
+                    "field": field_info["field"],
+                    "rules": field_info.get("rules") or [],
+                    "path": rel,
+                    "line": field_info["line"],
+                }
+                for field_info in _php_array_validation_fields(source, body, base_offset)
             ]
     return validation_fields
 
@@ -2898,6 +2946,7 @@ def _append_php_route_form_request_edges(
                     "from": route_ref,
                     "to": f"validation:{field_name}",
                     "request_class": request_class,
+                    "validation_rules": field.get("rules") or [],
                     "validation_path": field.get("path"),
                     "validation_line": field.get("line"),
                     **route_payload,
@@ -2929,6 +2978,7 @@ def _append_php_route_inline_validation_edges(
                 "to": f"validation:{field_name}",
                 "handler": method_symbol,
                 "source": "inline_validate",
+                "validation_rules": field_info.get("rules") or [],
                 "validation_path": validation_path,
                 "validation_line": field_info.get("line"),
                 "method": route.get("method"),
@@ -3499,13 +3549,14 @@ def _build_php_graph(
             for class_info in classes:
                 if class_info.get("role") != "form_request":
                     continue
-                for field_info in _php_array_field_keys(source, body, base_offset):
+                for field_info in _php_array_validation_fields(source, body, base_offset):
                     truncated = not _edge_append(
                         edges,
                         {
                             "kind": "request_validation",
                             "from": class_info["name"],
                             "to": f"validation:{field_info['field']}",
+                            "validation_rules": field_info.get("rules") or [],
                             "path": rel,
                             "line": field_info["line"],
                         },
@@ -3515,11 +3566,12 @@ def _build_php_graph(
         for match in PHP_VALIDATE_ARRAY_RE.finditer(source):
             class_info = _class_context(classes, match.start())
             method_context = _php_method_context_id(source, classes, match.start(), rel)
-            for field_info in _php_array_field_keys(source, match.group("body"), match.start()):
+            for field_info in _php_array_validation_fields(source, match.group("body"), match.start()):
                 edge = {
                     "kind": "request_validation",
                     "from": _php_context_id(class_info, rel),
                     "to": f"validation:{field_info['field']}",
+                    "validation_rules": field_info.get("rules") or [],
                     "path": rel,
                     "line": field_info["line"],
                 }
