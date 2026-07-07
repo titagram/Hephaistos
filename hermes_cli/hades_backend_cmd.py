@@ -23,6 +23,7 @@ from hermes_cli.hades_backend_actions import (
 )
 from hermes_cli.hades_backend_runtime import default_agent_id, default_agent_label
 from hermes_cli.hades_backend_status import load_backend_status_payload, support_report_payload
+from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
 from hermes_cli.hades_quality_report import build_hades_quality_report
 from hermes_cli import hades_backend_db as db
 
@@ -133,6 +134,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
         help="Create local pending memory proposals for extracted candidate facts",
     )
     backfill_note.add_argument("--json", action="store_true", help="Emit machine-readable backfill preview")
+    benchmark = sub.add_parser("benchmark", help="Run local synthetic Hades backend artifact benchmarks")
+    benchmark.add_argument("--medium-symbols", type=int, default=750, help="Synthetic medium graph symbol count")
+    benchmark.add_argument("--large-symbols", type=int, default=5000, help="Synthetic large graph symbol count")
+    benchmark.add_argument("--json", action="store_true", help="Emit machine-readable benchmark JSON")
     sub.add_parser("sync", help="Run a one-shot backend sync")
     parser.set_defaults(func=cmd_backend)
 
@@ -979,6 +984,44 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    medium_symbols = max(1, int(getattr(args, "medium_symbols", 750) or 750))
+    large_symbols = max(medium_symbols, int(getattr(args, "large_symbols", 5000) or 5000))
+    report = run_hades_backend_benchmark(
+        cases=[
+            {
+                "name": "medium_code_graph",
+                "symbols": medium_symbols,
+                "routes": max(1, medium_symbols // 8),
+                "edges": max(1, medium_symbols * 2),
+            },
+            {
+                "name": "large_code_graph",
+                "symbols": large_symbols,
+                "routes": max(1, large_symbols // 10),
+                "edges": max(1, large_symbols * 2),
+            },
+        ]
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report, sort_keys=True))
+        return 0 if report["status"] == "passed" else 1
+
+    print("Hades backend benchmark")
+    print(f"  Status: {report['status']}")
+    for case in report["cases"]:
+        ratio = case["compression_ratio"]
+        ratio_text = f"{ratio:.4f}" if isinstance(ratio, float) else "n/a"
+        print(
+            f"  {case['name']}: {case['upload_mode']} "
+            f"{case['original_bytes']}B -> {case['compressed_bytes']}B "
+            f"ratio={ratio_text} duration={case['duration_ms']}ms"
+        )
+    for warning in report["warnings"]:
+        print(f"  warning: {warning}")
+    return 0 if report["status"] == "passed" else 1
+
+
 def _existing_note_backfill_proposals_by_fingerprint(conn) -> dict[str, db.MemoryProposal]:
     existing: dict[str, db.MemoryProposal] = {}
     for proposal in db.list_memory_proposals(conn):
@@ -1150,10 +1193,12 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_bug_intake(args)
     if action == "backfill-note":
         return _cmd_backfill_note(args)
+    if action == "benchmark":
+        return _cmd_benchmark(args)
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|ingest-test|ingest-log|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

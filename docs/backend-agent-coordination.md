@@ -2876,6 +2876,36 @@ Resta fuori da questa tranche:
 - Eventuale compressione/chunking dedicata per source slices se il volume reale
   lo richiede.
 
+## Esecuzione Hades backend benchmark locale - 2026-07-07
+
+Stato: completata una quinta tranche P2-3 locale.
+
+Agent locale:
+
+- Nuovo modulo `hermes_cli/hades_backend_benchmark.py`.
+- Nuovo comando `hades backend benchmark [--json]`.
+- Il benchmark genera artifact `hades.code_graph.v1` sintetici source-free per
+  casi medium/large, misura hash canonico, bytes raw, bytes compressi,
+  compression ratio, upload mode e durata della preparazione payload.
+- Il report `hades.backend_benchmark.v1` usa soglie warning per durata locale e
+  ratio compressione; non richiede backend configurato e non legge source code.
+
+Verifiche eseguite:
+
+- Locale mirato:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_cmd.py::test_hades_backend_benchmark_reports_compressed_large_artifact tests/hermes_cli/test_hades_backend_cmd.py::test_backend_benchmark_command_emits_json`
+  passato: `2 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_benchmark.py hermes_cli/hades_backend_cmd.py tests/hermes_cli/test_hades_backend_cmd.py`
+  passato; `.venv/bin/python -m py_compile hermes_cli/hades_backend_benchmark.py hermes_cli/hades_backend_cmd.py`
+  passato.
+
+Resta fuori da questa tranche:
+
+- Delta-upload backend effettivo basato sul manifest per-file.
+- Benchmark su dataset reale di progetto, non solo sintetico.
+- Soglie CI produttive calibrate su hardware target.
+
 ## Esecuzione support runbook Hades - 2026-07-07
 
 Stato: completata la prima tranche locale P2-4 del piano "Documentation,

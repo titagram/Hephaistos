@@ -185,6 +185,48 @@ def test_project_unlink_notifies_backend_before_marking_local_binding(monkeypatc
     assert binding.status == "unlinked"
 
 
+def test_hades_backend_benchmark_reports_compressed_large_artifact():
+    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+
+    report = run_hades_backend_benchmark(
+        cases=[
+            {"name": "medium_code_graph", "symbols": 600, "routes": 60, "edges": 900},
+            {"name": "large_code_graph", "symbols": 2600, "routes": 260, "edges": 5200},
+        ]
+    )
+
+    assert report["schema"] == "hades.backend_benchmark.v1"
+    assert report["status"] == "passed"
+    assert report["case_count"] == 2
+    large = report["cases"][1]
+    assert large["schema"] == "hades.code_graph.v1"
+    assert large["raw_source_included"] is False
+    assert large["upload_mode"] == "compressed"
+    assert large["compressed_bytes"] < large["original_bytes"]
+    assert large["compression_ratio"] < 0.75
+    assert len(large["payload_sha256"]) == 64
+
+
+def test_backend_benchmark_command_emits_json(capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="benchmark",
+            medium_symbols=400,
+            large_symbols=2200,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["schema"] == "hades.backend_benchmark.v1"
+    assert payload["status"] == "passed"
+    assert [case["name"] for case in payload["cases"]] == ["medium_code_graph", "large_code_graph"]
+
+
 def test_backend_sync_executes_read_only_job(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

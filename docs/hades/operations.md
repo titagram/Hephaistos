@@ -73,6 +73,11 @@ backend upload while keeping local awareness coverage present.
 The same sync summary records `duration_ms`; use it as the local operational
 baseline for sync cost before comparing larger projects or changing indexing
 budgets.
+Use `hades backend benchmark --json` for a repeatable source-free synthetic
+guardrail over medium and large code graph artifacts. The report includes raw
+and compressed bytes, compression ratio, payload hash, duration, and warnings
+when local serialization/compression or compression efficiency crosses the
+current thresholds.
 Its `identity` section separates local profile memory, portable backend project
 memory, and local workspace binding state so a new device can distinguish
 shared project recall from source/index freshness that must be established on
