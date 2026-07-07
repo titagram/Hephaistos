@@ -267,6 +267,25 @@ def _php_graph_artifact():
                 "path": "app/Http/Controllers/OrderController.php",
                 "line": 49,
             },
+            {
+                "kind": "model_fillable",
+                "from": "App\\Models\\Order",
+                "to": "table:orders.status",
+                "field": "status",
+                "table": "orders",
+                "path": "app/Models/Order.php",
+                "line": 6,
+            },
+            {
+                "kind": "model_cast",
+                "from": "App\\Models\\Order",
+                "to": "table:orders.status",
+                "field": "status",
+                "cast_type": "string",
+                "table": "orders",
+                "path": "app/Models/Order.php",
+                "line": 8,
+            },
         ],
         "tests": {
             "schema": "hades.test_map.v1",
@@ -1024,6 +1043,58 @@ def test_hades_backend_graph_search_finds_local_query_write_edges(monkeypatch, t
         and "table=orders" in item["summary"]
         for item in result["items"]
     )
+
+
+def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders status model metadata", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_fillable"
+        and ref["to"] == "table:orders.status"
+        and ref["provenance"]["field"] == "status"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_cast"
+        and ref["to"] == "table:orders.status"
+        and ref["provenance"]["cast_type"] == "string"
+        for ref in graph_refs
+    )
+    assert any("field=status" in item["summary"] for item in result["items"])
+    assert any("cast_type=string" in item["summary"] for item in result["items"])
 
 
 def test_hades_backend_graph_search_finds_local_route_model_bindings(monkeypatch, tmp_path):

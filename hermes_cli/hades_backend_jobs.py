@@ -155,6 +155,22 @@ PHP_ARRAY_ENTRY_LIST_RE = re.compile(
 )
 PHP_CLASS_CONST_RE = re.compile(r"(?:\\\\)?(?P<class>[A-Za-z_][A-Za-z0-9_\\]+)::class")
 PHP_MODEL_TABLE_RE = re.compile(r"\bprotected\s+\$table\s*=\s*['\"](?P<table>[^'\"]+)['\"]", re.MULTILINE)
+PHP_MODEL_LIST_PROPERTY_RE = re.compile(
+    r"\bprotected\s+(?:array\s+)?\$(?P<property>fillable|guarded)\s*=\s*\[(?P<body>.*?)\]\s*;",
+    re.DOTALL | re.MULTILINE,
+)
+PHP_MODEL_CASTS_PROPERTY_RE = re.compile(
+    r"\bprotected\s+(?:array\s+)?\$casts\s*=\s*\[(?P<body>.*?)\]\s*;",
+    re.DOTALL | re.MULTILINE,
+)
+PHP_MODEL_CASTS_METHOD_RE = re.compile(
+    r"\bfunction\s+casts\s*\([^)]*\)\s*(?::\s*array)?\s*\{(?P<body>.*?)\}",
+    re.DOTALL | re.MULTILINE,
+)
+PHP_RETURN_ARRAY_RE = re.compile(r"\breturn\s*\[(?P<body>.*?)\]\s*;", re.DOTALL)
+PHP_ARRAY_STRING_PAIR_RE = re.compile(
+    r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*['\"](?P<value>[^'\"]+)['\"]"
+)
 PHP_CONFIG_RE = re.compile(r"\bconfig\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
 PHP_ENV_RE = re.compile(r"\benv\s*\(\s*['\"](?P<key>[^'\"]+)['\"]", re.MULTILINE)
 PHP_LOG_STATIC_RE = re.compile(
@@ -2387,6 +2403,112 @@ def _php_model_table_for_class(resolved_class: str, model_table_by_class: dict[s
     return ""
 
 
+def _php_array_string_values(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in PHP_QUOTED_VALUE_RE.finditer(body):
+        value = match.group("value").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append({"value": value, "line": _line_number(source, base_offset + match.start())})
+    return values
+
+
+def _php_array_string_pairs(source: str, body: str, base_offset: int) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in PHP_ARRAY_STRING_PAIR_RE.finditer(body):
+        key = match.group("key").strip()
+        value = match.group("value").strip()
+        if not key or not value or (key, value) in seen:
+            continue
+        seen.add((key, value))
+        pairs.append({"key": key, "value": value, "line": _line_number(source, base_offset + match.start())})
+    return pairs
+
+
+def _php_model_field_target(model_class: str, table: str, field: str) -> str:
+    if table and field != "*":
+        return f"table:{table}.{field}"
+    return f"model_field:{model_class}.{field}"
+
+
+def _php_model_metadata_classes(classes: list[dict[str, Any]], offset: int) -> list[dict[str, Any]]:
+    class_info = _class_context(classes, offset)
+    if class_info and class_info.get("role") == "model":
+        return [class_info]
+    return [class_info for class_info in classes if class_info.get("role") == "model"]
+
+
+def _append_php_model_metadata_edges(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    fallback_model_table: str,
+    model_table_by_class: dict[str, str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    for match in PHP_MODEL_LIST_PROPERTY_RE.finditer(source):
+        property_name = match.group("property")
+        for field_info in _php_array_string_values(source, match.group("body"), match.start("body")):
+            field = str(field_info["value"])
+            for class_info in _php_model_metadata_classes(classes, match.start()):
+                model_class = str(class_info["name"])
+                table = _php_model_table_for_class(model_class, model_table_by_class) or fallback_model_table
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": f"model_{property_name}",
+                        "from": model_class,
+                        "to": _php_model_field_target(model_class, table, field),
+                        "field": field,
+                        "table": table if field != "*" else "",
+                        "path": rel,
+                        "line": field_info["line"],
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
+    cast_bodies: list[tuple[re.Match[str], str, int]] = []
+    for match in PHP_MODEL_CASTS_PROPERTY_RE.finditer(source):
+        cast_bodies.append((match, match.group("body"), match.start("body")))
+    for method_match in PHP_MODEL_CASTS_METHOD_RE.finditer(source):
+        for return_match in PHP_RETURN_ARRAY_RE.finditer(method_match.group("body")):
+            cast_bodies.append(
+                (
+                    method_match,
+                    return_match.group("body"),
+                    method_match.start("body") + return_match.start("body"),
+                )
+            )
+
+    for match, body, base_offset in cast_bodies:
+        for cast_info in _php_array_string_pairs(source, body, base_offset):
+            field = str(cast_info["key"])
+            for class_info in _php_model_metadata_classes(classes, match.start()):
+                model_class = str(class_info["name"])
+                table = _php_model_table_for_class(model_class, model_table_by_class) or fallback_model_table
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "model_cast",
+                        "from": model_class,
+                        "to": _php_model_field_target(model_class, table, field),
+                        "field": field,
+                        "cast_type": cast_info["value"],
+                        "table": table,
+                        "path": rel,
+                        "line": cast_info["line"],
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+    return truncated
+
+
 def _append_php_eloquent_query_builder_edges(
     source: str,
     rel: str,
@@ -2978,6 +3100,16 @@ def _build_php_graph(
                     },
                     max_edges=max_edges,
                 ) or truncated
+
+        truncated = _append_php_model_metadata_edges(
+            source,
+            rel,
+            classes,
+            model_table,
+            model_table_by_class,
+            edges,
+            max_edges=max_edges,
+        ) or truncated
 
         for match in PHP_METHOD_RE.finditer(source):
             class_info = _class_context(classes, match.start())

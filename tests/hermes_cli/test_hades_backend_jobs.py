@@ -704,6 +704,12 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Illuminate\\Database\\Eloquent\\Model;\n"
         "class Order extends Model {\n"
         "    protected $table = 'orders';\n"
+        "    protected $fillable = ['customer_id', 'status'];\n"
+        "    protected $guarded = ['internal_note'];\n"
+        "    protected $casts = ['status' => 'string'];\n"
+        "    public function casts(): array {\n"
+        "        return ['customer_id' => 'integer'];\n"
+        "    }\n"
         "    public function customer() {\n"
         "        return $this->belongsTo(Customer::class);\n"
         "    }\n"
@@ -824,7 +830,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 60, "max_symbols": 70, "max_edges": 180},
+            "payload": {"max_files": 60, "max_symbols": 70, "max_edges": 220},
         },
         workspace_root=workspace,
     )
@@ -1019,6 +1025,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
     assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
+    assert ("model_fillable", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert ("model_fillable", "App\\Models\\Order", "table:orders.status") in edges
+    assert ("model_guarded", "App\\Models\\Order", "table:orders.internal_note") in edges
+    assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
+    assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert {
+        "kind": "model_cast",
+        "from": "App\\Models\\Order",
+        "to": "table:orders.status",
+        "field": "status",
+        "cast_type": "string",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 8,
+    } in artifact["edges"]
+    assert {
+        "kind": "model_cast",
+        "from": "App\\Models\\Order",
+        "to": "table:orders.customer_id",
+        "field": "customer_id",
+        "cast_type": "integer",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 10,
+    } in artifact["edges"]
     assert ("policy_for", "App\\Models\\Order", "App\\Policies\\OrderPolicy") in edges
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
     assert ("observed_by", "App\\Models\\Order", "App\\Observers\\OrderObserver") in edges
@@ -1077,6 +1108,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "paid" not in str(artifact)
     assert "$request->validate" not in str(artifact)
     assert "DB::table" not in str(artifact)
+    assert "protected $fillable" not in str(artifact)
+    assert "protected $guarded" not in str(artifact)
+    assert "protected $casts" not in str(artifact)
+    assert "return ['customer_id'" not in str(artifact)
     assert "$schedule->command" not in str(artifact)
     assert "middlewareAliases" not in str(artifact)
     assert "middlewareGroups" not in str(artifact)
