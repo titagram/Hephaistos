@@ -947,6 +947,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
+    assert ("method", "OrderService@format") in symbols
     assert ("method", "OrderResource@toArray") in symbols
     assert ("method", "StoreOrderRequest@authorize") in symbols
     assert ("method", "StoreOrderRequest@prepareForValidation") in symbols
@@ -970,6 +971,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("eloquent_relation", "App\\Models\\Order", "App\\Models\\Customer") in edges
     assert ("static_call", "App\\Http\\Controllers\\OrderController", "App\\Services\\OrderService::format") in edges
     assert ("static_call", "OrderController@show", "App\\Services\\OrderService::format") in edges
+    assert ("calls_method", "App\\Http\\Controllers\\OrderController", "OrderService@format") in edges
+    assert ("calls_method", "OrderController@show", "OrderService@format") in edges
     assert ("uses_form_request", "OrderController@show", "App\\Http\\Requests\\StoreOrderRequest") in edges
     assert ("uses_dependency", "OrderController@__construct", "App\\Services\\OrderService") in edges
     assert ("uses_dependency", "OrderController@show", "App\\Models\\Order") in edges
@@ -1042,6 +1045,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 27,
+    } in artifact["edges"]
+    assert {
+        "kind": "calls_method",
+        "from": "OrderController@show",
+        "to": "OrderService@format",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "target_class": "App\\Services\\OrderService",
+        "call_type": "static",
+        "target_method": "format",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 26,
     } in artifact["edges"]
     assert {
         "kind": "route_request_validation",

@@ -5503,3 +5503,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel method call graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per call graph method-level
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` costruisce un indice globale dei metodi PHP rilevati
+  nel workspace non-test.
+- Le static/service calls continuano a produrre gli edge compatibili
+  `static_call` verso `FQCN::method`.
+- Quando il target risolve a un metodo indicizzato, il graph aggiunge anche
+  `calls_method` verso il simbolo metodo reale, ad esempio
+  `OrderController@show -> OrderService@format`.
+- Il payload salva solo target class, target method, call type `static` e
+  path/line della chiamata; non conserva argomenti o corpo metodo.
+- Il fallback locale di `hades_backend_graph_search` e
+  `hades_backend_graph_traverse` puo' ora seguire `route -> controller ->
+  service method` senza accesso al source.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/traversal:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_method_call_edges tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_traverse_falls_back_to_local_graph_cache`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `85 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

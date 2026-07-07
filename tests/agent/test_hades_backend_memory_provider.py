@@ -89,6 +89,15 @@ def _php_graph_artifact():
                 "line": 41,
             },
             {
+                "kind": "method",
+                "name": "OrderService@format",
+                "class": "App\\Services\\OrderService",
+                "method": "format",
+                "role": "service",
+                "path": "app/Services/OrderService.php",
+                "line": 5,
+            },
+            {
                 "kind": "blade_view",
                 "name": "view:orders.show",
                 "view": "orders.show",
@@ -327,6 +336,16 @@ def _php_graph_artifact():
                 "line": 4,
                 "source_path": "app/Http/Controllers/OrderController.php",
                 "source_line": 44,
+            },
+            {
+                "kind": "calls_method",
+                "from": "OrderController@show",
+                "to": "OrderService@format",
+                "target_class": "App\\Services\\OrderService",
+                "call_type": "static",
+                "target_method": "format",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 44,
             },
             {
                 "kind": "view_ref",
@@ -1288,6 +1307,55 @@ def test_hades_backend_graph_search_finds_local_query_write_edges(monkeypatch, t
     )
 
 
+def test_hades_backend_graph_search_finds_local_method_call_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderService format static call", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "calls_method"
+        and ref["to"] == "OrderService@format"
+        and ref["provenance"]["target_class"] == "App\\Services\\OrderService"
+        for ref in graph_refs
+    )
+    assert any(
+        "call_type=static" in item["summary"]
+        and "target_method=format" in item["summary"]
+        and "target_class=App\\Services\\OrderService" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
@@ -2058,11 +2126,12 @@ def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatc
     assert {
         "route:orders.show",
         "OrderController@show",
+        "OrderService@format",
         "view:orders.show",
         "view:layouts.app",
         "component:alert",
     } <= node_ids
-    assert {"route_handler", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
+    assert {"route_handler", "calls_method", "view_ref", "blade_extends", "blade_component"} <= edge_kinds
     assert result["provenance"]["artifacts"][0]["origin"] == "memory_cache"
 
 

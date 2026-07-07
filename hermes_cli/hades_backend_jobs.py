@@ -3252,6 +3252,41 @@ def _php_form_request_input_mutation_index(
     return mutations_by_class
 
 
+def _php_method_symbol_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[tuple[str, str], str]:
+    method_symbols: dict[tuple[str, str], str] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            fqcn = _php_fqcn(namespace, match.group("name"))
+            classes.append({"name": fqcn, "offset": match.start()})
+        for method_match in PHP_METHOD_RE.finditer(source):
+            class_info = _class_context(classes, method_match.start())
+            if not class_info:
+                continue
+            fqcn = str(class_info["name"])
+            method_name = str(method_match.group("name") or "")
+            if method_name:
+                method_symbols[(fqcn, method_name)] = f"{_php_short_name(fqcn)}@{method_name}"
+    return method_symbols
+
+
 def _append_php_route_form_request_input_mutation_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3551,6 +3586,11 @@ def _build_php_graph(
         max_file_bytes=max_file_bytes,
     )
     form_request_input_mutations_by_class = _php_form_request_input_mutation_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    php_method_symbols = _php_method_symbol_index(
         workspace_root,
         php_files,
         max_file_bytes=max_file_bytes,
@@ -4203,6 +4243,28 @@ def _build_php_graph(
                 edge,
                 max_edges=max_edges,
             ) or truncated
+            target_method_symbol = php_method_symbols.get((resolved_class, method_name))
+            if target_method_symbol:
+                call_edge = {
+                    "kind": "calls_method",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": target_method_symbol,
+                    "target_class": resolved_class,
+                    "call_type": "static",
+                    "target_method": method_name,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, call_edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    call_edge,
+                    max_edges=max_edges,
+                ) or truncated
             if _php_is_laravel_api_resource_class(resolved_class) and method_name in {"make", "collection"}:
                 resource_model, resource_table = _php_resource_table_for_class(resolved_class, model_table_by_class)
                 resource_edge = {
