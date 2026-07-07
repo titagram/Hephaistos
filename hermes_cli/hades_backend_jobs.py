@@ -3313,6 +3313,35 @@ def _php_method_symbol_index(
     return method_symbols
 
 
+def _php_gate_policy_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> dict[str, str]:
+    policy_by_model: dict[str, str] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        for match in PHP_GATE_POLICY_RE.finditer(source):
+            model_class = _php_fqcn_resolved(namespace, str(match.group("model") or ""), uses)
+            policy_class = _php_fqcn_resolved(namespace, str(match.group("policy") or ""), uses)
+            if model_class and policy_class:
+                policy_by_model[model_class] = policy_class
+    return policy_by_model
+
+
 def _append_php_route_form_request_input_mutation_edges(
     routes_by_handler: dict[str, list[dict[str, Any]]],
     method_symbol: str,
@@ -3724,6 +3753,8 @@ def _append_php_authorization_edges(
     target_param: str,
     target_class: str,
     model_table: str,
+    policy_by_model: dict[str, str],
+    php_method_symbols: dict[tuple[str, str], str],
     edges: list[dict[str, Any]],
     max_edges: int,
 ) -> bool:
@@ -3770,6 +3801,24 @@ def _append_php_authorization_edges(
                 "from": method_symbol,
                 "to": f"table:{model_table}",
                 **base_payload,
+            },
+            max_edges=max_edges,
+        ) or truncated
+    policy_class = policy_by_model.get(target_class, "") if target_class else ""
+    policy_method_symbol = php_method_symbols.get((policy_class, ability), "") if policy_class else ""
+    if policy_method_symbol:
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "authorization_policy_method",
+                "from": method_symbol,
+                "to": policy_method_symbol,
+                "ability": ability,
+                "policy_class": policy_class,
+                "target_model": target_class,
+                "table": model_table,
+                "path": rel,
+                "line": source_line,
             },
             max_edges=max_edges,
         ) or truncated
@@ -3821,6 +3870,18 @@ def _append_php_authorization_edges(
                 },
                 max_edges=max_edges,
             ) or truncated
+        if policy_method_symbol:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_authorization_policy_method",
+                    "from": route_ref,
+                    "to": policy_method_symbol,
+                    "policy_class": policy_class,
+                    **route_payload,
+                },
+                max_edges=max_edges,
+            ) or truncated
     return truncated
 
 
@@ -3862,6 +3923,11 @@ def _build_php_graph(
         max_file_bytes=max_file_bytes,
     )
     php_method_symbols = _php_method_symbol_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    policy_by_model = _php_gate_policy_index(
         workspace_root,
         php_files,
         max_file_bytes=max_file_bytes,
@@ -4412,6 +4478,8 @@ def _build_php_graph(
                         target_param=target_param,
                         target_class=target_class,
                         model_table=model_table,
+                        policy_by_model=policy_by_model,
+                        php_method_symbols=php_method_symbols,
                         edges=edges,
                         max_edges=max_edges,
                     ) or truncated

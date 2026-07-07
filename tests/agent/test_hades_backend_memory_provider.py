@@ -109,6 +109,15 @@ def _php_graph_artifact():
                 "line": 5,
             },
             {
+                "kind": "method",
+                "name": "OrderPolicy@view",
+                "class": "App\\Policies\\OrderPolicy",
+                "method": "view",
+                "role": "policy",
+                "path": "app/Policies/OrderPolicy.php",
+                "line": 4,
+            },
+            {
                 "kind": "class",
                 "name": "App\\Exceptions\\OrderLockedException",
                 "short_name": "OrderLockedException",
@@ -341,6 +350,35 @@ def _php_graph_artifact():
                 "line": 4,
                 "source_path": "app/Http/Controllers/OrderController.php",
                 "source_line": 13,
+            },
+            {
+                "kind": "authorization_policy_method",
+                "from": "OrderController@show",
+                "to": "OrderPolicy@view",
+                "ability": "view",
+                "policy_class": "App\\Policies\\OrderPolicy",
+                "target_model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 13,
+            },
+            {
+                "kind": "route_authorization_policy_method",
+                "from": "route:orders.show",
+                "to": "OrderPolicy@view",
+                "handler": "OrderController@show",
+                "ability": "view",
+                "source": "this_authorize",
+                "target_param": "order",
+                "target_model": "App\\Models\\Order",
+                "table": "orders",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 13,
+                "policy_class": "App\\Policies\\OrderPolicy",
             },
             {
                 "kind": "http_abort",
@@ -2256,7 +2294,7 @@ def test_hades_backend_graph_search_finds_local_authorization_edges(monkeypatch,
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders authorization view policy", "limit": 5},
+            {"query": "orders authorization view policy", "limit": 10},
         )
     )
 
@@ -2272,9 +2310,21 @@ def test_hades_backend_graph_search_finds_local_authorization_edges(monkeypatch,
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_authorization_policy_method"
+        and ref["to"] == "OrderPolicy@view"
+        and ref["provenance"]["policy_class"] == "App\\Policies\\OrderPolicy"
+        for ref in graph_refs
+    )
+    assert any(
         "ability=view" in item["summary"]
         and "target_model=App\\Models\\Order" in item["summary"]
         and "source=this_authorize" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "policy_class=App\\Policies\\OrderPolicy" in item["summary"]
+        and "ability=view" in item["summary"]
         for item in result["items"]
     )
 

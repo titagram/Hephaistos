@@ -958,6 +958,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
+    assert ("method", "OrderPolicy@view") in symbols
     assert ("method", "OrderService@format") in symbols
     assert ("method", "OrderResource@toArray") in symbols
     assert ("method", "StoreOrderRequest@authorize") in symbols
@@ -1004,6 +1005,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_authorization", "route:orders.show", "ability:view") in edges
     assert ("route_authorization_model", "route:orders.show", "App\\Models\\Order") in edges
     assert ("route_authorization_table", "route:orders.show", "table:orders") in edges
+    assert ("authorization_policy_method", "OrderController@show", "OrderPolicy@view") in edges
+    assert ("route_authorization_policy_method", "route:orders.show", "OrderPolicy@view") in edges
     assert ("http_abort", "OrderController@show", "http_status:403") in edges
     assert ("route_http_abort", "route:orders.show", "http_status:403") in edges
     assert ("http_response_status", "InvoiceController@update", "http_status:409") in edges
@@ -1025,6 +1028,24 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "kind": "route_authorization",
         "from": "route:orders.show",
         "to": "ability:view",
+        "handler": "OrderController@show",
+        "ability": "view",
+        "source": "this_authorize",
+        "target_param": "order",
+        "target_model": "App\\Models\\Order",
+        "table": "orders",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 13,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_authorization_policy_method",
+        "from": "route:orders.show",
+        "to": "OrderPolicy@view",
+        "policy_class": "App\\Policies\\OrderPolicy",
         "handler": "OrderController@show",
         "ability": "view",
         "source": "this_authorize",

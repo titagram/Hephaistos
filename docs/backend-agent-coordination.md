@@ -5679,3 +5679,35 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel authorization policy method graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per policy method awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` costruisce un indice `model -> policy` dai mapping
+  `Gate::policy(Model::class, Policy::class)`.
+- Quando un authorization check ha ability e target model risolti, e il metodo
+  policy esiste nell'indice simboli PHP, il graph aggiunge
+  `authorization_policy_method` e `route_authorization_policy_method`.
+- Il payload salva solo ability, policy class, target model/table, path/line e
+  metadata route; non conserva corpo policy, condizioni o argomenti raw.
+- Il fallback locale di `hades_backend_graph_search` espone `policy_class` nei
+  dettagli cercabili dell'edge.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider/search:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_authorization_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `89 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

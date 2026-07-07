@@ -2879,6 +2879,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "authorization_path",
         "authorization_line",
         "access",
+        "policy_class",
         "table",
         "column",
         "model",
