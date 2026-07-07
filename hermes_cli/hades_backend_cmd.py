@@ -909,10 +909,16 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
         text, truncated = read_note_preview(args.file)
         result = analyze_note_quality(text, source=str(args.file), truncated=truncated)
         created_proposals: list[str] = []
+        skipped_duplicates: list[str] = []
         if getattr(args, "create_proposals", False):
             _agent, binding = _current_workspace_binding()
             with db.connect_closing() as conn:
+                existing_by_fingerprint = _existing_note_backfill_proposals_by_fingerprint(conn)
                 for fact in result["candidate_facts"]:
+                    fingerprint = str(fact.get("fingerprint") or "").strip()
+                    if fingerprint and fingerprint in existing_by_fingerprint:
+                        skipped_duplicates.append(existing_by_fingerprint[fingerprint].id)
+                        continue
                     proposal = db.create_memory_proposal(
                         conn,
                         project_id=binding.project_id,
@@ -924,6 +930,7 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
                             "source": "hades_note_quality",
                             "note_source": str(args.file),
                             "fact_kind": fact.get("kind"),
+                            "candidate_fact_fingerprint": fingerprint,
                             "evidence_ref": fact.get("evidence_ref"),
                             "candidate_fact": fact,
                         },
@@ -933,8 +940,15 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
             created_proposals = []
         result["created_proposal_count"] = len(created_proposals)
         result["created_proposal_ids"] = created_proposals
+        result["skipped_duplicate_proposal_count"] = len(skipped_duplicates)
+        result["skipped_duplicate_proposal_ids"] = skipped_duplicates
         if created_proposals:
             result["actions"] = [*result["actions"], "Run `hades backend sync` to submit created proposals for review."]
+        if skipped_duplicates:
+            result["actions"] = [
+                *result["actions"],
+                "Skipped duplicate candidate facts that already have local review proposals.",
+            ]
     except Exception as exc:
         print(f"Hades backend backfill-note: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
@@ -948,11 +962,26 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
     print(f"  Raw chunk:      {result['raw_chunk']}")
     print(f"  Candidate facts: {result['candidate_fact_count']}")
     print(f"  Created proposals: {result['created_proposal_count']}")
+    print(f"  Skipped duplicates: {result['skipped_duplicate_proposal_count']}")
     for fact in result["candidate_facts"][:5]:
         print(f"  - {fact['summary']}")
     for action in result["actions"]:
         print(f"  Action: {action}")
     return 0
+
+
+def _existing_note_backfill_proposals_by_fingerprint(conn) -> dict[str, db.MemoryProposal]:
+    existing: dict[str, db.MemoryProposal] = {}
+    for proposal in db.list_memory_proposals(conn):
+        provenance = proposal.provenance or {}
+        if provenance.get("source") != "hades_note_quality":
+            continue
+        candidate_fact = provenance.get("candidate_fact")
+        legacy_fingerprint = candidate_fact.get("fingerprint") if isinstance(candidate_fact, dict) else ""
+        fingerprint = str(provenance.get("candidate_fact_fingerprint") or legacy_fingerprint or "").strip()
+        if fingerprint:
+            existing[fingerprint] = proposal
+    return existing
 
 
 def _bug_report_id(response: dict[str, Any]) -> str | None:

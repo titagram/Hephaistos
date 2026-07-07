@@ -28,6 +28,7 @@ def test_note_quality_groups_raw_route_chunk_into_reviewed_candidate_fact():
     assert fact["kind"] == "route_handler_group"
     assert fact["predicate"] == "handles_routes"
     assert fact["object_count"] == 3
+    assert len(fact["fingerprint"]) == 64
     assert fact["review_status"] == "candidate"
     assert fact["subject"] == "carnovali/src/Controller/TaxonomyFlock/Vocabulary/SecurityActivityCategoryController.php"
     assert fact["objects"] == [
@@ -114,8 +115,29 @@ def test_backfill_note_command_can_create_review_proposals(monkeypatch, tmp_path
     assert rc == 0
     assert payload["created_proposal_count"] == 1
     assert payload["created_proposal_ids"] == [proposals[0].id]
+    assert payload["skipped_duplicate_proposal_count"] == 0
     assert proposals[0].status == "pending"
     assert proposals[0].intent == "note_backfill_candidate"
     assert proposals[0].summary.endswith("handles 3 routes in the taxonomy_flock_vocabulary_security_activity_category family.")
     assert proposals[0].provenance["source"] == "hades_note_quality"
+    assert len(proposals[0].provenance["candidate_fact_fingerprint"]) == 64
     assert proposals[0].provenance["candidate_fact"]["review_status"] == "candidate"
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="backfill-note",
+            create_proposals=True,
+            file=str(note),
+            json=True,
+        )
+    )
+    second_payload = json.loads(capsys.readouterr().out)
+
+    with hdb.connect_closing() as conn:
+        proposals_after_second_run = hdb.list_memory_proposals(conn)
+
+    assert rc == 0
+    assert len(proposals_after_second_run) == 1
+    assert second_payload["created_proposal_count"] == 0
+    assert second_payload["skipped_duplicate_proposal_count"] == 1
+    assert second_payload["skipped_duplicate_proposal_ids"] == [proposals[0].id]

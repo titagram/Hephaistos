@@ -2187,6 +2187,30 @@ Resta fuori da questa tranche:
 - Promozione automatizzata candidate fact -> verified wiki/project memory.
 - Ranking prima/dopo backfill su dataset reale.
 
+## Esecuzione note-quality backfill idempotente Hades - 2026-07-07
+
+Stato: completata una seconda tranche P1-7 locale.
+
+Agent locale:
+
+- I candidate facts prodotti da `hades_note_quality` hanno ora un fingerprint
+  stabile calcolato su kind, subject, predicate, objects ed evidence ref.
+- `hades backend backfill-note --create-proposals` salta le proposals locali
+  gia' presenti con lo stesso fingerprint, invece di duplicare la review queue.
+- Il JSON del comando espone `skipped_duplicate_proposal_count` e
+  `skipped_duplicate_proposal_ids`.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_note_quality.py`
+  passato: `3 passed`.
+
+Resta fuori da questa tranche:
+
+- Promozione automatizzata candidate fact -> verified wiki/project memory.
+- Ranking prima/dopo backfill su dataset reale.
+
 ## Esecuzione guided bug intake CLI Hades - 2026-07-07
 
 Stato: completata la prima tranche P2-1 del piano "Guided Bug Intake".

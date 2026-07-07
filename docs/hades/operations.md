@@ -296,6 +296,11 @@ Both commands read a bounded excerpt, redact likely tokens/API keys/bearer
 headers, extract lightweight stack frames when possible, and upload
 `failing_test` or `log_excerpt` evidence to the linked backend workspace.
 
+For legacy raw chunk notes, use `hades backend backfill-note <file> --json`
+first. Add `--create-proposals` only after reviewing the candidate facts. The
+command assigns stable fingerprints to extracted facts and skips local duplicate
+proposals on repeated runs; raw chunks remain outside automatic recall.
+
 When diagnosing bugs through the agent, invoke the `hades-bug-diagnosis` skill
 or follow the same order manually: project awareness status, existing evidence
 pack search, bug evidence search, graph search, minimal source slice fetch,

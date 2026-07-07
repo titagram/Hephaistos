@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -85,6 +86,7 @@ def _route_handler_facts(content: str, header: dict[str, Any]) -> list[dict[str,
     for handler, routes in sorted(by_handler.items()):
         shown_routes = routes[:MAX_ROUTES_PER_FACT]
         truncated = len(routes) > len(shown_routes)
+        evidence_ref = _provenance(header)
         facts.append(
             {
                 "kind": "route_handler_group",
@@ -94,7 +96,14 @@ def _route_handler_facts(content: str, header: dict[str, Any]) -> list[dict[str,
                 "objects": shown_routes,
                 "object_count": len(routes),
                 "truncated": truncated,
-                "evidence_ref": _provenance(header),
+                "evidence_ref": evidence_ref,
+                "fingerprint": _candidate_fact_fingerprint(
+                    kind="route_handler_group",
+                    subject=handler,
+                    predicate="handles_routes",
+                    objects=shown_routes,
+                    evidence_ref=evidence_ref,
+                ),
                 "review_status": "candidate",
             }
         )
@@ -107,6 +116,25 @@ def _route_summary(handler: str, routes: list[str]) -> str:
     prefix = _common_route_prefix(routes)
     prefix_text = f" in the {prefix} family" if prefix else ""
     return f"{handler} handles {len(routes)} routes{prefix_text}."
+
+
+def _candidate_fact_fingerprint(
+    *,
+    kind: str,
+    subject: str,
+    predicate: str,
+    objects: list[str],
+    evidence_ref: dict[str, Any],
+) -> str:
+    payload = {
+        "kind": kind,
+        "subject": subject,
+        "predicate": predicate,
+        "objects": objects,
+        "evidence_ref": evidence_ref,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _common_route_prefix(routes: list[str]) -> str:
