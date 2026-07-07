@@ -539,6 +539,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Listeners").mkdir(parents=True)
     (workspace / "app" / "Console" / "Commands").mkdir(parents=True)
     (workspace / "app" / "Models").mkdir(parents=True)
+    (workspace / "app" / "Http" / "Resources").mkdir(parents=True)
     (workspace / "app" / "Policies").mkdir(parents=True)
     (workspace / "app" / "Providers").mkdir(parents=True)
     (workspace / "app" / "Services").mkdir(parents=True)
@@ -626,8 +627,20 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        Order::where('status', 'paid')->first();\n"
         "        Order::where('status', 'pending')->update(['status' => 'paid']);\n"
         "        Order::recent()->first();\n"
+        "        App\\Http\\Resources\\OrderResource::make($order);\n"
         "        OrderService::format($order);\n"
         "        return view('orders.show', ['order' => $order]);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Resources" / "OrderResource.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Resources;\n"
+        "use Illuminate\\Http\\Resources\\Json\\JsonResource;\n"
+        "class OrderResource extends JsonResource {\n"
+        "    public function toArray($request): array {\n"
+        "        return ['id' => $this->id, 'status' => $this->status];\n"
         "    }\n"
         "}\n",
         encoding="utf-8",
@@ -847,7 +860,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         {
             "job_id": "job_php_graph",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 60, "max_symbols": 80, "max_edges": 260},
+            "payload": {"max_files": 60, "max_symbols": 90, "max_edges": 300},
         },
         workspace_root=workspace,
     )
@@ -877,6 +890,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Policies\\OrderPolicy") in symbols
     assert ("class", "App\\Services\\OrderService") in symbols
     assert ("class", "App\\Http\\Requests\\StoreOrderRequest") in symbols
+    assert ("class", "App\\Http\\Resources\\OrderResource") in symbols
     assert ("class", "App\\Http\\Middleware\\Authenticate") in symbols
     assert ("class", "App\\Http\\Middleware\\EncryptCookies") in symbols
     assert ("class", "App\\Http\\Middleware\\EnsureEmailIsVerified") in symbols
@@ -900,6 +914,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("method", "OrderController@show") in symbols
     assert ("method", "InvoiceController@index") in symbols
     assert ("method", "Order@customer") in symbols
+    assert ("method", "OrderResource@toArray") in symbols
     assert ("route_handler", "route:orders.show", "OrderController@show") in edges
     assert ("route_handler", "route:invoices.index", "InvoiceController@index") in edges
     assert ("route_handler", "route:invoices.show", "InvoiceController@show") in edges
@@ -1051,6 +1066,21 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_appended_attribute", "App\\Models\\Order", "model_attribute:App\\Models\\Order.display_status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert ("api_resource_model", "App\\Http\\Resources\\OrderResource", "App\\Models\\Order") in edges
+    assert ("api_resource_table", "App\\Http\\Resources\\OrderResource", "table:orders") in edges
+    assert ("api_resource_ref", "App\\Http\\Controllers\\OrderController", "App\\Http\\Resources\\OrderResource") in edges
+    assert ("api_resource_ref", "OrderController@show", "App\\Http\\Resources\\OrderResource") in edges
+    assert {
+        "kind": "api_resource_ref",
+        "from": "OrderController@show",
+        "to": "App\\Http\\Resources\\OrderResource",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "resource_method": "make",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 25,
+    } in artifact["edges"]
     assert {
         "kind": "model_appended_attribute",
         "from": "App\\Models\\Order",
@@ -1188,6 +1218,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "protected $appends" not in str(artifact)
     assert "protected $casts" not in str(artifact)
     assert "return ['customer_id'" not in str(artifact)
+    assert "return ['id' => $this->id" not in str(artifact)
     assert "strtoupper" not in str(artifact)
     assert "Attribute::make" not in str(artifact)
     assert "return $query->latest" not in str(artifact)

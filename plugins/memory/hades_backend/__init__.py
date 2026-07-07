@@ -2855,6 +2855,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
     for key in (
         "operation",
         "query_method",
+        "resource_method",
         "field",
         "property",
         "cast_type",

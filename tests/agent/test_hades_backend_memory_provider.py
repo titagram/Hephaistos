@@ -112,6 +112,15 @@ def _php_graph_artifact():
                 "path": "resources/views/components/alert.blade.php",
                 "line": 1,
             },
+            {
+                "kind": "class",
+                "name": "App\\Http\\Resources\\OrderResource",
+                "short_name": "OrderResource",
+                "role": "api_resource",
+                "path": "app/Http/Resources/OrderResource.php",
+                "line": 4,
+                "extends": "Illuminate\\Http\\Resources\\Json\\JsonResource",
+            },
         ],
         "edges": [
             {
@@ -315,6 +324,32 @@ def _php_graph_artifact():
                 "table": "orders",
                 "path": "app/Models/Order.php",
                 "line": 11,
+            },
+            {
+                "kind": "api_resource_model",
+                "from": "App\\Http\\Resources\\OrderResource",
+                "to": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Resources/OrderResource.php",
+                "line": 4,
+            },
+            {
+                "kind": "api_resource_table",
+                "from": "App\\Http\\Resources\\OrderResource",
+                "to": "table:orders",
+                "model": "App\\Models\\Order",
+                "path": "app/Http/Resources/OrderResource.php",
+                "line": 4,
+            },
+            {
+                "kind": "api_resource_ref",
+                "from": "OrderController@show",
+                "to": "App\\Http\\Resources\\OrderResource",
+                "resource_method": "make",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 50,
             },
             {
                 "kind": "model_accessor",
@@ -1329,6 +1364,57 @@ def test_hades_backend_graph_search_finds_local_model_serialization_edges(monkey
     )
     assert any("property=appends" in item["summary"] for item in result["items"])
     assert any("field=display_status" in item["summary"] for item in result["items"])
+
+
+def test_hades_backend_graph_search_finds_local_api_resource_edges(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": _php_graph_artifact(),
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "OrderResource make orders api resource", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "api_resource_ref"
+        and ref["to"] == "App\\Http\\Resources\\OrderResource"
+        and ref["provenance"]["resource_method"] == "make"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "api_resource_table"
+        and ref["to"] == "table:orders"
+        for ref in graph_refs
+    )
+    assert any("resource_method=make" in item["summary"] for item in result["items"])
+    assert any("model=App\\Models\\Order" in item["summary"] for item in result["items"])
 
 
 def test_hades_backend_graph_search_finds_local_route_model_bindings(monkeypatch, tmp_path):

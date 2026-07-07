@@ -5266,3 +5266,37 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel API Resource graph Hades - 2026-07-07
+
+Stato: completata una tranche locale P0-4 per API Resource awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` riconosce classi Laravel `JsonResource` e
+  `ResourceCollection` come ruolo `api_resource`.
+- Il graph collega le resource al model/table risolti per convenzione con edge
+  `api_resource_model` e `api_resource_table`.
+- Quando controller o service usano `new Resource`, `Resource::make(...)` o
+  `Resource::collection(...)`, il graph aggiunge `api_resource_ref` dal context
+  corrente alla resource, con `resource_method`, model e table quando noti.
+- Il fallback locale di `hades_backend_graph_search` mostra
+  `resource_method=...` nei summary edge, utile per diagnosticare payload API
+  e trasformazioni JSON senza leggere source live.
+- Il payload non conserva il corpo `toArray`, array di output o sorgente raw.
+
+Verifiche eseguite:
+
+- Locale mirato graph:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source`
+  passato: `1 passed`.
+- Locale mirato provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_api_resource_edges`
+  passato: `1 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `77 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

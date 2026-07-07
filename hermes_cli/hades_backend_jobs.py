@@ -1016,6 +1016,12 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
         return "controller"
     if path.startswith("app/Http/Requests/") or _php_short_name(extends) == "FormRequest" or short.endswith("Request"):
         return "form_request"
+    if (
+        path.startswith("app/Http/Resources/")
+        or _php_short_name(extends) in {"JsonResource", "ResourceCollection"}
+        or short.endswith(("Resource", "ResourceCollection"))
+    ):
+        return "api_resource"
     if path.startswith("app/Models/") or _php_short_name(extends) == "Model":
         return "model"
     if path.startswith("app/Http/Middleware/") or short.endswith("Middleware"):
@@ -2403,6 +2409,35 @@ def _php_model_table_for_class(resolved_class: str, model_table_by_class: dict[s
     return ""
 
 
+def _php_is_laravel_api_resource_class(resolved_class: str) -> bool:
+    short = _php_short_name(resolved_class)
+    return "\\Http\\Resources\\" in resolved_class or short.endswith(("Resource", "ResourceCollection"))
+
+
+def _php_resource_model_for_class(resource_class: str, model_table_by_class: dict[str, str]) -> str:
+    short = _php_short_name(resource_class)
+    base = short
+    for suffix in ("ResourceCollection", "Collection", "Resource"):
+        if base.endswith(suffix) and len(base) > len(suffix):
+            base = base[: -len(suffix)]
+            break
+    if not base or base == short:
+        return ""
+    for model_class in model_table_by_class:
+        if _php_short_name(model_class) == base:
+            return model_class
+    if resource_class.startswith("App\\Http\\Resources\\") or "\\Http\\Resources\\" in resource_class:
+        return f"App\\Models\\{base}"
+    return ""
+
+
+def _php_resource_table_for_class(resource_class: str, model_table_by_class: dict[str, str]) -> tuple[str, str]:
+    model_class = _php_resource_model_for_class(resource_class, model_table_by_class)
+    if not model_class:
+        return "", ""
+    return model_class, _php_model_table_for_class(model_class, model_table_by_class)
+
+
 def _php_scope_name(method_name: str) -> str:
     if not method_name.startswith("scope") or len(method_name) <= len("scope"):
         return ""
@@ -3157,6 +3192,34 @@ def _build_php_graph(
                     },
                     max_edges=max_edges,
                 ) or truncated
+            if role == "api_resource":
+                resource_model, resource_table = _php_resource_table_for_class(fqcn, model_table_by_class)
+                if resource_model:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "api_resource_model",
+                            "from": fqcn,
+                            "to": resource_model,
+                            "table": resource_table,
+                            "path": rel,
+                            "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
+                if resource_table:
+                    truncated = not _edge_append(
+                        edges,
+                        {
+                            "kind": "api_resource_table",
+                            "from": fqcn,
+                            "to": f"table:{resource_table}",
+                            "model": resource_model,
+                            "path": rel,
+                            "line": _line_number(source, match.start()),
+                        },
+                        max_edges=max_edges,
+                    ) or truncated
 
         classes.sort(key=lambda item: int(item["offset"]))
         truncated = _append_php_log_events(source, rel, classes, edges, log_events, max_edges=max_edges) or truncated
@@ -3534,6 +3597,28 @@ def _build_php_graph(
                 edge,
                 max_edges=max_edges,
             ) or truncated
+            if _php_is_laravel_api_resource_class(resolved_class) and method_name in {"make", "collection"}:
+                resource_model, resource_table = _php_resource_table_for_class(resolved_class, model_table_by_class)
+                resource_edge = {
+                    "kind": "api_resource_ref",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": resolved_class,
+                    "resource_method": method_name,
+                    "model": resource_model,
+                    "table": resource_table,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, resource_edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    resource_edge,
+                    max_edges=max_edges,
+                ) or truncated
             model_scopes = model_scope_by_class.get(resolved_class) or set()
             if method_name in model_scopes:
                 model_table = _php_model_table_for_class(resolved_class, model_table_by_class)
@@ -3842,10 +3927,11 @@ def _build_php_graph(
 
         for match in PHP_NEW_RE.finditer(source):
             class_info = _class_context(classes, match.start())
+            resolved_class = _php_fqcn_resolved(namespace, match.group("class"), uses)
             edge = {
                 "kind": "instantiates",
                 "from": class_info["name"] if class_info else rel,
-                "to": _php_fqcn_resolved(namespace, match.group("class"), uses),
+                "to": resolved_class,
                 "path": rel,
                 "line": _line_number(source, match.start()),
             }
@@ -3859,6 +3945,28 @@ def _build_php_graph(
                 edge,
                 max_edges=max_edges,
             ) or truncated
+            if _php_is_laravel_api_resource_class(resolved_class):
+                resource_model, resource_table = _php_resource_table_for_class(resolved_class, model_table_by_class)
+                resource_edge = {
+                    "kind": "api_resource_ref",
+                    "from": class_info["name"] if class_info else rel,
+                    "to": resolved_class,
+                    "resource_method": "new",
+                    "model": resource_model,
+                    "table": resource_table,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                }
+                truncated = not _edge_append(edges, resource_edge, max_edges=max_edges) or truncated
+                truncated = not _append_php_method_context_edge(
+                    source,
+                    rel,
+                    classes,
+                    match.start(),
+                    edges,
+                    resource_edge,
+                    max_edges=max_edges,
+                ) or truncated
 
         if rel.startswith("database/migrations/"):
             for table_info in _laravel_migration_tables(source, rel):
