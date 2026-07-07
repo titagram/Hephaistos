@@ -88,6 +88,9 @@ the JSON status payload.
 For release and staging checks, use the no-network MVP smoke in
 [operations.md](operations.md#mvp-smoke). Production release gates live in
 [../RELEASE_GATES.md](../RELEASE_GATES.md).
+For source-free bug diagnosis, follow
+[no-codebase-diagnosis.md](no-codebase-diagnosis.md) after the backend status
+shows current project awareness and evidence coverage.
 
 ## 5. Privacy And Data Boundaries
 

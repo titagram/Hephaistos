@@ -3580,6 +3580,31 @@ Resta fuori da questa tranche:
 
 - Wizard desktop.
 
+## Esecuzione no-codebase diagnosis guide Hades - 2026-07-07
+
+Stato: completata una tranche locale P2-4.
+
+Docs locali:
+
+- Nuova guida pubblica `docs/hades/no-codebase-diagnosis.md`.
+- La guida copre precondizioni source-free, refresh awareness, bug intake,
+  sequenza diagnosi senza source locale, quality audit, recovery blockers e
+  support bundle sicuro.
+- `docs/hades/README.md`, `docs/hades/launch.md` e
+  `docs/hades/support-runbook.md` linkano la guida.
+- `tests/test_docs_hades_mvp.py` include la nuova pagina nel set stabile delle
+  docs Hades e verifica il link dal support runbook.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/test_docs_hades_mvp.py`
+  passato: `6 passed`.
+
+Resta fuori da questa tranche:
+
+- Tutorial desktop in-app.
+
 ## Esecuzione scheduled quality audit Hades - 2026-07-07
 
 Stato: completata una tranche locale P2-5.

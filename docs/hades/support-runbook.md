@@ -23,6 +23,11 @@ For Hades diagnosis/evidence support, ask for metadata-only counts first:
 hades backend privacy-export --json
 ```
 
+For the full source-free diagnosis workflow, use
+[no-codebase-diagnosis.md](no-codebase-diagnosis.md). It defines the required
+awareness, evidence, freshness, and confidence gates before a precise root-cause
+claim is safe without local source access.
+
 Do not request `hades backend privacy-export --include-content --json` unless a
 maintainer has confirmed the user consent, project policy, and a secure sharing
 channel. Use `hades backend privacy-delete --json` and

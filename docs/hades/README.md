@@ -27,6 +27,9 @@ local contract fixture is [openapi-hades-v1.json](openapi-hades-v1.json).
   cleanup, degraded states, and recovery.
 - [support-runbook.md](support-runbook.md) maps launch failures to safe support
   commands, recovery actions, and escalation.
+- [no-codebase-diagnosis.md](no-codebase-diagnosis.md) covers source-free bug
+  diagnosis using backend awareness, bounded evidence, quality gates, and safe
+  recovery actions.
 - [developer-flow.md](developer-flow.md) covers local-only subagent and model
   routing defaults.
 - [accessibility-responsive-qa.md](accessibility-responsive-qa.md) defines the

@@ -16,6 +16,7 @@ def test_hades_mvp_user_docs_exist_with_required_topics():
         "operations.md": ["job", "waiting_confirmation", "Persephone"],
         "doctor-troubleshooting.md": ["hades doctor", "cleanup", "degraded"],
         "support-runbook.md": ["Safe Support Bundle", "Recovery Matrix", "Escalate"],
+        "no-codebase-diagnosis.md": ["source-free", "bug-intake", "quality-report", "diagnosable_without_source"],
         "developer-flow.md": ["subagent", "model routing", "local-only", "hades backend profiles"],
     }
 
@@ -126,6 +127,7 @@ def test_hades_support_runbook_covers_launch_failures_without_secret_collection(
         "windows path issue",
         "desktop/backend version mismatch",
         "hades doctor --report-backend",
+        "no-codebase-diagnosis.md",
         "do not ask users to send",
     ]
 
