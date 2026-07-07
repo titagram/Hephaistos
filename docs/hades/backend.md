@@ -70,7 +70,10 @@ High or medium confidence diagnosis reports are also rejected unless
 `freshness.status=current`, `evidence_refs` is non-empty, and current project
 awareness is `diagnosable_without_source=true`; failures return
 `diagnosis_freshness_not_current`, `diagnosis_evidence_refs_required`, or
-`diagnosis_awareness_not_diagnosable`.
+`diagnosis_awareness_not_diagnosable`. The local agent provider also refreshes
+live project-awareness status before saving high/medium reports, so stale
+coverage cannot be bypassed by passing claimed-current freshness in tool
+arguments.
 
 Privacy and retention controls are explicit and workspace scoped. The backend
 exposes:

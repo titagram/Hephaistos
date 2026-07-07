@@ -161,9 +161,11 @@ precise cause. A successful `hades backend sync` sends artifact HEAD metadata
 from the linked workspace binding so the backend can clear stale artifact
 warnings when the index matches the current checkout.
 The backend and local diagnosis tool both reject high/medium confidence
-diagnosis reports when this status is not source-free diagnosable; save `low`
-or `insufficient` until current graph, bug evidence, and source-slice coverage
-exist.
+diagnosis reports when this status is not source-free diagnosable. The local
+provider refreshes the live project-awareness status again when saving a
+high/medium report, so claimed-current tool arguments do not bypass stale
+coverage. Save `low` or `insufficient` until current graph, bug evidence, and
+source-slice coverage exist.
 
 The dashboard backend page surfaces the same local readiness picture in the
 `Diagnosis quality` panel: source-free ready bindings, blocked bindings,
@@ -366,9 +368,10 @@ evidence refs and confidence.
 
 The backend and local provider enforce a hard gate for precise persisted
 diagnoses: `high` or `medium` confidence reports require non-empty
-`evidence_refs`, `freshness.status=current`, and
-`awareness.diagnosable_without_source=true`. Otherwise the request is rejected
-with `diagnosis_evidence_refs_required`, `diagnosis_freshness_not_current`, or
+`evidence_refs`, live `freshness.status=current`, and live
+`awareness.diagnosable_without_source=true`. The provider refreshes the live
+awareness gate before saving, then rejects stale or incomplete coverage with
+`diagnosis_evidence_refs_required`, `diagnosis_freshness_not_current`, or
 `diagnosis_awareness_not_diagnosable`; save a `low` or `insufficient` report
 when the evidence is incomplete or stale.
 

@@ -432,8 +432,11 @@ DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
         "Persist a structured Hades backend diagnosis report for the linked "
         "workspace after the bug-diagnosis workflow has compared awareness, bug "
         "evidence, graph results, and source slices. Use this to preserve final "
-        "or insufficient-evidence outcomes with evidence refs. Results are live "
-        "backend data; there is no local cache fallback."
+        "or insufficient-evidence outcomes with evidence refs. For high/medium "
+        "confidence reports the tool refreshes live project-awareness status and "
+        "blocks the save when freshness is stale, missing, or not diagnosable "
+        "without source. Results are live backend data; there is no local cache "
+        "fallback."
     ),
     "parameters": {
         "type": "object",
@@ -815,19 +818,20 @@ class HadesBackendMemoryProvider(MemoryProvider):
         payload = args.get("payload")
         if payload is not None and not isinstance(payload, dict):
             return tool_error("Parameter payload must be an object when provided.")
-        if confidence in {"high", "medium"}:
+        precise_confidence = confidence in {"high", "medium"}
+        if precise_confidence:
             if not evidence_refs:
                 return tool_error(
                     "High/medium confidence diagnosis reports require evidence_refs.",
                     required_for_confidence=confidence,
                 )
-            freshness_status = str((freshness or {}).get("status") or "").strip()
-            if freshness_status != "current":
+            freshness_status = str((freshness or {}).get("status") or "").strip() if freshness else ""
+            if freshness_status and freshness_status != "current":
                 return tool_error(
                     "High/medium confidence diagnosis reports require freshness.status=current.",
                     freshness_status=freshness_status or "missing",
                 )
-            if not bool((awareness or {}).get("diagnosable_without_source")):
+            if awareness is not None and not bool(awareness.get("diagnosable_without_source")):
                 return tool_error(
                     "High/medium confidence diagnosis reports require awareness.diagnosable_without_source=true.",
                     diagnosable_without_source=bool((awareness or {}).get("diagnosable_without_source")),
@@ -848,6 +852,41 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     ],
                 }
             )
+
+        if precise_confidence:
+            live_awareness, live_awareness_error = self._backend_project_awareness_status()
+            if live_awareness is None:
+                return tool_error(
+                    "High/medium confidence diagnosis reports require live project awareness status.",
+                    backend_live_error=live_awareness_error or "project_awareness_status_unavailable",
+                    actions=[
+                        "Run `hades backend sync` and retry the diagnosis report.",
+                        "Save an insufficient-evidence report instead of a precise root-cause claim.",
+                    ],
+                )
+            awareness_gate = _tool_result_from_backend_project_awareness_status(live_awareness)
+            live_freshness = awareness_gate.get("freshness") if isinstance(awareness_gate.get("freshness"), dict) else {}
+            live_freshness_status = str(live_freshness.get("status") or "").strip()
+            if live_freshness_status != "current":
+                return tool_error(
+                    "High/medium confidence diagnosis reports require live freshness.status=current.",
+                    freshness_status=live_freshness_status or "missing",
+                    freshness=live_freshness,
+                    actions=awareness_gate.get("actions") or [],
+                )
+            if not bool(awareness_gate.get("diagnosable_without_source")):
+                return tool_error(
+                    "High/medium confidence diagnosis reports require live awareness.diagnosable_without_source=true.",
+                    diagnosable_without_source=bool(awareness_gate.get("diagnosable_without_source")),
+                    coverage=awareness_gate.get("coverage") if isinstance(awareness_gate.get("coverage"), dict) else {},
+                    actions=awareness_gate.get("actions") or [],
+                )
+            freshness = live_freshness
+            awareness = {
+                "diagnosable_without_source": True,
+                "overall_status": awareness_gate.get("overall_status"),
+                "coverage": awareness_gate.get("coverage") if isinstance(awareness_gate.get("coverage"), dict) else {},
+            }
 
         backend_result, backend_error = self._backend_diagnosis_report_create(
             bug_report_id=str(args.get("bug_report_id") or "").strip(),

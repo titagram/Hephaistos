@@ -116,6 +116,11 @@ High or medium confidence is valid only when all of these are true:
 - `awareness.diagnosable_without_source=true`;
 - the claim is supported by current graph/source-slice/evidence references.
 
+When the agent saves a high/medium diagnosis report, the local Hades provider
+refreshes live project-awareness status and uses that response for the final
+gate; the model's supplied freshness/awareness fields are not enough to bypass
+stale or incomplete backend coverage.
+
 If any gate is missing, the correct result is an insufficient diagnosis with
 the missing gate and next action. Do not promote a precise root cause from stale
 artifacts or unverified notes.

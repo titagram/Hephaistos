@@ -1408,7 +1408,25 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
     class FakeClient:
         def __init__(self):
             self.calls = []
+            self.awareness_calls = []
             self.closed = 0
+
+        def project_awareness_status(self, **payload):
+            self.awareness_calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "overall_status": "current",
+                "diagnosable_without_source": True,
+                "freshness": {
+                    "status": "current",
+                    "workspace_head_commit": "abc123",
+                    "artifact_head_commit": "abc123",
+                    "index_status": "live_query",
+                },
+                "coverage": {"code_graph": {"status": "current", "count": 1}},
+                "actions": [],
+            }
 
         def create_diagnosis_report(self, **payload):
             self.calls.append(payload)
@@ -1472,6 +1490,12 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
     assert result["diagnosis_report"]["root_cause"].startswith("OrderController")
     assert result["diagnosis_report"]["evidence_refs"][1]["id"] == "slice_1"
     assert result["diagnosis_report"]["freshness"]["workspace_head_commit"] == "abc123"
+    assert fake.awareness_calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+        }
+    ]
     assert fake.calls == [
         {
             "project_id": "proj_1",
@@ -1485,13 +1509,18 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
                 {"type": "bug_evidence", "id": "evidence_1"},
                 {"type": "source_slice", "id": "slice_1"},
             ],
-            "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+            "freshness": {
+                "status": "current",
+                "workspace_head_commit": "abc123",
+                "artifact_head_commit": "abc123",
+                "index_status": "live_query",
+            },
             "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
             "redactions": 2,
         }
     ]
-    assert fake.closed == 1
-    assert timeouts == [2.0]
+    assert fake.closed == 2
+    assert timeouts == [0.75, 2.0]
 
 
 def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypatch, tmp_path):
@@ -1565,6 +1594,62 @@ def test_hades_backend_diagnosis_report_create_tool_blocks_incomplete_awareness(
         "awareness.diagnosable_without_source=true."
     )
     assert result["diagnosable_without_source"] is False
+
+
+def test_hades_backend_diagnosis_report_create_tool_uses_live_awareness_gate(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def __init__(self):
+            self.create_calls = []
+
+        def project_awareness_status(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "overall_status": "stale",
+                "diagnosable_without_source": True,
+                "freshness": {
+                    "status": "stale",
+                    "workspace_head_commit": "new-head",
+                    "artifact_head_commit": "old-head",
+                    "index_status": "live_query",
+                    "stale_reason": "workspace_head_changed",
+                },
+                "coverage": {"code_graph": {"status": "stale", "count": 1}},
+                "actions": ["Run `hades backend sync` before precise diagnosis."],
+            }
+
+        def create_diagnosis_report(self, **payload):
+            self.create_calls.append(payload)
+            raise AssertionError("stale awareness must block before report create")
+
+        def close(self):
+            pass
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "confidence": "high",
+                "root_cause": "OrderController dereferences a nullable relation.",
+                "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                "freshness": {"status": "current", "workspace_head_commit": "claimed-current"},
+                "awareness": {"diagnosable_without_source": True},
+            },
+        )
+    )
+
+    assert result["error"] == "High/medium confidence diagnosis reports require live freshness.status=current."
+    assert result["freshness_status"] == "stale"
+    assert result["freshness"]["stale_reason"] == "workspace_head_changed"
+    assert result["actions"] == ["Run `hades backend sync` before precise diagnosis."]
+    assert fake.create_calls == []
 
 
 def test_hades_backend_resolved_bug_promote_tool_persists_live_backend(monkeypatch, tmp_path):

@@ -3542,6 +3542,37 @@ Resta fuori da questa tranche:
 - Valutazione remota end-to-end con modello/agent reale invece di solo API
   contract backend.
 
+## Esecuzione live awareness gate provider - 2026-07-07
+
+Stato: completata una tranche locale P0-3 sul blocco automatico dei report
+precisi.
+
+Agent locale:
+
+- `hades_backend_diagnosis_report_create` rilegge live
+  `project-awareness/status` prima di salvare report `high` o `medium`.
+- Il provider usa la freshness live restituita dal backend nel report salvato.
+- Se il backend live indica `freshness.status!=current` o
+  `diagnosable_without_source=false`, il provider blocca il report preciso e
+  restituisce actions/coverage per salvare un report `low` o `insufficient`.
+- Questo impedisce al modello di bypassare il gate passando manualmente
+  `freshness.status=current` nei tool args.
+
+Verifiche eseguite:
+
+- Locale:
+  `.venv/bin/python -m pytest -q tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato.
+- Locale lint/compile:
+  `ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato.
+- Locale:
+  `git diff --check` passato.
+
+Resta fuori da questa tranche:
+
+- Valutazione E2E con modello/agent reale e guidance visuale dedicata nelle UI.
+
 ## Esecuzione source-free test map graph - 2026-07-07
 
 Stato: completata una tranche locale P2-2 sull'indicizzazione vera dei
