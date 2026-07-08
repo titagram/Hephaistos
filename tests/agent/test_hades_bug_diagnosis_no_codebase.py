@@ -33,6 +33,9 @@ def test_hades_no_codebase_eval_suite_reports_accuracy_and_coverage():
     assert payload["tool_coverage"] == 1.0
     assert payload["tool_order_coverage"] == 1.0
     assert payload["persistence_coverage"] == 1.0
+    assert payload["causal_pack_coverage"] == 1.0
+    assert payload["causal_chain_coverage"] == 1.0
+    assert payload["counterfactual_refusal_coverage"] == 1.0
     assert payload["no_codebase_violations"] == []
     assert json.loads(json.dumps(payload)) == payload
 
@@ -55,6 +58,9 @@ def test_hades_no_codebase_eval_fails_on_source_file_tool_access():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls + ("read_file",),
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -335,6 +341,9 @@ def test_hades_no_codebase_eval_fails_when_hades_tools_are_out_of_order():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls[1:] + first.tool_calls[:1],
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -384,6 +393,7 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_evidence_is_missing():
         "expected insufficient confidence",
         "insufficient case must not claim a precise root cause",
         "missing evidence classification does not match fixture",
+        "counterfactual precise claim was not refused",
         "precise diagnosis requires source-free diagnosable awareness",
     ]
 
@@ -406,6 +416,9 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_freshness_is_stale():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls,
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -439,6 +452,9 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_awareness_is_not_diagn
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls,
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 

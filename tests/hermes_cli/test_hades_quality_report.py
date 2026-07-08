@@ -34,6 +34,9 @@ def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
     assert report["metrics"]["no_codebase"]["freshness_coverage"] == 1.0
     assert report["metrics"]["no_codebase"]["awareness_coverage"] == 1.0
     assert report["metrics"]["no_codebase"]["tool_order_coverage"] == 1.0
+    assert report["metrics"]["no_codebase"]["causal_pack_coverage"] == 1.0
+    assert report["metrics"]["no_codebase"]["causal_chain_coverage"] == 1.0
+    assert report["metrics"]["no_codebase"]["counterfactual_refusal_coverage"] == 1.0
     assert report["metrics"]["support"]["awareness_status"] == "ready"
     assert report["action_queue"] == []
 
@@ -49,6 +52,9 @@ def test_quality_suite_aggregates_no_codebase_fixtures():
     assert report["total"] >= 1
     assert report["suites"][0]["id"] == "default_no_codebase"
     assert report["suites"][0]["status"] == "passed"
+    assert report["suites"][0]["thresholds"]["min_causal_pack_coverage"] == 1.0
+    assert report["suites"][0]["thresholds"]["min_causal_chain_coverage"] == 1.0
+    assert report["suites"][0]["thresholds"]["min_counterfactual_refusal_coverage"] == 1.0
 
 
 def test_quality_report_blocks_failed_quality_suite():
@@ -174,6 +180,9 @@ def test_quality_report_blocks_forbidden_source_access_regressions():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls + ("read_file",),
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -206,6 +215,9 @@ def test_quality_report_blocks_stale_precise_diagnosis_regressions():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls,
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -237,6 +249,9 @@ def test_quality_report_blocks_hades_tool_order_regressions():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls[1:] + first.tool_calls[:1],
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 
@@ -269,6 +284,9 @@ def test_quality_report_blocks_undiagnosable_awareness_regressions():
         evidence_refs=first.evidence_refs,
         tool_calls=first.tool_calls,
         missing_evidence=first.missing_evidence,
+        causal_pack_refs=first.causal_pack_refs,
+        causal_chain=first.causal_chain,
+        counterfactual_refused=first.counterfactual_refused,
         persisted_report=first.persisted_report,
     )
 

@@ -6,7 +6,10 @@
       "fixture": "no_codebase_bug_cases.json",
       "min_accuracy": 1.0,
       "min_root_cause_accuracy": 1.0,
-      "min_insufficient_accuracy": 1.0
+      "min_insufficient_accuracy": 1.0,
+      "min_causal_pack_coverage": 1.0,
+      "min_causal_chain_coverage": 1.0,
+      "min_counterfactual_refusal_coverage": 1.0
     }
   ]
 }

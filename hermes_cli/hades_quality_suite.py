@@ -31,11 +31,17 @@ def run_quality_suite(suite: dict[str, Any]) -> dict[str, Any]:
         min_accuracy = float(item.get("min_accuracy") or 1.0)
         min_root = float(item.get("min_root_cause_accuracy") or 1.0)
         min_insufficient = float(item.get("min_insufficient_accuracy") or 1.0)
+        min_causal_pack = float(item.get("min_causal_pack_coverage") or 1.0)
+        min_causal_chain = float(item.get("min_causal_chain_coverage") or 1.0)
+        min_counterfactual = float(item.get("min_counterfactual_refusal_coverage") or 1.0)
         suite_passed = (
             report["status"] == "passed"
             and report["accuracy"] >= min_accuracy
             and report["root_cause_accuracy"] >= min_root
             and report["insufficient_accuracy"] >= min_insufficient
+            and report["causal_pack_coverage"] >= min_causal_pack
+            and report["causal_chain_coverage"] >= min_causal_chain
+            and report["counterfactual_refusal_coverage"] >= min_counterfactual
         )
         total += 1
         passed += 1 if suite_passed else 0
@@ -49,6 +55,9 @@ def run_quality_suite(suite: dict[str, Any]) -> dict[str, Any]:
                     "min_accuracy": min_accuracy,
                     "min_root_cause_accuracy": min_root,
                     "min_insufficient_accuracy": min_insufficient,
+                    "min_causal_pack_coverage": min_causal_pack,
+                    "min_causal_chain_coverage": min_causal_chain,
+                    "min_counterfactual_refusal_coverage": min_counterfactual,
                 },
                 "metrics": report,
             }

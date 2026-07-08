@@ -14,11 +14,21 @@
         "graph:graph.route.orders.show",
         "source_slice:slice.order_controller.show"
       ],
+      "required_causal_pack_refs": [
+        "causal_pack:cp.laravel.order_customer_null"
+      ],
+      "required_causal_chain_refs": [
+        "bug_evidence:ev.order.stack",
+        "graph:graph.route.orders.show",
+        "source_slice:slice.order_controller.show",
+        "diagnosis:rc.laravel.order_customer_null"
+      ],
       "required_tool_calls": [
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ]
     },
@@ -35,11 +45,21 @@
         "graph:graph.model.order_status",
         "source_slice:slice.order_migration_status"
       ],
+      "required_causal_pack_refs": [
+        "causal_pack:cp.laravel.orders_status_column_missing"
+      ],
+      "required_causal_chain_refs": [
+        "bug_evidence:ev.schema.sqlstate",
+        "graph:graph.model.order_status",
+        "source_slice:slice.order_migration_status",
+        "diagnosis:rc.laravel.orders_status_column_missing"
+      ],
       "required_tool_calls": [
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ]
     },
@@ -56,11 +76,21 @@
         "graph:graph.policy.invoice_update",
         "source_slice:slice.invoice_policy.update"
       ],
+      "required_causal_pack_refs": [
+        "causal_pack:cp.laravel.invoice_policy_guard_mismatch"
+      ],
+      "required_causal_chain_refs": [
+        "bug_evidence:ev.policy.http403",
+        "graph:graph.policy.invoice_update",
+        "source_slice:slice.invoice_policy.update",
+        "diagnosis:rc.laravel.invoice_policy_guard_mismatch"
+      ],
       "required_tool_calls": [
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ]
     },
@@ -77,11 +107,21 @@
         "graph:graph.job.shipment_notify",
         "source_slice:slice.shipment_job.handle"
       ],
+      "required_causal_pack_refs": [
+        "causal_pack:cp.laravel.shipment_job_unserializable_closure"
+      ],
+      "required_causal_chain_refs": [
+        "bug_evidence:ev.queue.worker_log",
+        "graph:graph.job.shipment_notify",
+        "source_slice:slice.shipment_job.handle",
+        "diagnosis:rc.laravel.shipment_job_unserializable_closure"
+      ],
       "required_tool_calls": [
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ]
     },
@@ -98,11 +138,21 @@
         "graph:graph.python.payment_client",
         "source_slice:slice.python.payment_settings"
       ],
+      "required_causal_pack_refs": [
+        "causal_pack:cp.python.fastapi_missing_payment_endpoint"
+      ],
+      "required_causal_chain_refs": [
+        "bug_evidence:ev.python.config_log",
+        "graph:graph.python.payment_client",
+        "source_slice:slice.python.payment_settings",
+        "diagnosis:rc.python.fastapi_missing_payment_endpoint"
+      ],
       "required_tool_calls": [
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ]
     },
@@ -122,11 +172,13 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ],
       "expected_missing_evidence": [
         "source_slice"
-      ]
+      ],
+      "should_refuse_precise_claim": true
     },
     {
       "id": "incomplete_stale_graph",
@@ -142,11 +194,13 @@
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ],
       "expected_missing_evidence": [
         "current_graph"
-      ]
+      ],
+      "should_refuse_precise_claim": true
     }
   ],
   "runs": [
@@ -167,7 +221,17 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
+      ],
+      "causal_pack_refs": [
+        "causal_pack:cp.laravel.order_customer_null"
+      ],
+      "causal_chain": [
+        "bug_evidence:ev.order.stack",
+        "graph:graph.route.orders.show",
+        "source_slice:slice.order_controller.show",
+        "diagnosis:rc.laravel.order_customer_null"
       ],
       "persisted_report": true
     },
@@ -188,7 +252,17 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
+      ],
+      "causal_pack_refs": [
+        "causal_pack:cp.laravel.orders_status_column_missing"
+      ],
+      "causal_chain": [
+        "bug_evidence:ev.schema.sqlstate",
+        "graph:graph.model.order_status",
+        "source_slice:slice.order_migration_status",
+        "diagnosis:rc.laravel.orders_status_column_missing"
       ],
       "persisted_report": true
     },
@@ -209,7 +283,17 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
+      ],
+      "causal_pack_refs": [
+        "causal_pack:cp.laravel.invoice_policy_guard_mismatch"
+      ],
+      "causal_chain": [
+        "bug_evidence:ev.policy.http403",
+        "graph:graph.policy.invoice_update",
+        "source_slice:slice.invoice_policy.update",
+        "diagnosis:rc.laravel.invoice_policy_guard_mismatch"
       ],
       "persisted_report": true
     },
@@ -230,7 +314,17 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
+      ],
+      "causal_pack_refs": [
+        "causal_pack:cp.laravel.shipment_job_unserializable_closure"
+      ],
+      "causal_chain": [
+        "bug_evidence:ev.queue.worker_log",
+        "graph:graph.job.shipment_notify",
+        "source_slice:slice.shipment_job.handle",
+        "diagnosis:rc.laravel.shipment_job_unserializable_closure"
       ],
       "persisted_report": true
     },
@@ -251,7 +345,17 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
+      ],
+      "causal_pack_refs": [
+        "causal_pack:cp.python.fastapi_missing_payment_endpoint"
+      ],
+      "causal_chain": [
+        "bug_evidence:ev.python.config_log",
+        "graph:graph.python.payment_client",
+        "source_slice:slice.python.payment_settings",
+        "diagnosis:rc.python.fastapi_missing_payment_endpoint"
       ],
       "persisted_report": true
     },
@@ -270,11 +374,13 @@
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
         "hades_backend_source_slice_fetch",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ],
       "missing_evidence": [
         "source_slice"
       ],
+      "counterfactual_refused": true,
       "persisted_report": true
     },
     {
@@ -290,11 +396,13 @@
         "hades_backend_project_awareness_status",
         "hades_backend_bug_evidence_search",
         "hades_backend_graph_search",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_diagnosis_report_create"
       ],
       "missing_evidence": [
         "current_graph"
       ],
+      "counterfactual_refused": true,
       "persisted_report": true
     }
   ]
