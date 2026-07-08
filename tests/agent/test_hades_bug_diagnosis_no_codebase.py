@@ -508,6 +508,104 @@ def test_hades_no_codebase_eval_checks_diagnosis_taxonomy_fields():
     assert passed_report["taxonomy_coverage"] == 1.0
 
 
+def test_hades_no_codebase_eval_requires_causal_pack_and_chain_for_complete_case():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisFixture,
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+    )
+
+    fixture = NoCodebaseDiagnosisFixture(
+        fixture_id="booking_overlap",
+        title="Booking overlap",
+        expected_root_cause_id="booking-overlap-validation-gap",
+        expected_confidence="high",
+        expected_freshness_status="current",
+        expected_diagnosable_without_source=True,
+        required_evidence_refs=("bug_evidence:booking_log",),
+        required_tool_calls=("hades_backend_project_awareness_status",),
+        required_causal_pack_refs=("causal_pack:booking_overlap",),
+        required_causal_chain_refs=(
+            "bug_evidence:booking_log",
+            "symbol:BookingController@store",
+            "source_slice:booking_controller_store",
+        ),
+    )
+    good = NoCodebaseDiagnosisRun(
+        fixture_id="booking_overlap",
+        root_cause_id="booking-overlap-validation-gap",
+        confidence="high",
+        freshness_status="current",
+        diagnosable_without_source=True,
+        evidence_refs=("bug_evidence:booking_log",),
+        tool_calls=("hades_backend_project_awareness_status",),
+        persisted_report=True,
+        causal_pack_refs=("causal_pack:booking_overlap",),
+        causal_chain=(
+            "bug_evidence:booking_log",
+            "symbol:BookingController@store",
+            "source_slice:booking_controller_store",
+        ),
+    )
+    bad = NoCodebaseDiagnosisRun(
+        fixture_id="booking_overlap",
+        root_cause_id="booking-overlap-validation-gap",
+        confidence="high",
+        freshness_status="current",
+        diagnosable_without_source=True,
+        evidence_refs=("bug_evidence:booking_log",),
+        tool_calls=("hades_backend_project_awareness_status",),
+        persisted_report=True,
+    )
+
+    passed = evaluate_no_codebase_diagnoses([fixture], [good]).to_dict()
+    failed = evaluate_no_codebase_diagnoses([fixture], [bad]).to_dict()
+
+    assert passed["status"] == "passed"
+    assert passed["causal_pack_coverage"] == 1.0
+    assert passed["causal_chain_coverage"] == 1.0
+    assert failed["status"] == "failed"
+    assert failed["causal_pack_coverage"] == 0.0
+    assert failed["causal_chain_coverage"] == 0.0
+    assert failed["results"][0]["failures"][-2:] == [
+        "required causal pack refs missing",
+        "required causal chain refs missing",
+    ]
+
+
+def test_hades_no_codebase_eval_passes_counterfactual_when_precise_claim_is_refused():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisFixture,
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+    )
+
+    fixture = NoCodebaseDiagnosisFixture(
+        fixture_id="ambiguous_auth_failure",
+        title="Ambiguous authorization failure",
+        expected_root_cause_id=None,
+        expected_confidence="insufficient",
+        expected_failure_classification="insufficient",
+        expected_missing_evidence=("source_slice", "runtime_log"),
+        should_refuse_precise_claim=True,
+        requires_persisted_report=False,
+    )
+    run = NoCodebaseDiagnosisRun(
+        fixture_id="ambiguous_auth_failure",
+        root_cause_id=None,
+        confidence="insufficient",
+        failure_classification="insufficient",
+        missing_evidence=("source_slice", "runtime_log"),
+        counterfactual_refused=True,
+    )
+
+    report = evaluate_no_codebase_diagnoses([fixture], [run]).to_dict()
+
+    assert report["status"] == "passed"
+    assert report["counterfactual_refusal_coverage"] == 1.0
+    assert report["insufficient_accuracy"] == 1.0
+
+
 def test_hades_no_codebase_eval_treats_string_null_root_cause_as_absent_for_insufficient_case():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisFixture,

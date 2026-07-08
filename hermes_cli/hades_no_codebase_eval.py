@@ -43,7 +43,10 @@ class NoCodebaseDiagnosisFixture:
     expected_diagnosable_without_source: bool | None = None
     required_evidence_refs: tuple[str, ...] = ()
     required_tool_calls: tuple[str, ...] = ()
+    required_causal_pack_refs: tuple[str, ...] = ()
+    required_causal_chain_refs: tuple[str, ...] = ()
     expected_missing_evidence: tuple[str, ...] = ()
+    should_refuse_precise_claim: bool = False
     requires_persisted_report: bool = True
 
     @property
@@ -63,6 +66,9 @@ class NoCodebaseDiagnosisRun:
     evidence_refs: tuple[str, ...] = ()
     tool_calls: tuple[str, ...] = ()
     missing_evidence: tuple[str, ...] = ()
+    causal_pack_refs: tuple[str, ...] = ()
+    causal_chain: tuple[str, ...] = ()
+    counterfactual_refused: bool = False
     persisted_report: bool = False
 
 
@@ -107,6 +113,9 @@ class NoCodebaseEvaluationReport:
     tool_order_coverage: float
     persistence_coverage: float
     taxonomy_coverage: float
+    causal_pack_coverage: float
+    causal_chain_coverage: float
+    counterfactual_refusal_coverage: float
     no_codebase_violations: tuple[dict[str, str], ...] = ()
     results: tuple[NoCodebaseFixtureResult, ...] = ()
 
@@ -130,6 +139,9 @@ class NoCodebaseEvaluationReport:
             "tool_order_coverage": self.tool_order_coverage,
             "persistence_coverage": self.persistence_coverage,
             "taxonomy_coverage": self.taxonomy_coverage,
+            "causal_pack_coverage": self.causal_pack_coverage,
+            "causal_chain_coverage": self.causal_chain_coverage,
+            "counterfactual_refusal_coverage": self.counterfactual_refusal_coverage,
             "no_codebase_violations": list(self.no_codebase_violations),
             "results": [
                 {
@@ -193,6 +205,12 @@ def evaluate_no_codebase_diagnoses(
     persistence_hits = 0
     taxonomy_checks = 0
     taxonomy_hits = 0
+    causal_pack_checks = 0
+    causal_pack_hits = 0
+    causal_chain_checks = 0
+    causal_chain_hits = 0
+    counterfactual_checks = 0
+    counterfactual_hits = 0
 
     for fixture in fixtures:
         run = runs_by_id.get(fixture.fixture_id)
@@ -228,6 +246,12 @@ def evaluate_no_codebase_diagnoses(
             missing = set(fixture.expected_missing_evidence)
             if missing and not missing.issubset(set(run.missing_evidence)):
                 failures.append("missing evidence classification does not match fixture")
+            if fixture.should_refuse_precise_claim:
+                counterfactual_checks += 1
+                if run.counterfactual_refused and run.confidence == "insufficient":
+                    counterfactual_hits += 1
+                else:
+                    failures.append("counterfactual precise claim was not refused")
         else:
             if run.root_cause_id != fixture.expected_root_cause_id:
                 failures.append("root cause id mismatch")
@@ -300,6 +324,20 @@ def evaluate_no_codebase_diagnoses(
             else:
                 failures.append("diagnosis report was not persisted")
 
+        required_causal_packs = set(fixture.required_causal_pack_refs)
+        actual_causal_packs = set(run.causal_pack_refs)
+        causal_pack_checks += len(required_causal_packs)
+        causal_pack_hits += len(required_causal_packs.intersection(actual_causal_packs))
+        if not required_causal_packs.issubset(actual_causal_packs):
+            failures.append("required causal pack refs missing")
+
+        required_causal_chain = set(fixture.required_causal_chain_refs)
+        actual_causal_chain = set(run.causal_chain)
+        causal_chain_checks += len(required_causal_chain)
+        causal_chain_hits += len(required_causal_chain.intersection(actual_causal_chain))
+        if not required_causal_chain.issubset(actual_causal_chain):
+            failures.append("required causal chain refs missing")
+
         results.append(
             NoCodebaseFixtureResult(
                 fixture_id=fixture.fixture_id,
@@ -349,6 +387,9 @@ def evaluate_no_codebase_diagnoses(
         tool_order_coverage=_ratio(tool_order_hits, tool_order_checks),
         persistence_coverage=_ratio(persistence_hits, persistence_checks),
         taxonomy_coverage=_ratio(taxonomy_hits, taxonomy_checks),
+        causal_pack_coverage=_ratio(causal_pack_hits, causal_pack_checks),
+        causal_chain_coverage=_ratio(causal_chain_hits, causal_chain_checks),
+        counterfactual_refusal_coverage=_ratio(counterfactual_hits, counterfactual_checks),
         no_codebase_violations=tuple(violations),
         results=tuple(results),
     )
@@ -366,7 +407,10 @@ def _fixture_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisFixture
         expected_diagnosable_without_source=_optional_bool(data.get("expected_diagnosable_without_source")),
         required_evidence_refs=tuple(_string_values(data.get("required_evidence_refs", []))),
         required_tool_calls=tuple(_string_values(data.get("required_tool_calls", []))),
+        required_causal_pack_refs=tuple(_string_values(data.get("required_causal_pack_refs", []))),
+        required_causal_chain_refs=tuple(_string_values(data.get("required_causal_chain_refs", []))),
         expected_missing_evidence=tuple(_string_values(data.get("expected_missing_evidence", []))),
+        should_refuse_precise_claim=bool(data.get("should_refuse_precise_claim", False)),
         requires_persisted_report=bool(data.get("requires_persisted_report", True)),
     )
 
@@ -383,6 +427,9 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
         evidence_refs=tuple(_evidence_refs(data.get("evidence_refs", []))),
         tool_calls=tuple(_tool_names(data.get("tool_calls", []))),
         missing_evidence=tuple(_string_values(data.get("missing_evidence", []))),
+        causal_pack_refs=tuple(_evidence_refs(data.get("causal_pack_refs", []))),
+        causal_chain=tuple(_evidence_refs(data.get("causal_chain", []))),
+        counterfactual_refused=bool(data.get("counterfactual_refused", False)),
         persisted_report=bool(data.get("persisted_report", False)),
     )
 
@@ -477,6 +524,13 @@ def _trajectory_run_from_entry(
     evidence_refs = final_payload.get("evidence_refs")
     if evidence_refs is None:
         evidence_refs = diagnosis_args.get("evidence_refs", [])
+    causal_pack_refs = final_payload.get("causal_pack_refs")
+    if causal_pack_refs is None:
+        causal_pack_refs = diagnosis_args.get("causal_pack_refs", [])
+    causal_chain = final_payload.get("causal_chain")
+    if causal_chain is None:
+        payload = diagnosis_args.get("payload")
+        causal_chain = payload.get("causal_chain", []) if isinstance(payload, Mapping) else []
     if persisted_report is None:
         persisted_report = bool(diagnosis_args)
     return NoCodebaseDiagnosisRun(
@@ -499,6 +553,9 @@ def _trajectory_run_from_entry(
         evidence_refs=tuple(_evidence_refs(evidence_refs if isinstance(evidence_refs, Iterable) and not isinstance(evidence_refs, (str, bytes)) else [])),
         tool_calls=tuple(name for name, _args in tool_calls),
         missing_evidence=tuple(_string_values(final_payload.get("missing_evidence", []))),
+        causal_pack_refs=tuple(_evidence_refs(causal_pack_refs if isinstance(causal_pack_refs, Iterable) and not isinstance(causal_pack_refs, (str, bytes)) else [])),
+        causal_chain=tuple(_evidence_refs(causal_chain if isinstance(causal_chain, Iterable) and not isinstance(causal_chain, (str, bytes)) else [])),
+        counterfactual_refused=bool(final_payload.get("counterfactual_refused", False)),
         persisted_report=bool(persisted_report),
     )
 

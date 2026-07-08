@@ -68,6 +68,36 @@ def test_quality_report_blocks_failed_quality_suite():
     assert any(action["id"] == "fix_no_codebase_quality_suite" for action in report["action_queue"])
 
 
+def test_quality_report_blocks_missing_causal_awareness_metrics():
+    from hermes_cli.hades_quality_report import build_hades_quality_report
+
+    report = build_hades_quality_report(
+        no_codebase_report={
+            "status": "failed",
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "accuracy": 0.0,
+            "evidence_ref_coverage": 1.0,
+            "freshness_coverage": 1.0,
+            "awareness_coverage": 1.0,
+            "tool_coverage": 1.0,
+            "tool_order_coverage": 1.0,
+            "persistence_coverage": 1.0,
+            "taxonomy_coverage": 1.0,
+            "causal_pack_coverage": 0.0,
+            "causal_chain_coverage": 0.0,
+            "counterfactual_refusal_coverage": 0.0,
+        }
+    )
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert report["status"] == "failed"
+    assert actions["repair_causal_pack_coverage"]["severity"] == "blocker"
+    assert actions["repair_causal_chain_coverage"]["severity"] == "blocker"
+    assert actions["repair_counterfactual_refusal"]["severity"] == "blocker"
+
+
 def test_note_backfill_quality_report_counts_review_candidates():
     from hermes_cli.hades_quality_report import build_hades_quality_report, build_note_backfill_quality_report
 

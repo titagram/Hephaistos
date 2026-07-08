@@ -111,6 +111,9 @@ def _no_codebase_metrics(report: dict[str, Any]) -> dict[str, Any]:
         "tool_order_coverage": float(report.get("tool_order_coverage") or 0.0),
         "persistence_coverage": float(report.get("persistence_coverage") or 0.0),
         "taxonomy_coverage": float(report.get("taxonomy_coverage") or 0.0),
+        "causal_pack_coverage": _float_metric(report, "causal_pack_coverage", default=1.0),
+        "causal_chain_coverage": _float_metric(report, "causal_chain_coverage", default=1.0),
+        "counterfactual_refusal_coverage": _float_metric(report, "counterfactual_refusal_coverage", default=1.0),
         "no_codebase_violations": len(report.get("no_codebase_violations") or []),
     }
 
@@ -144,10 +147,19 @@ def _no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
         ("tool_order_coverage", "repair_hades_tool_order", "Required Hades retrieval tools were not used in the diagnosis workflow order."),
         ("persistence_coverage", "repair_diagnosis_report_persistence", "Diagnosis reports were not persisted for every required fixture."),
         ("taxonomy_coverage", "repair_diagnosis_taxonomy", "Diagnosis taxonomy fields did not match the expected bug class or failure classification."),
+        ("causal_pack_coverage", "repair_causal_pack_coverage", "Precise source-free diagnoses must reference replayable causal packs."),
+        ("causal_chain_coverage", "repair_causal_chain_coverage", "Precise source-free diagnoses must include evidence-to-root-cause causal chains."),
+        ("counterfactual_refusal_coverage", "repair_counterfactual_refusal", "Ambiguous source-free fixtures must refuse precise root-cause claims."),
     ):
         if float(report.get(key) or 0.0) < 1.0:
             actions.append(_action(action_id, "blocker", message, value=float(report.get(key) or 0.0)))
     return actions
+
+
+def _float_metric(report: dict[str, Any], key: str, *, default: float = 0.0) -> float:
+    if key not in report:
+        return default
+    return float(report.get(key) or 0.0)
 
 
 def _note_backfill_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
