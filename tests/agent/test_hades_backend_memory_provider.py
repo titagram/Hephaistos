@@ -3795,6 +3795,83 @@ def test_hades_backend_graph_search_finds_local_middleware_method_edges(monkeypa
     )
 
 
+def test_hades_backend_graph_search_finds_local_middleware_parameter_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["routes"][0]["middleware"] = ["throttle:60,1"]
+    artifact["symbols"].append(
+        {
+            "kind": "method",
+            "name": "ThrottleRequests@handle",
+            "class": "App\\Http\\Middleware\\ThrottleRequests",
+            "method": "handle",
+            "role": "middleware",
+            "path": "app/Http/Middleware/ThrottleRequests.php",
+            "line": 4,
+        }
+    )
+    artifact["edges"].append(
+        {
+            "kind": "route_middleware_method",
+            "from": "route:orders.show",
+            "to": "ThrottleRequests@handle",
+            "middleware": "throttle",
+            "middleware_class": "App\\Http\\Middleware\\ThrottleRequests",
+            "middleware_params": ["60", "1"],
+            "method": "GET",
+            "uri": "/orders/{order}",
+            "path": "routes/web.php",
+            "line": 4,
+        }
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders throttle 60 1 middleware handle", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_middleware_method"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "ThrottleRequests@handle"
+        and ref["provenance"]["middleware"] == "throttle"
+        and ref["provenance"]["middleware_params"] == ["60", "1"]
+        for ref in graph_refs
+    )
+    assert any(
+        "middleware=throttle" in item["summary"]
+        and "middleware_params=['60', '1']" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

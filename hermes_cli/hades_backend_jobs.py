@@ -1268,6 +1268,20 @@ def _middleware_base_name(value: str) -> str:
     return str(value or "").split(":", 1)[0].strip()
 
 
+def _middleware_parameters(value: str) -> list[str]:
+    _base, separator, params = str(value or "").partition(":")
+    if not separator:
+        return []
+    values: list[str] = []
+    for raw_param in params.split(","):
+        param = raw_param.strip()
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", param):
+            values.append(param)
+        if len(values) >= 8:
+            break
+    return values
+
+
 def _php_class_ref(value: str) -> str:
     return str(value or "").strip().lstrip("\\")
 
@@ -2399,24 +2413,28 @@ def _php_route_edges(
         middleware_name: str,
         middleware_class: str,
         via: str = "",
+        middleware_params: list[str] | None = None,
     ) -> bool:
         handle_symbol = php_method_symbols.get((middleware_class, "handle"), "")
         if not handle_symbol:
             return True
+        edge = {
+            "kind": "route_middleware_method",
+            "from": route_ref,
+            "to": handle_symbol,
+            "middleware": middleware_name,
+            "middleware_class": middleware_class,
+            "via": via,
+            "method": route.get("method"),
+            "uri": route.get("uri"),
+            "path": route.get("path"),
+            "line": route.get("line"),
+        }
+        if middleware_params:
+            edge["middleware_params"] = middleware_params
         return _edge_append(
             edges,
-            {
-                "kind": "route_middleware_method",
-                "from": route_ref,
-                "to": handle_symbol,
-                "middleware": middleware_name,
-                "middleware_class": middleware_class,
-                "via": via,
-                "method": route.get("method"),
-                "uri": route.get("uri"),
-                "path": route.get("path"),
-                "line": route.get("line"),
-            },
+            edge,
             max_edges=max_edges,
         )
 
@@ -2442,35 +2460,43 @@ def _php_route_edges(
                 break
         for middleware in route.get("middleware") or []:
             base_middleware = _middleware_base_name(str(middleware))
+            middleware_params = _middleware_parameters(str(middleware))
+            route_middleware_edge = {
+                "kind": "route_middleware",
+                "from": route_ref,
+                "to": f"middleware:{middleware}",
+                "middleware": base_middleware,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            }
+            if middleware_params:
+                route_middleware_edge["middleware_params"] = middleware_params
             if not _edge_append(
                 edges,
-                {
-                    "kind": "route_middleware",
-                    "from": route_ref,
-                    "to": f"middleware:{middleware}",
-                    "method": route.get("method"),
-                    "uri": route.get("uri"),
-                    "path": route.get("path"),
-                    "line": route.get("line"),
-                },
+                route_middleware_edge,
                 max_edges=max_edges,
             ):
                 truncated = True
                 break
             class_target = alias_map.get(base_middleware)
             if class_target:
+                class_edge = {
+                    "kind": "route_middleware_class",
+                    "from": route_ref,
+                    "to": class_target,
+                    "middleware": base_middleware,
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                }
+                if middleware_params:
+                    class_edge["middleware_params"] = middleware_params
                 truncated = not _edge_append(
                     edges,
-                    {
-                        "kind": "route_middleware_class",
-                        "from": route_ref,
-                        "to": class_target,
-                        "middleware": base_middleware,
-                        "method": route.get("method"),
-                        "uri": route.get("uri"),
-                        "path": route.get("path"),
-                        "line": route.get("line"),
-                    },
+                    class_edge,
                     max_edges=max_edges,
                 ) or truncated
                 truncated = not append_middleware_method_edge(
@@ -2478,6 +2504,7 @@ def _php_route_edges(
                     route=route,
                     middleware_name=base_middleware,
                     middleware_class=class_target,
+                    middleware_params=middleware_params,
                 ) or truncated
             group_members = group_map.get(base_middleware) or []
             if group_members:
@@ -2520,6 +2547,7 @@ def _php_route_edges(
                         middleware_name=base_middleware,
                         middleware_class=target,
                         via=str(member),
+                        middleware_params=_middleware_parameters(str(member)),
                     ) or truncated
     return truncated
 

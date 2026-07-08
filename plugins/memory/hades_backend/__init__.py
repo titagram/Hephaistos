@@ -2949,6 +2949,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "handler",
         "middleware",
         "middleware_class",
+        "middleware_params",
         "via",
         "source",
         "uri",

@@ -587,7 +587,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Http\\Controllers\\OrderController;\n"
         "use App\\Http\\Controllers\\InvoiceController;\n"
         "Route::get('/orders/{order}', [OrderController::class, 'show'])"
-        "->middleware(['web', 'auth', 'verified'])->name('orders.show');\n"
+        "->middleware(['web', 'auth', 'verified', 'throttle:60,1'])->name('orders.show');\n"
         "Route::apiResource('invoices', InvoiceController::class)->middleware('auth');\n",
         encoding="utf-8",
     )
@@ -597,10 +597,12 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Http\\Middleware\\Authenticate;\n"
         "use App\\Http\\Middleware\\EncryptCookies;\n"
         "use App\\Http\\Middleware\\EnsureEmailIsVerified;\n"
+        "use App\\Http\\Middleware\\ThrottleRequests;\n"
         "class Kernel {\n"
         "    protected $middlewareAliases = [\n"
         "        'auth' => Authenticate::class,\n"
         "        'verified' => EnsureEmailIsVerified::class,\n"
+        "        'throttle' => ThrottleRequests::class,\n"
         "    ];\n"
         "    protected $middlewareGroups = [\n"
         "        'web' => [EncryptCookies::class, 'auth'],\n"
@@ -628,6 +630,14 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<?php\n"
         "namespace App\\Http\\Middleware;\n"
         "class EnsureEmailIsVerified {\n"
+        "    public function handle($request, $next) { return $next($request); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Http" / "Middleware" / "ThrottleRequests.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Middleware;\n"
+        "class ThrottleRequests {\n"
         "    public function handle($request, $next) { return $next($request); }\n"
         "}\n",
         encoding="utf-8",
@@ -962,7 +972,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert artifact["schema"] == "hades.php_graph.v1"
     assert artifact["framework"] == "laravel"
     assert artifact["raw_source_included"] is False
-    assert artifact["middleware"]["alias_count"] == 2
+    assert artifact["middleware"]["alias_count"] == 3
     assert artifact["middleware"]["group_count"] == 1
     assert ("GET", "/orders/{order}", "OrderController@show") in routes
     assert ("GET", "/invoices", "InvoiceController@index") in routes
@@ -981,8 +991,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Http\\Middleware\\Authenticate") in symbols
     assert ("class", "App\\Http\\Middleware\\EncryptCookies") in symbols
     assert ("class", "App\\Http\\Middleware\\EnsureEmailIsVerified") in symbols
+    assert ("class", "App\\Http\\Middleware\\ThrottleRequests") in symbols
     assert ("middleware_alias", "middleware:auth") in symbols
     assert ("middleware_alias", "middleware:verified") in symbols
+    assert ("middleware_alias", "middleware:throttle") in symbols
     assert ("middleware_group", "middleware_group:web") in symbols
     assert ("class", "App\\Jobs\\SyncOrderJob") in symbols
     assert ("class", "App\\Events\\OrderPlaced") in symbols
@@ -1024,17 +1036,21 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_middleware", "route:orders.show", "middleware:web") in edges
     assert ("route_middleware", "route:orders.show", "middleware:auth") in edges
     assert ("route_middleware", "route:orders.show", "middleware:verified") in edges
+    assert ("route_middleware", "route:orders.show", "middleware:throttle:60,1") in edges
     assert ("route_middleware_group", "route:orders.show", "middleware_group:web") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("route_middleware", "route:invoices.index", "middleware:auth") in edges
     assert ("route_middleware_class", "route:invoices.index", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EncryptCookies") in edges
     assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
+    assert ("route_middleware_class", "route:orders.show", "App\\Http\\Middleware\\ThrottleRequests") in edges
     assert ("route_middleware_method", "route:orders.show", "Authenticate@handle") in edges
     assert ("route_middleware_method", "route:orders.show", "EncryptCookies@handle") in edges
     assert ("route_middleware_method", "route:orders.show", "EnsureEmailIsVerified@handle") in edges
+    assert ("route_middleware_method", "route:orders.show", "ThrottleRequests@handle") in edges
     assert ("middleware_alias_class", "middleware:auth", "App\\Http\\Middleware\\Authenticate") in edges
     assert ("middleware_alias_class", "middleware:verified", "App\\Http\\Middleware\\EnsureEmailIsVerified") in edges
+    assert ("middleware_alias_class", "middleware:throttle", "App\\Http\\Middleware\\ThrottleRequests") in edges
     assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\EncryptCookies") in edges
     assert ("middleware_group_member", "middleware_group:web", "App\\Http\\Middleware\\Authenticate") in edges
     assert {
@@ -1043,6 +1059,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "Authenticate@handle",
         "middleware": "auth",
         "middleware_class": "App\\Http\\Middleware\\Authenticate",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_middleware_method",
+        "from": "route:orders.show",
+        "to": "ThrottleRequests@handle",
+        "middleware": "throttle",
+        "middleware_class": "App\\Http\\Middleware\\ThrottleRequests",
+        "middleware_params": ["60", "1"],
         "method": "GET",
         "uri": "/orders/{order}",
         "path": "routes/web.php",
