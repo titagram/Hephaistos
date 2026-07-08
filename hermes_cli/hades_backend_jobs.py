@@ -529,6 +529,12 @@ BLADE_AUTHORIZATION_RE = re.compile(
     r"@(?P<helper>can|cannot|elsecan|elsecannot)\s*\(\s*['\"](?P<ability>[A-Za-z0-9_.:-]{1,128})['\"]",
     re.MULTILINE,
 )
+BLADE_FORM_FIELD_RE = re.compile(
+    r"<(?P<tag>input|select|textarea)\b(?P<attrs>[^>]*)\bname\s*=\s*['\"](?P<field>[A-Za-z0-9_.*:-]{1,128})['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
+BLADE_OLD_INPUT_RE = re.compile(r"\bold\s*\(\s*['\"](?P<field>[A-Za-z0-9_.*:-]{1,128})['\"]", re.MULTILINE)
+BLADE_ERROR_DIRECTIVE_RE = re.compile(r"@error\s*\(\s*['\"](?P<field>[A-Za-z0-9_.*:-]{1,128})['\"]", re.MULTILINE)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1966,6 +1972,82 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_form_field(field: str, tag: str, offset: int) -> None:
+        nonlocal truncated
+        field = str(field or "").strip()
+        if not field or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", field):
+            return
+        normalized_tag = str(tag or "").lower()
+        line = _line_number(source, offset)
+        target = f"request_field:{field}"
+        key = ("blade_form_field", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_form_field",
+                "from": view_id,
+                "to": target,
+                "form_field": field,
+                "form_field_tag": normalized_tag,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    def append_blade_old_input(field: str, offset: int) -> None:
+        nonlocal truncated
+        field = str(field or "").strip()
+        if not field or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", field):
+            return
+        line = _line_number(source, offset)
+        target = f"request_field:{field}"
+        key = ("blade_old_input", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_old_input",
+                "from": view_id,
+                "to": target,
+                "form_field": field,
+                "input_helper": "old",
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    def append_blade_validation_error(field: str, offset: int) -> None:
+        nonlocal truncated
+        field = str(field or "").strip()
+        if not field or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", field):
+            return
+        line = _line_number(source, offset)
+        target = f"validation:{field}"
+        key = ("blade_validation_error", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_validation_error",
+                "from": view_id,
+                "to": target,
+                "form_field": field,
+                "validation_helper": "error",
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2061,6 +2143,12 @@ def _append_blade_view_graph(
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
     for match in BLADE_AUTHORIZATION_RE.finditer(source):
         append_blade_authorization(match.group("helper"), match.group("ability"), match.start())
+    for match in BLADE_FORM_FIELD_RE.finditer(source):
+        append_blade_form_field(match.group("field"), match.group("tag"), match.start("field"))
+    for match in BLADE_OLD_INPUT_RE.finditer(source):
+        append_blade_old_input(match.group("field"), match.start("field"))
+    for match in BLADE_ERROR_DIRECTIVE_RE.finditer(source):
+        append_blade_validation_error(match.group("field"), match.start("field"))
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
         route = known_routes.get(match.group("route"))

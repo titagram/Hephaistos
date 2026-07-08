@@ -4080,6 +4080,100 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
     )
 
 
+def test_hades_backend_graph_search_finds_local_blade_form_field_edges(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "blade_form_field",
+                "from": "view:orders.show",
+                "to": "request_field:customer_id",
+                "form_field": "customer_id",
+                "form_field_tag": "input",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 17,
+            },
+            {
+                "kind": "blade_old_input",
+                "from": "view:orders.show",
+                "to": "request_field:customer_id",
+                "form_field": "customer_id",
+                "input_helper": "old",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 17,
+            },
+            {
+                "kind": "blade_validation_error",
+                "from": "view:orders.show",
+                "to": "validation:customer_id",
+                "form_field": "customer_id",
+                "validation_helper": "error",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 18,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order view form field.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view customer_id input old error validation", "limit": 20},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_form_field"
+        and ref["to"] == "request_field:customer_id"
+        and ref["provenance"]["form_field_tag"] == "input"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_old_input"
+        and ref["to"] == "request_field:customer_id"
+        and ref["provenance"]["input_helper"] == "old"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_validation_error"
+        and ref["to"] == "validation:customer_id"
+        and ref["provenance"]["validation_helper"] == "error"
+        for ref in graph_refs
+    )
+    assert any(
+        "form_field=customer_id" in item["summary"]
+        and "validation_helper=error" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_blade_form_metadata(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
     graph_payload["edges"].extend(

@@ -933,6 +933,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@can('view', $order)\n"
         "<span>Allowed</span>\n"
         "@endcan\n"
+        "<input type=\"text\" name=\"customer_id\" value=\"{{ old('customer_id') }}\">\n"
+        "@error('customer_id')\n"
+        "<span>{{ $message }}</span>\n"
+        "@enderror\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1872,6 +1876,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_route_param", "view:orders.show", "route_param:invoices.update.invoice") in edges
     assert ("blade_route_param", "view:orders.show", "route_param:orders.show.order") in edges
     assert ("blade_authorization", "view:orders.show", "ability:view") in edges
+    assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
+    assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
+    assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1912,6 +1919,33 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "authorization_helper": "can",
         "path": "resources/views/orders/show.blade.php",
         "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_form_field",
+        "from": "view:orders.show",
+        "to": "request_field:customer_id",
+        "form_field": "customer_id",
+        "form_field_tag": "input",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_old_input",
+        "from": "view:orders.show",
+        "to": "request_field:customer_id",
+        "form_field": "customer_id",
+        "input_helper": "old",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_validation_error",
+        "from": "view:orders.show",
+        "to": "validation:customer_id",
+        "form_field": "customer_id",
+        "validation_helper": "error",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 18,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",
