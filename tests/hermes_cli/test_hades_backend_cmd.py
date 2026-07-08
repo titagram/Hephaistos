@@ -1391,6 +1391,55 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
     ]
 
 
+def test_backend_status_waiting_jobs_are_actionable_but_not_degraded(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(tmp_path / "repo"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={},
+            status="waiting_confirmation",
+        )
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="status", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["job_counts"] == {"waiting_confirmation": 1}
+    assert payload["degraded"] is False
+    assert "Review 1 backend job(s) waiting for confirmation." in payload["actions"]
+
+
 def test_backend_status_text_prints_identity_next_step(monkeypatch, tmp_path, capsys):
     _seed_current_backend_workspace(monkeypatch, tmp_path)
 

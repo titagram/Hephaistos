@@ -310,7 +310,7 @@ def backend_status_payload(
             "background": background_sync,
             "background_updated_at": background_sync_updated_at,
         },
-        "degraded": bool(waiting or refused or last_error or background_failed or quality_failed or task_work.get("failed")),
+        "degraded": bool(refused or last_error or background_failed or quality_failed or task_work.get("failed")),
         "actions": actions,
     }
 
