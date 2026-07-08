@@ -991,6 +991,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("class", "App\\Console\\Commands\\SyncOrdersCommand") in symbols
     assert ("interface", "App\\Contracts\\OrderFormatter") in symbols
     assert ("class", "App\\Observers\\OrderObserver") in symbols
+    assert ("method", "OrderObserver@updated") in symbols
     assert ("class", "App\\Broadcasting\\OrderChannel") in symbols
     assert ("blade_view", "view:orders.show") in symbols
     assert ("blade_view", "view:orders.partials.summary") in symbols
@@ -1929,6 +1930,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     } in artifact["edges"]
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
     assert ("observed_by", "App\\Models\\Order", "App\\Observers\\OrderObserver") in edges
+    assert ("observed_by_method", "App\\Models\\Order", "OrderObserver@updated") in edges
+    assert {
+        "kind": "observed_by_method",
+        "from": "App\\Models\\Order",
+        "to": "OrderObserver@updated",
+        "observer_class": "App\\Observers\\OrderObserver",
+        "observer_method": "updated",
+        "lifecycle_event": "updated",
+        "table": "orders",
+        "path": "app/Providers/AuthServiceProvider.php",
+        "line": 18,
+    } in artifact["edges"]
     assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges
     assert ("env_ref", "App\\Http\\Controllers\\OrderController", "env:ORDER_DEBUG") in edges

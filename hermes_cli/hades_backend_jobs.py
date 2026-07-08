@@ -443,6 +443,23 @@ PHP_OBSERVER_RE = re.compile(
     r"(?P<model>\\?[A-Za-z0-9_\\]+)::observe\s*\(\s*(?P<observer>\\?[A-Za-z0-9_\\]+)::class\s*\)",
     re.MULTILINE,
 )
+PHP_OBSERVER_LIFECYCLE_METHODS = {
+    "retrieved",
+    "creating",
+    "created",
+    "updating",
+    "updated",
+    "saving",
+    "saved",
+    "deleting",
+    "deleted",
+    "trashed",
+    "forceDeleting",
+    "forceDeleted",
+    "restoring",
+    "restored",
+    "replicating",
+}
 PHP_VIEW_FUNCTION_RE = re.compile(r"\bview\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 PHP_VIEW_MAKE_RE = re.compile(r"\bView::make\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 PHP_INERTIA_RENDER_RE = re.compile(r"\bInertia::render\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
@@ -7016,17 +7033,39 @@ def _build_php_graph(
             ) or truncated
 
         for match in PHP_OBSERVER_RE.finditer(source):
+            model_class = _php_fqcn_resolved(namespace, match.group("model"), uses)
+            observer_class = _php_fqcn_resolved(namespace, match.group("observer"), uses)
             truncated = not _edge_append(
                 edges,
                 {
                     "kind": "observed_by",
-                    "from": _php_fqcn_resolved(namespace, match.group("model"), uses),
-                    "to": _php_fqcn_resolved(namespace, match.group("observer"), uses),
+                    "from": model_class,
+                    "to": observer_class,
                     "path": rel,
                     "line": _line_number(source, match.start()),
                 },
                 max_edges=max_edges,
             ) or truncated
+            model_table = _php_model_table_for_class(model_class, model_table_by_class)
+            for observer_method in sorted(PHP_OBSERVER_LIFECYCLE_METHODS):
+                observer_method_symbol = php_method_symbols.get((observer_class, observer_method), "")
+                if not observer_method_symbol:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "observed_by_method",
+                        "from": model_class,
+                        "to": observer_method_symbol,
+                        "observer_class": observer_class,
+                        "observer_method": observer_method,
+                        "lifecycle_event": observer_method,
+                        "table": model_table,
+                        "path": rel,
+                        "line": _line_number(source, match.start()),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
         for match in PHP_LISTEN_ARRAY_RE.finditer(source):
             event_class = _php_fqcn_resolved(namespace, match.group("event"), uses)

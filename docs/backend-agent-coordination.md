@@ -6326,3 +6326,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel observer method graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per observer lifecycle awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` mantiene `observed_by` per il binding
+  `Model::observe(Observer::class)` e aggiunge `observed_by_method` verso i
+  lifecycle methods realmente presenti sull'observer, ad esempio
+  `OrderObserver@updated`.
+- Gli edge salvano solo model, observer class, observer method/lifecycle event,
+  table, path e line; non conservano corpo observer o argomenti runtime.
+- Il fallback locale di `hades_backend_graph_search` espone
+  `observer_class`/`observer_method`/`lifecycle_event` da cache artifact anche a
+  backend offline.
+
+Resta fuori da questa tranche:
+
+- Inferenza automatica che collega ogni singola `Model::update/delete` al
+  lifecycle event potenzialmente emesso; questa tranche rende gia' traversabile
+  il metodo observer eseguibile dal model.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_observer_method_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `108 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
