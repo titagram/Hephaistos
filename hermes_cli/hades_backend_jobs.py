@@ -525,7 +525,10 @@ BLADE_INCLUDE_DATA_PARAM_RE = re.compile(
     r"['\"](?P<key>[A-Za-z_][A-Za-z0-9_]{0,127})['\"]\s*=>\s*\$(?P<variable>[A-Za-z_][A-Za-z0-9_]{0,127})"
 )
 BLADE_COMPONENT_DIRECTIVE_RE = re.compile(r"@component\s*\(\s*['\"](?P<component>[^'\"]+)['\"]", re.MULTILINE)
-BLADE_ANONYMOUS_COMPONENT_RE = re.compile(r"<x[-:](?P<component>[A-Za-z0-9_.:-]+)\b", re.MULTILINE)
+BLADE_ANONYMOUS_COMPONENT_RE = re.compile(r"<x[-:](?P<component>[A-Za-z0-9_.:-]+)\b(?P<attrs>[^>]*)>", re.MULTILINE)
+BLADE_COMPONENT_PROP_RE = re.compile(
+    r"(?P<bound>:)?(?P<prop>[A-Za-z_][A-Za-z0-9_-]{0,127})\s*=\s*['\"]\$(?P<variable>[A-Za-z_][A-Za-z0-9_]{0,127})['\"]"
+)
 BLADE_LIVEWIRE_RE = re.compile(
     r"(?:@livewire\s*\(\s*['\"](?P<directive>[^'\"]+)['\"]|<livewire:(?P<tag>[A-Za-z0-9_.:-]+)\b)",
     re.MULTILINE,
@@ -2139,6 +2142,63 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_component_prop(component_raw: str, prop: str, variable: str, offset: int) -> None:
+        nonlocal truncated
+        component_target = _blade_component_target(component_raw)
+        component = component_target.removeprefix("component:")
+        prop = str(prop or "").strip()
+        variable = str(variable or "").strip()
+        if not component_target or not component or not prop or not variable:
+            return
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}", prop):
+            return
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", variable):
+            return
+        line = _line_number(source, offset)
+        target = f"component_prop:{component}.{prop}"
+        edge_key = ("blade_component_prop", target, variable, line)
+        if edge_key not in seen_edges:
+            seen_edges.add(edge_key)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "blade_component_prop",
+                    "from": view_id,
+                    "to": target,
+                    "component": component,
+                    "component_prop": prop,
+                    "component_source_variable": variable,
+                    "path": rel,
+                    "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+        route = known_routes.get(view_name)
+        if not route or variable not in _php_route_params(route):
+            return
+        route_name = str(route.get("name") or view_name)
+        route_target = f"route_param:{route_name}.{variable}"
+        route_edge_key = ("blade_component_prop_route_param", target, route_target, line)
+        if route_edge_key in seen_edges:
+            return
+        seen_edges.add(route_edge_key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_component_prop_route_param",
+                "from": target,
+                "to": route_target,
+                "component": component,
+                "component_prop": prop,
+                "component_source_variable": variable,
+                "route_name": route_name,
+                "route_param": variable,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_route_param(route_name: str, route_param: str, status: str, offset: int) -> None:
         nonlocal truncated
         route = known_routes.get(route_name)
@@ -2828,6 +2888,13 @@ def _append_blade_view_graph(
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
     for match in BLADE_ANONYMOUS_COMPONENT_RE.finditer(source):
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
+        for prop_match in BLADE_COMPONENT_PROP_RE.finditer(match.group("attrs") or ""):
+            append_blade_component_prop(
+                match.group("component"),
+                prop_match.group("prop"),
+                prop_match.group("variable"),
+                match.start("attrs") + prop_match.start("prop"),
+            )
     for match in BLADE_LIVEWIRE_RE.finditer(source):
         livewire_name = match.group("directive") or match.group("tag") or ""
         if livewire_name:
@@ -4525,6 +4592,101 @@ def _append_blade_include_authorization_edges(
                             continue
                         seen.add(policy_key)
                         truncated = not _edge_append(edges, policy_edge, max_edges=max_edges) or truncated
+    return truncated
+
+
+def _append_blade_include_component_prop_edges(edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+    include_data_by_slot: dict[str, list[dict[str, Any]]] = {}
+    route_param_by_slot: dict[str, list[dict[str, Any]]] = {}
+    component_props_by_slot: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        kind = str(edge.get("kind") or "")
+        if kind == "blade_include_data":
+            include_data_by_slot.setdefault(str(edge.get("to") or ""), []).append(edge)
+        elif kind == "blade_include_data_route_param":
+            route_param_by_slot.setdefault(str(edge.get("from") or ""), []).append(edge)
+        elif kind == "blade_component_prop":
+            from_view = str(edge.get("from") or "")
+            variable = str(edge.get("component_source_variable") or "")
+            if from_view.startswith("view:") and variable:
+                component_props_by_slot.setdefault(f"view_data:{from_view.removeprefix('view:')}.{variable}", []).append(edge)
+
+    truncated = False
+    seen = {
+        (
+            str(edge.get("kind") or ""),
+            str(edge.get("from") or ""),
+            str(edge.get("to") or ""),
+            str(edge.get("path") or ""),
+            str(edge.get("line") or ""),
+        )
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+    for slot, prop_edges in component_props_by_slot.items():
+        include_edges = include_data_by_slot.get(slot) or []
+        if not include_edges:
+            continue
+        route_edges = route_param_by_slot.get(slot) or []
+        for prop_edge in prop_edges:
+            component_prop_target = str(prop_edge.get("to") or "")
+            if not component_prop_target:
+                continue
+            for include_edge in include_edges:
+                include_data_edge = {
+                    "kind": "blade_component_prop_include_data",
+                    "from": component_prop_target,
+                    "to": slot,
+                    "component": prop_edge.get("component"),
+                    "component_prop": prop_edge.get("component_prop"),
+                    "component_source_variable": prop_edge.get("component_source_variable"),
+                    "included_view": include_edge.get("included_view"),
+                    "include_data_key": include_edge.get("include_data_key"),
+                    "include_source_variable": include_edge.get("include_source_variable"),
+                    "include_parent_view": include_edge.get("from"),
+                    "path": prop_edge.get("path"),
+                    "line": prop_edge.get("line"),
+                }
+                key = (
+                    str(include_data_edge.get("kind") or ""),
+                    str(include_data_edge.get("from") or ""),
+                    str(include_data_edge.get("to") or ""),
+                    str(include_data_edge.get("path") or ""),
+                    str(include_data_edge.get("line") or ""),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    truncated = not _edge_append(edges, include_data_edge, max_edges=max_edges) or truncated
+                for route_edge in route_edges:
+                    route_param_edge = {
+                        "kind": "blade_component_prop_include_route_param",
+                        "from": component_prop_target,
+                        "to": route_edge.get("to"),
+                        "component": prop_edge.get("component"),
+                        "component_prop": prop_edge.get("component_prop"),
+                        "component_source_variable": prop_edge.get("component_source_variable"),
+                        "included_view": include_edge.get("included_view"),
+                        "include_data_key": include_edge.get("include_data_key"),
+                        "include_source_variable": include_edge.get("include_source_variable"),
+                        "include_parent_view": include_edge.get("from"),
+                        "route_name": route_edge.get("route_name"),
+                        "route_param": route_edge.get("route_param"),
+                        "path": prop_edge.get("path"),
+                        "line": prop_edge.get("line"),
+                    }
+                    route_key = (
+                        str(route_param_edge.get("kind") or ""),
+                        str(route_param_edge.get("from") or ""),
+                        str(route_param_edge.get("to") or ""),
+                        str(route_param_edge.get("path") or ""),
+                        str(route_param_edge.get("line") or ""),
+                    )
+                    if route_key in seen:
+                        continue
+                    seen.add(route_key)
+                    truncated = not _edge_append(edges, route_param_edge, max_edges=max_edges) or truncated
     return truncated
 
 
@@ -9149,6 +9311,7 @@ def _build_php_graph(
         php_method_symbols=php_method_symbols,
         max_edges=max_edges,
     ) or truncated
+    truncated = _append_blade_include_component_prop_edges(edges, max_edges=max_edges) or truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",

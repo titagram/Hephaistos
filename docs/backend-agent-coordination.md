@@ -6870,8 +6870,45 @@ Integrazione locale:
 
 Resta fuori da questa tranche:
 
-- Alias multipli tra parent e partial, component props, `@each`, nested
-  partials e policy dinamiche non mappate staticamente.
+- Alias multipli tra parent e partial, `@each`, nested partials e policy
+  dinamiche non mappate staticamente.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_include_data_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `119 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade component prop graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per propagare context safe verso
+componenti Blade anonimi.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge `blade_component_prop` per props bound safe su
+  anonymous components, ad esempio `<x-orders.card :order="$order" />`.
+- Aggiunge `blade_component_prop_include_data` quando il component prop vive in
+  un partial e la variabile sorgente arriva da `blade_include_data`.
+- Aggiunge `blade_component_prop_include_route_param` quando quel data slot e'
+  gia' collegato a un route param del parent.
+- Gli edge salvano solo component name, prop name, source variable, included
+  view, parent view, route name/param, path e line.
+- Il parser ignora valori, espressioni dinamiche, props non-bound e
+  template/source raw.
+- Il fallback locale di `hades_backend_graph_search` espone component/prop nei
+  summary da cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Component class resolution, props statiche non variabile, alias multipli,
+  `@props` declarations, nested components e data-flow dentro il component.
 
 Verifiche eseguite:
 

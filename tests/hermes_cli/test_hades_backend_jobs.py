@@ -964,7 +964,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "orders" / "partials" / "summary.blade.php").write_text(
-        "<x-orders.card />\n"
+        "<x-orders.card :order=\"$order\" />\n"
         "@can('view', $order)\n"
         "<span>Partial allowed</span>\n"
         "@endcan\n",
@@ -1901,6 +1901,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_include", "view:layouts.app", "view:shared.banner") in edges
     assert ("blade_component", "view:orders.show", "component:alert") in edges
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
+    assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
+    assert (
+        "blade_component_prop_include_data",
+        "component_prop:orders.card.order",
+        "view_data:orders.partials.summary.order",
+    ) in edges
+    assert (
+        "blade_component_prop_include_route_param",
+        "component_prop:orders.card.order",
+        "route_param:orders.show.order",
+    ) in edges
     assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
     assert ("livewire_component_class", "livewire:orders-status", "App\\Livewire\\OrdersStatus") in edges
     assert ("blade_route_ref", "view:orders.show", "route:invoices.update") in edges
@@ -2109,6 +2120,46 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "table": "orders",
         "path": "resources/views/orders/show.blade.php",
         "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_prop",
+        "from": "view:orders.partials.summary",
+        "to": "component_prop:orders.card.order",
+        "component": "orders.card",
+        "component_prop": "order",
+        "component_source_variable": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_prop_include_data",
+        "from": "component_prop:orders.card.order",
+        "to": "view_data:orders.partials.summary.order",
+        "component": "orders.card",
+        "component_prop": "order",
+        "component_source_variable": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_prop_include_route_param",
+        "from": "component_prop:orders.card.order",
+        "to": "route_param:orders.show.order",
+        "component": "orders.card",
+        "component_prop": "order",
+        "component_source_variable": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
     } in artifact["edges"]
     assert {
         "kind": "blade_authorization",
