@@ -509,9 +509,20 @@ BLADE_INCLUDE_RE = re.compile(
     r"@(?:include|includeIf|each)\s*\(\s*['\"](?P<view>[^'\"]+)['\"]",
     re.MULTILINE,
 )
+BLADE_INCLUDE_DATA_RE = re.compile(
+    r"@(?:include|includeIf)\s*\(\s*['\"](?P<view>[^'\"]+)['\"]\s*,\s*\[(?P<data>.{0,512}?)\]\s*\)",
+    re.MULTILINE | re.DOTALL,
+)
 BLADE_CONDITIONAL_INCLUDE_RE = re.compile(
     r"@(?:includeWhen|includeUnless)\s*\(\s*[^,]+,\s*['\"](?P<view>[^'\"]+)['\"]",
     re.MULTILINE,
+)
+BLADE_CONDITIONAL_INCLUDE_DATA_RE = re.compile(
+    r"@(?:includeWhen|includeUnless)\s*\(\s*[^,]+,\s*['\"](?P<view>[^'\"]+)['\"]\s*,\s*\[(?P<data>.{0,512}?)\]\s*\)",
+    re.MULTILINE | re.DOTALL,
+)
+BLADE_INCLUDE_DATA_PARAM_RE = re.compile(
+    r"['\"](?P<key>[A-Za-z_][A-Za-z0-9_]{0,127})['\"]\s*=>\s*\$(?P<variable>[A-Za-z_][A-Za-z0-9_]{0,127})"
 )
 BLADE_COMPONENT_DIRECTIVE_RE = re.compile(r"@component\s*\(\s*['\"](?P<component>[^'\"]+)['\"]", re.MULTILINE)
 BLADE_ANONYMOUS_COMPONENT_RE = re.compile(r"<x[-:](?P<component>[A-Za-z0-9_.:-]+)\b", re.MULTILINE)
@@ -2072,6 +2083,62 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_include_data(included_view: str, key: str, variable: str, offset: int) -> None:
+        nonlocal truncated
+        included_view = str(included_view or "").strip()
+        key = str(key or "").strip()
+        variable = str(variable or "").strip()
+        if not included_view or not key or not variable:
+            return
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key):
+            return
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", variable):
+            return
+        line = _line_number(source, offset)
+        target = f"view_data:{included_view}.{key}"
+        edge_key = ("blade_include_data", target, variable, line)
+        if edge_key not in seen_edges:
+            seen_edges.add(edge_key)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "blade_include_data",
+                    "from": view_id,
+                    "to": target,
+                    "included_view": included_view,
+                    "include_data_key": key,
+                    "include_source_variable": variable,
+                    "path": rel,
+                    "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+        route = known_routes.get(view_name)
+        if not route or variable not in _php_route_params(route):
+            return
+        route_name = str(route.get("name") or view_name)
+        route_target = f"route_param:{route_name}.{variable}"
+        route_edge_key = ("blade_include_data_route_param", target, route_target, line)
+        if route_edge_key in seen_edges:
+            return
+        seen_edges.add(route_edge_key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_include_data_route_param",
+                "from": target,
+                "to": route_target,
+                "included_view": included_view,
+                "include_data_key": key,
+                "include_source_variable": variable,
+                "route_name": route_name,
+                "route_param": variable,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_route_param(route_name: str, route_param: str, status: str, offset: int) -> None:
         nonlocal truncated
         route = known_routes.get(route_name)
@@ -2739,8 +2806,24 @@ def _append_blade_view_graph(
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())
     for match in BLADE_INCLUDE_RE.finditer(source):
         append_edge("blade_include", f"view:{match.group('view')}", match.start())
+    for match in BLADE_INCLUDE_DATA_RE.finditer(source):
+        for data_match in BLADE_INCLUDE_DATA_PARAM_RE.finditer(match.group("data") or ""):
+            append_blade_include_data(
+                match.group("view"),
+                data_match.group("key"),
+                data_match.group("variable"),
+                match.start("data") + data_match.start("key"),
+            )
     for match in BLADE_CONDITIONAL_INCLUDE_RE.finditer(source):
         append_edge("blade_include", f"view:{match.group('view')}", match.start())
+    for match in BLADE_CONDITIONAL_INCLUDE_DATA_RE.finditer(source):
+        for data_match in BLADE_INCLUDE_DATA_PARAM_RE.finditer(match.group("data") or ""):
+            append_blade_include_data(
+                match.group("view"),
+                data_match.group("key"),
+                data_match.group("variable"),
+                match.start("data") + data_match.start("key"),
+            )
     for match in BLADE_COMPONENT_DIRECTIVE_RE.finditer(source):
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
     for match in BLADE_ANONYMOUS_COMPONENT_RE.finditer(source):

@@ -4019,6 +4019,92 @@ def test_hades_backend_graph_search_finds_local_blade_route_params(monkeypatch, 
     )
 
 
+def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "blade_include_data",
+                "from": "view:orders.show",
+                "to": "view_data:orders.partials.summary.order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 3,
+            },
+            {
+                "kind": "blade_include_data_route_param",
+                "from": "view_data:orders.partials.summary.order",
+                "to": "route_param:orders.show.order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 3,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order Blade include data.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders partial summary include data order route param", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_include_data"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "view_data:orders.partials.summary.order"
+        and ref["provenance"]["include_data_key"] == "order"
+        and ref["provenance"]["include_source_variable"] == "order"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_include_data_route_param"
+        and ref["from"] == "view_data:orders.partials.summary.order"
+        and ref["to"] == "route_param:orders.show.order"
+        and ref["provenance"]["route_param"] == "order"
+        for ref in graph_refs
+    )
+    assert any(
+        "included_view=orders.partials.summary" in item["summary"]
+        and "include_data_key=order" in item["summary"]
+        and "include_source_variable=order" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
     graph_payload["edges"].extend(

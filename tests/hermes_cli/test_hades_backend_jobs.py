@@ -933,7 +933,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "resources" / "views" / "orders" / "show.blade.php").write_text(
         "@extends('layouts.app')\n"
         "@section('content')\n"
-        "@include('orders.partials.summary')\n"
+        "@include('orders.partials.summary', ['order' => $order])\n"
         "<x-alert type=\"info\" />\n"
         "@livewire('orders-status')\n"
         "<form action=\"{{ route('invoices.update', ['invoice' => 7]) }}\" method=\"POST\">\n"
@@ -1888,6 +1888,12 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("view_ref", "OrderController@show", "view:orders.show") in edges
     assert ("blade_extends", "view:orders.show", "view:layouts.app") in edges
     assert ("blade_include", "view:orders.show", "view:orders.partials.summary") in edges
+    assert ("blade_include_data", "view:orders.show", "view_data:orders.partials.summary.order") in edges
+    assert (
+        "blade_include_data_route_param",
+        "view_data:orders.partials.summary.order",
+        "route_param:orders.show.order",
+    ) in edges
     assert ("blade_include", "view:layouts.app", "view:shared.flash") in edges
     assert ("blade_include", "view:layouts.app", "view:shared.banner") in edges
     assert ("blade_component", "view:orders.show", "component:alert") in edges
@@ -1954,6 +1960,28 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_name": "invoices.update",
         "path": "resources/views/orders/show.blade.php",
         "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_include_data",
+        "from": "view:orders.show",
+        "to": "view_data:orders.partials.summary.order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 3,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_include_data_route_param",
+        "from": "view_data:orders.partials.summary.order",
+        "to": "route_param:orders.show.order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 3,
     } in artifact["edges"]
     assert {
         "kind": "blade_route_param",
