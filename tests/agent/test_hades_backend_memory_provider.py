@@ -3932,6 +3932,93 @@ def test_hades_backend_graph_search_finds_local_blade_route_refs(monkeypatch, tm
     )
 
 
+def test_hades_backend_graph_search_finds_local_blade_route_params(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "blade_route_param",
+                "from": "view:orders.show",
+                "to": "route_param:invoices.update.invoice",
+                "route_name": "invoices.update",
+                "route_param": "invoice",
+                "route_param_status": "provided",
+                "route_param_required": True,
+                "route_param_match": True,
+                "path": "resources/views/orders/show.blade.php",
+                "line": 6,
+            },
+            {
+                "kind": "blade_route_param",
+                "from": "view:orders.show",
+                "to": "route_param:orders.show.order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "route_param_status": "missing",
+                "route_param_required": True,
+                "route_param_match": False,
+                "path": "resources/views/orders/show.blade.php",
+                "line": 13,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view route param invoice order missing provided", "limit": 20},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_route_param"
+        and ref["to"] == "route_param:invoices.update.invoice"
+        and ref["provenance"]["route_param_status"] == "provided"
+        and ref["provenance"]["route_param_match"] is True
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_route_param"
+        and ref["to"] == "route_param:orders.show.order"
+        and ref["provenance"]["route_param_status"] == "missing"
+        and ref["provenance"]["route_param_match"] is False
+        for ref in graph_refs
+    )
+    assert any(
+        "route_param=order" in item["summary"]
+        and "route_param_status=missing" in item["summary"]
+        and "route_param_match=False" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_blade_form_metadata(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
     graph_payload["edges"].extend(

@@ -516,6 +516,11 @@ BLADE_LIVEWIRE_RE = re.compile(
     re.MULTILINE,
 )
 BLADE_ROUTE_FUNCTION_RE = re.compile(r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]", re.MULTILINE)
+BLADE_ROUTE_ARRAY_PARAMS_RE = re.compile(
+    r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]\s*,\s*\[(?P<params>.{0,512}?)\]\s*\)",
+    re.MULTILINE | re.DOTALL,
+)
+BLADE_ROUTE_PARAM_KEY_RE = re.compile(r"['\"](?P<param>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*=>")
 BLADE_FORM_METHOD_RE = re.compile(r"@method\s*\(\s*['\"](?P<method>GET|POST|PUT|PATCH|DELETE)['\"]\s*\)", re.IGNORECASE | re.MULTILINE)
 BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
 BLADE_FORM_BLOCK_RE = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
@@ -1195,6 +1200,17 @@ def _php_route_id(route: dict[str, Any]) -> str:
 def _php_route_params(route: dict[str, Any]) -> set[str]:
     uri = str(route.get("uri") or "")
     return {match.group("name") for match in PHP_ROUTE_PARAM_RE.finditer(uri)}
+
+
+def _php_required_route_params(route: dict[str, Any]) -> set[str]:
+    uri = str(route.get("uri") or "")
+    required: set[str] = set()
+    for match in PHP_ROUTE_PARAM_RE.finditer(uri):
+        token = match.group(0)
+        name = match.group("name")
+        if not token.startswith(f"{{{name}?"):
+            required.add(name)
+    return required
 
 
 def _php_role(path: str, class_name: str, extends: str) -> str:
@@ -1886,6 +1902,40 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_route_param(route_name: str, route_param: str, status: str, offset: int) -> None:
+        nonlocal truncated
+        route = known_routes.get(route_name)
+        if not route:
+            return
+        route_param = str(route_param or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", route_param):
+            return
+        all_params = _php_route_params(route)
+        required_params = _php_required_route_params(route)
+        normalized_status = "missing" if status == "missing" else "provided"
+        line = _line_number(source, offset)
+        target = f"route_param:{route_name}.{route_param}"
+        key = ("blade_route_param", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_route_param",
+                "from": view_id,
+                "to": target,
+                "route_name": route_name,
+                "route_param": route_param,
+                "route_param_status": normalized_status,
+                "route_param_required": route_param in required_params,
+                "route_param_match": normalized_status == "provided" and route_param in all_params,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -1961,6 +2011,11 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def route_call_has_argument(offset: int) -> bool:
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        return offset < len(source) and source[offset] == ","
+
     for match in BLADE_EXTENDS_RE.finditer(source):
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())
     for match in BLADE_INCLUDE_RE.finditer(source):
@@ -1976,6 +2031,23 @@ def _append_blade_view_graph(
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
+        route = known_routes.get(match.group("route"))
+        if route and not route_call_has_argument(match.end()):
+            for missing_param in sorted(_php_required_route_params(route)):
+                append_route_param(match.group("route"), missing_param, "missing", match.start())
+    for match in BLADE_ROUTE_ARRAY_PARAMS_RE.finditer(source):
+        route_name = match.group("route")
+        route = known_routes.get(route_name)
+        if not route:
+            continue
+        provided_params: set[str] = set()
+        params_source = match.group("params") or ""
+        for param_match in BLADE_ROUTE_PARAM_KEY_RE.finditer(params_source):
+            param_name = param_match.group("param")
+            provided_params.add(param_name)
+            append_route_param(route_name, param_name, "provided", match.start("params") + param_match.start("param"))
+        for missing_param in sorted(_php_required_route_params(route) - provided_params):
+            append_route_param(route_name, missing_param, "missing", match.start("params"))
     for match in BLADE_FORM_METHOD_RE.finditer(source):
         append_form_method(match.group("method"), match.start())
     for match in BLADE_CSRF_RE.finditer(source):

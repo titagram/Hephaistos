@@ -929,6 +929,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<form action=\"{{ route('invoices.store') }}\" method=\"POST\">\n"
         "@csrf\n"
         "</form>\n"
+        "<a href=\"{{ route('orders.show') }}\">Broken order link</a>\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1865,6 +1866,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_form_method", "view:orders.show", "http_method:PUT") in edges
     assert ("blade_form_route_method", "view:orders.show", "route:invoices.update") in edges
     assert ("blade_form_route_method", "view:orders.show", "route:invoices.store") in edges
+    assert ("blade_route_param", "view:orders.show", "route_param:invoices.update.invoice") in edges
+    assert ("blade_route_param", "view:orders.show", "route_param:orders.show.order") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1872,6 +1875,30 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_name": "invoices.update",
         "path": "resources/views/orders/show.blade.php",
         "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_route_param",
+        "from": "view:orders.show",
+        "to": "route_param:invoices.update.invoice",
+        "route_name": "invoices.update",
+        "route_param": "invoice",
+        "route_param_status": "provided",
+        "route_param_required": True,
+        "route_param_match": True,
+        "path": "resources/views/orders/show.blade.php",
+        "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_route_param",
+        "from": "view:orders.show",
+        "to": "route_param:orders.show.order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "route_param_status": "missing",
+        "route_param_required": True,
+        "route_param_match": False,
+        "path": "resources/views/orders/show.blade.php",
+        "line": 13,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",
