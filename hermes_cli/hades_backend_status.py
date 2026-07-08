@@ -529,6 +529,9 @@ def _binding_awareness_payload(
     source_slice_errors = _count(last_summary, "source_slice_errors")
     source_slice_candidates = _count(last_summary, "source_slice_candidates")
     source_slice_jobs_waiting = _count(last_summary, "source_slice_jobs_waiting")
+    causal_packs_valid = _count(last_summary, "causal_packs_valid") + _count(last_summary, "causal_pack_valid")
+    causal_packs_invalid = _count(last_summary, "causal_packs_invalid") + _count(last_summary, "causal_pack_invalid")
+    causal_packs_missing = _count(last_summary, "causal_packs_missing_for_open_bugs")
     proposal_errors = _count(last_summary, "proposal_errors")
     bug_evidence_items = (
         _count(last_summary, "bug_evidence_items")
@@ -556,6 +559,8 @@ def _binding_awareness_payload(
         quality_actions.append("approve_source_slice_jobs")
     elif "source_slice_index" in missing and is_linked:
         quality_actions.append("sync_source_slices")
+    if causal_packs_missing:
+        quality_actions.append("create_causal_pack")
     if not is_linked:
         status = "unlinked"
     elif has_errors:
@@ -599,6 +604,17 @@ def _binding_awareness_payload(
                 "status": _coverage_status(bug_evidence_items, summary_scope, missing_status="unknown"),
                 "items_last_sync": bug_evidence_items,
             },
+            "causal_packs": {
+                "status": _causal_pack_status(
+                    valid=causal_packs_valid,
+                    invalid=causal_packs_invalid,
+                    missing_for_open_bugs=causal_packs_missing,
+                    summary_scope=summary_scope,
+                ),
+                "valid": causal_packs_valid,
+                "invalid": causal_packs_invalid,
+                "missing_for_open_bugs": causal_packs_missing,
+            },
         },
         "quality": {
             "confidence": "ready" if diagnosable_without_source else ("blocked" if has_errors or not is_linked else "incomplete"),
@@ -626,6 +642,18 @@ def _source_slice_candidate_status(*, candidates: int, waiting_jobs: int, summar
     if summary_scope == "binding":
         return "present"
     return "aggregate"
+
+
+def _causal_pack_status(*, valid: int, invalid: int, missing_for_open_bugs: int, summary_scope: str) -> str:
+    if summary_scope != "binding":
+        return "unknown"
+    if missing_for_open_bugs > 0:
+        return "partial" if valid > 0 else "missing"
+    if valid > 0:
+        return "ready"
+    if invalid > 0:
+        return "invalid"
+    return "none"
 
 
 def _awareness_summary(

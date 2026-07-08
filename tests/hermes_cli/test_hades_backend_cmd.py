@@ -873,6 +873,41 @@ def test_backend_status_text_prints_identity_next_step(monkeypatch, tmp_path, ca
     assert "before source-free diagnosis" in output
 
 
+def test_backend_status_json_surfaces_causal_pack_awareness_action(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "artifacts_uploaded": 1,
+                "source_slices_uploaded": 1,
+                "bug_evidence_items": 1,
+                "causal_packs_valid": 1,
+                "causal_packs_missing_for_open_bugs": 1,
+            },
+        )
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="status", json=True))
+    payload = json.loads(capsys.readouterr().out)
+    awareness = payload["bindings"][0]["awareness"]
+
+    assert rc == 0
+    assert awareness["coverage"]["causal_packs"] == {
+        "status": "partial",
+        "valid": 1,
+        "invalid": 0,
+        "missing_for_open_bugs": 1,
+    }
+    assert "create_causal_pack" in awareness["quality"]["actions"]
+
+
 def test_backend_support_report_json_redacts_paths_and_secrets(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
