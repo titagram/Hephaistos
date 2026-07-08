@@ -28,6 +28,42 @@ For the full source-free diagnosis workflow, use
 awareness, evidence, freshness, and confidence gates before a precise root-cause
 claim is safe without local source access.
 
+## Kanban Local Agent Task Work
+
+Use this path when a dashboard kanban task should be picked up by the local
+Hades agent:
+
+```bash
+hades backend worker-setup
+hades backend tasks list --json
+hades backend tasks status --json
+hades backend tasks work --once --limit 1 --json
+hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json --record
+```
+
+Expected evidence:
+
+- `worker-setup` returns `status=linked`, `device_id`, `repository_id`, and
+  `local_workspace_id`.
+- `tasks list --json` shows `hades.kanban_task_work.v1` items with
+  `contract.valid=true`.
+- `tasks work --once --json` returns `completed=1` for a successful claim/run,
+  or a structured `error.code` and `error.next_step`.
+- `quality-report --record` has no `repair_agent_work_shared_memory`,
+  `repair_agent_work_structured_diagnosis`, or
+  `agent_work_repair_causal_pack_coverage` blockers for completed bug work.
+
+If a bug task is part of a no-codebase release fixture, the work item payload
+may include `quality_eval.no_codebase_fixture_id`. Completed work must then
+record `result.no_codebase_diagnosis`; a prose-only answer is a blocker because
+it cannot prove evidence refs, freshness, source-free awareness, Hades tool
+order, causal pack refs, and persisted report status.
+
+For cross-device checks, use two local profiles or two machines with separate
+`worker-setup` runs. Device B should be able to read project shared memory
+written by Device A, register its own workspace, and claim compatible unclaimed
+work. Device B must not complete or heartbeat a lease opened by Device A.
+
 Do not request `hades backend privacy-export --include-content --json` unless a
 maintainer has confirmed the user consent, project policy, and a secure sharing
 channel. Use `hades backend privacy-delete --json` and
