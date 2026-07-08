@@ -93,6 +93,15 @@ payload even when the backend does not send a legacy free-form `prompt` field.
 This is the local release gate that catches backend/local payload drift before
 an item is claimed.
 
+No-codebase release fixtures can be attached to a task payload with optional
+`quality_eval.no_codebase_fixture_id`. When present, the Hades backend
+`quality-report` command with `--no-codebase-eval <fixture.json>` also
+evaluates the completed work item result as a no-codebase diagnosis run.
+Completed bug work must then store a structured `result.no_codebase_diagnosis`
+with freshness, awareness, evidence refs, Hades retrieval tool calls, causal
+pack refs, causal chain, and persisted report status. A prose-only answer is
+intentionally treated as a quality blocker.
+
 ## Bug Evidence
 
 Bug reports and bug evidence are stored separately from generic shared memory.

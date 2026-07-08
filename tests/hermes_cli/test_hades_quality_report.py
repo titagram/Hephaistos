@@ -249,6 +249,98 @@ def test_agent_work_quality_report_passes_when_memory_refs_are_recorded():
     assert report["status"] == "passed"
 
 
+def test_agent_work_no_codebase_report_evaluates_completed_kanban_bug_work():
+    from hermes_cli.hades_agent_work_eval import build_agent_work_no_codebase_report
+    from hermes_cli.hades_no_codebase_eval import load_no_codebase_eval_fixture
+
+    fixtures, runs = load_no_codebase_eval_fixture(FIXTURE_PATH)
+    run = runs[0]
+    report = build_agent_work_no_codebase_report(
+        fixtures,
+        [
+            {
+                "work_item_id": "awi_bug_1",
+                "status": "completed",
+                "payload": {
+                    "schema": "hades.kanban_task_work.v1",
+                    "task_type": "bug",
+                    "quality_eval": {"no_codebase_fixture_id": run.fixture_id},
+                    "memory_required": True,
+                },
+                "result": {
+                    "memory_refs": [{"type": "project_memory", "id": "mem_1"}],
+                    "diagnosis_report_id": "diag_1",
+                    "no_codebase_diagnosis": {
+                        "root_cause_id": run.root_cause_id,
+                        "confidence": run.confidence,
+                        "freshness_status": run.freshness_status,
+                        "diagnosable_without_source": run.diagnosable_without_source,
+                        "evidence_refs": list(run.evidence_refs),
+                        "tool_calls": list(run.tool_calls),
+                        "causal_pack_refs": list(run.causal_pack_refs),
+                        "causal_chain": list(run.causal_chain),
+                        "persisted_report": True,
+                    },
+                },
+            }
+        ],
+    )
+
+    assert report["schema"] == "hades.agent_work_no_codebase_quality.v1"
+    assert report["status"] == "passed"
+    assert report["eligible_work_items"] == 1
+    assert report["evaluated_work_items"] == 1
+    assert report["accuracy"] == 1.0
+    assert report["causal_pack_coverage"] == 1.0
+    assert report["skipped_work_items"] == []
+
+
+def test_quality_report_blocks_agent_work_no_codebase_causal_regressions():
+    from hermes_cli.hades_agent_work_eval import build_agent_work_no_codebase_report
+    from hermes_cli.hades_no_codebase_eval import load_no_codebase_eval_fixture
+    from hermes_cli.hades_quality_report import build_hades_quality_report
+
+    fixtures, runs = load_no_codebase_eval_fixture(FIXTURE_PATH)
+    run = runs[0]
+    agent_work_no_codebase = build_agent_work_no_codebase_report(
+        fixtures,
+        [
+            {
+                "work_item_id": "awi_bug_1",
+                "status": "completed",
+                "payload": {
+                    "schema": "hades.kanban_task_work.v1",
+                    "quality_eval": {"no_codebase_fixture_id": run.fixture_id},
+                },
+                "result": {
+                    "diagnosis_report_id": "diag_1",
+                    "no_codebase_diagnosis": {
+                        "root_cause_id": run.root_cause_id,
+                        "confidence": run.confidence,
+                        "freshness_status": run.freshness_status,
+                        "diagnosable_without_source": run.diagnosable_without_source,
+                        "evidence_refs": list(run.evidence_refs),
+                        "tool_calls": list(run.tool_calls),
+                        "causal_pack_refs": [],
+                        "causal_chain": list(run.causal_chain),
+                        "persisted_report": True,
+                    },
+                },
+            }
+        ],
+    )
+    report = build_hades_quality_report(
+        no_codebase_report=_passing_no_codebase_report(),
+        agent_work_no_codebase_report=agent_work_no_codebase,
+    )
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert report["status"] == "failed"
+    assert report["metrics"]["agent_work_no_codebase"]["eligible_work_items"] == 1
+    assert actions["agent_work_fix_no_codebase_eval_failures"]["severity"] == "blocker"
+    assert actions["agent_work_repair_causal_pack_coverage"]["severity"] == "blocker"
+
+
 def test_quality_report_blocks_forbidden_source_access_regressions():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisRun,
@@ -520,6 +612,50 @@ def test_backend_quality_report_flags_cached_agent_work_without_memory_context(m
     assert payload["metrics"]["agent_work"]["missing_shared_memory_context_count"] == 1
     assert payload["metrics"]["agent_work"]["missing_work_item_ids"] == ["awi_missing_memory"]
     assert actions["repair_agent_work_shared_memory"]["severity"] == "blocker"
+
+
+def test_backend_quality_report_blocks_cached_task_work_missing_structured_no_codebase_result(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing() as conn:
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_bug_no_structured_result",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="completed",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "task_type": "bug",
+                "memory_required": True,
+                "quality_eval": {"no_codebase_fixture_id": "laravel_service_dependency_null"},
+            },
+            result={
+                "memory_refs": [{"type": "project_memory", "id": "mem_1"}],
+                "final_response": "Root cause explained in prose only.",
+            },
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(FIXTURE_PATH),
+            skip_local_status=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    actions = {action["id"]: action for action in payload["action_queue"]}
+
+    assert rc == 1
+    assert payload["status"] == "failed"
+    assert payload["metrics"]["agent_work_no_codebase"]["eligible_work_items"] == 1
+    assert payload["metrics"]["agent_work_no_codebase"]["evaluated_work_items"] == 0
+    assert actions["repair_agent_work_structured_diagnosis"]["severity"] == "blocker"
 
 
 def test_backend_quality_report_command_accepts_trajectory_runs(monkeypatch, tmp_path, capsys):

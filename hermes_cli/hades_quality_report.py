@@ -10,6 +10,7 @@ from typing import Any, Iterable
 def build_hades_quality_report(
     *,
     no_codebase_report: dict[str, Any] | None = None,
+    agent_work_no_codebase_report: dict[str, Any] | None = None,
     suite_report: dict[str, Any] | None = None,
     support_report: dict[str, Any] | None = None,
     note_backfill_report: dict[str, Any] | None = None,
@@ -30,6 +31,10 @@ def build_hades_quality_report(
     else:
         metrics["no_codebase"] = _no_codebase_metrics(no_codebase_report)
         actions.extend(_no_codebase_actions(no_codebase_report))
+
+    if agent_work_no_codebase_report is not None:
+        metrics["agent_work_no_codebase"] = _agent_work_no_codebase_metrics(agent_work_no_codebase_report)
+        actions.extend(_agent_work_no_codebase_actions(agent_work_no_codebase_report))
 
     if suite_report is not None:
         metrics["no_codebase_suite"] = {
@@ -146,6 +151,15 @@ def _no_codebase_metrics(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _agent_work_no_codebase_metrics(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_no_codebase_metrics(report),
+        "eligible_work_items": int(report.get("eligible_work_items") or 0),
+        "evaluated_work_items": int(report.get("evaluated_work_items") or 0),
+        "skipped_work_items": len(report.get("skipped_work_items") or []),
+    }
+
+
 def _no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if report.get("status") != "passed" or int(report.get("failed") or 0) > 0:
@@ -181,6 +195,29 @@ def _no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     ):
         if float(report.get(key) or 0.0) < 1.0:
             actions.append(_action(action_id, "blocker", message, value=float(report.get(key) or 0.0)))
+    return actions
+
+
+def _agent_work_no_codebase_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    skipped = report.get("skipped_work_items") or []
+    if skipped:
+        actions.append(
+            _action(
+                "repair_agent_work_structured_diagnosis",
+                "blocker",
+                "Completed no-codebase task work must record a structured diagnosis run.",
+                count=len(skipped),
+            )
+        )
+    for action in _no_codebase_actions(report):
+        actions.append(
+            {
+                **action,
+                "id": f"agent_work_{action['id']}",
+                "message": f"Agent work no-codebase gate: {action['message']}",
+            }
+        )
     return actions
 
 
