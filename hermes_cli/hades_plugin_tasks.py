@@ -247,13 +247,15 @@ def explain_plugin_task(work_item_id: str) -> dict[str, Any]:
 
 
 def _task_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    from hermes_cli.hades_kanban_task_contract import KANBAN_TASK_WORK_SCHEMA, kanban_task_contract_status
+
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     prompt = _prompt_from_work_item_payload(payload)
     task_id = str(item.get("task_id") or payload.get("task_id") or "").strip()
     title = str(item.get("title") or payload.get("title") or payload.get("normalized_problem") or "").strip()
     if not title and prompt:
         title = prompt.splitlines()[0][:120]
-    return {
+    task = {
         "work_item_id": str(item.get("id") or item.get("work_item_id") or "").strip(),
         "task_id": task_id or None,
         "project_id": str(item.get("project_id") or payload.get("project_id") or "").strip() or None,
@@ -266,6 +268,9 @@ def _task_from_item(item: dict[str, Any]) -> dict[str, Any]:
         "prompt_preview": prompt[:240],
         "payload": payload,
     }
+    if str(payload.get("schema") or "").strip() == KANBAN_TASK_WORK_SCHEMA:
+        task["contract"] = kanban_task_contract_status(payload)
+    return task
 
 
 def _cache_items(items: list[dict[str, Any]], *, selected_project_id: str, local_workspace_id: str) -> None:

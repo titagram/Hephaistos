@@ -380,6 +380,12 @@ def _prompt_from_work_item_payload(payload: dict[str, Any]) -> str:
             if role == "user" and isinstance(content, str) and content.strip():
                 return content.strip()
 
+    from hermes_cli.hades_kanban_task_contract import kanban_task_prompt
+
+    prompt = kanban_task_prompt(payload)
+    if prompt:
+        return prompt
+
     return ""
 
 

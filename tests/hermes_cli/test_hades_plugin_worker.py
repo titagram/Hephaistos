@@ -101,6 +101,82 @@ def test_plugin_worker_claims_heartbeats_and_completes_with_chat_message(monkeyp
     assert item.result == {"final_response": "Risposta locale", "metadata": {"item": "awi_1"}}
 
 
+def test_plugin_worker_builds_prompt_from_kanban_task_contract(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_plugin_worker import run_plugin_worker_once
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    kanban_payload = {
+        "schema": "hades.kanban_task_work.v1",
+        "task_id": "task_1",
+        "project_id": "proj_1",
+        "repository_id": "repo_1",
+        "workspace_binding_id": "wb_1",
+        "title": "Fix checkout regression",
+        "description": "Checkout fails after selecting an existing customer.",
+        "acceptance_criteria": ["Explain root cause"],
+        "priority": "high",
+        "risk": "medium",
+        "normalized_problem": "Diagnose checkout failure for existing customers.",
+        "task_type": "bug",
+        "clarification_status": "ready",
+        "ready_for_agent_work": True,
+        "required_context": ["shared_project_memory", "bug_evidence"],
+        "source_access_policy": {"mode": "source_free_first"},
+        "project_awareness_required": True,
+        "memory_required": True,
+        "created_from": {"type": "kanban_task", "source": "dashboard"},
+        "bug_report_id": "bug_1",
+        "evidence_refs": [{"kind": "bug_evidence", "id": "ev_1"}],
+        "bug_intake": {"status": "created"},
+    }
+
+    class FakeClient:
+        def list_agent_work_items(self, **payload):
+            return {"items": [{"id": "awi_1", "project_id": "proj_1", "payload": kanban_payload}]}
+
+        def claim_agent_work_item(self, work_item_id, *, local_workspace_id):
+            return {"lease_token": "lease_1", "item": {"id": work_item_id, "payload": kanban_payload}}
+
+        def heartbeat_agent_work_item(self, work_item_id, *, lease_token):
+            return {"ok": True}
+
+        def complete_agent_work_item(self, work_item_id, **payload):
+            return {"ok": True}
+
+    prompts = []
+
+    def runner(prompt, item):
+        prompts.append(prompt)
+        return "done"
+
+    result = run_plugin_worker_once(
+        client_factory=FakeClient,
+        agent_runner=runner,
+        local_workspace_id="lw_1",
+        quiet=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.summary["completed"] == 1
+    assert len(prompts) == 1
+    assert "Fix checkout regression" in prompts[0]
+    assert "bug_evidence: ev_1" in prompts[0]
+    assert "shared Hades memory" in prompts[0]
+
+
 def test_plugin_worker_keeps_heartbeating_while_runner_is_active(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

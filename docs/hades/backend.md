@@ -85,6 +85,14 @@ The local worker must treat this payload as authoritative task input, but it
 must still check shared project memory and project awareness before making
 source-free diagnosis claims.
 
+The local CLI carries a matching contract validator for
+`hades.kanban_task_work.v1`. `hades backend tasks list --json` includes a
+`contract` object for kanban task payloads with `valid=true` or stable
+field-level errors. The worker can build bounded prompt input from the contract
+payload even when the backend does not send a legacy free-form `prompt` field.
+This is the local release gate that catches backend/local payload drift before
+an item is claimed.
+
 ## Bug Evidence
 
 Bug reports and bug evidence are stored separately from generic shared memory.

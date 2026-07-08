@@ -638,7 +638,30 @@ def test_backend_tasks_list_outputs_available_local_agent_work(monkeypatch, tmp_
                         "status": "queued",
                         "priority": "high",
                         "title": "Fix failing checkout",
-                        "payload": {"schema": "hades.kanban_task_work.v1", "prompt": "Diagnose checkout bug"},
+                        "payload": {
+                            "schema": "hades.kanban_task_work.v1",
+                            "task_id": "task_1",
+                            "project_id": "proj_1",
+                            "repository_id": "repo_1",
+                            "workspace_binding_id": "wb_1",
+                            "title": "Fix failing checkout",
+                            "description": "Checkout fails after customer selection.",
+                            "acceptance_criteria": ["Explain root cause"],
+                            "priority": "high",
+                            "risk": "medium",
+                            "normalized_problem": "Diagnose checkout failure after customer selection.",
+                            "task_type": "bug",
+                            "clarification_status": "ready",
+                            "ready_for_agent_work": True,
+                            "required_context": ["shared_project_memory", "bug_evidence"],
+                            "source_access_policy": {"mode": "source_free_first"},
+                            "project_awareness_required": True,
+                            "memory_required": True,
+                            "created_from": {"type": "kanban_task", "source": "dashboard"},
+                            "bug_report_id": "bug_1",
+                            "evidence_refs": [{"kind": "bug_evidence", "id": "ev_1"}],
+                            "bug_intake": {"status": "created"},
+                        },
                     }
                 ]
             }
@@ -668,6 +691,7 @@ def test_backend_tasks_list_outputs_available_local_agent_work(monkeypatch, tmp_
     assert payload["items"][0]["work_item_id"] == "awi_1"
     assert payload["items"][0]["task_id"] == "task_1"
     assert payload["items"][0]["title"] == "Fix failing checkout"
+    assert payload["items"][0]["contract"]["valid"] is True
 
     with hdb.connect_closing() as conn:
         cached = hdb.get_plugin_work_item(conn, "awi_1")
