@@ -1904,6 +1904,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_authorization", "view:orders.show", "ability:view") in edges
     assert ("blade_authorization", "view:orders.show", "ability:update") in edges
     assert ("blade_authorization", "view:orders.show", "ability:delete") in edges
+    assert ("blade_authorization_route_param", "ability:view", "route_param:orders.show.order") in edges
+    assert ("blade_authorization_route_param", "ability:update", "route_param:orders.show.order") in edges
+    assert ("blade_authorization_route_param", "ability:delete", "route_param:orders.show.order") in edges
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
@@ -1999,6 +2002,42 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "ability": "delete",
         "authorization_helper": "canany",
         "authorization_subject": "order",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_route_param",
+        "from": "ability:view",
+        "to": "route_param:orders.show.order",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_route_param",
+        "from": "ability:update",
+        "to": "route_param:orders.show.order",
+        "ability": "update",
+        "authorization_helper": "canany",
+        "authorization_subject": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_route_param",
+        "from": "ability:delete",
+        "to": "route_param:orders.show.order",
+        "ability": "delete",
+        "authorization_helper": "canany",
+        "authorization_subject": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
         "path": "resources/views/orders/show.blade.php",
         "line": 17,
     } in artifact["edges"]

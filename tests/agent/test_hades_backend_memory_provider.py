@@ -4053,6 +4053,30 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
                 "path": "resources/views/orders/show.blade.php",
                 "line": 17,
             },
+            {
+                "kind": "blade_authorization_route_param",
+                "from": "ability:view",
+                "to": "route_param:orders.show.order",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 14,
+            },
+            {
+                "kind": "blade_authorization_route_param",
+                "from": "ability:update",
+                "to": "route_param:orders.show.order",
+                "ability": "update",
+                "authorization_helper": "canany",
+                "authorization_subject": "order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 17,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4129,6 +4153,15 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         and "authorization_helper=canany" in item["summary"]
         and "authorization_subject=order" in item["summary"]
         for item in result["items"]
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_route_param"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "route_param:orders.show.order"
+        and ref["provenance"]["route_name"] == "orders.show"
+        and ref["provenance"]["route_param"] == "order"
+        for ref in graph_refs
     )
 
 

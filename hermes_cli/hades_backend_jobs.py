@@ -2020,7 +2020,7 @@ def _append_blade_view_graph(
         else:
             truncated = True
 
-    seen_edges: set[tuple[str, str, int]] = set()
+    seen_edges: set[tuple[Any, ...]] = set()
 
     def append_edge(kind: str, target: str, offset: int) -> None:
         nonlocal truncated
@@ -2100,6 +2100,39 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_authorization_route_param(helper: str, ability: str, subject: str, offset: int) -> None:
+        nonlocal truncated
+        ability = str(ability or "").strip()
+        normalized_subject = str(subject or "").strip()
+        if not ability or not normalized_subject:
+            return
+        route = known_routes.get(view_name)
+        if not route or normalized_subject not in _php_route_params(route):
+            return
+        route_name = str(route.get("name") or view_name)
+        line = _line_number(source, offset)
+        target = f"route_param:{route_name}.{normalized_subject}"
+        key = ("blade_authorization_route_param", f"ability:{ability}", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_authorization_route_param",
+                "from": f"ability:{ability}",
+                "to": target,
+                "ability": ability,
+                "authorization_helper": str(helper or "").lower(),
+                "authorization_subject": normalized_subject,
+                "route_name": route_name,
+                "route_param": normalized_subject,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_blade_authorization(helper: str, ability: str, offset: int, subject: str = "") -> None:
         nonlocal truncated
         ability = str(ability or "").strip()
@@ -2131,6 +2164,7 @@ def _append_blade_view_graph(
             payload,
             max_edges=max_edges,
         ) or truncated
+        append_blade_authorization_route_param(normalized_helper, ability, normalized_subject, offset)
 
     def append_blade_authorization_any(helper: str, abilities_source: str, offset: int, subject: str = "") -> None:
         for ability_match in PHP_QUOTED_VALUE_RE.finditer(str(abilities_source or "")):
