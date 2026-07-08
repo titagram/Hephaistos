@@ -38,6 +38,7 @@ hades backend worker-setup
 hades backend tasks list --json
 hades backend tasks status --json
 hades backend tasks work --once --limit 1 --json
+hades backend tasks work --loop --interval 5 --idle-exit-after 3 --json
 hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json --record
 ```
 
@@ -49,6 +50,8 @@ Expected evidence:
   `contract.valid=true`.
 - `tasks work --once --json` returns `completed=1` for a successful claim/run,
   or a structured `error.code` and `error.next_step`.
+- `tasks work --loop --json` returns `mode=loop`, aggregate cycle counts, and
+  exits cleanly when `--idle-exit-after` is reached.
 - `quality-report --record` has no `repair_agent_work_shared_memory`,
   `repair_agent_work_structured_diagnosis`, or
   `agent_work_repair_causal_pack_coverage` blockers for completed bug work.

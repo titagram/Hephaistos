@@ -501,6 +501,54 @@ def test_backend_worker_command_dispatches_plugin_worker(monkeypatch, capsys):
     ]
 
 
+def test_backend_worker_loop_polls_until_idle_limit(monkeypatch, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_worker as worker
+
+    summaries = iter(
+        [
+            {"listed": 1, "claimed": 1, "completed": 1, "failed": 0, "skipped": 0},
+            {"listed": 0, "claimed": 0, "completed": 0, "failed": 0, "skipped": 0},
+            {"listed": 0, "claimed": 0, "completed": 0, "failed": 0, "skipped": 0},
+        ]
+    )
+    calls = []
+    sleeps = []
+
+    def fake_run_plugin_worker_once(**kwargs):
+        calls.append(kwargs)
+        return worker.PluginWorkerResult(next(summaries), 0)
+
+    monkeypatch.setattr(worker, "run_plugin_worker_once", fake_run_plugin_worker_once)
+    monkeypatch.setattr(cmd.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker",
+            once=False,
+            loop=True,
+            interval=0.25,
+            max_cycles=5,
+            idle_exit_after=2,
+            project_id="proj_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            limit=1,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["mode"] == "loop"
+    assert payload["cycles"] == 3
+    assert payload["completed"] == 1
+    assert payload["idle_cycles"] == 2
+    assert len(calls) == 3
+    assert sleeps == [0.25]
+
+
 def test_backend_worker_json_error_output_is_machine_readable(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

@@ -108,6 +108,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     profiles.add_argument("--json", action="store_true", help="Emit machine-readable profile JSON")
     worker = sub.add_parser("worker", help="Process one batch of local plugin work items")
     worker.add_argument("--once", action="store_true", help="Explicit one-shot mode; currently the default")
+    worker.add_argument("--loop", action="store_true", help="Poll for work until stopped or a loop limit is reached")
+    worker.add_argument("--interval", type=float, default=5.0, help="Seconds to wait between idle loop cycles")
+    worker.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles; 0 means unlimited")
+    worker.add_argument("--idle-exit-after", type=int, default=0, help="Exit after this many consecutive idle cycles; 0 disables")
     worker.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
     worker.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
     worker.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
@@ -128,6 +132,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     tasks_list.add_argument("--json", action="store_true", help="Emit machine-readable task list")
     tasks_work = tasks_sub.add_parser("work", help="Process one batch of backend task work items")
     tasks_work.add_argument("--once", action="store_true", help="Explicit one-shot mode; currently the default")
+    tasks_work.add_argument("--loop", action="store_true", help="Poll for work until stopped or a loop limit is reached")
+    tasks_work.add_argument("--interval", type=float, default=5.0, help="Seconds to wait between idle loop cycles")
+    tasks_work.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles; 0 means unlimited")
+    tasks_work.add_argument("--idle-exit-after", type=int, default=0, help="Exit after this many consecutive idle cycles; 0 disables")
     tasks_work.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
     tasks_work.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
     tasks_work.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
@@ -916,13 +924,18 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     from hermes_cli.hades_plugin_worker import run_plugin_worker_once
 
     json_mode = bool(getattr(args, "json", False))
-    result = run_plugin_worker_once(
-        project_id=getattr(args, "project_id", None),
-        local_workspace_id=getattr(args, "local_workspace_id", None),
-        agent_key=getattr(args, "agent_key", "local_agent") or "local_agent",
-        limit=max(1, int(getattr(args, "limit", 1) or 1)),
-        quiet=json_mode,
-    )
+    loop = bool(getattr(args, "loop", False)) and not bool(getattr(args, "once", False))
+    worker_kwargs = {
+        "project_id": getattr(args, "project_id", None),
+        "local_workspace_id": getattr(args, "local_workspace_id", None),
+        "agent_key": getattr(args, "agent_key", "local_agent") or "local_agent",
+        "limit": max(1, int(getattr(args, "limit", 1) or 1)),
+        "quiet": json_mode,
+    }
+    if loop:
+        return _run_worker_loop(args, run_plugin_worker_once, worker_kwargs, json_mode=json_mode)
+
+    result = run_plugin_worker_once(**worker_kwargs)
     if json_mode:
         print(json.dumps(result.summary, sort_keys=True))
         return result.exit_code
@@ -936,6 +949,72 @@ def _cmd_worker(args: argparse.Namespace) -> int:
         f"skipped {summary.get('skipped', 0)}"
     )
     return result.exit_code
+
+
+def _run_worker_loop(
+    args: argparse.Namespace,
+    run_plugin_worker_once: Callable[..., Any],
+    worker_kwargs: dict[str, Any],
+    *,
+    json_mode: bool,
+) -> int:
+    max_cycles = max(0, int(getattr(args, "max_cycles", 0) or 0))
+    idle_exit_after = max(0, int(getattr(args, "idle_exit_after", 0) or 0))
+    interval = max(0.0, float(getattr(args, "interval", 5.0) or 0.0))
+    aggregate = {
+        "mode": "loop",
+        "cycles": 0,
+        "listed": 0,
+        "claimed": 0,
+        "completed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "idle_cycles": 0,
+        "last": {},
+    }
+    exit_code = 0
+
+    while max_cycles == 0 or aggregate["cycles"] < max_cycles:
+        result = run_plugin_worker_once(**worker_kwargs)
+        summary = result.summary
+        aggregate["cycles"] += 1
+        aggregate["last"] = summary
+        if "error" in summary:
+            if json_mode:
+                print(json.dumps({"error": summary["error"], **aggregate}, sort_keys=True))
+            else:
+                error = summary["error"] if isinstance(summary.get("error"), dict) else {}
+                print(f"Hades backend worker: {error.get('message', 'failed')}", file=sys.stderr)
+                if error.get("next_step"):
+                    print(f"  Next step: {error['next_step']}", file=sys.stderr)
+            return result.exit_code or 1
+
+        for key in ("listed", "claimed", "completed", "failed", "skipped"):
+            aggregate[key] += int(summary.get(key) or 0)
+        if int(summary.get("claimed") or 0) == 0 and int(summary.get("completed") or 0) == 0:
+            aggregate["idle_cycles"] += 1
+        else:
+            aggregate["idle_cycles"] = 0
+        if result.exit_code:
+            exit_code = result.exit_code
+        if idle_exit_after and aggregate["idle_cycles"] >= idle_exit_after:
+            break
+        if max_cycles and aggregate["cycles"] >= max_cycles:
+            break
+        if aggregate["idle_cycles"] > 0 and interval > 0:
+            time.sleep(interval)
+
+    if json_mode:
+        print(json.dumps(aggregate, sort_keys=True))
+    else:
+        print(
+            "Hades backend worker loop: "
+            f"{aggregate['cycles']} cycle(s), listed {aggregate['listed']} item(s), "
+            f"claimed {aggregate['claimed']}, completed {aggregate['completed']}, "
+            f"failed {aggregate['failed']}, skipped {aggregate['skipped']}, "
+            f"idle {aggregate['idle_cycles']}"
+        )
+    return exit_code
 
 
 def _cmd_worker_setup(args: argparse.Namespace) -> int:
