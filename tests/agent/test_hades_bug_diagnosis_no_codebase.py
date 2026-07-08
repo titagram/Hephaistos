@@ -622,7 +622,7 @@ def test_hades_no_codebase_eval_loads_nested_causal_chain_refs(tmp_path):
                         "causal_pack_refs": ["causal_pack:pack_1"],
                         "causal_chain": [
                             {"step": 1, "refs": ["bug_evidence:ev_1", "graph:route:orders.show"]},
-                            {"step": 2, "refs": ["diagnosis:rc.nested"]},
+                            {"step": 2, "diagnosis": "rc.nested"},
                         ],
                     }
                 ],

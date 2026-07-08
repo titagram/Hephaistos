@@ -751,6 +751,18 @@ def _evidence_refs(values: Iterable[Any]) -> list[str]:
             nested_refs = value.get("refs")
             if isinstance(nested_refs, Iterable) and not isinstance(nested_refs, (str, bytes, Mapping)):
                 refs.extend(_evidence_refs(nested_refs))
+            for key, raw_nested in value.items():
+                if key in {"id", "ref", "evidence_id", "type", "refs", "step", "description"}:
+                    continue
+                if not isinstance(raw_nested, str):
+                    continue
+                nested_text = raw_nested.strip()
+                if not nested_text:
+                    continue
+                if key == "diagnosis" and not nested_text.startswith("diagnosis:"):
+                    nested_text = f"diagnosis:{nested_text}"
+                if ":" in nested_text:
+                    refs.append(nested_text)
         else:
             text = str(value).strip()
         if text:
