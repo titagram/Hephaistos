@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from hermes_cli.config import load_config, save_config, save_env_value
 from hermes_cli.hades_coordination import hades_coordination_profiles
-from hermes_cli.hades_backend_client import HadesBackendClient, redact_secret, token_env_key
+from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError, redact_secret, token_env_key
 from hermes_cli.hades_backend_actions import (
     acknowledge_memory_proposal,
     approve_backend_job,
@@ -41,7 +41,13 @@ from hermes_cli.hades_quality_report import (
 from hermes_cli import hades_backend_db as db
 
 
-AUTO_JOB_CAPABILITIES = {"read_files", "project_inspection", "sync_git_tree", "populate_backend_ast"}
+AUTO_JOB_CAPABILITIES = {
+    "read_files",
+    "project_inspection",
+    "sync_git_tree",
+    "populate_backend_ast",
+    "populate_project_wiki",
+}
 SKIP_JOB_STATUSES = {"waiting_confirmation", "started", "completed", "failed", "expired", "cancelled", "unlinked"}
 
 
@@ -67,6 +73,27 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     bootstrap.add_argument("--workspace", default=None, help="Workspace path to link (default: current directory)")
     bootstrap.add_argument("--project-name", default=None, help="Local Hades project name to create when needed")
     bootstrap.add_argument("--non-interactive", action="store_true")
+    bootstrap_awareness = sub.add_parser(
+        "bootstrap-awareness",
+        aliases=("awareness-bootstrap",),
+        help="Populate project artifacts, source slices, and wiki awareness for the current workspace",
+    )
+    bootstrap_awareness.add_argument(
+        "--yes",
+        action="store_true",
+        help="Approve generated read_source_slice jobs for the current workspace during the bootstrap",
+    )
+    bootstrap_awareness.add_argument(
+        "--skip-wiki",
+        action="store_true",
+        help="Only refresh artifacts/source slices; do not enqueue or process populate_project_wiki",
+    )
+    bootstrap_awareness.add_argument(
+        "--record-quality-report",
+        action="store_true",
+        help="Record a quality-report snapshot after the awareness bootstrap",
+    )
+    bootstrap_awareness.add_argument("--json", action="store_true", help="Emit machine-readable bootstrap summary")
 
     status = sub.add_parser("status", help="Show backend registration status")
     status.add_argument("--json", action="store_true", help="Emit machine-readable status JSON")
@@ -269,7 +296,14 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
 
 
 def _detect_default_capabilities() -> list[str]:
-    return ["read_files", "read_source_slice", "project_inspection", "sync_git_tree", "populate_backend_ast"]
+    return [
+        "read_files",
+        "read_source_slice",
+        "project_inspection",
+        "sync_git_tree",
+        "populate_backend_ast",
+        "populate_project_wiki",
+    ]
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:
@@ -729,6 +763,170 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     print(f"  Binding:       {binding_id}")
     print("  Next:          run `hades doctor` or start Hades from this workspace")
     return sync_rc
+
+
+def _current_workspace_scoped_agent_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
+    _default_agent, binding = _current_workspace_binding()
+    with db.connect_closing() as conn:
+        scoped_agent = db.get_agent(conn, binding.agent_id)
+    if scoped_agent is None:
+        raise RuntimeError(f"Hades backend agent {binding.agent_id} is not known locally")
+    return scoped_agent, binding
+
+
+def _quality_report_for_record() -> dict[str, Any]:
+    with db.connect_closing() as conn:
+        note_backfill_report = build_note_backfill_quality_report(db.list_memory_proposals(conn))
+        plugin_work_items = db.list_plugin_work_items(conn)
+        agent_work_report = build_agent_work_quality_report(plugin_work_items)
+    return build_hades_quality_report(
+        support_report=support_report_payload(),
+        note_backfill_report=note_backfill_report,
+        agent_work_report=agent_work_report,
+    )
+
+
+def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_backend_sync import _sync_baseline_artifacts, run_backend_sync
+
+    json_mode = bool(getattr(args, "json", False))
+    approve_slices = bool(getattr(args, "yes", False))
+    skip_wiki = bool(getattr(args, "skip_wiki", False))
+    try:
+        agent, binding = _current_workspace_scoped_agent_binding()
+    except Exception as exc:
+        print(f"Hades backend bootstrap-awareness: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    result: dict[str, Any] = {
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "workspace": binding.display_path,
+        "baseline": {},
+        "syncs": [],
+        "source_slice_approval": None,
+        "wiki_request": None,
+        "quality_report": None,
+    }
+
+    client = None
+    try:
+        client = runtime.client_for_agent(agent, timeout=60.0)
+        uploaded, failed, skipped, candidates = _sync_baseline_artifacts(
+            client,
+            agent,
+            binding,
+            execute_job=execute_job,
+        )
+        result["baseline"] = {
+            "artifacts_uploaded": uploaded,
+            "artifacts_failed": failed,
+            "artifacts_skipped": skipped,
+            "source_slice_candidates": candidates,
+        }
+        if failed:
+            raise RuntimeError(f"baseline artifact upload failed for {failed} artifact(s)")
+
+        first_sync = run_backend_sync(quiet=True)
+        result["syncs"].append({"phase": "after_baseline", **first_sync.summary, "exit_code": first_sync.exit_code})
+
+        if approve_slices:
+            approval = approve_backend_jobs(
+                capabilities=["read_source_slice"],
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+            )
+            result["source_slice_approval"] = {
+                "status": approval.status,
+                "summary": approval.summary,
+                **approval.payload,
+            }
+            slice_sync = run_backend_sync(quiet=True)
+            result["syncs"].append({"phase": "after_source_slices", **slice_sync.summary, "exit_code": slice_sync.exit_code})
+        else:
+            result["source_slice_approval"] = {
+                "status": "skipped",
+                "summary": "read_source_slice jobs require --yes for automatic approval",
+            }
+
+        if not skip_wiki:
+            try:
+                wiki_response = client.bootstrap_project_awareness(
+                    project_id=binding.project_id,
+                    agent_id=agent.agent_id,
+                    workspace_binding_id=binding.backend_workspace_binding_id,
+                    reason="CLI bootstrap-awareness",
+                )
+                result["wiki_request"] = wiki_response.get("job") or wiki_response.get("refresh_request") or wiki_response
+            except HadesBackendError as exc:
+                if exc.status_code == 404:
+                    result["wiki_request"] = {
+                        "status": "unsupported_backend",
+                        "summary": "Backend does not expose project-awareness/bootstrap; existing queued wiki jobs can still be processed.",
+                    }
+                else:
+                    raise
+            wiki_sync = run_backend_sync(quiet=True)
+            result["syncs"].append({"phase": "after_wiki", **wiki_sync.summary, "exit_code": wiki_sync.exit_code})
+
+        final_sync = run_backend_sync(quiet=True)
+        result["syncs"].append({"phase": "final", **final_sync.summary, "exit_code": final_sync.exit_code})
+        try:
+            result["awareness"] = client.project_awareness_status(
+                project_id=binding.project_id,
+                workspace_binding_id=binding.backend_workspace_binding_id,
+            )
+        except Exception as exc:
+            result["awareness"] = {"status": "unavailable", "error": redact_secret(str(exc))}
+
+        if bool(getattr(args, "record_quality_report", False)):
+            report = _quality_report_for_record()
+            with db.connect_closing() as conn:
+                _record_quality_report_snapshot(conn, report)
+            result["quality_report"] = {
+                "status": report.get("status"),
+                "summary": report.get("summary"),
+            }
+    except Exception as exc:
+        result["error"] = redact_secret(str(exc))
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(f"Hades backend bootstrap-awareness: {result['error']}", file=sys.stderr)
+        return 1
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    if json_mode:
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
+    baseline = result["baseline"]
+    print("Hades backend bootstrap-awareness complete")
+    print(f"  Project:     {binding.project_id}")
+    print(f"  Workspace:   {binding.display_path}")
+    print(
+        "  Baseline:    "
+        f"{baseline.get('artifacts_uploaded', 0)} uploaded, "
+        f"{baseline.get('artifacts_skipped', 0)} skipped, "
+        f"{baseline.get('source_slice_candidates', 0)} source-slice candidate(s)"
+    )
+    approval = result.get("source_slice_approval") if isinstance(result.get("source_slice_approval"), dict) else {}
+    print(f"  Source slice: {approval.get('summary', 'not run')}")
+    wiki_request = result.get("wiki_request") if isinstance(result.get("wiki_request"), dict) else {}
+    if skip_wiki:
+        print("  Wiki:         skipped")
+    else:
+        print(f"  Wiki:         {wiki_request.get('status') or wiki_request.get('id') or 'requested/processed'}")
+    awareness = result.get("awareness") if isinstance(result.get("awareness"), dict) else {}
+    print(f"  Awareness:    {awareness.get('overall_status') or awareness.get('status') or 'unknown'}")
+    if not approve_slices:
+        print("  Next:         rerun with `--yes` to approve source-slice jobs automatically")
+    return 0
 
 
 def _ensure_local_project(args: argparse.Namespace):
@@ -2248,6 +2446,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_setup(args)
     if action == "bootstrap":
         return _cmd_bootstrap(args)
+    if action in {"bootstrap-awareness", "awareness-bootstrap"}:
+        return _cmd_bootstrap_awareness(args)
     if action == "status":
         return _cmd_status(args)
     if action == "support-report":
@@ -2303,7 +2503,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|bootstrap-awareness|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

@@ -252,6 +252,9 @@ class HadesBackendClient:
     def project_awareness_status(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "project-awareness/status", params=payload)
 
+    def bootstrap_project_awareness(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "project-awareness/bootstrap", json_body=payload)
+
     def pull_jobs(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "agent/jobs", params=payload)
 

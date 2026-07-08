@@ -234,6 +234,63 @@ def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_p
     assert "return Booking::create" not in str(artifact["source_slice_candidates"])
 
 
+def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "composer.json").write_text('{"require":{"laravel/framework":"^11.0"}}\n', encoding="utf-8")
+    routes = tmp_path / "routes"
+    routes.mkdir()
+    routes.joinpath("web.php").write_text(
+        "<?php\nuse App\\Http\\Controllers\\BookingController;\nRoute::post('/bookings', [BookingController::class, 'store'])->name('bookings.store');\n",
+        encoding="utf-8",
+    )
+    controller = tmp_path / "app" / "Http" / "Controllers" / "BookingController.php"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "<?php\nnamespace App\\Http\\Controllers;\nclass BookingController {\n public function store() { return Booking::create([]); }\n}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "app" / "Models" / "Booking.php"
+    model.parent.mkdir(parents=True)
+    model.write_text("<?php\nnamespace App\\Models;\nclass Booking extends Model {}\n", encoding="utf-8")
+    migration = tmp_path / "database" / "migrations"
+    migration.mkdir(parents=True)
+    migration.joinpath("2026_01_01_000000_create_bookings_table.php").write_text(
+        "<?php\nSchema::create('bookings', function (Blueprint $table) { $table->id(); $table->string('status'); });\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "tests" / "Feature" / "BookingTest.php"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("<?php\nit('stores bookings', function () { $this->post('/bookings'); });\n", encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_wiki",
+            "capability": "populate_project_wiki",
+            "payload": {"max_files": 80, "max_symbols": 200},
+        },
+        workspace_root=tmp_path,
+    )
+
+    pages = result["pages"]
+    slugs = {page["slug"] for page in pages}
+    overview = pages[0]
+
+    assert result["status"] == "completed"
+    assert result["schema"] == "devboard.wiki_refresh_result.v1"
+    assert result["raw_source_included"] is False
+    assert overview["source_status"] == "verified_from_code"
+    assert "Project Overview" in overview["title"]
+    assert "Raw source is not embedded" in overview["content_markdown"]
+    assert any(ref["kind"] == "artifact_ref" for ref in overview["evidence_refs"])
+    assert any(ref.get("path") == "composer.json" for ref in overview["evidence_refs"])
+    assert any(slug.endswith("-entrypoints") for slug in slugs)
+    assert any(slug.endswith("-data-model") for slug in slugs)
+    assert any(slug.endswith("-symbol-map") for slug in slugs)
+    assert any(slug.endswith("-tests-quality") for slug in slugs)
+    assert "return Booking::create" not in str(result)
+
+
 def test_sync_git_tree_omits_symlink_file_and_directory_escapes(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -371,7 +428,10 @@ def test_populate_backend_ast_extracts_python_symbols_without_source(tmp_path):
     symbols = {(item["kind"], item["name"]) for item in result["artifact"]["symbols"]}
 
     assert result["status"] == "completed"
-    assert result["artifact"]["schema"] == "hades.symbols.v1"
+    assert result["artifact"]["schema"] == "hades.code_graph.v1"
+    assert result["artifact"]["framework"] == "python"
+    assert result["artifact"]["routes"] == []
+    assert result["artifact"]["database"] == {"tables": []}
     assert ("class", "Service") in symbols
     assert ("function", "helper") in symbols
     assert "return 1" not in str(result)

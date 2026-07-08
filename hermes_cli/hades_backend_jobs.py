@@ -3658,6 +3658,382 @@ def _execute_project_inspection(job: dict[str, Any], workspace_root: Path) -> di
     return result
 
 
+def _wiki_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug[:80] or "project"
+
+
+def _wiki_cell(value: Any, *, max_chars: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = text.replace("|", "\\|")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _wiki_table(headers: list[str], rows: list[list[Any]], *, max_rows: int = 80) -> list[str]:
+    if not rows:
+        return []
+    lines = [
+        "| " + " | ".join(_wiki_cell(header, max_chars=80) for header in headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows[:max_rows]:
+        padded = list(row[: len(headers)]) + [""] * max(0, len(headers) - len(row))
+        lines.append("| " + " | ".join(_wiki_cell(value) for value in padded) + " |")
+    if len(rows) > max_rows:
+        lines.append(f"\n... {len(rows) - max_rows} row(s) omitted from this bounded wiki page.")
+    return lines
+
+
+def _wiki_bounded(lines: list[str], *, max_chars: int = 24_000) -> str:
+    text = "\n".join(lines).strip() + "\n"
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 120].rstrip() + "\n\n... [bounded wiki page truncated]\n"
+
+
+def _artifact_evidence(artifact: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(artifact, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return {
+        "kind": "artifact_ref",
+        "schema": artifact.get("schema"),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "raw_source_included": bool(artifact.get("raw_source_included")),
+    }
+
+
+def _file_evidence(files_by_path: dict[str, dict[str, Any]], path: Any) -> dict[str, Any] | None:
+    rel = str(path or "").strip()
+    if not rel:
+        return None
+    item = files_by_path.get(rel)
+    evidence = {"kind": "file_ref", "path": rel}
+    if isinstance(item, dict):
+        if item.get("sha256"):
+            evidence["hash"] = item.get("sha256")
+        if item.get("bytes") is not None:
+            evidence["bytes"] = item.get("bytes")
+    return evidence
+
+
+def _dedupe_evidence(refs: list[dict[str, Any] | None], *, limit: int = 80) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        key = json.dumps(ref, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _wiki_page(
+    *,
+    root_slug: str,
+    suffix: str,
+    title: str,
+    lines: list[str],
+    evidence_refs: list[dict[str, Any] | None],
+    page_type: str = "technical",
+) -> dict[str, Any]:
+    return {
+        "slug": f"{root_slug}-{suffix}",
+        "title": title,
+        "page_type": page_type,
+        "producer": "hades",
+        "source_status": "verified_from_code",
+        "content_markdown": _wiki_bounded(lines),
+        "evidence_refs": _dedupe_evidence(evidence_refs),
+    }
+
+
+def _wiki_route_rows(routes: list[dict[str, Any]]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for route in routes:
+        rows.append(
+            [
+                route.get("method") or "",
+                route.get("uri") or route.get("path") or "",
+                route.get("name") or "",
+                route.get("handler") or "",
+                route.get("source_path") or route.get("path") or "",
+                route.get("line") or "",
+            ]
+        )
+    return rows
+
+
+def _wiki_symbol_rows(symbols: list[dict[str, Any]]) -> list[list[Any]]:
+    role_rank = {
+        "controller": 0,
+        "model": 1,
+        "service": 2,
+        "command": 3,
+        "livewire_component": 4,
+        "class": 5,
+        "function": 6,
+        "method": 7,
+    }
+
+    def sort_key(symbol: dict[str, Any]) -> tuple[int, str, str]:
+        role = str(symbol.get("role") or symbol.get("kind") or "")
+        return (role_rank.get(role, 50), str(symbol.get("path") or ""), str(symbol.get("name") or ""))
+
+    rows: list[list[Any]] = []
+    for symbol in sorted(symbols, key=sort_key):
+        rows.append(
+            [
+                symbol.get("name") or symbol.get("class") or "",
+                symbol.get("role") or symbol.get("kind") or "",
+                symbol.get("path") or "",
+                symbol.get("line") or "",
+            ]
+        )
+    return rows
+
+
+def _wiki_table_rows(database: dict[str, Any]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for table in database.get("tables") or []:
+        columns = table.get("columns") or []
+        foreign_keys = table.get("foreign_keys") or []
+        rows.append(
+            [
+                table.get("table") or "",
+                table.get("model") or table.get("source") or table.get("action") or "",
+                len(columns),
+                len(foreign_keys),
+                table.get("path") or "",
+                table.get("line") or "",
+            ]
+        )
+    return rows
+
+
+def _wiki_test_rows(tests: dict[str, Any]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for item in tests.get("files") or []:
+        cases = item.get("cases") or []
+        refs = item.get("symbol_refs") or item.get("route_refs") or item.get("import_refs") or []
+        rows.append([item.get("path") or "", item.get("framework") or "", len(cases), ", ".join(str(ref) for ref in refs[:6])])
+    return rows
+
+
+def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    max_files = int(payload.get("max_files") or 10_000)
+    max_symbols = int(payload.get("max_symbols") or 5_000)
+    max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
+    tree_result = _execute_sync_git_tree(
+        {"capability": "sync_git_tree", "payload": {**payload, "max_files": max_files}},
+        workspace_root,
+    )
+    graph_result = _execute_populate_backend_ast(
+        {
+            "capability": "populate_backend_ast",
+            "payload": {
+                **payload,
+                "max_files": min(max_files, int(payload.get("max_ast_files") or 1_000)),
+                "max_symbols": max_symbols,
+                "max_file_bytes": max_file_bytes,
+            },
+        },
+        workspace_root,
+    )
+    tree = tree_result.get("artifact") if isinstance(tree_result, dict) else {}
+    graph = graph_result.get("artifact") if isinstance(graph_result, dict) else {}
+    if not isinstance(tree, dict) or not isinstance(graph, dict):
+        return {
+            "status": "failed",
+            "summary": "Unable to build local project wiki artifacts.",
+            "schema": "devboard.wiki_refresh_result.v1",
+            "pages": [],
+        }
+
+    root_name = str(graph.get("root") or tree.get("root") or workspace_root.name)
+    root_slug = _wiki_slug(root_name)
+    files = tree.get("files") if isinstance(tree.get("files"), list) else []
+    files_by_path = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
+    project_index = tree.get("project_index") if isinstance(tree.get("project_index"), dict) else {}
+    language_counts = project_index.get("language_counts") if isinstance(project_index.get("language_counts"), dict) else {}
+    dependency_manifests = project_index.get("dependency_manifests")
+    if not isinstance(dependency_manifests, list):
+        dependency_manifests = graph.get("dependency_manifests") if isinstance(graph.get("dependency_manifests"), list) else []
+    routes = graph.get("routes") if isinstance(graph.get("routes"), list) else project_index.get("routes") or []
+    symbols = graph.get("symbols") if isinstance(graph.get("symbols"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    database = graph.get("database") if isinstance(graph.get("database"), dict) else project_index.get("database") or {}
+    tests = graph.get("tests") if isinstance(graph.get("tests"), dict) else {}
+    logs = graph.get("logs") if isinstance(graph.get("logs"), dict) else {}
+
+    artifact_refs = [_artifact_evidence(tree), _artifact_evidence(graph)]
+    manifest_refs = [
+        _file_evidence(files_by_path, manifest.get("path"))
+        for manifest in dependency_manifests
+        if isinstance(manifest, dict)
+    ]
+    overview_lines = [
+        f"# {root_name} Project Overview",
+        "",
+        "Generated by Hades from bounded local project artifacts. Raw source is not embedded in this wiki page.",
+        "",
+        "## Artifact Summary",
+        "",
+        f"- Metadata tree: {tree.get('summary') or project_index.get('summary') or 'available'}",
+        f"- Code graph: {graph.get('summary') or 'available'}",
+        f"- Files indexed: {len(files)}",
+        f"- Routes indexed: {len(routes)}",
+        f"- Symbols indexed: {len(symbols)}",
+        f"- Edges indexed: {len(edges)}",
+        f"- Database tables/migrations indexed: {len(database.get('tables') or []) or int(database.get('migration_count') or 0)}",
+        f"- Test files indexed: {int(tests.get('file_count') or len(tests.get('files') or []))}",
+        f"- Log events indexed: {int(logs.get('event_count') or 0)}",
+        "",
+        "## Languages",
+        "",
+    ]
+    language_rows = [
+        [language, counts.get("files", 0), counts.get("bytes", 0)]
+        for language, counts in sorted(language_counts.items())
+        if isinstance(counts, dict)
+    ]
+    overview_lines.extend(_wiki_table(["Language", "Files", "Bytes"], language_rows, max_rows=30) or ["No language counts were available."])
+    overview_lines.extend(["", "## Dependencies", ""])
+    dependency_rows = [
+        [manifest.get("manager"), manifest.get("path"), ", ".join(str(pkg) for pkg in (manifest.get("packages") or [])[:12])]
+        for manifest in dependency_manifests
+        if isinstance(manifest, dict)
+    ]
+    overview_lines.extend(_wiki_table(["Manager", "Manifest", "Packages"], dependency_rows, max_rows=30) or ["No dependency manifests were detected."])
+
+    pages = [
+        _wiki_page(
+            root_slug=root_slug,
+            suffix="overview",
+            title=f"{root_name} Project Overview",
+            lines=overview_lines,
+            evidence_refs=[*artifact_refs, *manifest_refs],
+        )
+    ]
+
+    if routes:
+        route_refs = [
+            _file_evidence(files_by_path, route.get("source_path") or route.get("path"))
+            for route in routes
+            if isinstance(route, dict)
+        ]
+        route_lines = [
+            f"# {root_name} Entrypoints And Routes",
+            "",
+            "Routes and public entrypoints detected from framework metadata and static route declarations.",
+            "",
+        ]
+        route_lines.extend(_wiki_table(["Method", "Path", "Name", "Handler", "Source", "Line"], _wiki_route_rows(routes), max_rows=120))
+        pages.append(
+            _wiki_page(
+                root_slug=root_slug,
+                suffix="entrypoints",
+                title=f"{root_name} Entrypoints And Routes",
+                lines=route_lines,
+                evidence_refs=[*artifact_refs, *route_refs],
+            )
+        )
+
+    table_rows = _wiki_table_rows(database)
+    if table_rows:
+        table_refs = [
+            _file_evidence(files_by_path, table.get("path"))
+            for table in database.get("tables") or []
+            if isinstance(table, dict)
+        ]
+        data_lines = [
+            f"# {root_name} Data Model",
+            "",
+            "Tables, models, migrations, and foreign-key signals detected by Hades.",
+            "",
+        ]
+        data_lines.extend(_wiki_table(["Table", "Model/Source", "Columns", "Foreign Keys", "Source", "Line"], table_rows, max_rows=160))
+        pages.append(
+            _wiki_page(
+                root_slug=root_slug,
+                suffix="data-model",
+                title=f"{root_name} Data Model",
+                lines=data_lines,
+                evidence_refs=[*artifact_refs, *table_refs],
+            )
+        )
+
+    if symbols:
+        symbol_refs = [
+            _file_evidence(files_by_path, symbol.get("path"))
+            for symbol in symbols
+            if isinstance(symbol, dict)
+        ]
+        symbol_lines = [
+            f"# {root_name} Symbol Map",
+            "",
+            "High-signal symbols detected in the local code graph. This is intended for source-free orientation and bug triage.",
+            "",
+        ]
+        symbol_lines.extend(_wiki_table(["Symbol", "Role", "Source", "Line"], _wiki_symbol_rows(symbols), max_rows=180))
+        pages.append(
+            _wiki_page(
+                root_slug=root_slug,
+                suffix="symbol-map",
+                title=f"{root_name} Symbol Map",
+                lines=symbol_lines,
+                evidence_refs=[*artifact_refs, *symbol_refs],
+            )
+        )
+
+    test_rows = _wiki_test_rows(tests)
+    if test_rows or int(logs.get("event_count") or 0):
+        test_refs = [
+            _file_evidence(files_by_path, item.get("path"))
+            for item in tests.get("files") or []
+            if isinstance(item, dict)
+        ]
+        quality_lines = [
+            f"# {root_name} Tests And Runtime Signals",
+            "",
+            f"- Test files: {int(tests.get('file_count') or len(tests.get('files') or []))}",
+            f"- Log events: {int(logs.get('event_count') or 0)}",
+            "",
+        ]
+        quality_lines.extend(_wiki_table(["Test File", "Framework", "Cases", "Coverage Refs"], test_rows, max_rows=120) or ["No test files were indexed."])
+        pages.append(
+            _wiki_page(
+                root_slug=root_slug,
+                suffix="tests-quality",
+                title=f"{root_name} Tests And Runtime Signals",
+                lines=quality_lines,
+                evidence_refs=[*artifact_refs, *test_refs],
+            )
+        )
+
+    max_pages = max(1, int(payload.get("max_pages") or 8))
+    pages = pages[:max_pages]
+    return {
+        "status": "completed",
+        "schema": "devboard.wiki_refresh_result.v1",
+        "summary": f"Generated {len(pages)} project wiki page(s) from local Hades artifacts for {root_name}.",
+        "pages": pages,
+        "source_artifacts": [
+            {"schema": tree.get("schema"), "summary": tree.get("summary"), "raw_source_included": bool(tree.get("raw_source_included"))},
+            {"schema": graph.get("schema"), "summary": graph.get("summary"), "raw_source_included": bool(graph.get("raw_source_included"))},
+        ],
+        "raw_source_included": False,
+        "truncated": bool(tree.get("truncated")) or bool(graph.get("truncated")),
+        "retention_class": "project_wiki",
+    }
+
+
 def _php_graph_summary(
     routes: list[dict[str, Any]],
     symbols: list[dict[str, Any]],
@@ -11453,53 +11829,40 @@ def _build_python_artifact(
         "truncated": len(log_events) > MAX_LOG_EVENTS,
         "raw_source_included": False,
     }
-    if routes or database["tables"]:
-        framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
-        graph_database = {**database, "tables": database["tables"][:500]}
-        graph = {
-            "schema": "hades.code_graph.v1",
-            "language": "python",
-            "framework": framework,
-            "root": workspace_root.name,
-            "routes": routes[:500],
-            "symbols": symbols,
-            "edges": edges,
-            "database": graph_database,
-            "tests": tests,
-            "logs": logs,
-            "summary": "",
-            "omitted": omitted,
-            "truncated": truncated
-            or len(symbols) >= max_symbols
-            or len(edges) >= max_edges
-            or len(routes) > 500
-            or len(database["tables"]) > 500,
-            "redactions": len(omitted),
-            "retention_class": "source_symbols",
-            "raw_source_included": False,
-        }
-        graph["summary"] = _py_graph_summary(
-            graph["routes"],
-            symbols,
-            edges,
-            framework=framework,
-            database=graph_database,
-            tests=tests,
-            logs=logs,
-        )
-        return graph
-
-    return {
-        "schema": "hades.symbols.v1",
+    framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
+    graph_database = {**database, "tables": database["tables"][:500]}
+    graph = {
+        "schema": "hades.code_graph.v1",
+        "language": "python",
+        "framework": framework,
+        "root": workspace_root.name,
+        "routes": routes[:500],
         "symbols": symbols,
+        "edges": edges,
+        "database": graph_database,
         "tests": tests,
         "logs": logs,
+        "summary": "",
         "omitted": omitted,
-        "truncated": truncated or len(symbols) >= max_symbols,
+        "truncated": truncated
+        or len(symbols) >= max_symbols
+        or len(edges) >= max_edges
+        or len(routes) > 500
+        or len(database["tables"]) > 500,
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
     }
+    graph["summary"] = _py_graph_summary(
+        graph["routes"],
+        symbols,
+        edges,
+        framework=framework,
+        database=graph_database,
+        tests=tests,
+        logs=logs,
+    )
+    return graph
 
 
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
@@ -11602,6 +11965,8 @@ def execute_job(job: dict[str, Any], *, workspace_root: str | Path) -> dict[str,
         return _execute_sync_git_tree(job, root)
     if capability == "populate_backend_ast":
         return _execute_populate_backend_ast(job, root)
+    if capability == "populate_project_wiki":
+        return _execute_populate_project_wiki(job, root)
     if capability == "project_inspection":
         return _execute_project_inspection(job, root)
     return {

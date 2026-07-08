@@ -39,6 +39,87 @@ def _seed_current_backend_workspace(monkeypatch, tmp_path):
     return workspace
 
 
+def test_backend_default_capabilities_include_project_wiki_refresh():
+    import hermes_cli.hades_backend_cmd as cmd
+
+    assert "populate_project_wiki" in cmd._detect_default_capabilities()
+    assert "populate_project_wiki" in cmd.AUTO_JOB_CAPABILITIES
+
+
+def test_backend_bootstrap_awareness_orchestrates_current_workspace(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    import hermes_cli.hades_backend_sync as sync
+    from hermes_cli.hades_backend_actions import BackendActionResult
+    from hermes_cli.hades_backend_sync import SyncResult
+
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+            self.bootstrap_requests = []
+
+        def bootstrap_project_awareness(self, **payload):
+            self.bootstrap_requests.append(payload)
+            return {"job": {"id": "job_wiki", "status": "queued"}}
+
+        def project_awareness_status(self, **payload):
+            return {"overall_status": "ready", "project_id": payload["project_id"]}
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+    sync_phases = []
+
+    monkeypatch.setattr(runtime, "client_for_agent", lambda agent, timeout=15.0: fake_client)
+    monkeypatch.setattr(sync, "_sync_baseline_artifacts", lambda *args, **kwargs: (2, 0, 1, 25))
+    monkeypatch.setattr(
+        sync,
+        "run_backend_sync",
+        lambda quiet=False: (sync_phases.append(quiet) or SyncResult({"pulled": 0, "completed": 0}, 0)),
+    )
+    monkeypatch.setattr(
+        cmd,
+        "approve_backend_jobs",
+        lambda **kwargs: BackendActionResult(
+            ok=True,
+            status="completed",
+            summary="approved 3/3 job(s); failed 0",
+            payload={"approved": 3, "failed": 0, "dry_run": False},
+        ),
+    )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="bootstrap-awareness",
+            yes=True,
+            skip_wiki=False,
+            record_quality_report=False,
+            json=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Hades backend bootstrap-awareness complete" in output
+    assert "25 source-slice candidate(s)" in output
+    assert "approved 3/3 job(s); failed 0" in output
+    assert "ready" in output
+    assert fake_client.bootstrap_requests == [
+        {
+            "project_id": "proj_1",
+            "agent_id": "agent_1",
+            "workspace_binding_id": "wb_1",
+            "reason": "CLI bootstrap-awareness",
+        }
+    ]
+    assert sync_phases == [True, True, True, True]
+    assert fake_client.closed is True
+
+
 def test_backend_setup_registers_agent_and_persists_derived_token(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
