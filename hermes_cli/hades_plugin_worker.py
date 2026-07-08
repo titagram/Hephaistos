@@ -18,8 +18,18 @@ AgentRunner = Callable[[str, dict[str, Any]], str | dict[str, Any]]
 
 @dataclass(frozen=True)
 class PluginWorkerResult:
-    summary: dict[str, int]
+    summary: dict[str, Any]
     exit_code: int
+
+
+def _error_summary(code: str, message: str, next_step: str, **extra: Any) -> dict[str, Any]:
+    error: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "next_step": next_step,
+    }
+    error.update({key: value for key, value in extra.items() if value not in (None, "")})
+    return {"error": error}
 
 
 def run_plugin_worker_once(
@@ -45,7 +55,14 @@ def run_plugin_worker_once(
             "hades_backend.worker.skipped",
             extra={"hades_event": "worker.skipped", "hades_reason": "not_configured"},
         )
-        return PluginWorkerResult({"error": 1}, 1)
+        return PluginWorkerResult(
+            _error_summary(
+                "not_configured",
+                "Hades backend is not configured.",
+                "Run `hades backend setup` or `hades backend bootstrap` first.",
+            ),
+            1,
+        )
 
     selected_project_id = str(project_id or agent.project_id).strip()
     selected_local_workspace_id = str(local_workspace_id or runtime.plugin_local_workspace_id()).strip()
@@ -64,7 +81,16 @@ def run_plugin_worker_once(
                 "backend worker: missing plugin local workspace id; pass --local-workspace-id "
                 "or set backend.plugin_local_workspace_id"
             )
-        return PluginWorkerResult({"error": 1}, 1)
+        return PluginWorkerResult(
+            _error_summary(
+                "missing_local_workspace_id",
+                "Plugin local workspace id is missing.",
+                "Run `hades backend worker-setup` in the project checkout, or pass --local-workspace-id.",
+                project_id=selected_project_id,
+                agent_key=agent_key,
+            ),
+            1,
+        )
 
     try:
         client = client_factory() if client_factory is not None else runtime.plugin_work_items_client_from_config()
@@ -80,7 +106,16 @@ def run_plugin_worker_once(
         )
         if not quiet:
             print(f"backend worker: failed to create plugin client: {redact_secret(str(exc))}")
-        return PluginWorkerResult({"error": 1}, 1)
+        return PluginWorkerResult(
+            _error_summary(
+                "plugin_client_error",
+                f"Failed to create plugin API client: {redact_secret(str(exc))}",
+                "Run `hades backend worker-setup` and verify plugin token configuration.",
+                project_id=selected_project_id,
+                agent_key=agent_key,
+            ),
+            1,
+        )
 
     runner = agent_runner or _default_agent_runner
     claimed = completed = failed = skipped = 0
@@ -115,7 +150,16 @@ def run_plugin_worker_once(
         if not quiet:
             print(f"backend worker: failed to list plugin work items: {redact_secret(str(exc))}")
         _close_client(client)
-        return PluginWorkerResult({"error": 1}, 1)
+        return PluginWorkerResult(
+            _error_summary(
+                "list_work_items_failed",
+                f"Failed to list plugin work items: {redact_secret(str(exc))}",
+                "Check backend connectivity, plugin token scope, and project/workspace binding.",
+                project_id=selected_project_id,
+                agent_key=agent_key,
+            ),
+            1,
+        )
 
     for item in items[: max(1, int(limit or 1))]:
         work_item_id = _work_item_id(item)

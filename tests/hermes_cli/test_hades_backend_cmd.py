@@ -533,8 +533,186 @@ def test_backend_worker_json_error_output_is_machine_readable(monkeypatch, tmp_p
     output = capsys.readouterr().out.strip()
 
     assert rc == 1
-    assert json.loads(output) == {"error": 1}
+    payload = json.loads(output)
+    assert payload["error"]["code"] == "missing_local_workspace_id"
+    assert "worker-setup" in payload["error"]["next_step"]
     assert output.startswith("{")
+
+
+def test_backend_worker_setup_registers_device_workspace_and_persists_ids(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_tasks as tasks
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.config import load_config
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.closed = False
+
+        def register_device(self, **payload):
+            assert payload["name"]
+            assert payload["fingerprint_hash"].startswith("sha256:")
+            return {"device_id": "dev_1", "status": "active"}
+
+        def list_repositories(self, project_id):
+            assert project_id == "proj_1"
+            return {"repositories": [{"repository_id": "repo_1", "name": "repo", "slug": "repo"}]}
+
+        def register_local_workspace(self, repository_id, **payload):
+            assert repository_id == "repo_1"
+            assert payload["device_id"] == "dev_1"
+            assert payload["local_root_hash"].startswith("sha256:")
+            assert payload["display_path"]
+            return {"local_workspace_id": "lw_1", "status": "linked"}
+
+        def close(self):
+            self.closed = True
+
+    fake = FakeClient()
+    monkeypatch.setattr(tasks.runtime, "plugin_work_items_client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker-setup",
+            workspace=str(workspace),
+            repository_id=None,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    config = load_config()
+
+    assert rc == 0
+    assert payload["local_workspace_id"] == "lw_1"
+    assert payload["repository_id"] == "repo_1"
+    assert config["backend"]["plugin_device_id"] == "dev_1"
+    assert config["backend"]["plugin_repository_id"] == "repo_1"
+    assert config["backend"]["plugin_local_workspace_id"] == "lw_1"
+    assert fake.closed is True
+
+
+def test_backend_tasks_list_outputs_available_local_agent_work(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_tasks as tasks
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    class FakeClient:
+        def list_agent_work_items(self, **payload):
+            assert payload["project_id"] == "proj_1"
+            assert payload["agent_key"] == "local_agent"
+            return {
+                "items": [
+                    {
+                        "id": "awi_1",
+                        "project_id": "proj_1",
+                        "task_id": "task_1",
+                        "status": "queued",
+                        "priority": "high",
+                        "title": "Fix failing checkout",
+                        "payload": {"schema": "hades.kanban_task_work.v1", "prompt": "Diagnose checkout bug"},
+                    }
+                ]
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tasks.runtime, "plugin_work_items_client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="list",
+            project_id=None,
+            repository_id=None,
+            agent_key="local_agent",
+            status="queued",
+            limit=20,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["count"] == 1
+    assert payload["items"][0]["work_item_id"] == "awi_1"
+    assert payload["items"][0]["task_id"] == "task_1"
+    assert payload["items"][0]["title"] == "Fix failing checkout"
+
+    with hdb.connect_closing() as conn:
+        cached = hdb.get_plugin_work_item(conn, "awi_1")
+    assert cached is not None
+    assert cached.kind == "hades.kanban_task_work.v1"
+
+
+def test_backend_tasks_work_reuses_plugin_worker(monkeypatch, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_worker as worker
+
+    calls = []
+
+    def fake_run_plugin_worker_once(**kwargs):
+        calls.append(kwargs)
+        return worker.PluginWorkerResult({"listed": 1, "claimed": 1, "completed": 1, "failed": 0, "skipped": 0}, 0)
+
+    monkeypatch.setattr(worker, "run_plugin_worker_once", fake_run_plugin_worker_once)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="work",
+            once=True,
+            project_id="proj_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            limit=1,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["completed"] == 1
+    assert calls == [
+        {
+            "project_id": "proj_1",
+            "local_workspace_id": "lw_1",
+            "agent_key": "local_agent",
+            "limit": 1,
+            "quiet": True,
+        }
+    ]
 
 
 def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tmp_path, capsys):

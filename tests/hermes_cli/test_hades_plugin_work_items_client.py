@@ -100,3 +100,61 @@ def test_plugin_fail_uses_message_payload_and_redacts_errors():
 
     assert "500" in text
     assert "super-secret-token" not in text
+
+
+def test_plugin_client_supports_device_repository_and_workspace_setup_routes():
+    from hermes_cli.hades_plugin_work_items_client import HadesPluginWorkItemsClient
+
+    seen: list[tuple[str, str, dict, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        seen.append((request.method, request.url.path, body, dict(request.headers)))
+        if request.url.path == "/api/plugin/v1/auth/check":
+            return httpx.Response(200, json={"authenticated": True})
+        if request.url.path == "/api/plugin/v1/devices/register":
+            assert body["fingerprint_hash"] == "sha256:device"
+            return httpx.Response(200, json={"device_id": "dev_1", "status": "active"})
+        if request.url.path == "/api/plugin/v1/projects":
+            return httpx.Response(200, json={"projects": [{"project_id": "proj_1"}]})
+        if request.url.path == "/api/plugin/v1/projects/proj_1/repositories":
+            return httpx.Response(200, json={"repositories": [{"repository_id": "repo_1"}]})
+        if request.url.path == "/api/plugin/v1/repositories/repo_1/local-workspaces":
+            assert request.headers["x-devboard-device-id"] == "dev_1"
+            assert body["display_path"] == "~/repo"
+            return httpx.Response(200, json={"local_workspace_id": "lw_1", "status": "linked"})
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = HadesPluginWorkItemsClient(
+        "https://backend.example",
+        "plugin-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.auth_check()["authenticated"] is True
+    assert client.register_device(
+        name="dev-box",
+        fingerprint_hash="sha256:device",
+        platform_os="darwin",
+        platform_arch="arm64",
+        plugin_version="0.0.0",
+    )["device_id"] == "dev_1"
+    assert client.list_projects()["projects"][0]["project_id"] == "proj_1"
+    assert client.list_repositories("proj_1")["repositories"][0]["repository_id"] == "repo_1"
+    assert client.register_local_workspace(
+        "repo_1",
+        device_id="dev_1",
+        local_root_hash="sha256:root",
+        display_path="~/repo",
+        current_branch="main",
+        last_head_sha="abc123",
+        dirty_status="clean",
+    )["local_workspace_id"] == "lw_1"
+
+    assert [path for _, path, _, _ in seen] == [
+        "/api/plugin/v1/auth/check",
+        "/api/plugin/v1/devices/register",
+        "/api/plugin/v1/projects",
+        "/api/plugin/v1/projects/proj_1/repositories",
+        "/api/plugin/v1/repositories/repo_1/local-workspaces",
+    ]

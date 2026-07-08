@@ -58,6 +58,7 @@ class HadesPluginWorkItemsClient:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         try:
             response = self._client.request(
@@ -65,6 +66,7 @@ class HadesPluginWorkItemsClient:
                 self._url(path),
                 json=json_body,
                 params=_query_params(params),
+                headers=headers,
             )
         except httpx.HTTPError as exc:
             raise HadesBackendError(redact_secret(str(exc))) from exc
@@ -86,6 +88,74 @@ class HadesPluginWorkItemsClient:
 
     def list_agent_work_items(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "agent-work-items", params=payload)
+
+    def auth_check(self) -> dict[str, Any]:
+        return self._request("POST", "auth/check")
+
+    def register_device(
+        self,
+        *,
+        name: str,
+        fingerprint_hash: str,
+        platform_os: str,
+        platform_arch: str,
+        plugin_version: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "devices/register",
+            json_body={
+                "name": name,
+                "fingerprint_hash": fingerprint_hash,
+                "platform_os": platform_os,
+                "platform_arch": platform_arch,
+                "plugin_version": plugin_version,
+            },
+        )
+
+    def list_projects(self) -> dict[str, Any]:
+        return self._request("GET", "projects")
+
+    def list_repositories(self, project_id: str) -> dict[str, Any]:
+        return self._request("GET", f"projects/{project_id}/repositories")
+
+    def register_local_workspace(
+        self,
+        repository_id: str,
+        *,
+        device_id: str,
+        local_root_hash: str,
+        display_path: str,
+        current_branch: str,
+        last_head_sha: str | None,
+        dirty_status: str,
+        remote_name: str | None = None,
+        remote_url_host: str | None = None,
+        remote_url_hash: str | None = None,
+        upstream_branch: str | None = None,
+        ahead_count: int | None = None,
+        behind_count: int | None = None,
+        git_state_observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"repositories/{repository_id}/local-workspaces",
+            json_body={
+                "local_root_hash": local_root_hash,
+                "display_path": display_path,
+                "current_branch": current_branch,
+                "last_head_sha": last_head_sha,
+                "dirty_status": dirty_status,
+                "remote_name": remote_name,
+                "remote_url_host": remote_url_host,
+                "remote_url_hash": remote_url_hash,
+                "upstream_branch": upstream_branch,
+                "ahead_count": ahead_count,
+                "behind_count": behind_count,
+                "git_state_observed_at": git_state_observed_at,
+            },
+            headers={"X-DevBoard-Device-Id": device_id},
+        )
 
     def claim_agent_work_item(self, work_item_id: str, *, local_workspace_id: str) -> dict[str, Any]:
         return self._request(

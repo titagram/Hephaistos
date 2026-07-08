@@ -109,6 +109,26 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     worker.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
     worker.add_argument("--limit", type=int, default=1, help="Maximum work items to process")
     worker.add_argument("--json", action="store_true", help="Emit machine-readable worker summary")
+    worker_setup = sub.add_parser("worker-setup", help="Register this checkout for local backend task work")
+    worker_setup.add_argument("--workspace", default=None, help="Workspace path to register (default: current directory)")
+    worker_setup.add_argument("--repository-id", default=None, help="Backend repository id when it cannot be inferred")
+    worker_setup.add_argument("--json", action="store_true", help="Emit machine-readable setup result")
+    tasks = sub.add_parser("tasks", help="List or process backend task work items")
+    tasks_sub = tasks.add_subparsers(dest="tasks_action")
+    tasks_list = tasks_sub.add_parser("list", help="List backend work items available to the local agent")
+    tasks_list.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
+    tasks_list.add_argument("--repository-id", default=None, help="Backend repository id filter")
+    tasks_list.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
+    tasks_list.add_argument("--status", default="queued", help="Work item status filter")
+    tasks_list.add_argument("--limit", type=int, default=20, help="Maximum work items to show")
+    tasks_list.add_argument("--json", action="store_true", help="Emit machine-readable task list")
+    tasks_work = tasks_sub.add_parser("work", help="Process one batch of backend task work items")
+    tasks_work.add_argument("--once", action="store_true", help="Explicit one-shot mode; currently the default")
+    tasks_work.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
+    tasks_work.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
+    tasks_work.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
+    tasks_work.add_argument("--limit", type=int, default=1, help="Maximum work items to process")
+    tasks_work.add_argument("--json", action="store_true", help="Emit machine-readable worker summary")
     jobs = sub.add_parser("jobs", help="List local backend jobs needing review")
     jobs.add_argument("--status", action="append", default=None, help="Filter by job status; repeatable")
     jobs.add_argument("--all", action="store_true", help="Show all local backend jobs")
@@ -888,6 +908,81 @@ def _cmd_worker(args: argparse.Namespace) -> int:
         f"skipped {summary.get('skipped', 0)}"
     )
     return result.exit_code
+
+
+def _cmd_worker_setup(args: argparse.Namespace) -> int:
+    from hermes_cli.hades_plugin_tasks import setup_plugin_worker
+
+    result = setup_plugin_worker(
+        workspace=getattr(args, "workspace", None),
+        repository_id=getattr(args, "repository_id", None),
+    )
+    payload = result.payload
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True))
+        return result.exit_code
+    if "error" in payload:
+        error = payload["error"] if isinstance(payload.get("error"), dict) else {}
+        print(f"Hades backend worker setup: {error.get('message', 'failed')}", file=sys.stderr)
+        if error.get("next_step"):
+            print(f"  Next step: {error['next_step']}", file=sys.stderr)
+        return result.exit_code
+    print("Hades backend worker setup complete")
+    print(f"  Project:          {payload.get('project_id')}")
+    print(f"  Repository:       {payload.get('repository_name') or payload.get('repository_id')}")
+    print(f"  Device:           {payload.get('device_id')}")
+    print(f"  Local workspace:  {payload.get('local_workspace_id')}")
+    print(f"  Checkout:         {payload.get('display_path')}")
+    return result.exit_code
+
+
+def _cmd_tasks(args: argparse.Namespace) -> int:
+    action = getattr(args, "tasks_action", None)
+    if action == "list":
+        from hermes_cli.hades_plugin_tasks import list_plugin_tasks
+
+        payload = list_plugin_tasks(
+            project_id=getattr(args, "project_id", None),
+            repository_id=getattr(args, "repository_id", None),
+            agent_key=getattr(args, "agent_key", "local_agent") or "local_agent",
+            status=getattr(args, "status", "queued") or "queued",
+            limit=max(1, int(getattr(args, "limit", 20) or 20)),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True))
+            return 1 if "error" in payload else 0
+        if "error" in payload:
+            error = payload["error"] if isinstance(payload.get("error"), dict) else {}
+            print(f"Hades backend tasks: {error.get('message', 'failed')}", file=sys.stderr)
+            if error.get("next_step"):
+                print(f"  Next step: {error['next_step']}", file=sys.stderr)
+            return 1
+        _print_task_list(payload)
+        return 0
+    if action == "work":
+        return _cmd_worker(args)
+    print("usage: hades backend tasks <list|work>", file=sys.stderr)
+    return 1
+
+
+def _print_task_list(payload: dict[str, Any]) -> None:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    print("Hades backend tasks")
+    print(f"  Project: {payload.get('project_id')}")
+    print(f"  Agent:   {payload.get('agent_key')}")
+    if not items:
+        print("  No matching backend task work items.")
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        work_item_id = item.get("work_item_id") or "unknown"
+        status = item.get("status") or "unknown"
+        priority = item.get("priority") or "normal"
+        title = item.get("title") or item.get("prompt_preview") or "(untitled)"
+        task_id = item.get("task_id")
+        suffix = f" task={task_id}" if task_id else ""
+        print(f"  {work_item_id}: {status} {priority} - {title}{suffix}")
 
 
 def _cmd_jobs(args: argparse.Namespace) -> int:
@@ -1944,6 +2039,10 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_profiles(args)
     if action == "worker":
         return _cmd_worker(args)
+    if action == "worker-setup":
+        return _cmd_worker_setup(args)
+    if action == "tasks":
+        return _cmd_tasks(args)
     if action == "jobs":
         return _cmd_jobs(args)
     if action == "approve-job":
@@ -1975,7 +2074,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0
