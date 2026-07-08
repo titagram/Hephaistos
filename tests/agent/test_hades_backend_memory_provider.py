@@ -4235,6 +4235,71 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     )
 
 
+def test_hades_backend_graph_search_finds_local_blade_wire_action_edges(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].append(
+        {
+            "kind": "blade_wire_action",
+            "from": "view:orders.show",
+            "to": "livewire_action:saveOrder",
+            "wire_action": "saveOrder",
+            "wire_event": "click",
+            "wire_modifiers": ["debounce"],
+            "path": "resources/views/orders/show.blade.php",
+            "line": 22,
+        }
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for Livewire save action.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view livewire wire click saveOrder debounce action", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_action"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "livewire_action:saveOrder"
+        and ref["provenance"]["wire_action"] == "saveOrder"
+        and ref["provenance"]["wire_event"] == "click"
+        and ref["provenance"]["wire_modifiers"] == ["debounce"]
+        for ref in graph_refs
+    )
+    assert any(
+        "wire_action=saveOrder" in item["summary"]
+        and "wire_event=click" in item["summary"]
+        and "wire_modifiers=['debounce']" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_blade_form_metadata(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
     graph_payload["edges"].extend(

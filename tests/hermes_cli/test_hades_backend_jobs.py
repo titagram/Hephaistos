@@ -938,6 +938,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<span>{{ $message }}</span>\n"
         "@enderror\n"
         "<input type=\"text\" wire:model.defer=\"status\">\n"
+        "<button wire:click.debounce=\"saveOrder\">Save</button>\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1881,6 +1882,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
     assert ("blade_wire_model", "view:orders.show", "livewire_property:status") in edges
+    assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1957,6 +1959,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_modifiers": ["defer"],
         "path": "resources/views/orders/show.blade.php",
         "line": 21,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_action",
+        "from": "view:orders.show",
+        "to": "livewire_action:saveOrder",
+        "wire_action": "saveOrder",
+        "wire_event": "click",
+        "wire_modifiers": ["debounce"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 22,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",

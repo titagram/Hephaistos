@@ -539,6 +539,11 @@ BLADE_WIRE_MODEL_RE = re.compile(
     r"\bwire:model(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<model>[A-Za-z0-9_.*:-]{1,128})['\"]",
     re.IGNORECASE | re.MULTILINE,
 )
+BLADE_WIRE_ACTION_RE = re.compile(
+    r"\bwire:(?P<event>click|submit|change|keydown|keyup|blur|focus)"
+    r"(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<action>[A-Za-z_][A-Za-z0-9_:-]{0,127})(?:\s*\([^'\"]{0,256}\))?['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -2082,6 +2087,40 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_wire_action(event: str, action: str, modifiers: str, offset: int) -> None:
+        nonlocal truncated
+        action = str(action or "").strip()
+        if not action or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:-]{0,127}", action):
+            return
+        normalized_event = str(event or "").lower()
+        if normalized_event not in {"click", "submit", "change", "keydown", "keyup", "blur", "focus"}:
+            return
+        modifier_tokens = [
+            token
+            for token in str(modifiers or "").lstrip(".").split(".")
+            if token and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", token)
+        ][:6]
+        line = _line_number(source, offset)
+        target = f"livewire_action:{action}"
+        key = ("blade_wire_action", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_wire_action",
+                "from": view_id,
+                "to": target,
+                "wire_action": action,
+                "wire_event": normalized_event,
+                "wire_modifiers": modifier_tokens,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2185,6 +2224,13 @@ def _append_blade_view_graph(
         append_blade_validation_error(match.group("field"), match.start("field"))
     for match in BLADE_WIRE_MODEL_RE.finditer(source):
         append_blade_wire_model(match.group("model"), match.group("modifiers"), match.start("model"))
+    for match in BLADE_WIRE_ACTION_RE.finditer(source):
+        append_blade_wire_action(
+            match.group("event"),
+            match.group("action"),
+            match.group("modifiers"),
+            match.start("action"),
+        )
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
         route = known_routes.get(match.group("route"))
