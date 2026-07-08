@@ -214,6 +214,11 @@ PHP_PROMOTED_PROPERTY_PARAM_RE = re.compile(
     r"\b(?:public|protected|private)\s+(?:readonly\s+)?"
     r"(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
 )
+PHP_PARAM_NAME_RE = re.compile(
+    r"^(?:(?:public|protected|private)\s+)?(?:readonly\s+)?"
+    r"(?:(?P<class>\\?[A-Z][A-Za-z0-9_\\]+)\s+)?"
+    r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
+)
 PHP_PROPERTY_RE = re.compile(
     r"\b(?P<visibility>public|protected|private)\s+"
     r"(?:readonly\s+)?(?P<type>\??[A-Za-z_\\][A-Za-z0-9_\\|]*)?\s*"
@@ -2011,6 +2016,7 @@ def _append_blade_view_graph(
     php_method_symbols: dict[tuple[str, str], str] | None = None,
     livewire_component_by_alias: dict[str, dict[str, Any]] | None = None,
     blade_component_class_by_alias: dict[str, dict[str, Any]] | None = None,
+    model_table_by_class: dict[str, str] | None = None,
     max_symbols: int,
     max_edges: int,
 ) -> bool:
@@ -2026,6 +2032,7 @@ def _append_blade_view_graph(
     known_php_method_symbols = php_method_symbols or {}
     known_livewire = livewire_component_by_alias or {}
     known_blade_components = blade_component_class_by_alias or {}
+    known_model_tables = model_table_by_class or {}
     referenced_livewire_aliases: set[str] = set()
     referenced_alpine_data_keys: set[str] = set()
     if len(symbols) < max_symbols:
@@ -2244,6 +2251,35 @@ def _append_blade_view_graph(
                 },
                 max_edges=max_edges,
             ) or truncated
+        component_info = known_blade_components.get(component) or {}
+        component_class = str(component_info.get("class") or "")
+        constructor_params = component_info.get("constructor_params") if isinstance(component_info.get("constructor_params"), dict) else {}
+        param_info = constructor_params.get(prop) if isinstance(constructor_params, dict) else None
+        if isinstance(param_info, dict) and component_class:
+            param_type = str(param_info.get("type") or "")
+            param_edge = {
+                "kind": "blade_component_prop_class_param",
+                "from": target,
+                "to": f"component_param:{component_class}.{prop}",
+                "component": component,
+                "component_prop": prop,
+                "component_source_variable": variable,
+                "component_class": component_class,
+                "component_param": prop,
+                "component_param_type": param_type,
+                "component_path": component_info.get("path"),
+                "component_line": param_info.get("line") or component_info.get("line"),
+                "path": rel,
+                "line": line,
+            }
+            model_table = known_model_tables.get(param_type, "") if param_type else ""
+            if model_table:
+                param_edge["model"] = param_type
+                param_edge["table"] = model_table
+            param_key = ("blade_component_prop_class_param", target, param_edge["to"], line)
+            if param_key not in seen_edges:
+                seen_edges.add(param_key)
+                truncated = not _edge_append(edges, param_edge, max_edges=max_edges) or truncated
         route = known_routes.get(view_name)
         if not route or variable not in _php_route_params(route):
             return
@@ -5298,6 +5334,37 @@ def _php_blade_component_class_index(
     max_file_bytes: int,
 ) -> dict[str, dict[str, Any]]:
     components: dict[str, dict[str, Any]] = {}
+
+    def constructor_params_for_class(
+        source: str,
+        classes: list[dict[str, Any]],
+        fqcn: str,
+        namespace: str,
+        uses: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        params_by_name: dict[str, dict[str, Any]] = {}
+        for method_match in PHP_METHOD_RE.finditer(source):
+            if method_match.group("name") != "__construct":
+                continue
+            method_class = _class_context(classes, method_match.start())
+            if not method_class or method_class.get("name") != fqcn:
+                continue
+            params = method_match.group("params") or ""
+            for param_source, param_offset in _split_top_level_items(params):
+                param_match = PHP_PARAM_NAME_RE.match(param_source)
+                if not param_match:
+                    continue
+                param_name = str(param_match.group("name") or "")
+                if not param_name:
+                    continue
+                param_type = _php_resolved_simple_type(namespace, str(param_match.group("class") or ""), uses)
+                params_by_name[param_name] = {
+                    "name": param_name,
+                    "type": param_type,
+                    "line": _line_number(source, method_match.start("params") + param_offset),
+                }
+        return params_by_name
+
     for path in php_files:
         rel = path.relative_to(workspace_root).as_posix()
         if _is_test_path(rel):
@@ -5337,10 +5404,12 @@ def _php_blade_component_class_index(
             if not alias:
                 continue
             render_method = php_method_symbols.get((fqcn, "render"), "")
+            constructor_params = constructor_params_for_class(source, classes, fqcn, namespace, uses)
             components[alias] = {
                 "alias": alias,
                 "class": fqcn,
                 "render_method": render_method,
+                "constructor_params": constructor_params,
                 "path": rel,
                 "line": class_info.get("line"),
             }
@@ -7854,6 +7923,7 @@ def _build_php_graph(
             php_method_symbols=php_method_symbols,
             livewire_component_by_alias=livewire_component_by_alias,
             blade_component_class_by_alias=blade_component_class_by_alias,
+            model_table_by_class=model_table_by_class,
             max_symbols=max_symbols,
             max_edges=max_edges,
         ) or truncated

@@ -4123,6 +4123,23 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "line": 1,
             },
             {
+                "kind": "blade_component_prop_class_param",
+                "from": "component_prop:orders.card.order",
+                "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+                "component": "orders.card",
+                "component_prop": "order",
+                "component_source_variable": "order",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_param": "order",
+                "component_param_type": "App\\Models\\Order",
+                "component_path": "app/View/Components/Orders/Card.php",
+                "component_line": 5,
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
+            {
                 "kind": "blade_component_class",
                 "from": "component:orders.card",
                 "to": "App\\View\\Components\\Orders\\Card",
@@ -4296,6 +4313,15 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
     )
     assert any(
         ref["type"] == "edge"
+        and ref["kind"] == "blade_component_prop_class_param"
+        and ref["from"] == "component_prop:orders.card.order"
+        and ref["to"] == "component_param:App\\View\\Components\\Orders\\Card.order"
+        and ref["provenance"]["component_param_type"] == "App\\Models\\Order"
+        and ref["provenance"]["table"] == "orders"
+        for ref in component_graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
         and ref["kind"] == "blade_component_class"
         and ref["from"] == "component:orders.card"
         and ref["to"] == "App\\View\\Components\\Orders\\Card"
@@ -4348,6 +4374,13 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
     assert any(
         "component=orders.card" in item["summary"]
         and "component_class=App\\View\\Components\\Orders\\Card" in item["summary"]
+        for item in component_result["items"]
+    )
+    assert any(
+        "component=orders.card" in item["summary"]
+        and "component_prop=order" in item["summary"]
+        and "component_param=order" in item["summary"]
+        and "component_param_type=App\\Models\\Order" in item["summary"]
         for item in component_result["items"]
     )
     assert any(

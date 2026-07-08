@@ -758,7 +758,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "namespace App\\View\\Components\\Orders;\n"
         "use Illuminate\\View\\Component;\n"
         "class Card extends Component {\n"
-        "    public function __construct(public $order) {}\n"
+        "    public function __construct(public \\App\\Models\\Order $order) {}\n"
         "    public function render() { return view('components.orders.card'); }\n"
         "}\n",
         encoding="utf-8",
@@ -1924,6 +1924,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component_render_method", "component:orders.card", "Card@render") in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
     assert (
+        "blade_component_prop_class_param",
+        "component_prop:orders.card.order",
+        "component_param:App\\View\\Components\\Orders\\Card.order",
+    ) in edges
+    assert (
         "blade_component_prop_include_data",
         "component_prop:orders.card.order",
         "view_data:orders.partials.summary.order",
@@ -2171,6 +2176,23 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "component": "orders.card",
         "component_prop": "order",
         "component_source_variable": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_prop_class_param",
+        "from": "component_prop:orders.card.order",
+        "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+        "component": "orders.card",
+        "component_prop": "order",
+        "component_source_variable": "order",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_param": "order",
+        "component_param_type": "App\\Models\\Order",
+        "component_path": "app/View/Components/Orders/Card.php",
+        "component_line": 5,
+        "model": "App\\Models\\Order",
+        "table": "orders",
         "path": "resources/views/orders/partials/summary.blade.php",
         "line": 1,
     } in artifact["edges"]
