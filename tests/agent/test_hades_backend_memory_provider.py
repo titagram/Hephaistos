@@ -4276,6 +4276,15 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "path": "resources/views/orders/show.blade.php",
                 "line": 23,
             },
+            {
+                "kind": "blade_alpine_model",
+                "from": "view:orders.show",
+                "to": "alpine_state:filters.status",
+                "alpine_model": "filters.status",
+                "alpine_modifiers": ["debounce"],
+                "path": "resources/views/orders/show.blade.php",
+                "line": 24,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4303,7 +4312,7 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view livewire wire model order.status status property validation", "limit": 20},
+            {"query": "orders view livewire wire model order.status status property validation alpine filters.status", "limit": 20},
         )
     )
 
@@ -4384,6 +4393,15 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_alpine_model"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "alpine_state:filters.status"
+        and ref["provenance"]["alpine_model"] == "filters.status"
+        and ref["provenance"]["alpine_modifiers"] == ["debounce"]
+        for ref in graph_refs
+    )
+    assert any(
         "wire_model=status" in item["summary"] and "wire_modifiers=['defer']" in item["summary"]
         for item in result["items"]
     )
@@ -4398,6 +4416,11 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     assert any(
         "wire_model=order.status" in item["summary"]
         and "field=order.status" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "alpine_model=filters.status" in item["summary"]
+        and "alpine_modifiers=['debounce']" in item["summary"]
         for item in result["items"]
     )
 

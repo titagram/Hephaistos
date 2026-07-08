@@ -543,6 +543,10 @@ BLADE_WIRE_MODEL_RE = re.compile(
     r"\bwire:model(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<model>[A-Za-z0-9_.*:-]{1,128})['\"]",
     re.IGNORECASE | re.MULTILINE,
 )
+BLADE_ALPINE_MODEL_RE = re.compile(
+    r"\bx-model(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<model>\$?[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*){0,8})['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
 BLADE_WIRE_ACTION_RE = re.compile(
     r"\bwire:(?P<event>click|submit|change|keydown|keyup|blur|focus)"
     r"(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<action>[A-Za-z_][A-Za-z0-9_:-]{0,127})(?:\s*\([^'\"]{0,256}\))?['\"]",
@@ -2189,6 +2193,36 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_alpine_model(model: str, modifiers: str, offset: int) -> None:
+        nonlocal truncated
+        model = str(model or "").strip()
+        if not model or not re.fullmatch(r"\$?[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*){0,8}", model):
+            return
+        modifier_tokens = [
+            token
+            for token in str(modifiers or "").lstrip(".").split(".")
+            if token and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", token)
+        ][:6]
+        line = _line_number(source, offset)
+        target = f"alpine_state:{model}"
+        key = ("blade_alpine_model", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_alpine_model",
+                "from": view_id,
+                "to": target,
+                "alpine_model": model,
+                "alpine_modifiers": modifier_tokens,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_livewire_component_class(alias: str, offset: int) -> None:
         nonlocal truncated
         component = known_livewire.get(alias)
@@ -2441,6 +2475,8 @@ def _append_blade_view_graph(
         append_blade_wire_model(match.group("model"), match.group("modifiers"), match.start("model"))
         append_livewire_model_properties(match.group("model"), match.start("model"))
         append_livewire_model_validations(match.group("model"), match.start("model"))
+    for match in BLADE_ALPINE_MODEL_RE.finditer(source):
+        append_blade_alpine_model(match.group("model"), match.group("modifiers"), match.start("model"))
     for match in BLADE_WIRE_ACTION_RE.finditer(source):
         append_blade_wire_action(
             match.group("event"),
