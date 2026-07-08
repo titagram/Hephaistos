@@ -27,6 +27,64 @@ If the backend refuses or conflicts a proposal, local status must show the
 reason. If the backend is unavailable, Hades uses local memory and may use stale
 shared memory cache as degraded context.
 
+## Kanban Task Work Contract
+
+Dashboard Kanban tasks can become local Hades work only through the versioned
+`hades.kanban_task_work.v1` payload stored on `agent_work_items`. This payload
+is the shared contract between backend task authors, backend-side agents, and
+the local agent worker.
+
+Required fields:
+
+- `schema`: always `hades.kanban_task_work.v1`.
+- `task_id`, `project_id`: authoritative dashboard identifiers.
+- `repository_id`: repository scope selected on the task, or `null` only before
+  a task is ready for local agent work.
+- `title`, `description`, `acceptance_criteria`, `priority`, `risk`: bounded
+  task text copied from the dashboard.
+- `normalized_problem`: executable problem statement derived from the task.
+- `task_type`: one of `implementation`, `analysis`, or `bug`.
+- `clarification_status`: `ready` or `needs_clarification`.
+- `ready_for_agent_work`: true only when repository scope, observable problem,
+  and acceptance criteria are present.
+- `required_context`: context classes the agent must consult, such as
+  `shared_project_memory`, `project_awareness_status`, `repository_scope`, and
+  `bug_evidence`.
+- `source_access_policy`: source-free-first policy, including whether approved
+  source-slice jobs are allowed.
+- `project_awareness_required` and `memory_required`: both true for local Hades
+  work items.
+- `created_from`: provenance with `type=kanban_task`, source, assigning user,
+  and normalization timestamp.
+
+Bug or root-cause tasks add:
+
+- `workspace_binding_id`: linked Hades workspace binding when known.
+- `bug_report_id`: Hades bug report created for the task when a linked binding
+  exists.
+- `evidence_refs`: at least the initial `bug_evidence` ref when evidence was
+  created from the task.
+- `bug_intake`: status object. Valid statuses are `not_applicable`, `created`,
+  `existing`, and `missing_workspace_binding`.
+
+Lifecycle:
+
+1. The dashboard validates the task and repository scope.
+2. Backend normalization derives `normalized_problem`, `task_type`,
+   `required_context`, clarification questions, and readiness.
+3. Tasks with `clarification_status=needs_clarification` are not queued for
+   `local_agent`; they must be clarified first.
+4. Ready bug/root-cause tasks create or reuse Hades bug report and initial
+   evidence when the project has a linked Hades workspace binding.
+5. Ready tasks create one active `agent_work_items` row for
+   `assigned_agent_key=local_agent`.
+6. The backend writes a `queued_from_kanban_task` work-item event containing the
+   schema, normalization summary, and bug-intake status.
+
+The local worker must treat this payload as authoritative task input, but it
+must still check shared project memory and project awareness before making
+source-free diagnosis claims.
+
 ## Bug Evidence
 
 Bug reports and bug evidence are stored separately from generic shared memory.

@@ -37,3 +37,25 @@ Or set the env var: `HERMES_KANBAN_DISPATCH_IN_GATEWAY=false`
 
 Non-dispatch gateways still deliver messages for their own platform adapters
 (Telegram, Discord, etc.) — they just don't poll kanban boards.
+
+## Backend Tasks And Local Hades Work
+
+Dashboard Kanban tasks are not executed by gateway dispatchers directly. When a
+dashboard user explicitly requests local-agent execution, the backend normalizes
+the task and, only if it is ready, creates an `agent_work_items` row assigned to
+`local_agent` with payload schema `hades.kanban_task_work.v1`.
+
+Readiness requires repository scope, an observable problem statement, and
+acceptance criteria. Ambiguous tasks stay as Kanban work until clarified; they
+must not be claimed by the local worker. Bug or root-cause tasks also create or
+reuse Hades bug report/evidence when the project has a linked Hades workspace
+binding. The local worker then pulls work with:
+
+```bash
+hades backend tasks list
+hades backend tasks work --once
+```
+
+The payload contract is documented in `docs/hades/backend.md`. Gateway ownership
+still matters only for local Kanban board dispatch. Backend-originated Hades
+work uses the backend work queue and shared project memory instead.
