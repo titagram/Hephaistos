@@ -2818,6 +2818,68 @@ def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch
     assert any("cast_type=string" in item["summary"] for item in result["items"])
 
 
+def test_hades_backend_graph_search_finds_local_model_trait_edges(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].append(
+        {
+            "kind": "model_trait",
+            "from": "App\\Models\\Order",
+            "to": "Illuminate\\Database\\Eloquent\\SoftDeletes",
+            "trait_class": "Illuminate\\Database\\Eloquent\\SoftDeletes",
+            "trait_short_name": "SoftDeletes",
+            "table": "orders",
+            "path": "app/Models/Order.php",
+            "line": 31,
+        }
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders model SoftDeletes trait", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "model_trait"
+        and ref["from"] == "App\\Models\\Order"
+        and ref["to"] == "Illuminate\\Database\\Eloquent\\SoftDeletes"
+        for ref in graph_refs
+    )
+    assert any(
+        "trait_short_name=SoftDeletes" in item["summary"]
+        and "trait_class=Illuminate\\Database\\Eloquent\\SoftDeletes" in item["summary"]
+        and "table=orders" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_scope_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

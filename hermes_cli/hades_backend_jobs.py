@@ -168,6 +168,10 @@ PHP_MODEL_CASTS_METHOD_RE = re.compile(
     r"\bfunction\s+casts\s*\([^)]*\)\s*(?::\s*array)?\s*\{(?P<body>.*?)\}",
     re.DOTALL | re.MULTILINE,
 )
+PHP_CLASS_TRAIT_USE_RE = re.compile(
+    r"^[ \t]*use\s+(?P<traits>\\?[A-Za-z0-9_\\]+(?:\s*,\s*\\?[A-Za-z0-9_\\]+)*)\s*;",
+    re.MULTILINE,
+)
 PHP_RETURN_ARRAY_RE = re.compile(r"\breturn\s*\[(?P<body>.*?)\]\s*;", re.DOTALL)
 PHP_ARRAY_STRING_PAIR_RE = re.compile(
     r"['\"](?P<key>[^'\"]+)['\"]\s*=>\s*['\"](?P<value>[^'\"]+)['\"]"
@@ -2941,6 +2945,47 @@ def _php_model_metadata_classes(classes: list[dict[str, Any]], offset: int) -> l
     if class_info and class_info.get("role") == "model":
         return [class_info]
     return [class_info for class_info in classes if class_info.get("role") == "model"]
+
+
+def _append_php_model_trait_edges(
+    source: str,
+    rel: str,
+    classes: list[dict[str, Any]],
+    namespace: str,
+    uses: dict[str, str],
+    fallback_model_table: str,
+    model_table_by_class: dict[str, str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    truncated = False
+    for match in PHP_CLASS_TRAIT_USE_RE.finditer(source):
+        class_info = _class_context(classes, match.start())
+        if not class_info or class_info.get("role") != "model":
+            continue
+        model_class = str(class_info["name"])
+        table = _php_model_table_for_class(model_class, model_table_by_class) or fallback_model_table
+        for raw_trait in match.group("traits").split(","):
+            trait_ref = raw_trait.strip()
+            if not trait_ref:
+                continue
+            trait_class = _php_fqcn_resolved(namespace, trait_ref, uses)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "model_trait",
+                    "from": model_class,
+                    "to": trait_class,
+                    "trait_class": trait_class,
+                    "trait_short_name": _php_short_name(trait_class),
+                    "table": table,
+                    "path": rel,
+                    "line": _line_number(source, match.start()),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
 
 
 def _append_php_model_metadata_edges(
@@ -6114,6 +6159,18 @@ def _build_php_graph(
                     },
                     max_edges=max_edges,
                 ) or truncated
+
+        truncated = _append_php_model_trait_edges(
+            source,
+            rel,
+            classes,
+            namespace,
+            uses,
+            model_table,
+            model_table_by_class,
+            edges,
+            max_edges=max_edges,
+        ) or truncated
 
         truncated = _append_php_model_metadata_edges(
             source,

@@ -2924,6 +2924,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "direction",
         "attribute_style",
         "attribute_method",
+        "trait_class",
+        "trait_short_name",
         "ability",
         "authorization_result",
         "authorization_path",

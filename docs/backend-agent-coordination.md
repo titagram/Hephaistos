@@ -6291,3 +6291,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel model trait graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per model trait awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge edge `model_trait` per trait dichiarati dentro
+  model Laravel, risolti tramite namespace/import PHP quando possibile.
+- Il caso `SoftDeletes` diventa cercabile e traversabile come fatto causale
+  source-free collegato al model/table, utile insieme agli edge
+  `withTrashed`/`onlyTrashed`/`restore`/`forceDelete`.
+- Il payload salva solo model, trait class, trait short name, table, path e
+  line; non conserva corpo del trait o source raw del model.
+- Il fallback locale di `hades_backend_graph_search` espone
+  `trait_class`/`trait_short_name` da cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Analisi AST del corpo del trait e inferenza automatica di comportamenti
+  introdotti da trait custom; questa tranche indicizza la presenza del trait
+  come metadata verificabile.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_model_trait_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `107 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

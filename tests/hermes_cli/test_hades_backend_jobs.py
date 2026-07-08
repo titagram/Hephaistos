@@ -818,6 +818,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    public function scopeRecent($query) {\n"
         "        return $query->latest();\n"
         "    }\n"
+        "    use \\Illuminate\\Database\\Eloquent\\SoftDeletes;\n"
         "}\n",
         encoding="utf-8",
     )
@@ -1799,6 +1800,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("model_appended_attribute", "App\\Models\\Order", "model_attribute:App\\Models\\Order.display_status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.status") in edges
     assert ("model_cast", "App\\Models\\Order", "table:orders.customer_id") in edges
+    assert ("model_trait", "App\\Models\\Order", "Illuminate\\Database\\Eloquent\\SoftDeletes") in edges
     assert ("api_resource_model", "App\\Http\\Resources\\OrderResource", "App\\Models\\Order") in edges
     assert ("api_resource_table", "App\\Http\\Resources\\OrderResource", "table:orders") in edges
     assert ("api_resource_field", "App\\Http\\Resources\\OrderResource", "response_field:id") in edges
@@ -1862,6 +1864,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "table": "orders",
         "path": "app/Models/Order.php",
         "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "model_trait",
+        "from": "App\\Models\\Order",
+        "to": "Illuminate\\Database\\Eloquent\\SoftDeletes",
+        "trait_class": "Illuminate\\Database\\Eloquent\\SoftDeletes",
+        "trait_short_name": "SoftDeletes",
+        "table": "orders",
+        "path": "app/Models/Order.php",
+        "line": 31,
     } in artifact["edges"]
     assert {
         "kind": "model_accessor",
