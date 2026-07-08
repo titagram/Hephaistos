@@ -515,6 +515,7 @@ BLADE_LIVEWIRE_RE = re.compile(
     r"(?:@livewire\s*\(\s*['\"](?P<directive>[^'\"]+)['\"]|<livewire:(?P<tag>[A-Za-z0-9_.:-]+)\b)",
     re.MULTILINE,
 )
+BLADE_ROUTE_FUNCTION_RE = re.compile(r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]", re.MULTILINE)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1856,6 +1857,29 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_route_ref(route_name: str, offset: int) -> None:
+        nonlocal truncated
+        if not route_name:
+            return
+        line = _line_number(source, offset)
+        target = f"route:{route_name}"
+        key = ("blade_route_ref", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_route_ref",
+                "from": view_id,
+                "to": target,
+                "route_name": route_name,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     for match in BLADE_EXTENDS_RE.finditer(source):
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())
     for match in BLADE_INCLUDE_RE.finditer(source):
@@ -1869,6 +1893,8 @@ def _append_blade_view_graph(
     for match in BLADE_LIVEWIRE_RE.finditer(source):
         livewire_name = match.group("directive") or match.group("tag") or ""
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
+    for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
+        append_route_ref(match.group("route"), match.start())
 
     return truncated
 

@@ -922,6 +922,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@include('orders.partials.summary')\n"
         "<x-alert type=\"info\" />\n"
         "@livewire('orders-status')\n"
+        "<form action=\"{{ route('invoices.update', ['invoice' => 7]) }}\" method=\"POST\"></form>\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1853,6 +1854,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component", "view:orders.show", "component:alert") in edges
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
     assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
+    assert ("blade_route_ref", "view:orders.show", "route:invoices.update") in edges
+    assert {
+        "kind": "blade_route_ref",
+        "from": "view:orders.show",
+        "to": "route:invoices.update",
+        "route_name": "invoices.update",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 6,
+    } in artifact["edges"]
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("model_fillable", "App\\Models\\Order", "table:orders.customer_id") in edges
     assert ("model_fillable", "App\\Models\\Order", "table:orders.status") in edges
