@@ -490,6 +490,23 @@ DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
                 "description": "Optional bounded structured diagnosis detail.",
                 "additionalProperties": True,
             },
+            "root_cause_id": {
+                "type": "string",
+                "description": "Stable root-cause identifier such as rc.booking.guest_alias_missing.",
+            },
+            "bug_class": {
+                "type": "string",
+                "description": "Normalized bug class such as missing_validation, wrong_guard, schema_mismatch, stale_policy, bad_relationship.",
+            },
+            "failure_classification": {
+                "type": "string",
+                "description": "If not successful, classify the gap as indexing_gap, missing_evidence, source_slice_policy_gap, retrieval_ranking_gap, tool_workflow_gap, model_reasoning_gap, or trajectory_parser_gap.",
+            },
+            "affected_refs": {
+                "type": "array",
+                "description": "Stable route, symbol, table, graph, or source-slice refs involved in the diagnosis.",
+                "items": {"type": "string"},
+            },
             "redactions": {
                 "type": "integer",
                 "minimum": 0,
@@ -818,6 +835,15 @@ class HadesBackendMemoryProvider(MemoryProvider):
         payload = args.get("payload")
         if payload is not None and not isinstance(payload, dict):
             return tool_error("Parameter payload must be an object when provided.")
+        enriched_payload = dict(payload or {})
+        for key in ("root_cause_id", "bug_class", "failure_classification"):
+            value = str(args.get(key) or "").strip()
+            if value:
+                enriched_payload[key] = value
+        affected_refs = _string_list(args.get("affected_refs"))
+        if affected_refs:
+            enriched_payload["affected_refs"] = affected_refs
+        payload = enriched_payload or None
         precise_confidence = confidence in {"high", "medium"}
         if precise_confidence:
             if not evidence_refs:

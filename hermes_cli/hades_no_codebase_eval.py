@@ -37,6 +37,8 @@ class NoCodebaseDiagnosisFixture:
     title: str
     expected_root_cause_id: str | None
     expected_confidence: str
+    expected_bug_class: str = ""
+    expected_failure_classification: str = ""
     expected_freshness_status: str = ""
     expected_diagnosable_without_source: bool | None = None
     required_evidence_refs: tuple[str, ...] = ()
@@ -54,6 +56,8 @@ class NoCodebaseDiagnosisRun:
     fixture_id: str
     root_cause_id: str | None
     confidence: str
+    bug_class: str = ""
+    failure_classification: str = ""
     freshness_status: str = ""
     diagnosable_without_source: bool | None = None
     evidence_refs: tuple[str, ...] = ()
@@ -71,6 +75,10 @@ class NoCodebaseFixtureResult:
     actual_root_cause_id: str | None = None
     expected_confidence: str = ""
     actual_confidence: str = ""
+    expected_bug_class: str = ""
+    actual_bug_class: str = ""
+    expected_failure_classification: str = ""
+    actual_failure_classification: str = ""
     expected_freshness_status: str = ""
     actual_freshness_status: str = ""
     expected_diagnosable_without_source: bool | None = None
@@ -98,6 +106,7 @@ class NoCodebaseEvaluationReport:
     tool_coverage: float
     tool_order_coverage: float
     persistence_coverage: float
+    taxonomy_coverage: float
     no_codebase_violations: tuple[dict[str, str], ...] = ()
     results: tuple[NoCodebaseFixtureResult, ...] = ()
 
@@ -120,6 +129,7 @@ class NoCodebaseEvaluationReport:
             "tool_coverage": self.tool_coverage,
             "tool_order_coverage": self.tool_order_coverage,
             "persistence_coverage": self.persistence_coverage,
+            "taxonomy_coverage": self.taxonomy_coverage,
             "no_codebase_violations": list(self.no_codebase_violations),
             "results": [
                 {
@@ -130,6 +140,10 @@ class NoCodebaseEvaluationReport:
                     "actual_root_cause_id": result.actual_root_cause_id,
                     "expected_confidence": result.expected_confidence,
                     "actual_confidence": result.actual_confidence,
+                    "expected_bug_class": result.expected_bug_class,
+                    "actual_bug_class": result.actual_bug_class,
+                    "expected_failure_classification": result.expected_failure_classification,
+                    "actual_failure_classification": result.actual_failure_classification,
                     "expected_freshness_status": result.expected_freshness_status,
                     "actual_freshness_status": result.actual_freshness_status,
                     "expected_diagnosable_without_source": result.expected_diagnosable_without_source,
@@ -177,6 +191,8 @@ def evaluate_no_codebase_diagnoses(
     tool_order_hits = 0
     persistence_checks = 0
     persistence_hits = 0
+    taxonomy_checks = 0
+    taxonomy_hits = 0
 
     for fixture in fixtures:
         run = runs_by_id.get(fixture.fixture_id)
@@ -188,6 +204,8 @@ def evaluate_no_codebase_diagnoses(
                     failures=("missing diagnosis run",),
                     expected_root_cause_id=fixture.expected_root_cause_id,
                     expected_confidence=fixture.expected_confidence,
+                    expected_bug_class=fixture.expected_bug_class,
+                    expected_failure_classification=fixture.expected_failure_classification,
                     expected_freshness_status=fixture.expected_freshness_status,
                     expected_diagnosable_without_source=fixture.expected_diagnosable_without_source,
                     expected_evidence_refs=fixture.required_evidence_refs,
@@ -215,6 +233,18 @@ def evaluate_no_codebase_diagnoses(
                 failures.append("root cause id mismatch")
             if run.confidence != fixture.expected_confidence:
                 failures.append("confidence mismatch")
+        if fixture.expected_bug_class:
+            taxonomy_checks += 1
+            if run.bug_class == fixture.expected_bug_class:
+                taxonomy_hits += 1
+            else:
+                failures.append("bug class mismatch")
+        if fixture.expected_failure_classification:
+            taxonomy_checks += 1
+            if run.failure_classification == fixture.expected_failure_classification:
+                taxonomy_hits += 1
+            else:
+                failures.append("failure classification mismatch")
 
         expected_freshness = fixture.expected_freshness_status
         if expected_freshness:
@@ -279,6 +309,10 @@ def evaluate_no_codebase_diagnoses(
                 actual_root_cause_id=run.root_cause_id,
                 expected_confidence=fixture.expected_confidence,
                 actual_confidence=run.confidence,
+                expected_bug_class=fixture.expected_bug_class,
+                actual_bug_class=run.bug_class,
+                expected_failure_classification=fixture.expected_failure_classification,
+                actual_failure_classification=run.failure_classification,
                 expected_freshness_status=fixture.expected_freshness_status,
                 actual_freshness_status=run.freshness_status,
                 expected_diagnosable_without_source=fixture.expected_diagnosable_without_source,
@@ -314,6 +348,7 @@ def evaluate_no_codebase_diagnoses(
         tool_coverage=_ratio(tool_hits, tool_checks),
         tool_order_coverage=_ratio(tool_order_hits, tool_order_checks),
         persistence_coverage=_ratio(persistence_hits, persistence_checks),
+        taxonomy_coverage=_ratio(taxonomy_hits, taxonomy_checks),
         no_codebase_violations=tuple(violations),
         results=tuple(results),
     )
@@ -325,6 +360,8 @@ def _fixture_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisFixture
         title=str(data.get("title") or data["id"]),
         expected_root_cause_id=_optional_str(data.get("expected_root_cause_id")),
         expected_confidence=str(data["expected_confidence"]),
+        expected_bug_class=str(data.get("expected_bug_class") or ""),
+        expected_failure_classification=str(data.get("expected_failure_classification") or ""),
         expected_freshness_status=str(data.get("expected_freshness_status") or ""),
         expected_diagnosable_without_source=_optional_bool(data.get("expected_diagnosable_without_source")),
         required_evidence_refs=tuple(_string_values(data.get("required_evidence_refs", []))),
@@ -339,6 +376,8 @@ def _run_from_mapping(data: Mapping[str, Any]) -> NoCodebaseDiagnosisRun:
         fixture_id=str(data["fixture_id"]),
         root_cause_id=_optional_str(data.get("root_cause_id")),
         confidence=str(data.get("confidence") or ""),
+        bug_class=str(data.get("bug_class") or ""),
+        failure_classification=str(data.get("failure_classification") or ""),
         freshness_status=str(data.get("freshness_status") or ""),
         diagnosable_without_source=_optional_bool(data.get("diagnosable_without_source")),
         evidence_refs=tuple(_evidence_refs(data.get("evidence_refs", []))),
@@ -449,6 +488,10 @@ def _trajectory_run_from_entry(
             or diagnosis_args.get("root_cause")
         ),
         confidence=str(confidence or ""),
+        bug_class=str(final_payload.get("bug_class") or diagnosis_args.get("bug_class") or ""),
+        failure_classification=str(
+            final_payload.get("failure_classification") or diagnosis_args.get("failure_classification") or ""
+        ),
         freshness_status=str(final_payload.get("freshness_status") or freshness.get("status") or ""),
         diagnosable_without_source=_optional_bool(
             final_payload.get("diagnosable_without_source") if "diagnosable_without_source" in final_payload else awareness.get("diagnosable_without_source")

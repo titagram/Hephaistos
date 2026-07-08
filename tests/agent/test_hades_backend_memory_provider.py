@@ -6489,6 +6489,65 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
     assert timeouts == [0.75, 2.0]
 
 
+def test_hades_backend_diagnosis_report_create_forwards_taxonomy_fields(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    class FakeClient:
+        def project_awareness_status(self, **payload):
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "overall_status": "ready",
+                "diagnosable_without_source": True,
+                "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                "coverage": {"source_slices": {"status": "current", "count": 1}},
+                "actions": [],
+            }
+
+        def create_diagnosis_report(self, **payload):
+            return {
+                "diagnosis_report": {
+                    "id": "diag_1",
+                    "status": payload["status"],
+                    "confidence": payload["confidence"],
+                    "root_cause": payload["root_cause"],
+                    "evidence_refs": payload["evidence_refs"],
+                    "freshness": payload["freshness"],
+                    "payload": payload["payload"],
+                }
+            }
+
+        def close(self):
+            pass
+
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: FakeClient())
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "root_cause": "BookingController does not handle guest aliases.",
+                "confidence": "high",
+                "evidence_refs": [{"type": "source_slice", "id": "slice_1"}],
+                "freshness": {"status": "current"},
+                "awareness": {"diagnosable_without_source": True},
+                "root_cause_id": "rc.booking.guest_alias_missing",
+                "bug_class": "missing_validation",
+                "failure_classification": "source_slice_policy_gap",
+                "affected_refs": ["route:bookings.store", "class:BookingController"],
+            },
+        )
+    )
+
+    payload = result["diagnosis_report"]["payload"]
+    assert payload["root_cause_id"] == "rc.booking.guest_alias_missing"
+    assert payload["bug_class"] == "missing_validation"
+    assert payload["failure_classification"] == "source_slice_policy_gap"
+    assert payload["affected_refs"] == ["route:bookings.store", "class:BookingController"]
+
+
 def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 

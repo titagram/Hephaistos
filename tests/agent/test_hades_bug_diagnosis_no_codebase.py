@@ -452,3 +452,57 @@ def test_hades_no_codebase_eval_blocks_precise_claim_when_awareness_is_not_diagn
         "diagnosable_without_source mismatch",
         "precise diagnosis requires source-free diagnosable awareness",
     ]
+
+
+def test_hades_no_codebase_eval_checks_diagnosis_taxonomy_fields():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisFixture,
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+    )
+
+    fixture = NoCodebaseDiagnosisFixture(
+        fixture_id="taxonomy_case",
+        title="Taxonomy case",
+        expected_root_cause_id="rc.booking.guest_alias_missing",
+        expected_confidence="high",
+        expected_bug_class="missing_validation",
+        expected_failure_classification="",
+        expected_freshness_status="current",
+        expected_diagnosable_without_source=True,
+        required_evidence_refs=("source_slice:slice_1",),
+        required_tool_calls=("hades_backend_project_awareness_status",),
+        requires_persisted_report=True,
+    )
+
+    bad = NoCodebaseDiagnosisRun(
+        fixture_id="taxonomy_case",
+        root_cause_id="rc.booking.guest_alias_missing",
+        confidence="high",
+        bug_class="wrong_guard",
+        freshness_status="current",
+        diagnosable_without_source=True,
+        evidence_refs=("source_slice:slice_1",),
+        tool_calls=("hades_backend_project_awareness_status",),
+        persisted_report=True,
+    )
+    good = NoCodebaseDiagnosisRun(
+        fixture_id="taxonomy_case",
+        root_cause_id="rc.booking.guest_alias_missing",
+        confidence="high",
+        bug_class="missing_validation",
+        freshness_status="current",
+        diagnosable_without_source=True,
+        evidence_refs=("source_slice:slice_1",),
+        tool_calls=("hades_backend_project_awareness_status",),
+        persisted_report=True,
+    )
+
+    failed_report = evaluate_no_codebase_diagnoses([fixture], [bad]).to_dict()
+    passed_report = evaluate_no_codebase_diagnoses([fixture], [good]).to_dict()
+
+    assert failed_report["status"] == "failed"
+    assert failed_report["taxonomy_coverage"] == 0.0
+    assert failed_report["results"][0]["failures"] == ["bug class mismatch"]
+    assert passed_report["status"] == "passed"
+    assert passed_report["taxonomy_coverage"] == 1.0
