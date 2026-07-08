@@ -35,6 +35,7 @@ GRAPH_TRAVERSE_TOOL_NAME = "hades_backend_graph_traverse"
 SOURCE_SLICE_FETCH_TOOL_NAME = "hades_backend_source_slice_fetch"
 EVIDENCE_PACK_SEARCH_TOOL_NAME = "hades_backend_evidence_pack_search"
 EVIDENCE_PACK_CREATE_TOOL_NAME = "hades_backend_evidence_pack_create"
+CAUSAL_PACK_FETCH_TOOL_NAME = "hades_backend_causal_pack_fetch"
 PROJECT_AWARENESS_STATUS_TOOL_NAME = "hades_backend_project_awareness_status"
 DIAGNOSIS_REPORT_CREATE_TOOL_NAME = "hades_backend_diagnosis_report_create"
 RESOLVED_BUG_PROMOTE_TOOL_NAME = "hades_backend_resolved_bug_promote"
@@ -415,6 +416,50 @@ EVIDENCE_PACK_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
+CAUSAL_PACK_FETCH_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": CAUSAL_PACK_FETCH_TOOL_NAME,
+    "description": (
+        "Fetch or search replayable Hades causal evidence packs for this linked "
+        "workspace. Use this before a high/medium source-free root-cause claim "
+        "and pass returned causal pack ids to the diagnosis report. Results are "
+        "live backend data; there is no local cache fallback."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Optional exact causal pack id.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional text to match root cause, bug class, affected refs, or evidence refs.",
+            },
+            "bug_report_id": {
+                "type": "string",
+                "description": "Optional Hades bug report id to scope causal pack search.",
+            },
+            "root_cause_id": {
+                "type": "string",
+                "description": "Optional stable root cause id to scope causal pack search.",
+            },
+            "replay": {
+                "type": "boolean",
+                "default": False,
+                "description": "When true and id is supplied, replay-check the pack refs against backend data.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": TOOL_RESULT_LIMIT,
+                "default": 5,
+                "description": "Maximum number of causal packs to return for search.",
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
 PROJECT_AWARENESS_STATUS_TOOL_SCHEMA: Dict[str, Any] = {
     "name": PROJECT_AWARENESS_STATUS_TOOL_NAME,
     "description": (
@@ -705,6 +750,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             SOURCE_SLICE_FETCH_TOOL_SCHEMA,
             EVIDENCE_PACK_SEARCH_TOOL_SCHEMA,
             EVIDENCE_PACK_CREATE_TOOL_SCHEMA,
+            CAUSAL_PACK_FETCH_TOOL_SCHEMA,
             PROJECT_AWARENESS_STATUS_TOOL_SCHEMA,
             DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA,
             RESOLVED_BUG_PROMOTE_TOOL_SCHEMA,
@@ -715,6 +761,8 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return self._handle_evidence_pack_create(args)
         if tool_name == EVIDENCE_PACK_SEARCH_TOOL_NAME:
             return self._handle_evidence_pack_search(args)
+        if tool_name == CAUSAL_PACK_FETCH_TOOL_NAME:
+            return self._handle_causal_pack_fetch(args)
         if tool_name == RESOLVED_BUG_PROMOTE_TOOL_NAME:
             return self._handle_resolved_bug_promote(args)
         if tool_name == DIAGNOSIS_REPORT_CREATE_TOOL_NAME:
@@ -1210,6 +1258,56 @@ class HadesBackendMemoryProvider(MemoryProvider):
             result["backend_live_error"] = backend_error
         return tool_result(result)
 
+    def _handle_causal_pack_fetch(self, args: Dict[str, Any]) -> str:
+        pack_id = str(args.get("id") or "").strip()
+        query = str(args.get("query") or "").strip()
+        bug_report_id = str(args.get("bug_report_id") or "").strip()
+        root_cause_id = str(args.get("root_cause_id") or "").strip()
+        replay = bool(args.get("replay"))
+        limit = _bounded_int(args.get("limit"), default=5, minimum=1, maximum=TOOL_RESULT_LIMIT)
+        if not any((pack_id, query, bug_report_id, root_cause_id)):
+            return tool_error("Provide at least one of id, query, bug_report_id, or root_cause_id.")
+
+        if self._binding is None:
+            return tool_result(
+                {
+                    "status": "unmapped_project",
+                    "message": (
+                        "This working directory is not linked to a Hades backend "
+                        "project, so causal packs are unavailable."
+                    ),
+                    "actions": [
+                        "Run `hades backend bootstrap ...` for a new backend project binding.",
+                        "Run `hades project link <project>` from an existing local project.",
+                        "Run `hades backend sync` after linking.",
+                    ],
+                    "items": [],
+                }
+            )
+
+        backend_result, backend_error = self._backend_causal_pack_fetch(
+            pack_id=pack_id,
+            query=query,
+            bug_report_id=bug_report_id,
+            root_cause_id=root_cause_id,
+            replay=replay,
+            limit=limit,
+        )
+        if backend_result is not None:
+            return tool_result(_tool_result_from_backend_causal_packs(backend_result))
+
+        result = {
+            "status": "backend_unavailable",
+            "project_id": self._binding.project_id,
+            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+            "message": "Hades backend causal pack live fetch is unavailable.",
+            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "items": [],
+        }
+        if backend_error:
+            result["backend_live_error"] = backend_error
+        return tool_result(result)
+
     def _handle_graph_search(self, args: Dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()
         if not query:
@@ -1663,6 +1761,46 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     head_commit=head_commit or None,
                     redactions=redactions,
                 )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            return None, redact_secret(str(exc))
+        return response, None
+
+    def _backend_causal_pack_fetch(
+        self,
+        *,
+        pack_id: str,
+        query: str,
+        bug_report_id: str,
+        root_cause_id: str,
+        replay: bool,
+        limit: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if self._binding is None:
+            return None, None
+        try:
+            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            try:
+                common = {
+                    "project_id": self._binding.project_id,
+                    "workspace_binding_id": self._binding.backend_workspace_binding_id,
+                }
+                if pack_id:
+                    response = client.causal_pack(pack_id, **common)
+                    if replay:
+                        response = dict(response)
+                        response["replay"] = client.replay_causal_pack(pack_id, **common).get("replay", {})
+                else:
+                    response = client.causal_packs(
+                        **common,
+                        query=query or None,
+                        bug_report_id=bug_report_id or None,
+                        root_cause_id=root_cause_id or None,
+                        limit=limit,
+                    )
             finally:
                 close = getattr(client, "close", None)
                 if callable(close):
@@ -3314,6 +3452,54 @@ def _evidence_pack_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
         "version": item.get("version"),
         "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
     }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _causal_pack_item_from_backend(item: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "id": _item_id(item),
+        "bug_report_id": item.get("bug_report_id"),
+        "bug_id": item.get("bug_id"),
+        "root_cause_id": item.get("root_cause_id"),
+        "bug_class": item.get("bug_class"),
+        "failure_classification": item.get("failure_classification"),
+        "affected_refs": item.get("affected_refs") if isinstance(item.get("affected_refs"), list) else [],
+        "freshness": item.get("freshness") if isinstance(item.get("freshness"), dict) else {},
+        "awareness": item.get("awareness") if isinstance(item.get("awareness"), dict) else {},
+        "evidence_refs": item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else [],
+        "graph_refs": item.get("graph_refs") if isinstance(item.get("graph_refs"), list) else [],
+        "source_slice_refs": item.get("source_slice_refs") if isinstance(item.get("source_slice_refs"), list) else [],
+        "replay": item.get("replay") if isinstance(item.get("replay"), dict) else {},
+        "status": item.get("status"),
+        "blockers": item.get("blockers") if isinstance(item.get("blockers"), list) else [],
+        "updated_at": item.get("updated_at"),
+        "version": item.get("version"),
+        "score": _bounded_int(item.get("score"), default=0, minimum=0, maximum=1_000_000),
+    }
+    return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _tool_result_from_backend_causal_packs(response: dict[str, Any]) -> dict[str, Any]:
+    single = response.get("causal_pack") if isinstance(response.get("causal_pack"), dict) else None
+    items = [_causal_pack_item_from_backend(single)] if single is not None else [
+        _causal_pack_item_from_backend(item) for item in _backend_items(response)
+    ]
+    count = _bounded_int(response.get("count"), default=len(items), minimum=0, maximum=1_000_000)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "project_id": response.get("project_id"),
+        "workspace_binding_id": response.get("workspace_binding_id"),
+        "query": response.get("query", ""),
+        "bug_report_id": response.get("bug_report_id"),
+        "root_cause_id": response.get("root_cause_id"),
+        "searched_cache_only": False,
+        "count": count,
+        "server_time": response.get("server_time"),
+        "items": items,
+    }
+    replay = response.get("replay")
+    if isinstance(replay, dict):
+        result["replay"] = replay
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 

@@ -1038,6 +1038,7 @@ def test_hades_backend_memory_provider_prefetches_linked_project_cache(monkeypat
         "hades_backend_source_slice_fetch",
         "hades_backend_evidence_pack_search",
         "hades_backend_evidence_pack_create",
+        "hades_backend_causal_pack_fetch",
         "hades_backend_project_awareness_status",
         "hades_backend_diagnosis_report_create",
         "hades_backend_resolved_bug_promote",
@@ -6385,6 +6386,179 @@ def test_hades_backend_evidence_pack_create_tool_requires_title(monkeypatch, tmp
     )
 
     assert result["error"] == "Missing required parameter: title"
+
+
+def test_hades_backend_causal_pack_fetch_tool_searches_live_backend(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = 0
+
+        def causal_packs(self, **payload):
+            self.calls.append(payload)
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "query": payload["query"],
+                "bug_report_id": payload["bug_report_id"],
+                "root_cause_id": payload["root_cause_id"],
+                "count": 1,
+                "server_time": "2026-07-08T10:00:00Z",
+                "items": [
+                    {
+                        "id": "causal_pack_1",
+                        "bug_report_id": "bug_1",
+                        "bug_id": "booking-form-null-customer",
+                        "root_cause_id": "root_customer_required_missing",
+                        "bug_class": "validation_gap",
+                        "failure_classification": "null_relation",
+                        "affected_refs": ["route:bookings.store", "table:customers"],
+                        "freshness": {"status": "current", "workspace_head_commit": "abc123"},
+                        "awareness": {"status": "ready"},
+                        "evidence_refs": [{"type": "evidence_pack", "id": "pack_1"}],
+                        "graph_refs": [{"type": "edge", "ref": "route:bookings.store->BookingController@store"}],
+                        "source_slice_refs": ["slice_1"],
+                        "replay": {"status": "passed", "checked_refs": 3},
+                        "status": "valid",
+                        "blockers": [],
+                        "updated_at": "2026-07-08T09:59:00Z",
+                        "version": "causal_pack_1",
+                        "score": 42,
+                    }
+                ],
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_causal_pack_fetch",
+            {
+                "query": "booking customer validation",
+                "bug_report_id": "bug_1",
+                "root_cause_id": "root_customer_required_missing",
+                "limit": 4,
+            },
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is False
+    assert result["items"][0]["id"] == "causal_pack_1"
+    assert result["items"][0]["root_cause_id"] == "root_customer_required_missing"
+    assert result["items"][0]["affected_refs"] == ["route:bookings.store", "table:customers"]
+    assert result["items"][0]["freshness"]["workspace_head_commit"] == "abc123"
+    assert result["items"][0]["replay"]["status"] == "passed"
+    assert fake.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "query": "booking customer validation",
+            "bug_report_id": "bug_1",
+            "root_cause_id": "root_customer_required_missing",
+            "limit": 4,
+        }
+    ]
+    assert fake.closed == 1
+    assert timeouts == [0.75]
+
+
+def test_hades_backend_causal_pack_fetch_tool_fetches_exact_pack_with_replay(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    timeouts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.pack_calls = []
+            self.replay_calls = []
+            self.closed = 0
+
+        def causal_pack(self, causal_pack_id, **payload):
+            self.pack_calls.append((causal_pack_id, payload))
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "causal_pack": {
+                    "id": causal_pack_id,
+                    "bug_report_id": "bug_1",
+                    "root_cause_id": "root_customer_required_missing",
+                    "bug_class": "validation_gap",
+                    "affected_refs": ["route:bookings.store"],
+                    "evidence_refs": [{"type": "evidence_pack", "id": "pack_1"}],
+                    "graph_refs": [{"type": "edge", "ref": "route:bookings.store->BookingController@store"}],
+                    "source_slice_refs": ["slice_1"],
+                    "status": "valid",
+                },
+            }
+
+        def replay_causal_pack(self, causal_pack_id, **payload):
+            self.replay_calls.append((causal_pack_id, payload))
+            return {
+                "project_id": payload["project_id"],
+                "workspace_binding_id": payload["workspace_binding_id"],
+                "replay": {
+                    "status": "passed",
+                    "checked_refs": 3,
+                    "missing_refs": [],
+                },
+            }
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    import plugins.memory.hades_backend as hades_memory
+
+    def client_from_config(*, timeout=None):
+        timeouts.append(timeout)
+        return fake
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", client_from_config)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_causal_pack_fetch",
+            {"id": "causal_pack_1", "replay": True},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert result["items"][0]["id"] == "causal_pack_1"
+    assert result["replay"]["status"] == "passed"
+    assert fake.pack_calls == [
+        (
+            "causal_pack_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+            },
+        )
+    ]
+    assert fake.replay_calls == fake.pack_calls
+    assert fake.closed == 1
+    assert timeouts == [0.75]
+
+
+def test_hades_backend_causal_pack_fetch_tool_requires_scope(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(provider.handle_tool_call("hades_backend_causal_pack_fetch", {}))
+
+    assert result["error"].startswith("Provide at least one")
 
 
 def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkeypatch, tmp_path):
