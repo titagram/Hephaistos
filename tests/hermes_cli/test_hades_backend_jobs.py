@@ -745,6 +745,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Livewire\\Component;\n"
         "class OrdersStatus extends Component {\n"
         "    public string $status = '';\n"
+        "    protected array $rules = ['status' => 'required|string'];\n"
         "    public function saveOrder() {}\n"
         "    public function render() {}\n"
         "}\n",
@@ -1902,6 +1903,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "livewire_property:status",
         "livewire_property:App\\Livewire\\OrdersStatus.status",
     ) in edges
+    assert ("livewire_validation", "App\\Livewire\\OrdersStatus", "validation:status") in edges
+    assert ("blade_wire_model_validation", "livewire_property:status", "validation:status") in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
     assert ("blade_wire_action_method", "livewire_action:saveOrder", "OrdersStatus@saveOrder") in edges
     assert {
@@ -1999,6 +2002,34 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_model": "status",
         "livewire_property": "status",
         "livewire_property_type": "string",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 21,
+    } in artifact["edges"]
+    assert {
+        "kind": "livewire_validation",
+        "from": "App\\Livewire\\OrdersStatus",
+        "to": "validation:status",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "field": "status",
+        "validation_rules": ["required", "string"],
+        "validation_path": "app/Livewire/OrdersStatus.php",
+        "validation_line": 6,
+        "path": "app/Livewire/OrdersStatus.php",
+        "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model_validation",
+        "from": "livewire_property:status",
+        "to": "validation:status",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "wire_model": "status",
+        "livewire_property": "status",
+        "field": "status",
+        "validation_rules": ["required", "string"],
+        "validation_path": "app/Livewire/OrdersStatus.php",
+        "validation_line": 6,
         "path": "resources/views/orders/show.blade.php",
         "line": 21,
     } in artifact["edges"]

@@ -220,6 +220,10 @@ PHP_PROPERTY_RE = re.compile(
     r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
+PHP_LIVEWIRE_RULES_PROPERTY_RE = re.compile(
+    r"\b(?:public|protected)\s+(?:array\s+)?\$rules\s*=\s*\[(?P<body>.*?)\]\s*;",
+    re.DOTALL | re.MULTILINE,
+)
 PHP_THIS_PROPERTY_ASSIGN_RE = re.compile(
     r"\$this->(?P<property>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$(?P<param>[A-Za-z_][A-Za-z0-9_]*)\s*;"
 )
@@ -1792,6 +1796,50 @@ def _php_rules_method_body(source: str) -> tuple[str, int] | None:
     return source[match.end() : end], match.end()
 
 
+def _php_livewire_validation_fields(source: str, classes: list[dict[str, Any]], fqcn: str, rel: str) -> list[dict[str, Any]]:
+    fields: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_field(field_info: dict[str, Any]) -> None:
+        field_name = str(field_info.get("field") or "")
+        if not field_name or field_name in seen:
+            return
+        seen.add(field_name)
+        fields.append(
+            {
+                "field": field_name,
+                "rules": field_info.get("rules") or [],
+                "database_rules": field_info.get("database_rules") or [],
+                "path": rel,
+                "line": field_info.get("line"),
+            }
+        )
+
+    for property_match in PHP_LIVEWIRE_RULES_PROPERTY_RE.finditer(source):
+        property_class = _class_context(classes, property_match.start())
+        if not property_class or property_class.get("name") != fqcn:
+            continue
+        for field_info in _php_array_validation_fields(source, property_match.group("body"), property_match.start("body")):
+            add_field(field_info)
+
+    for method_match in PHP_METHOD_RE.finditer(source):
+        method_class = _class_context(classes, method_match.start())
+        if not method_class or method_class.get("name") != fqcn:
+            continue
+        if str(method_match.group("name") or "") != "rules":
+            continue
+        method_body, method_body_offset = _php_method_body_slice(source, method_match)
+        return_match = PHP_RETURN_ARRAY_RE.search(method_body)
+        if return_match:
+            for field_info in _php_array_validation_fields(
+                source,
+                return_match.group("body"),
+                method_body_offset + return_match.start("body"),
+            ):
+                add_field(field_info)
+    return fields
+
+
 def _php_schedule_cadence(chain: str) -> str:
     ignored = {"name", "timezone", "withoutOverlapping", "onOneServer", "runInBackground", "evenInMaintenanceMode"}
     for match in PHP_SCHEDULE_CADENCE_RE.finditer(chain or ""):
@@ -2228,6 +2276,48 @@ def _append_blade_view_graph(
                 edge["livewire_property_type"] = property_type
             truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
 
+    def append_livewire_model_validations(model: str, offset: int) -> None:
+        nonlocal truncated
+        model = str(model or "").strip()
+        if not model or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", model):
+            return
+        root_property = model.split(".", 1)[0].split(":", 1)[0].split("*", 1)[0]
+        if not root_property or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", root_property):
+            return
+        line = _line_number(source, offset)
+        for alias in sorted(referenced_livewire_aliases):
+            component = known_livewire.get(alias) or {}
+            component_class = str(component.get("class") or "")
+            if not component_class:
+                continue
+            for field_info in component.get("validation_fields") or []:
+                field_name = str(field_info.get("field") or "")
+                if field_name != root_property:
+                    continue
+                key = ("blade_wire_model_validation", f"{component_class}.{field_name}", line)
+                if key in seen_edges:
+                    continue
+                seen_edges.add(key)
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "blade_wire_model_validation",
+                        "from": f"livewire_property:{model}",
+                        "to": f"validation:{field_name}",
+                        "livewire_alias": alias,
+                        "livewire_class": component_class,
+                        "wire_model": model,
+                        "livewire_property": root_property,
+                        "field": field_name,
+                        "validation_rules": field_info.get("rules") or [],
+                        "validation_path": field_info.get("path"),
+                        "validation_line": field_info.get("line"),
+                        "path": rel,
+                        "line": line,
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2335,6 +2425,7 @@ def _append_blade_view_graph(
     for match in BLADE_WIRE_MODEL_RE.finditer(source):
         append_blade_wire_model(match.group("model"), match.group("modifiers"), match.start("model"))
         append_livewire_model_properties(match.group("model"), match.start("model"))
+        append_livewire_model_validations(match.group("model"), match.start("model"))
     for match in BLADE_WIRE_ACTION_RE.finditer(source):
         append_blade_wire_action(
             match.group("event"),
@@ -4200,6 +4291,7 @@ def _php_livewire_component_index(
                     "type": property_type,
                     "line": _line_number(source, property_match.start()),
                 }
+            validation_fields = _php_livewire_validation_fields(source, classes, fqcn, rel)
             alias = _livewire_alias_from_path(rel, str(class_info.get("short_name") or _php_short_name(fqcn)))
             if alias:
                 components[alias] = {
@@ -4207,6 +4299,7 @@ def _php_livewire_component_index(
                     "class": fqcn,
                     "methods": methods,
                     "properties": properties,
+                    "validation_fields": validation_fields,
                     "path": rel,
                     "line": class_info.get("line"),
                 }
@@ -6825,6 +6918,38 @@ def _build_php_graph(
                         },
                         max_edges=max_edges,
                     ) or truncated
+            if role == "livewire_component":
+                livewire_component = next(
+                    (
+                        component
+                        for component in livewire_component_by_alias.values()
+                        if str(component.get("class") or "") == fqcn
+                    ),
+                    None,
+                )
+                if livewire_component:
+                    livewire_alias = str(livewire_component.get("alias") or "")
+                    for field_info in livewire_component.get("validation_fields") or []:
+                        field_name = str(field_info.get("field") or "")
+                        if not field_name:
+                            continue
+                        truncated = not _edge_append(
+                            edges,
+                            {
+                                "kind": "livewire_validation",
+                                "from": fqcn,
+                                "to": f"validation:{field_name}",
+                                "livewire_alias": livewire_alias,
+                                "livewire_class": fqcn,
+                                "field": field_name,
+                                "validation_rules": field_info.get("rules") or [],
+                                "validation_path": field_info.get("path"),
+                                "validation_line": field_info.get("line"),
+                                "path": rel,
+                                "line": field_info.get("line"),
+                            },
+                            max_edges=max_edges,
+                        ) or truncated
 
         classes.sort(key=lambda item: int(item["offset"]))
         truncated = _append_php_log_events(source, rel, classes, edges, log_events, max_edges=max_edges) or truncated

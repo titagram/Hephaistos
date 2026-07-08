@@ -4199,6 +4199,34 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "path": "resources/views/orders/show.blade.php",
                 "line": 21,
             },
+            {
+                "kind": "livewire_validation",
+                "from": "App\\Livewire\\OrdersStatus",
+                "to": "validation:status",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "field": "status",
+                "validation_rules": ["required", "string"],
+                "validation_path": "app/Livewire/OrdersStatus.php",
+                "validation_line": 6,
+                "path": "app/Livewire/OrdersStatus.php",
+                "line": 6,
+            },
+            {
+                "kind": "blade_wire_model_validation",
+                "from": "livewire_property:status",
+                "to": "validation:status",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "wire_model": "status",
+                "livewire_property": "status",
+                "field": "status",
+                "validation_rules": ["required", "string"],
+                "validation_path": "app/Livewire/OrdersStatus.php",
+                "validation_line": 6,
+                "path": "resources/views/orders/show.blade.php",
+                "line": 21,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4253,6 +4281,23 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "livewire_validation"
+        and ref["from"] == "App\\Livewire\\OrdersStatus"
+        and ref["to"] == "validation:status"
+        and ref["provenance"]["validation_rules"] == ["required", "string"]
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_model_validation"
+        and ref["from"] == "livewire_property:status"
+        and ref["to"] == "validation:status"
+        and ref["provenance"]["livewire_property"] == "status"
+        and ref["provenance"]["validation_rules"] == ["required", "string"]
+        for ref in graph_refs
+    )
+    assert any(
         "wire_model=status" in item["summary"] and "wire_modifiers=['defer']" in item["summary"]
         for item in result["items"]
     )
@@ -4260,6 +4305,9 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         "livewire_property=status" in item["summary"]
         and "livewire_property_type=string" in item["summary"]
         for item in result["items"]
+    )
+    assert any(
+        "validation_rules=['required', 'string']" in item["summary"] for item in result["items"]
     )
 
 

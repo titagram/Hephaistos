@@ -6809,3 +6809,41 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Livewire validation graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per collegare validation rules
+Livewire ai componenti e ai binding `wire:model` metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` estende l'indice Livewire con validation fields estratti
+  da property `$rules` e metodo `rules()` sui componenti convenzionali.
+- Aggiunge edge `livewire_validation` dalla classe componente a
+  `validation:<field>` con rule names safe.
+- Aggiunge edge `blade_wire_model_validation` quando un binding `wire:model`
+  nella view referenzia un root property validato dal componente Livewire
+  presente nella stessa view.
+- Il payload salva solo alias, classe, binding, field, rule names, path e line;
+  non conserva valori runtime, default property, argomenti Livewire o
+  template/source raw.
+- Il fallback locale di `hades_backend_graph_search` espone questi dettagli da
+  cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Validation rules dinamiche costruite a runtime, closure rules e binding nested
+  oltre al root field match; questi casi restano conservativi per evitare falsi
+  positivi source-free.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_wire_model_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `118 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
