@@ -295,6 +295,115 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     assert fake.pull_upload_counts == [0]
 
 
+def test_sync_runner_uses_binding_scoped_agent_for_each_project(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace_one = tmp_path / "repo-one"
+    workspace_two = tmp_path / "repo-two"
+    workspace_one.mkdir()
+    workspace_two.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_project_one",
+            project_id="project_one",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_ONE",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_project_two",
+            project_id="project_two",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TWO",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_one",
+            agent_id="agent_project_one",
+            local_project_id="local_one",
+            workspace_fingerprint="wf_one",
+            display_path="~/repo-one",
+            repo_root=str(workspace_one),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_one",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_two",
+            agent_id="agent_project_two",
+            local_project_id="local_two",
+            workspace_fingerprint="wf_two",
+            display_path="~/repo-two",
+            repo_root=str(workspace_two),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_two",
+        )
+        conn.execute("UPDATE backend_agents SET updated_at = 10 WHERE agent_id = 'agent_project_one'")
+        conn.execute("UPDATE backend_agents SET updated_at = 20 WHERE agent_id = 'agent_project_two'")
+        conn.commit()
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, agent):
+            self.agent = agent
+
+        def _assert_scoped(self, payload):
+            assert payload["project_id"] == self.agent.project_id
+            if "agent_id" in payload:
+                assert payload["agent_id"] == self.agent.agent_id
+            calls.append((self.agent.agent_id, payload["project_id"], payload.get("workspace_binding_id")))
+
+        def memory_snapshot(self, **payload):
+            self._assert_scoped(payload)
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            self._assert_scoped(payload)
+            return {"events": []}
+
+        def pull_jobs(self, **payload):
+            self._assert_scoped(payload)
+            return {"jobs": []}
+
+        def close(self):
+            return None
+
+    clients = {}
+    default_agent = None
+    with hdb.connect_closing() as conn:
+        default_agent = hdb.get_agent(conn, "agent_project_two")
+    assert default_agent is not None
+
+    def fake_client_for_agent(agent):
+        clients.setdefault(agent.agent_id, FakeClient(agent))
+        return clients[agent.agent_id]
+
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake_client_for_agent(default_agent))
+    monkeypatch.setattr(runtime, "client_for_agent", fake_client_for_agent)
+
+    result = run_backend_sync(quiet=True)
+
+    assert result.exit_code == 0
+    assert ("agent_project_one", "project_one", "wb_one") in calls
+    assert ("agent_project_two", "project_two", "wb_two") in calls
+    assert all(agent_id.endswith(project_id.rsplit("_", 1)[-1]) for agent_id, project_id, _ in calls)
+
+
 def test_cleanup_orphaned_memory_cache_removes_unlinked_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

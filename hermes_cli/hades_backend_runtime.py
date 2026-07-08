@@ -44,6 +44,10 @@ def client_from_config(*, timeout: float = 15.0) -> HadesBackendClient:
     agent = current_agent()
     if agent is None:
         raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
+    return client_for_agent(agent, timeout=timeout)
+
+
+def client_for_agent(agent: db.BackendAgent, *, timeout: float = 15.0) -> HadesBackendClient:
     token = agent_token(agent)
     if not token:
         raise RuntimeError(f"Hades backend token is missing from .env ({agent.token_env_key})")

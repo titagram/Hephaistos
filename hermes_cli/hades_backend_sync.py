@@ -62,6 +62,11 @@ def run_backend_sync(
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
+        agents = {
+            binding.agent_id: loaded
+            for binding in bindings
+            if (loaded := db.get_agent(conn, binding.agent_id)) is not None
+        }
         expired_jobs = db.expire_waiting_jobs(conn, now=now) if agent else []
 
     if agent is None:
@@ -95,19 +100,20 @@ def run_backend_sync(
     )
     started_monotonic = time.monotonic()
 
-    try:
-        client = client_factory() if client_factory is not None else runtime.client_from_config()
-    except Exception as exc:
-        logger.warning(
-            "hades_backend.sync.client_error",
-            extra={
-                "hades_event": "sync.client_error",
-                "hades_agent_id": agent.agent_id,
-                "hades_project_id": agent.project_id,
-                "hades_error": redact_secret(str(exc)),
-            },
-        )
-        return SyncResult({"error": 1}, 1)
+    clients: dict[str, object] = {}
+
+    def client_for_agent(sync_agent: db.BackendAgent) -> object:
+        if client_factory is not None:
+            return client_factory()
+        existing = clients.get(sync_agent.agent_id)
+        if existing is not None:
+            return existing
+        if sync_agent.agent_id == agent.agent_id and sync_agent.project_id == agent.project_id:
+            created = runtime.client_from_config()
+        else:
+            created = runtime.client_for_agent(sync_agent)
+        clients[sync_agent.agent_id] = created
+        return created
 
     pulled = completed = waiting = failed = skipped = 0
     memory_snapshots = proposals_synced = proposal_errors = 0
@@ -121,16 +127,37 @@ def run_backend_sync(
             binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id)
         if binding is None:
             continue
+        binding_agent = agents.get(binding.agent_id)
+        if binding_agent is None:
+            sync_errors += 1
+            _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
+            continue
         try:
+            client = client_for_agent(binding_agent)
             client.update_job_status(
                 job.job_id,
-                **_status_payload(agent, binding, "expired", reason="deadline_expired"),
+                **_status_payload(binding_agent, binding, "expired", reason="deadline_expired"),
             )
-        except Exception:
+        except Exception as exc:
             sync_errors += 1
+            _record_sync_error(binding, str(exc))
         expired += 1
 
     for binding in bindings:
+        binding_agent = agents.get(binding.agent_id)
+        if binding_agent is None:
+            sync_errors += 1
+            _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
+            continue
+        try:
+            client = client_for_agent(binding_agent)
+        except Exception as exc:
+            sync_errors += 1
+            _record_sync_error(binding, str(exc))
+            if not quiet:
+                print(f"backend sync: failed to configure client for {binding.display_path}: {redact_secret(str(exc))}")
+            continue
+
         try:
             snapshots, synced, errors = _sync_memory(client, binding)
             memory_snapshots += snapshots
@@ -158,7 +185,7 @@ def run_backend_sync(
         try:
             response = client.pull_jobs(
                 project_id=binding.project_id,
-                agent_id=agent.agent_id,
+                agent_id=binding_agent.agent_id,
                 workspace_binding_id=binding.backend_workspace_binding_id,
                 capabilities=_detect_default_capabilities(),
             )
@@ -196,14 +223,14 @@ def run_backend_sync(
                 )
 
             try:
-                client.update_job_status(jid, **_status_payload(agent, binding, "received"))
+                client.update_job_status(jid, **_status_payload(binding_agent, binding, "received"))
                 if capability not in AUTO_JOB_CAPABILITIES or _requires_confirmation(job):
                     with db.connect_closing() as conn:
                         db.update_job_status(conn, jid, "waiting_confirmation")
                     client.update_job_status(
                         jid,
                         **_status_payload(
-                            agent,
+                            binding_agent,
                             binding,
                             "waiting_confirmation",
                             reason="local_confirmation_required",
@@ -216,7 +243,7 @@ def run_backend_sync(
 
                 with db.connect_closing() as conn:
                     db.update_job_status(conn, jid, "started")
-                client.update_job_status(jid, **_status_payload(agent, binding, "started"))
+                client.update_job_status(jid, **_status_payload(binding_agent, binding, "started"))
 
                 result = execute_job(
                     {"job_id": jid, "capability": capability, "payload": payload},
@@ -228,8 +255,8 @@ def run_backend_sync(
                 with db.connect_closing() as conn:
                     db.update_job_status(conn, jid, final_status, result=result)
                 if final_status == "completed":
-                    uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, agent, binding, jid, result)
-                    slices_uploaded, slices_failed = _upload_job_source_slice(client, agent, binding, jid, result)
+                    uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, binding_agent, binding, jid, result)
+                    slices_uploaded, slices_failed = _upload_job_source_slice(client, binding_agent, binding, jid, result)
                     artifact = result.get("artifact") if isinstance(result, dict) else None
                     candidates = artifact.get("source_slice_candidates") if isinstance(artifact, dict) else None
                     if isinstance(candidates, list):
@@ -241,12 +268,12 @@ def run_backend_sync(
                     source_slice_errors += slices_failed
                     sync_errors += upload_failed
                     sync_errors += slices_failed
-                    client.submit_job_result(jid, **_status_payload(agent, binding, final_status, result=result))
+                    client.submit_job_result(jid, **_status_payload(binding_agent, binding, final_status, result=result))
                     completed += 1
                 else:
                     client.update_job_status(
                         jid,
-                        **_status_payload(agent, binding, final_status, error=redact_secret(result.get("summary", ""))),
+                        **_status_payload(binding_agent, binding, final_status, error=redact_secret(result.get("summary", ""))),
                     )
                     failed += 1
             except Exception as exc:
@@ -254,7 +281,7 @@ def run_backend_sync(
                 with db.connect_closing() as conn:
                     db.update_job_status(conn, jid, "failed", result=result)
                 try:
-                    client.update_job_status(jid, **_status_payload(agent, binding, "failed", error=result["summary"]))
+                    client.update_job_status(jid, **_status_payload(binding_agent, binding, "failed", error=result["summary"]))
                 except Exception:
                     pass
                 failed += 1
@@ -266,7 +293,7 @@ def run_backend_sync(
                     baseline_failed,
                     baseline_skipped,
                     baseline_candidates,
-                ) = _sync_baseline_artifacts(client, agent, binding, execute_job=execute_job)
+                ) = _sync_baseline_artifacts(client, binding_agent, binding, execute_job=execute_job)
                 artifacts_uploaded += baseline_uploaded
                 artifact_errors += baseline_failed
                 artifacts_skipped += baseline_skipped
@@ -327,6 +354,10 @@ def run_backend_sync(
             "hades_summary": summary,
         },
     )
+    for client in clients.values():
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
     return SyncResult(summary, 1 if sync_errors else 0)
 
 
