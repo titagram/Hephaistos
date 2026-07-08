@@ -2198,6 +2198,33 @@ def _append_blade_view_graph(
             },
             max_edges=max_edges,
         ) or truncated
+        binding = (known_route_model_bindings.get(route_name) or {}).get(variable) or {}
+        model_class = str(binding.get("model") or "")
+        model_table = str(binding.get("table") or "")
+        if not model_class:
+            return
+        model_edge_key = ("blade_component_prop_model", target, model_class, line)
+        if model_edge_key in seen_edges:
+            return
+        seen_edges.add(model_edge_key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_component_prop_model",
+                "from": target,
+                "to": model_class,
+                "component": component,
+                "component_prop": prop,
+                "component_source_variable": variable,
+                "route_name": route_name,
+                "route_param": variable,
+                "model": model_class,
+                "table": model_table,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
 
     def append_route_param(route_name: str, route_param: str, status: str, offset: int) -> None:
         nonlocal truncated
@@ -4595,7 +4622,12 @@ def _append_blade_include_authorization_edges(
     return truncated
 
 
-def _append_blade_include_component_prop_edges(edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+def _append_blade_include_component_prop_edges(
+    edges: list[dict[str, Any]],
+    *,
+    route_model_binding_by_route: dict[str, dict[str, dict[str, str]]],
+    max_edges: int,
+) -> bool:
     include_data_by_slot: dict[str, list[dict[str, Any]]] = {}
     route_param_by_slot: dict[str, list[dict[str, Any]]] = {}
     component_props_by_slot: dict[str, list[dict[str, Any]]] = {}
@@ -4660,6 +4692,8 @@ def _append_blade_include_component_prop_edges(edges: list[dict[str, Any]], *, m
                     seen.add(key)
                     truncated = not _edge_append(edges, include_data_edge, max_edges=max_edges) or truncated
                 for route_edge in route_edges:
+                    route_name = str(route_edge.get("route_name") or "")
+                    route_param = str(route_edge.get("route_param") or "")
                     route_param_edge = {
                         "kind": "blade_component_prop_include_route_param",
                         "from": component_prop_target,
@@ -4671,8 +4705,8 @@ def _append_blade_include_component_prop_edges(edges: list[dict[str, Any]], *, m
                         "include_data_key": include_edge.get("include_data_key"),
                         "include_source_variable": include_edge.get("include_source_variable"),
                         "include_parent_view": include_edge.get("from"),
-                        "route_name": route_edge.get("route_name"),
-                        "route_param": route_edge.get("route_param"),
+                        "route_name": route_name,
+                        "route_param": route_param,
                         "path": prop_edge.get("path"),
                         "line": prop_edge.get("line"),
                     }
@@ -4687,6 +4721,40 @@ def _append_blade_include_component_prop_edges(edges: list[dict[str, Any]], *, m
                         continue
                     seen.add(route_key)
                     truncated = not _edge_append(edges, route_param_edge, max_edges=max_edges) or truncated
+                    binding = (route_model_binding_by_route.get(route_name) or {}).get(route_param) or {}
+                    model_class = str(binding.get("model") or "")
+                    model_table = str(binding.get("table") or "")
+                    if not model_class:
+                        continue
+                    model_edge = {
+                        "kind": "blade_component_prop_include_model",
+                        "from": component_prop_target,
+                        "to": model_class,
+                        "component": prop_edge.get("component"),
+                        "component_prop": prop_edge.get("component_prop"),
+                        "component_source_variable": prop_edge.get("component_source_variable"),
+                        "included_view": include_edge.get("included_view"),
+                        "include_data_key": include_edge.get("include_data_key"),
+                        "include_source_variable": include_edge.get("include_source_variable"),
+                        "include_parent_view": include_edge.get("from"),
+                        "route_name": route_name,
+                        "route_param": route_param,
+                        "model": model_class,
+                        "table": model_table,
+                        "path": prop_edge.get("path"),
+                        "line": prop_edge.get("line"),
+                    }
+                    model_key = (
+                        str(model_edge.get("kind") or ""),
+                        str(model_edge.get("from") or ""),
+                        str(model_edge.get("to") or ""),
+                        str(model_edge.get("path") or ""),
+                        str(model_edge.get("line") or ""),
+                    )
+                    if model_key in seen:
+                        continue
+                    seen.add(model_key)
+                    truncated = not _edge_append(edges, model_edge, max_edges=max_edges) or truncated
     return truncated
 
 
@@ -9311,7 +9379,11 @@ def _build_php_graph(
         php_method_symbols=php_method_symbols,
         max_edges=max_edges,
     ) or truncated
-    truncated = _append_blade_include_component_prop_edges(edges, max_edges=max_edges) or truncated
+    truncated = _append_blade_include_component_prop_edges(
+        edges,
+        route_model_binding_by_route=route_model_binding_by_route,
+        max_edges=max_edges,
+    ) or truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",

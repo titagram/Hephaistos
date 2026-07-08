@@ -4152,6 +4152,24 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "path": "resources/views/orders/partials/summary.blade.php",
                 "line": 1,
             },
+            {
+                "kind": "blade_component_prop_include_model",
+                "from": "component_prop:orders.card.order",
+                "to": "App\\Models\\Order",
+                "component": "orders.card",
+                "component_prop": "order",
+                "component_source_variable": "order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "include_parent_view": "view:orders.show",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4269,6 +4287,14 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         and ref["from"] == "component_prop:orders.card.order"
         and ref["to"] == "route_param:orders.show.order"
         and ref["provenance"]["route_param"] == "order"
+        for ref in component_graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_prop_include_model"
+        and ref["from"] == "component_prop:orders.card.order"
+        and ref["to"] == "App\\Models\\Order"
+        and ref["provenance"]["table"] == "orders"
         for ref in component_graph_refs
     )
     assert any(
