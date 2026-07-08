@@ -3518,6 +3518,9 @@ def _execute_read_source_slice(job: dict[str, Any], workspace_root: Path) -> dic
         "policy": str(payload.get("policy") or "manual_review"),
         "raw_source_included": True,
     }
+    candidate_key = str(payload.get("candidate_key") or "").strip()
+    if re.fullmatch(r"[a-fA-F0-9]{64}", candidate_key):
+        source_slice["candidate_key"] = candidate_key.lower()
     return {
         "status": "completed",
         "summary": f"Read source slice {rel}:{bounded_start}-{bounded_end}; redactions {source_slice['redactions']}.",

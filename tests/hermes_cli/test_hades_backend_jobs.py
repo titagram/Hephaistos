@@ -85,6 +85,7 @@ def test_read_source_slice_job_redacts_and_bounds_line_window(tmp_path):
                 "start_line": 3,
                 "end_line": 5,
                 "symbol": "OrderController@show",
+                "candidate_key": "a" * 64,
             },
         },
         workspace_root=tmp_path,
@@ -98,6 +99,7 @@ def test_read_source_slice_job_redacts_and_bounds_line_window(tmp_path):
     assert source_slice["end_line"] == 5
     assert source_slice["language"] == "php"
     assert source_slice["symbol"] == "OrderController@show"
+    assert source_slice["candidate_key"] == "a" * 64
     assert source_slice["retention_class"] == "source_slice"
     assert source_slice["raw_source_included"] is True
     assert "sk-live-secret" not in source_slice["content_redacted"]
