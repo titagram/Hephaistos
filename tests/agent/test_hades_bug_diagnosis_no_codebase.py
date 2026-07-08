@@ -589,6 +589,55 @@ def test_hades_no_codebase_eval_requires_causal_pack_and_chain_for_complete_case
     ]
 
 
+def test_hades_no_codebase_eval_loads_nested_causal_chain_refs(tmp_path):
+    from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps(
+            {
+                "schema": "hades.no_codebase_eval.v1",
+                "fixtures": [
+                    {
+                        "id": "nested_chain_case",
+                        "title": "Nested chain case",
+                        "expected_root_cause_id": "rc.nested",
+                        "expected_confidence": "high",
+                        "required_causal_pack_refs": ["causal_pack:pack_1"],
+                        "required_causal_chain_refs": [
+                            "bug_evidence:ev_1",
+                            "graph:route:orders.show",
+                            "diagnosis:rc.nested",
+                        ],
+                        "requires_persisted_report": False,
+                    }
+                ],
+                "runs": [
+                    {
+                        "fixture_id": "nested_chain_case",
+                        "root_cause_id": "rc.nested",
+                        "confidence": "high",
+                        "freshness_status": "current",
+                        "diagnosable_without_source": True,
+                        "causal_pack_refs": ["causal_pack:pack_1"],
+                        "causal_chain": [
+                            {"step": 1, "refs": ["bug_evidence:ev_1", "graph:route:orders.show"]},
+                            {"step": 2, "refs": ["diagnosis:rc.nested"]},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fixtures, runs = load_no_codebase_eval_fixture(eval_file)
+    report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+
+    assert report["status"] == "passed"
+    assert report["causal_chain_coverage"] == 1.0
+
+
 def test_hades_no_codebase_eval_passes_counterfactual_when_precise_claim_is_refused():
     from hermes_cli.hades_no_codebase_eval import (
         NoCodebaseDiagnosisFixture,

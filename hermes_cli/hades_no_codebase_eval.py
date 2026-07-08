@@ -748,6 +748,9 @@ def _evidence_refs(values: Iterable[Any]) -> list[str]:
             text = str(ref_id or "").strip()
             if text and ref_type:
                 text = f"{ref_type}:{text}"
+            nested_refs = value.get("refs")
+            if isinstance(nested_refs, Iterable) and not isinstance(nested_refs, (str, bytes, Mapping)):
+                refs.extend(_evidence_refs(nested_refs))
         else:
             text = str(value).strip()
         if text:
