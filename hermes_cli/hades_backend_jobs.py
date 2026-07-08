@@ -18,6 +18,7 @@ from hermes_cli.hades_source_slice_policy import plan_source_slice_candidates
 
 SKIP_DIRS = {
     ".cache",
+    ".devboard",
     ".git",
     ".mypy_cache",
     ".next",
@@ -33,6 +34,21 @@ SKIP_DIRS = {
     "node_modules",
     "target",
     "vendor",
+}
+SOURCE_DIR_PRIORITY = {
+    "src": 0,
+    "app": 1,
+    "routes": 2,
+    "config": 3,
+    "database": 4,
+    "migrations": 5,
+    "tests": 6,
+    "test": 7,
+    "resources": 8,
+    "templates": 9,
+    "assets": 20,
+    "public": 30,
+    "docs": 40,
 }
 SECRET_FILE_NAMES = {
     ".env",
@@ -77,6 +93,11 @@ BINARY_SUFFIXES = {
     ".woff2",
     ".zip",
 }
+
+
+def _workspace_dir_sort_key(dirname: str) -> tuple[int, str]:
+    return (SOURCE_DIR_PRIORITY.get(dirname, 10), dirname)
+
 LANGUAGE_SUFFIXES = {
     ".css": "css",
     ".go": "go",
@@ -3537,7 +3558,7 @@ def _iter_workspace_files(root: Path, *, max_files: int) -> tuple[list[Path], li
     for current, dirs, names in os.walk(root):
         current_path = Path(current)
         kept_dirs: list[str] = []
-        for dirname in sorted(dirs):
+        for dirname in sorted(dirs, key=_workspace_dir_sort_key):
             dir_path = current_path / dirname
             rel = dir_path.relative_to(root).as_posix()
             if dirname in SKIP_DIRS:

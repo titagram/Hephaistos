@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from hermes_cli import hades_backend_db as db
-from hermes_cli.hades_backend_client import redact_secret
+from hermes_cli.hades_backend_client import HadesBackendError, redact_secret
 from hermes_cli.hades_backend_jobs import execute_job
 
 RESOLVED_BUG_VERIFICATION_STATUSES = {"user_confirmed", "test_passed", "manual_review"}
@@ -76,6 +76,14 @@ def job_payload_for_display(job: db.BackendJob) -> dict[str, Any]:
         "payload_keys": sorted(str(key) for key in job.payload.keys()),
         "result": job.result,
     }
+
+
+def _remote_job_missing(exc: BaseException) -> bool:
+    if not isinstance(exc, HadesBackendError):
+        return False
+    if exc.status_code != 404:
+        return False
+    return exc.code in {None, "", "job_not_found"}
 
 
 def proposal_payload_for_display(proposal: db.MemoryProposal) -> dict[str, Any]:
@@ -246,6 +254,20 @@ def approve_backend_job(job_id: str) -> BackendActionResult:
             payload={"job": job_payload_for_display(updated or job)},
         )
     except Exception as exc:
+        if _remote_job_missing(exc):
+            result = {
+                "status": "expired",
+                "summary": "Remote Hades job no longer exists; local cached job expired.",
+            }
+            with db.connect_closing() as conn:
+                updated = db.update_job_status(conn, job_id, "expired", result=result)
+            return BackendActionResult(
+                ok=False,
+                status="expired",
+                summary=result["summary"],
+                payload={"job": job_payload_for_display(updated or job)},
+            )
+
         result = {"status": "failed", "summary": redact_secret(str(exc))}
         with db.connect_closing() as conn:
             updated = db.update_job_status(conn, job_id, "failed", result=result)

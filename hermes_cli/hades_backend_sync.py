@@ -169,6 +169,7 @@ def run_backend_sync(
                 print(f"backend sync: failed to pull jobs for {binding.display_path}: {redact_secret(str(exc))}")
             continue
 
+        binding_pulled = 0
         for job in _response_jobs(response):
             jid = _job_id(job)
             capability = _job_capability(job)
@@ -177,6 +178,7 @@ def run_backend_sync(
                 skipped += 1
                 continue
             pulled += 1
+            binding_pulled += 1
 
             with db.connect_closing() as conn:
                 existing = db.get_job(conn, jid)
@@ -257,6 +259,28 @@ def run_backend_sync(
                     pass
                 failed += 1
 
+        if binding_pulled == 0:
+            try:
+                (
+                    baseline_uploaded,
+                    baseline_failed,
+                    baseline_skipped,
+                    baseline_candidates,
+                ) = _sync_baseline_artifacts(client, agent, binding, execute_job=execute_job)
+                artifacts_uploaded += baseline_uploaded
+                artifact_errors += baseline_failed
+                artifacts_skipped += baseline_skipped
+                source_slice_candidates += baseline_candidates
+                sync_errors += baseline_failed
+            except Exception as exc:
+                sync_errors += 1
+                _record_sync_error(binding, str(exc))
+                if not quiet:
+                    print(
+                        f"backend sync: failed to upload baseline artifacts for {binding.display_path}: "
+                        f"{redact_secret(str(exc))}"
+                    )
+
     with db.connect_closing() as conn:
         source_slice_jobs_waiting = max(
             source_slice_jobs_waiting,
@@ -304,6 +328,61 @@ def run_backend_sync(
         },
     )
     return SyncResult(summary, 1 if sync_errors else 0)
+
+
+def _sync_baseline_artifacts(
+    client: object,
+    agent: db.BackendAgent,
+    binding: db.WorkspaceBinding,
+    *,
+    execute_job: Callable[..., dict[str, object]],
+) -> tuple[int, int, int, int]:
+    uploaded = failed = skipped = source_slice_candidates = 0
+    head_commit = str(binding.head_commit or "").strip()
+    for capability in ("sync_git_tree", "populate_backend_ast"):
+        if not _agent_has_capability(agent, capability):
+            continue
+        payload: dict[str, object] = {
+            "head_commit": head_commit,
+            "workspace_head_commit": head_commit,
+            "max_source_slice_candidates": 25,
+        }
+        result = execute_job(
+            {"job_id": None, "capability": capability, "payload": payload},
+            workspace_root=binding.repo_root,
+        )
+        final_status = str(result.get("status") or "completed")
+        if final_status != "completed":
+            failed += 1
+            continue
+        artifact = result.get("artifact") if isinstance(result, dict) else None
+        candidates = artifact.get("source_slice_candidates") if isinstance(artifact, dict) else None
+        if isinstance(candidates, list):
+            source_slice_candidates += len(candidates)
+        artifact_uploaded, artifact_failed, artifact_skipped = _upload_job_artifact(
+            client,
+            agent,
+            binding,
+            None,
+            result,
+        )
+        uploaded += artifact_uploaded
+        failed += artifact_failed
+        skipped += artifact_skipped
+    return uploaded, failed, skipped, source_slice_candidates
+
+
+def _agent_has_capability(agent: db.BackendAgent, capability: str) -> bool:
+    capabilities = agent.capabilities if isinstance(agent.capabilities, dict) else {}
+    if not capabilities:
+        return True
+    if capability in capabilities:
+        return bool(capabilities.get(capability))
+    if capability == "sync_git_tree":
+        return bool(capabilities.get("artifacts", True))
+    if capability == "populate_backend_ast":
+        return bool(capabilities.get("populate_backend_ast", capabilities.get("artifacts", True)))
+    return True
 
 
 def maybe_run_backend_sync(
@@ -559,7 +638,13 @@ def _artifact_file_delta(cached_manifest: object, current_manifest: dict[str, ob
     }
 
 
-def _upload_job_artifact(client: object, agent: db.BackendAgent, binding: db.WorkspaceBinding, job_id: str, result: dict) -> tuple[int, int, int]:
+def _upload_job_artifact(
+    client: object,
+    agent: db.BackendAgent,
+    binding: db.WorkspaceBinding,
+    job_id: str | None,
+    result: dict,
+) -> tuple[int, int, int]:
     artifact = result.get("artifact") if isinstance(result, dict) else None
     if not isinstance(artifact, dict):
         return (0, 0, 0)

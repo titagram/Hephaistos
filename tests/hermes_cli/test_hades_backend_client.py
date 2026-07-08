@@ -676,7 +676,11 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
     }
     covered_client_methods = {case["method_name"] for case in CLIENT_ROUTE_CASES}
     covered_routes = {(case["http_method"], case["openapi_path"]) for case in CLIENT_ROUTE_CASES}
-    fixture_routes = set(_openapi_routes())
+    fixture_routes = {
+        route
+        for route in _openapi_routes()
+        if route[1].startswith("/api/hades/v1/")
+    }
 
     assert public_client_methods == covered_client_methods
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
@@ -739,7 +743,16 @@ def test_client_raises_backend_error_with_redacted_body():
     from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"message": "bad token sk-live-secret"})
+        return httpx.Response(
+            404,
+            json={
+                "error": {
+                    "code": "job_not_found",
+                    "message": "bad token sk-live-secret",
+                    "next_step": "Run hades backend sync.",
+                }
+            },
+        )
 
     client = HadesBackendClient(
         "https://backend.example",
@@ -751,11 +764,15 @@ def test_client_raises_backend_error_with_redacted_body():
         client.health()
     except HadesBackendError as exc:
         text = str(exc)
+        error = exc
     else:  # pragma: no cover - guard
         raise AssertionError("expected HadesBackendError")
 
-    assert "401" in text
+    assert "404" in text
     assert "sk-live-secret" not in text
+    assert error.status_code == 404
+    assert error.code == "job_not_found"
+    assert error.next_step == "Run hades backend sync."
 
 
 def test_get_payloads_use_query_params_for_laravel_routes():

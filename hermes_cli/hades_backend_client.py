@@ -143,7 +143,22 @@ class HadesBackendClient:
                 body: Any = response.json()
             except ValueError:
                 body = response.text
-            raise HadesBackendError(f"{response.status_code}: {redact_secret(body)}")
+            code = None
+            next_step = None
+            details = None
+            if isinstance(body, dict):
+                error = body.get("error")
+                if isinstance(error, dict):
+                    code = str(error.get("code") or "") or None
+                    next_step = str(error.get("next_step") or "") or None
+                    details = error.get("details")
+            raise HadesBackendError(
+                f"{response.status_code}: {redact_secret(body)}",
+                status_code=response.status_code,
+                code=code,
+                next_step=next_step,
+                details=details,
+            )
         if not response.content:
             return {}
         try:

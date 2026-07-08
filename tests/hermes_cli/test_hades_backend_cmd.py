@@ -1804,6 +1804,74 @@ def test_backend_approve_job_executes_waiting_job(monkeypatch, tmp_path, capsys)
     assert fake.results[0][1]["status"] == "completed"
 
 
+def test_backend_approve_job_expires_stale_remote_job(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli.hades_backend_client import HadesBackendError
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_wait",
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+
+    class FakeClient:
+        def update_job_status(self, job_id, **payload):
+            raise HadesBackendError("404: job not found", status_code=404, code="job_not_found")
+
+    monkeypatch.setattr(runtime, "client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="approve-job", job_id="job_wait"))
+
+    output = capsys.readouterr()
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_wait")
+
+    assert rc == 1
+    assert "expired" in output.out
+    assert "Remote Hades job no longer exists" in output.err
+    assert job is not None
+    assert job.status == "expired"
+    assert job.result == {
+        "status": "expired",
+        "summary": "Remote Hades job no longer exists; local cached job expired.",
+    }
+
+
 def test_backend_refuse_job_cancels_waiting_job(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

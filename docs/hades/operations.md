@@ -71,8 +71,12 @@ binding, schema, HEAD commit, and artifact hash. If `sync_git_tree` or
 `artifact.skipped`, records `artifacts_skipped` /
 `skipped_unchanged_last_sync`, and avoids a duplicate upload while keeping
 local awareness coverage present. On a new device with an empty local cache,
-sync first calls `/api/hades/v1/artifacts/lookup`; if the backend already has
-the same hash, the large artifact payload is not sent.
+`sync` also creates a baseline git-tree and code-graph artifact when the backend
+has no queued indexing jobs for the binding. It first calls
+`/api/hades/v1/artifacts/lookup`; if the backend already has the same hash, the
+large artifact payload is not sent. Source slices remain approval-gated: graph
+uploads create bounded source-slice candidate jobs, and the user must approve
+expected `read_source_slice` jobs before line-window content is uploaded.
 The same sync summary records `duration_ms`; use it as the local operational
 baseline for sync cost before comparing larger projects or changing indexing
 budgets.

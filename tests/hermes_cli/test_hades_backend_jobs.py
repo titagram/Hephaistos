@@ -151,6 +151,27 @@ def test_sync_git_tree_returns_bounded_manifest(tmp_path):
     assert all(not path.startswith(".git") for path in paths)
 
 
+def test_workspace_file_iteration_prioritizes_source_dirs_before_assets(tmp_path):
+    from hermes_cli.hades_backend_jobs import _iter_workspace_files
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for index in range(20):
+        (assets / f"style_{index}.scss").write_text(".x { color: red; }\n", encoding="utf-8")
+    (tmp_path / ".devboard" / "artifacts").mkdir(parents=True)
+    (tmp_path / ".devboard" / "artifacts" / "graph.json").write_text("{}", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Controller.php").write_text("<?php\nclass Controller {}\n", encoding="utf-8")
+
+    files, omitted, truncated = _iter_workspace_files(tmp_path, max_files=5)
+
+    paths = [path.relative_to(tmp_path).as_posix() for path in files]
+    assert "src/Controller.php" in paths
+    assert truncated is True
+    assert {"path": ".devboard", "reason": "generated_or_dependency_dir"} in omitted
+
+
 def test_project_inspection_is_metadata_tree_alias_without_raw_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

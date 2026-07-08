@@ -217,6 +217,84 @@ def test_sync_runner_counts_pending_source_slice_jobs(monkeypatch, tmp_path):
     assert summary["source_slice_jobs_waiting"] == 1
 
 
+def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    controller = workspace / "app" / "Http" / "Controllers" / "BookingController.php"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "class BookingController {\n"
+        "    public function show() { return response()->json(['ok' => true]); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": True, "populate_backend_ast": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+            self.pull_upload_counts = []
+
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            return {"events": []}
+
+        def artifact_lookup(self, **payload):
+            return {"exists": False}
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+
+        def pull_jobs(self, **payload):
+            self.pull_upload_counts.append(len(self.uploads))
+            return {"jobs": []}
+
+    fake = FakeClient()
+    result = run_backend_sync(client_factory=lambda: fake)
+
+    schemas = {upload["schema"] for upload in fake.uploads}
+    assert result.exit_code == 0
+    assert result.summary["artifacts_uploaded"] == 2
+    assert result.summary["artifact_errors"] == 0
+    assert result.summary["source_slice_candidates"] >= 1
+    assert schemas == {"hades.git_tree.v1", "hades.php_graph.v1"}
+    assert {upload["job_id"] for upload in fake.uploads} == {None}
+    assert all(upload["workspace_binding_id"] == "wb_1" for upload in fake.uploads)
+    assert fake.pull_upload_counts == [0]
+
+
 def test_cleanup_orphaned_memory_cache_removes_unlinked_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
@@ -1267,6 +1345,7 @@ def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch
     assert payload["actions"] == [
         "Background backend sync is backing off; run `hades backend sync` to retry now.",
         "Run `hades backend quality-report --record` to establish a governance baseline.",
+        "Run `hades backend worker-setup` in this checkout before claiming backend task work.",
     ]
 
 
@@ -1333,6 +1412,7 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
     assert payload["actions"] == [
         "Project awareness is incomplete; inspect `awareness` before source-free diagnosis.",
         "Run `hades backend quality-report --record` to establish a governance baseline.",
+        "Run `hades backend worker-setup` in this checkout before claiming backend task work.",
     ]
     assert identity["personal_memory"]["scope"] == "local_profile"
     assert identity["personal_memory"]["portable_between_devices"] is False
@@ -1741,7 +1821,8 @@ def test_backend_status_reports_source_free_diagnosis_readiness(monkeypatch, tmp
         "diagnosable_without_source_bindings": 1,
     }
     assert payload["actions"] == [
-        "Run `hades backend quality-report --record` to establish a governance baseline."
+        "Run `hades backend quality-report --record` to establish a governance baseline.",
+        "Run `hades backend worker-setup` in this checkout before claiming backend task work.",
     ]
     assert binding_awareness["status"] == "ready"
     assert binding_awareness["diagnosable_without_source"] is True
