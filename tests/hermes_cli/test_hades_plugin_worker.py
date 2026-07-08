@@ -177,6 +177,43 @@ def test_plugin_worker_builds_prompt_from_kanban_task_contract(monkeypatch, tmp_
     assert "shared Hades memory" in prompts[0]
 
 
+def test_plugin_worker_preserves_structured_list_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_plugin_worker import run_plugin_worker_once
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    class FakeClient:
+        def list_agent_work_items(self, **payload):
+            raise HadesBackendError(
+                "403: workspace mismatch",
+                status_code=403,
+                code="workspace_mismatch",
+                next_step="Run `hades backend worker-setup` in this checkout.",
+            )
+
+        def close(self):
+            self.closed = True
+
+    result = run_plugin_worker_once(client_factory=FakeClient, local_workspace_id="lw_1", quiet=True)
+
+    assert result.exit_code == 1
+    assert result.summary["error"]["code"] == "workspace_mismatch"
+    assert result.summary["error"]["next_step"] == "Run `hades backend worker-setup` in this checkout."
+
+
 def test_plugin_worker_keeps_heartbeating_while_runner_is_active(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

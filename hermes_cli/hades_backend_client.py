@@ -23,6 +23,22 @@ _SECRET_PATTERNS = (
 class HadesBackendError(RuntimeError):
     """Raised when the Hades backend returns an error response."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+        next_step: str | None = None,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.next_step = next_step
+        self.details = details
+
 
 def _normalize_base_url(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")

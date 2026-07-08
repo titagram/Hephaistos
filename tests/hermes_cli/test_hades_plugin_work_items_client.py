@@ -102,6 +102,41 @@ def test_plugin_fail_uses_message_payload_and_redacts_errors():
     assert "super-secret-token" not in text
 
 
+def test_plugin_client_preserves_structured_error_code_and_next_step():
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli.hades_plugin_work_items_client import HadesPluginWorkItemsClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "error": {
+                    "code": "workspace_mismatch",
+                    "message": "Workspace is not allowed for this device token=super-secret-token",
+                    "next_step": "Run `hades backend worker-setup` in this checkout.",
+                }
+            },
+        )
+
+    client = HadesPluginWorkItemsClient(
+        "https://backend.example",
+        "plugin-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        client.list_agent_work_items(project_id="proj_1")
+    except HadesBackendError as exc:
+        error = exc
+    else:  # pragma: no cover - guard
+        raise AssertionError("expected HadesBackendError")
+
+    assert error.status_code == 403
+    assert error.code == "workspace_mismatch"
+    assert error.next_step == "Run `hades backend worker-setup` in this checkout."
+    assert "super-secret-token" not in str(error)
+
+
 def test_plugin_client_supports_device_repository_and_workspace_setup_routes():
     from hermes_cli.hades_plugin_work_items_client import HadesPluginWorkItemsClient
 

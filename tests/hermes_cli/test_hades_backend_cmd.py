@@ -699,6 +699,59 @@ def test_backend_tasks_list_outputs_available_local_agent_work(monkeypatch, tmp_
     assert cached.kind == "hades.kanban_task_work.v1"
 
 
+def test_backend_tasks_list_preserves_plugin_error_code(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli.hades_backend_client import HadesBackendError
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_tasks as tasks
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    class FakeClient:
+        def list_agent_work_items(self, **payload):
+            raise HadesBackendError(
+                "403: workspace mismatch",
+                status_code=403,
+                code="workspace_mismatch",
+                next_step="Run `hades backend worker-setup` in this checkout.",
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tasks.runtime, "plugin_work_items_client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="list",
+            project_id=None,
+            repository_id=None,
+            agent_key="local_agent",
+            status="queued",
+            limit=20,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["error"]["code"] == "workspace_mismatch"
+    assert payload["error"]["next_step"] == "Run `hades backend worker-setup` in this checkout."
+
+
 def test_backend_tasks_work_reuses_plugin_worker(monkeypatch, capsys):
     import hermes_cli.hades_backend_cmd as cmd
     import hermes_cli.hades_plugin_worker as worker

@@ -8,7 +8,7 @@ from threading import Event, Thread
 from typing import Any, Callable
 
 from hermes_cli import hades_backend_db as db
-from hermes_cli.hades_backend_client import redact_secret
+from hermes_cli.hades_backend_client import HadesBackendError, redact_secret
 
 logger = logging.getLogger("hermes_cli.hades_backend")
 
@@ -95,6 +95,12 @@ def run_plugin_worker_once(
     try:
         client = client_factory() if client_factory is not None else runtime.plugin_work_items_client_from_config()
     except Exception as exc:
+        code, message, next_step = _plugin_exception_error(
+            exc,
+            fallback_code="plugin_client_error",
+            fallback_message="Failed to create plugin API client",
+            fallback_next_step="Run `hades backend worker-setup` and verify plugin token configuration.",
+        )
         logger.warning(
             "hades_backend.worker.client_error",
             extra={
@@ -108,9 +114,9 @@ def run_plugin_worker_once(
             print(f"backend worker: failed to create plugin client: {redact_secret(str(exc))}")
         return PluginWorkerResult(
             _error_summary(
-                "plugin_client_error",
-                f"Failed to create plugin API client: {redact_secret(str(exc))}",
-                "Run `hades backend worker-setup` and verify plugin token configuration.",
+                code,
+                message,
+                next_step,
                 project_id=selected_project_id,
                 agent_key=agent_key,
             ),
@@ -138,6 +144,12 @@ def run_plugin_worker_once(
         )
         items = _response_work_items(response)
     except Exception as exc:
+        code, message, next_step = _plugin_exception_error(
+            exc,
+            fallback_code="list_work_items_failed",
+            fallback_message="Failed to list plugin work items",
+            fallback_next_step="Check backend connectivity, plugin token scope, and project/workspace binding.",
+        )
         logger.warning(
             "hades_backend.worker.list_error",
             extra={
@@ -152,9 +164,9 @@ def run_plugin_worker_once(
         _close_client(client)
         return PluginWorkerResult(
             _error_summary(
-                "list_work_items_failed",
-                f"Failed to list plugin work items: {redact_secret(str(exc))}",
-                "Check backend connectivity, plugin token scope, and project/workspace binding.",
+                code,
+                message,
+                next_step,
                 project_id=selected_project_id,
                 agent_key=agent_key,
             ),
@@ -297,6 +309,22 @@ def _default_agent_runner(prompt: str, item: dict[str, Any]) -> str:
 
     agent = AIAgent(platform="hades_backend_worker")
     return agent.chat(prompt)
+
+
+def _plugin_exception_error(
+    exc: Exception,
+    *,
+    fallback_code: str,
+    fallback_message: str,
+    fallback_next_step: str,
+) -> tuple[str, str, str]:
+    if isinstance(exc, HadesBackendError):
+        code = str(exc.code or fallback_code)
+        next_step = str(exc.next_step or fallback_next_step)
+    else:
+        code = fallback_code
+        next_step = fallback_next_step
+    return code, f"{fallback_message}: {redact_secret(str(exc))}", next_step
 
 
 def _run_with_periodic_heartbeat(

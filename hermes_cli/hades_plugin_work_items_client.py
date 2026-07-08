@@ -75,7 +75,15 @@ class HadesPluginWorkItemsClient:
                 body: Any = response.json()
             except ValueError:
                 body = response.text
-            raise HadesBackendError(f"{response.status_code}: {redact_secret(body)}")
+            error = _plugin_error_body(body)
+            message = str(error.get("message") or body or "plugin API request failed")
+            raise HadesBackendError(
+                f"{response.status_code}: {redact_secret(message)}",
+                status_code=response.status_code,
+                code=str(error.get("code") or "").strip() or None,
+                next_step=str(error.get("next_step") or "").strip() or None,
+                details=redact_secret(body),
+            )
         if not response.content:
             return {}
         try:
@@ -192,3 +200,12 @@ class HadesPluginWorkItemsClient:
             f"agent-work-items/{work_item_id}/fail",
             json_body={"lease_token": lease_token, "message": message},
         )
+
+
+def _plugin_error_body(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        return {"message": body}
+    error = body.get("error")
+    if isinstance(error, dict):
+        return error
+    return body

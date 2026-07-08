@@ -14,7 +14,7 @@ from typing import Any
 
 from hermes_cli import hades_backend_db as db
 from hermes_cli.config import load_config, save_config
-from hermes_cli.hades_backend_client import redact_secret
+from hermes_cli.hades_backend_client import HadesBackendError, redact_secret
 from hermes_cli.hades_plugin_worker import _prompt_from_work_item_payload
 from hermes_cli import hades_backend_runtime as runtime
 
@@ -154,10 +154,16 @@ def list_plugin_tasks(
             limit=max(1, int(limit or 20)),
         )
     except Exception as exc:
+        code, message, next_step = _plugin_exception_error(
+            exc,
+            fallback_code="list_work_items_failed",
+            fallback_message="Failed to list plugin work items",
+            fallback_next_step="Check backend connectivity, plugin token scope, and project/workspace binding.",
+        )
         return _error(
-            "list_work_items_failed",
-            f"Failed to list plugin work items: {redact_secret(str(exc))}",
-            "Check backend connectivity, plugin token scope, and project/workspace binding.",
+            code,
+            message,
+            next_step,
         )
     finally:
         if client is None:
@@ -296,6 +302,22 @@ def _agent_work_quality(items: list[Any]) -> dict[str, Any]:
     from hermes_cli.hades_quality_report import build_agent_work_quality_report
 
     return build_agent_work_quality_report(items)
+
+
+def _plugin_exception_error(
+    exc: Exception,
+    *,
+    fallback_code: str,
+    fallback_message: str,
+    fallback_next_step: str,
+) -> tuple[str, str, str]:
+    if isinstance(exc, HadesBackendError):
+        code = str(exc.code or fallback_code)
+        next_step = str(exc.next_step or fallback_next_step)
+    else:
+        code = fallback_code
+        next_step = fallback_next_step
+    return code, f"{fallback_message}: {redact_secret(str(exc))}", next_step
 
 
 def _response_items(response: dict[str, Any]) -> list[dict[str, Any]]:
