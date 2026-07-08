@@ -112,6 +112,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     worker.add_argument("--interval", type=float, default=5.0, help="Seconds to wait between idle loop cycles")
     worker.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles; 0 means unlimited")
     worker.add_argument("--idle-exit-after", type=int, default=0, help="Exit after this many consecutive idle cycles; 0 disables")
+    worker.add_argument("--max-errors", type=int, default=3, help="Stop loop after this many consecutive failed cycles; 0 disables")
     worker.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
     worker.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
     worker.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
@@ -136,6 +137,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     tasks_work.add_argument("--interval", type=float, default=5.0, help="Seconds to wait between idle loop cycles")
     tasks_work.add_argument("--max-cycles", type=int, default=0, help="Maximum loop cycles; 0 means unlimited")
     tasks_work.add_argument("--idle-exit-after", type=int, default=0, help="Exit after this many consecutive idle cycles; 0 disables")
+    tasks_work.add_argument("--max-errors", type=int, default=3, help="Stop loop after this many consecutive failed cycles; 0 disables")
     tasks_work.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
     tasks_work.add_argument("--local-workspace-id", default=None, help="Plugin local workspace id used to claim work")
     tasks_work.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
@@ -960,6 +962,7 @@ def _run_worker_loop(
 ) -> int:
     max_cycles = max(0, int(getattr(args, "max_cycles", 0) or 0))
     idle_exit_after = max(0, int(getattr(args, "idle_exit_after", 0) or 0))
+    max_errors = max(0, int(getattr(args, "max_errors", 3) or 0))
     interval = max(0.0, float(getattr(args, "interval", 5.0) or 0.0))
     aggregate = {
         "mode": "loop",
@@ -970,6 +973,7 @@ def _run_worker_loop(
         "failed": 0,
         "skipped": 0,
         "idle_cycles": 0,
+        "error_cycles": 0,
         "last": {},
     }
     exit_code = 0
@@ -995,13 +999,19 @@ def _run_worker_loop(
             aggregate["idle_cycles"] += 1
         else:
             aggregate["idle_cycles"] = 0
-        if result.exit_code:
-            exit_code = result.exit_code
+        cycle_failed = bool(result.exit_code) or int(summary.get("failed") or 0) > 0
+        if cycle_failed:
+            exit_code = result.exit_code or 1
+            aggregate["error_cycles"] += 1
+        else:
+            aggregate["error_cycles"] = 0
         if idle_exit_after and aggregate["idle_cycles"] >= idle_exit_after:
+            break
+        if max_errors and aggregate["error_cycles"] >= max_errors:
             break
         if max_cycles and aggregate["cycles"] >= max_cycles:
             break
-        if aggregate["idle_cycles"] > 0 and interval > 0:
+        if (aggregate["idle_cycles"] > 0 or aggregate["error_cycles"] > 0) and interval > 0:
             time.sleep(interval)
 
     if json_mode:
@@ -1012,7 +1022,7 @@ def _run_worker_loop(
             f"{aggregate['cycles']} cycle(s), listed {aggregate['listed']} item(s), "
             f"claimed {aggregate['claimed']}, completed {aggregate['completed']}, "
             f"failed {aggregate['failed']}, skipped {aggregate['skipped']}, "
-            f"idle {aggregate['idle_cycles']}"
+            f"idle {aggregate['idle_cycles']}, error cycles {aggregate['error_cycles']}"
         )
     return exit_code
 

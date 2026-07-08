@@ -543,9 +543,55 @@ def test_backend_worker_loop_polls_until_idle_limit(monkeypatch, capsys):
     assert rc == 0
     assert payload["mode"] == "loop"
     assert payload["cycles"] == 3
+    assert payload["error_cycles"] == 0
     assert payload["completed"] == 1
     assert payload["idle_cycles"] == 2
     assert len(calls) == 3
+    assert sleeps == [0.25]
+
+
+def test_backend_worker_loop_stops_after_consecutive_error_limit(monkeypatch, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_worker as worker
+
+    calls = []
+    sleeps = []
+
+    def fake_run_plugin_worker_once(**kwargs):
+        calls.append(kwargs)
+        return worker.PluginWorkerResult(
+            {"listed": 1, "claimed": 1, "completed": 0, "failed": 1, "skipped": 0},
+            1,
+        )
+
+    monkeypatch.setattr(worker, "run_plugin_worker_once", fake_run_plugin_worker_once)
+    monkeypatch.setattr(cmd.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker",
+            once=False,
+            loop=True,
+            interval=0.25,
+            max_cycles=0,
+            idle_exit_after=0,
+            max_errors=2,
+            project_id="proj_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            limit=1,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["mode"] == "loop"
+    assert payload["cycles"] == 2
+    assert payload["failed"] == 2
+    assert payload["error_cycles"] == 2
+    assert len(calls) == 2
     assert sleeps == [0.25]
 
 
@@ -1249,6 +1295,7 @@ def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_
         "Review 1 refused/conflicted memory proposal(s).",
         "Inspect last backend sync error and rerun `hades backend sync`.",
         "Run `hades backend quality-report --record` to establish a governance baseline.",
+        "Run `hades backend worker-setup` in this checkout before claiming backend task work.",
     ]
 
 
