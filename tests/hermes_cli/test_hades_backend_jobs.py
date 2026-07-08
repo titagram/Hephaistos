@@ -744,6 +744,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "namespace App\\Livewire;\n"
         "use Livewire\\Component;\n"
         "class OrdersStatus extends Component {\n"
+        "    public string $status = '';\n"
         "    public function saveOrder() {}\n"
         "    public function render() {}\n"
         "}\n",
@@ -1896,6 +1897,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
     assert ("blade_wire_model", "view:orders.show", "livewire_property:status") in edges
+    assert (
+        "blade_wire_model_property",
+        "livewire_property:status",
+        "livewire_property:App\\Livewire\\OrdersStatus.status",
+    ) in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
     assert ("blade_wire_action_method", "livewire_action:saveOrder", "OrdersStatus@saveOrder") in edges
     assert {
@@ -1981,6 +1987,18 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "livewire_property:status",
         "wire_model": "status",
         "wire_modifiers": ["defer"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 21,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model_property",
+        "from": "livewire_property:status",
+        "to": "livewire_property:App\\Livewire\\OrdersStatus.status",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "wire_model": "status",
+        "livewire_property": "status",
+        "livewire_property_type": "string",
         "path": "resources/views/orders/show.blade.php",
         "line": 21,
     } in artifact["edges"]

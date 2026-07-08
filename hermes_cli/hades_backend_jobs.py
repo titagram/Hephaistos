@@ -2188,6 +2188,46 @@ def _append_blade_view_graph(
                 max_edges=max_edges,
             ) or truncated
 
+    def append_livewire_model_properties(model: str, offset: int) -> None:
+        nonlocal truncated
+        model = str(model or "").strip()
+        if not model or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", model):
+            return
+        # Livewire nested bindings like "order.status" resolve through the root
+        # public property. Keep the full binding and the root property only.
+        root_property = model.split(".", 1)[0].split(":", 1)[0].split("*", 1)[0]
+        if not root_property or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", root_property):
+            return
+        line = _line_number(source, offset)
+        for alias in sorted(referenced_livewire_aliases):
+            component = known_livewire.get(alias) or {}
+            properties = component.get("properties") or {}
+            if not isinstance(properties, dict):
+                continue
+            property_info = properties.get(root_property) or {}
+            component_class = str(component.get("class") or "")
+            if not property_info or not component_class:
+                continue
+            key = ("blade_wire_model_property", f"{component_class}.{root_property}", line)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edge = {
+                "kind": "blade_wire_model_property",
+                "from": f"livewire_property:{model}",
+                "to": f"livewire_property:{component_class}.{root_property}",
+                "livewire_alias": alias,
+                "livewire_class": component_class,
+                "wire_model": model,
+                "livewire_property": root_property,
+                "path": rel,
+                "line": line,
+            }
+            property_type = str(property_info.get("type") or "")
+            if property_type:
+                edge["livewire_property_type"] = property_type
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2294,6 +2334,7 @@ def _append_blade_view_graph(
         append_blade_validation_error(match.group("field"), match.start("field"))
     for match in BLADE_WIRE_MODEL_RE.finditer(source):
         append_blade_wire_model(match.group("model"), match.group("modifiers"), match.start("model"))
+        append_livewire_model_properties(match.group("model"), match.start("model"))
     for match in BLADE_WIRE_ACTION_RE.finditer(source):
         append_blade_wire_action(
             match.group("event"),
@@ -4133,6 +4174,7 @@ def _php_livewire_component_index(
                 continue
             fqcn = str(class_info["name"])
             methods: dict[str, str] = {}
+            properties: dict[str, dict[str, Any]] = {}
             for method_match in PHP_METHOD_RE.finditer(source):
                 method_class = _class_context(classes, method_match.start())
                 if not method_class or method_class.get("name") != fqcn:
@@ -4143,12 +4185,28 @@ def _php_livewire_component_index(
                 method_symbol = php_method_symbols.get((fqcn, method_name), "")
                 if method_name and method_symbol:
                     methods[method_name] = method_symbol
+            for property_match in PHP_PROPERTY_RE.finditer(source):
+                property_class = _class_context(classes, property_match.start())
+                if not property_class or property_class.get("name") != fqcn:
+                    continue
+                if str(property_match.group("visibility") or "") != "public":
+                    continue
+                property_name = str(property_match.group("name") or "")
+                if not property_name:
+                    continue
+                property_type = str(property_match.group("type") or "").lstrip("?")
+                properties[property_name] = {
+                    "name": property_name,
+                    "type": property_type,
+                    "line": _line_number(source, property_match.start()),
+                }
             alias = _livewire_alias_from_path(rel, str(class_info.get("short_name") or _php_short_name(fqcn)))
             if alias:
                 components[alias] = {
                     "alias": alias,
                     "class": fqcn,
                     "methods": methods,
+                    "properties": properties,
                     "path": rel,
                     "line": class_info.get("line"),
                 }
