@@ -678,6 +678,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        \\Illuminate\\Support\\Facades\\Storage::disk('s3')->put('orders/export.csv', 'secret csv payload');\n"
         "        $request->input('customer_note', 'private fallback note');\n"
         "        $request->hasFile('invoice_pdf');\n"
+        "        \\Illuminate\\Support\\Facades\\Cookie::queue('orders_filter', 'private cookie value');\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1084,6 +1085,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_request_input_access", "route:orders.show", "request_field:customer_note") in edges
     assert ("request_file_access", "OrderController@show", "request_file:invoice_pdf") in edges
     assert ("route_request_file_access", "route:orders.show", "request_file:invoice_pdf") in edges
+    assert ("cookie_access", "OrderController@show", "cookie:orders_filter") in edges
+    assert ("route_cookie_access", "route:orders.show", "cookie:orders_filter") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1341,6 +1344,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 36,
+    } in artifact["edges"]
+    assert {
+        "kind": "cookie_access",
+        "from": "OrderController@show",
+        "to": "cookie:orders_filter",
+        "cookie_name": "orders_filter",
+        "cookie_operation": "set",
+        "cookie_method": "cookie_queue",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 37,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_cookie_access",
+        "from": "route:orders.show",
+        "to": "cookie:orders_filter",
+        "handler": "OrderController@show",
+        "cookie_name": "orders_filter",
+        "cookie_operation": "set",
+        "cookie_method": "cookie_queue",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 37,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1865,6 +1893,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "secret csv payload" not in str(artifact)
     assert "private fallback note" not in str(artifact)
     assert "$request->hasFile" not in str(artifact)
+    assert "private cookie value" not in str(artifact)
     assert "locked" not in str(artifact)
     assert "return view('orders.show'" not in str(artifact)
     assert "$this->app->singleton" not in str(artifact)

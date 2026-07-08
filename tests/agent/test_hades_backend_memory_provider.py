@@ -2518,6 +2518,88 @@ def test_hades_backend_graph_search_finds_local_request_file_access_edges(monkey
     )
 
 
+def test_hades_backend_graph_search_finds_local_cookie_access_edges(monkeypatch, tmp_path):
+    artifact = _php_graph_artifact()
+    artifact["edges"].extend(
+        [
+            {
+                "kind": "cookie_access",
+                "from": "OrderController@show",
+                "to": "cookie:orders_filter",
+                "cookie_name": "orders_filter",
+                "cookie_operation": "set",
+                "cookie_method": "cookie_queue",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 50,
+            },
+            {
+                "kind": "route_cookie_access",
+                "from": "route:orders.show",
+                "to": "cookie:orders_filter",
+                "handler": "OrderController@show",
+                "cookie_name": "orders_filter",
+                "cookie_operation": "set",
+                "cookie_method": "cookie_queue",
+                "method": "GET",
+                "uri": "/orders/{order}",
+                "path": "routes/web.php",
+                "line": 4,
+                "source_path": "app/Http/Controllers/OrderController.php",
+                "source_line": 50,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": artifact,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders cookie orders_filter queue set", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "route_cookie_access"
+        and ref["from"] == "route:orders.show"
+        and ref["to"] == "cookie:orders_filter"
+        and ref["provenance"]["cookie_name"] == "orders_filter"
+        and ref["provenance"]["cookie_operation"] == "set"
+        and ref["provenance"]["cookie_method"] == "cookie_queue"
+        for ref in graph_refs
+    )
+    assert any(
+        "cookie_name=orders_filter" in item["summary"]
+        and "cookie_operation=set" in item["summary"]
+        and "cookie_method=cookie_queue" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_model_metadata_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

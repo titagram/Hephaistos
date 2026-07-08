@@ -230,6 +230,12 @@ PHP_RESPONSE_HELPER_RE = re.compile(
     r"\bresponse\s*\(\s*\)\s*->\s*(?P<method>json|noContent)\s*\(",
     re.IGNORECASE | re.MULTILINE,
 )
+PHP_RESPONSE_COOKIE_CHAIN_RE = re.compile(
+    r"\bresponse\s*\(\s*\)\s*->\s*(?P<method>cookie|withoutCookie)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
+PHP_COOKIE_HELPER_RE = re.compile(r"(?<!->)(?<!::)\bcookie\s*\(", re.IGNORECASE | re.MULTILINE)
+PHP_COOKIE_FACADE_RE = re.compile(r"\bCookie::(?P<method>queue|forget|make)\s*\(", re.IGNORECASE | re.MULTILINE)
 PHP_REDIRECT_HELPER_RE = re.compile(
     r"\b(?P<helper>redirect|back)\s*\(",
     re.IGNORECASE | re.MULTILINE,
@@ -3877,6 +3883,145 @@ def _append_php_route_http_response_status_edges(
     return truncated
 
 
+def _php_cookie_operation(method: str) -> str:
+    normalized = method.lower()
+    if normalized in {"forget", "withoutcookie"}:
+        return "delete"
+    return "set"
+
+
+def _php_cookie_name_literal(raw: str) -> str:
+    literal = _php_quoted_literal(raw)
+    if not literal or len(literal) > 128:
+        return ""
+    if "$" in literal or "{" in literal or "}" in literal:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", literal):
+        return ""
+    return literal
+
+
+def _php_cookie_access_items(
+    *,
+    source: str,
+    method_body_offset: int,
+    relative_call_start: int,
+    cookie_method: str,
+    args: str,
+) -> list[dict[str, Any]]:
+    parts = _split_top_level_items(args)
+    cookie_name = _php_cookie_name_literal(parts[0][0]) if parts else ""
+    if not cookie_name:
+        return []
+    method = cookie_method.lower().removeprefix("cookie_")
+    return [
+        {
+            "cookie_name": cookie_name,
+            "cookie_operation": _php_cookie_operation(method),
+            "cookie_method": cookie_method,
+            "line": _line_number(source, method_body_offset + relative_call_start),
+        }
+    ]
+
+
+def _php_cookie_accesses_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    accesses: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+
+    def append_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("cookie_name") or ""),
+                str(item.get("cookie_operation") or ""),
+                str(item.get("cookie_method") or ""),
+                int(item.get("line") or 0),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            accesses.append(item)
+
+    for pattern, method_prefix in (
+        (PHP_RESPONSE_COOKIE_CHAIN_RE, "cookie_response"),
+        (PHP_COOKIE_FACADE_RE, "cookie"),
+    ):
+        for match in pattern.finditer(method_body):
+            open_abs = method_body_offset + match.end() - 1
+            close_abs = _balanced_end(source, open_abs, "(", ")")
+            if close_abs == -1:
+                continue
+            method = str(match.group("method") or "").lower()
+            append_items(
+                _php_cookie_access_items(
+                    source=source,
+                    method_body_offset=method_body_offset,
+                    relative_call_start=match.start(),
+                    cookie_method=f"{method_prefix}_{method}",
+                    args=source[open_abs + 1 : close_abs],
+                )
+            )
+
+    for match in PHP_COOKIE_HELPER_RE.finditer(method_body):
+        open_abs = method_body_offset + match.end() - 1
+        close_abs = _balanced_end(source, open_abs, "(", ")")
+        if close_abs == -1:
+            continue
+        append_items(
+            _php_cookie_access_items(
+                source=source,
+                method_body_offset=method_body_offset,
+                relative_call_start=match.start(),
+                cookie_method="cookie_helper",
+                args=source[open_abs + 1 : close_abs],
+            )
+        )
+    return accesses
+
+
+def _append_php_route_cookie_access_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    accesses: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not accesses:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for access in accesses:
+            cookie_name = str(access.get("cookie_name") or "")
+            if not cookie_name:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_cookie_access",
+                    "from": route_ref,
+                    "to": f"cookie:{cookie_name}",
+                    "handler": method_symbol,
+                    "cookie_name": cookie_name,
+                    "cookie_operation": access.get("cookie_operation"),
+                    "cookie_method": access.get("cookie_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": access.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_quoted_literal(raw: str) -> str:
     match = PHP_QUOTED_VALUE_RE.fullmatch(raw.strip())
     return str(match.group("value") or "") if match else ""
@@ -5980,6 +6125,33 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 http_responses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            cookie_accesses = _php_cookie_accesses_for_method(source, method_body, method_body_offset)
+            for access in cookie_accesses:
+                cookie_name = str(access.get("cookie_name") or "")
+                if not cookie_name:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "cookie_access",
+                        "from": method_symbol,
+                        "to": f"cookie:{cookie_name}",
+                        "cookie_name": cookie_name,
+                        "cookie_operation": access.get("cookie_operation"),
+                        "cookie_method": access.get("cookie_method"),
+                        "path": rel,
+                        "line": access.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_cookie_access_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                cookie_accesses,
                 edges,
                 max_edges=max_edges,
             ) or truncated
