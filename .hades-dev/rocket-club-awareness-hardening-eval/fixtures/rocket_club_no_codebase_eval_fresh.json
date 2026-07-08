@@ -1,0 +1,233 @@
+{
+  "fixtures": [
+    {
+      "case_id": "rc_booking_controller_or_model",
+      "expected_confidence": "high",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+      "id": "gpt__rc_booking_controller_or_model",
+      "model_family": "gpt",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER3S7G3SHA08QT1QXZAT4",
+        "evidence_pack:01KX0ER3ZNQK5VKYQXYGFS98J3",
+        "graph:BookingController@validateBooking",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1491",
+        "graph:route:console.bookings.store",
+        "source_slice:01KX0EEP6BNQJPBTTGA2G9MHEV"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "gpt: Booking creation requires registered user or guest alias"
+    },
+    {
+      "case_id": "rc_payment_or_subscription_schema",
+      "expected_confidence": "high",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+      "id": "gpt__rc_payment_or_subscription_schema",
+      "model_family": "gpt",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER47BBNPA6WZ5RFQZYKZJ",
+        "evidence_pack:01KX0ER4BDKS4CQE3Y6Q9X1XZY",
+        "graph:RecordManualPayment@buildFifoAllocations",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "graph:DomainException",
+        "source_slice:01KX0EESGA854G190Z4SBBERB6"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "gpt: Manual payment exceeds open account balance"
+    },
+    {
+      "case_id": "rc_filament_or_inertia_policy",
+      "expected_confidence": "medium",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+      "id": "gpt__rc_filament_or_inertia_policy",
+      "model_family": "gpt",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER4JX85R0KB607DVT7AME",
+        "evidence_pack:01KX0ER4Q27WFADP81F27CB0S0",
+        "graph:AdminPanelProvider@panel",
+        "graph:App\\Providers\\Filament\\AdminPanelProvider",
+        "graph:Filament\\Http\\Middleware\\Authenticate",
+        "source_slice:01KX0EEV53ADS8BHYABWVYVWNB"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "gpt: Filament admin requires Filament admin authentication"
+    },
+    {
+      "case_id": "rc_incomplete_missing_source_slice",
+      "expected_confidence": "insufficient",
+      "expected_diagnosable_without_source": false,
+      "expected_freshness_status": "current",
+      "expected_missing_evidence": [
+        "source_slice"
+      ],
+      "expected_root_cause_id": null,
+      "id": "gpt__rc_incomplete_missing_source_slice",
+      "model_family": "gpt",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER4ZZ8DPTJX2EM8MC5GYR",
+        "evidence_pack:01KX0ER54115J7YZ1AXXETFNQH",
+        "graph:route:console.tournament-registrations.offer",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:75",
+        "graph:TournamentController@offerWaitlistSpot"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "gpt: Tournament waitlist offer lacks handler source slice"
+    },
+    {
+      "case_id": "rc_booking_controller_or_model",
+      "expected_confidence": "high",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+      "id": "deepseek-v4-flash__rc_booking_controller_or_model",
+      "model_family": "deepseek-v4-flash",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER3S7G3SHA08QT1QXZAT4",
+        "evidence_pack:01KX0ER3ZNQK5VKYQXYGFS98J3",
+        "graph:BookingController@validateBooking",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1491",
+        "graph:route:console.bookings.store",
+        "source_slice:01KX0EEP6BNQJPBTTGA2G9MHEV"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "deepseek-v4-flash: Booking creation requires registered user or guest alias"
+    },
+    {
+      "case_id": "rc_payment_or_subscription_schema",
+      "expected_confidence": "high",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+      "id": "deepseek-v4-flash__rc_payment_or_subscription_schema",
+      "model_family": "deepseek-v4-flash",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER47BBNPA6WZ5RFQZYKZJ",
+        "evidence_pack:01KX0ER4BDKS4CQE3Y6Q9X1XZY",
+        "graph:RecordManualPayment@buildFifoAllocations",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "graph:DomainException",
+        "source_slice:01KX0EESGA854G190Z4SBBERB6"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "deepseek-v4-flash: Manual payment exceeds open account balance"
+    },
+    {
+      "case_id": "rc_filament_or_inertia_policy",
+      "expected_confidence": "medium",
+      "expected_diagnosable_without_source": true,
+      "expected_freshness_status": "current",
+      "expected_root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+      "id": "deepseek-v4-flash__rc_filament_or_inertia_policy",
+      "model_family": "deepseek-v4-flash",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER4JX85R0KB607DVT7AME",
+        "evidence_pack:01KX0ER4Q27WFADP81F27CB0S0",
+        "graph:AdminPanelProvider@panel",
+        "graph:App\\Providers\\Filament\\AdminPanelProvider",
+        "graph:Filament\\Http\\Middleware\\Authenticate",
+        "source_slice:01KX0EEV53ADS8BHYABWVYVWNB"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "deepseek-v4-flash: Filament admin requires Filament admin authentication"
+    },
+    {
+      "case_id": "rc_incomplete_missing_source_slice",
+      "expected_confidence": "insufficient",
+      "expected_diagnosable_without_source": false,
+      "expected_freshness_status": "current",
+      "expected_missing_evidence": [
+        "source_slice"
+      ],
+      "expected_root_cause_id": null,
+      "id": "deepseek-v4-flash__rc_incomplete_missing_source_slice",
+      "model_family": "deepseek-v4-flash",
+      "required_evidence_refs": [
+        "bug_evidence:01KX0ER4ZZ8DPTJX2EM8MC5GYR",
+        "evidence_pack:01KX0ER54115J7YZ1AXXETFNQH",
+        "graph:route:console.tournament-registrations.offer",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:75",
+        "graph:TournamentController@offerWaitlistSpot"
+      ],
+      "required_tool_calls": [
+        "hades_backend_project_awareness_status",
+        "hades_backend_bug_evidence_search",
+        "hades_backend_evidence_pack_search",
+        "hades_backend_graph_search",
+        "hades_backend_source_slice_fetch",
+        "hades_backend_diagnosis_report_create"
+      ],
+      "title": "deepseek-v4-flash: Tournament waitlist offer lacks handler source slice"
+    }
+  ],
+  "metadata": {
+    "fresh_backend_project": true,
+    "fresh_eval_root": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval",
+    "generated_at": "2026-07-08T07:10:00+02:00",
+    "head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+    "no_codebase_cwd": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/no-source-cwd",
+    "project_id": "01KX0E53DVFDWMTCDRCA0T7RDK",
+    "target_project": "/Users/gabriele/Dev/rocket-club/progetto-biliardo-codex",
+    "workspace_binding_id": "01KX0E67VNAPW9RV00CT5VR56M"
+  },
+  "schema": "hades.no_codebase_eval.v1",
+  "trajectory_dirs": [
+    "../trajectories/gpt",
+    "../trajectories/deepseek-v4-flash"
+  ]
+}

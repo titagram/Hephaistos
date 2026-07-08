@@ -506,3 +506,39 @@ def test_hades_no_codebase_eval_checks_diagnosis_taxonomy_fields():
     assert failed_report["results"][0]["failures"] == ["bug class mismatch"]
     assert passed_report["status"] == "passed"
     assert passed_report["taxonomy_coverage"] == 1.0
+
+
+def test_hades_no_codebase_eval_treats_string_null_root_cause_as_absent_for_insufficient_case():
+    from hermes_cli.hades_no_codebase_eval import (
+        NoCodebaseDiagnosisFixture,
+        NoCodebaseDiagnosisRun,
+        evaluate_no_codebase_diagnoses,
+    )
+
+    fixture = NoCodebaseDiagnosisFixture(
+        fixture_id="insufficient_case",
+        title="Insufficient case",
+        expected_root_cause_id=None,
+        expected_confidence="insufficient",
+        expected_freshness_status="current",
+        expected_diagnosable_without_source=False,
+        required_evidence_refs=(),
+        required_tool_calls=(),
+        expected_missing_evidence=("source_slice",),
+        requires_persisted_report=False,
+    )
+    run = NoCodebaseDiagnosisRun(
+        fixture_id="insufficient_case",
+        root_cause_id="null",
+        confidence="insufficient",
+        freshness_status="current",
+        diagnosable_without_source=False,
+        evidence_refs=(),
+        tool_calls=(),
+        missing_evidence=("source_slice",),
+        persisted_report=False,
+    )
+
+    report = evaluate_no_codebase_diagnoses([fixture], [run]).to_dict()
+
+    assert report["status"] == "passed"

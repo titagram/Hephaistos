@@ -223,7 +223,7 @@ def evaluate_no_codebase_diagnoses(
         if fixture.expects_insufficient_evidence:
             if run.confidence != "insufficient":
                 failures.append("expected insufficient confidence")
-            if run.root_cause_id not in ("", None, "not_determined", "not determined"):
+            if str(run.root_cause_id or "").strip().lower() not in {"", "not_determined", "not determined", "null", "none", "n/a", "not_applicable"}:
                 failures.append("insufficient case must not claim a precise root cause")
             missing = set(fixture.expected_missing_evidence)
             if missing and not missing.issubset(set(run.missing_evidence)):
@@ -655,6 +655,8 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
+    if text.lower() in {"null", "none", "n/a", "not_applicable"}:
+        return None
     return text or None
 
 

@@ -262,6 +262,11 @@ Risultato operativo:
   segreti non redatti nel payload annidato.
 - La quality suite no-codebase locale passa sugli 8 run reali Rocket Club gia'
   salvati, con `taxonomy_coverage=1.0` e zero source-access violations.
+- Fresh Rocket Club hardening project creato e indicizzato: candidate
+  source-slice jobs approvati, backend `diagnosable_without_source=true`,
+  DeepSeek fresh `4/4`. Gate completo ancora non chiuso perche' GPT/Codex non
+  e' rieseguibile sull'endpoint disponibile (`gpt-5.3-codex-spark` non
+  supportato).
 
 - [ ] Aggiungere provisioning/revoca bootstrap token da dashboard o comando
   setup, evitando inserimenti DB manuali.

@@ -1,0 +1,13 @@
+{
+  "schema": "hades.no_codebase_quality_suite.v1",
+  "suites": [
+    {
+      "id": "rocket_club_awareness_hardening_fresh",
+      "required_status": "passed",
+      "fixture": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/fixtures/rocket_club_no_codebase_eval_fresh.json",
+      "min_accuracy": 1.0,
+      "min_root_cause_accuracy": 1.0,
+      "min_insufficient_accuracy": 1.0
+    }
+  ]
+}
