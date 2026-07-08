@@ -112,6 +112,7 @@ def run_backend_sync(
     pulled = completed = waiting = failed = skipped = 0
     memory_snapshots = proposals_synced = proposal_errors = 0
     artifacts_uploaded = artifact_errors = artifacts_skipped = source_slices_uploaded = source_slice_errors = inbox_events = 0
+    source_slice_candidates = source_slice_jobs_waiting = 0
     sync_errors = 0
     expired = 0
 
@@ -207,6 +208,8 @@ def run_backend_sync(
                         ),
                     )
                     waiting += 1
+                    if capability == "read_source_slice":
+                        source_slice_jobs_waiting += 1
                     continue
 
                 with db.connect_closing() as conn:
@@ -225,6 +228,10 @@ def run_backend_sync(
                 if final_status == "completed":
                     uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, agent, binding, jid, result)
                     slices_uploaded, slices_failed = _upload_job_source_slice(client, agent, binding, jid, result)
+                    artifact = result.get("artifact") if isinstance(result, dict) else None
+                    candidates = artifact.get("source_slice_candidates") if isinstance(artifact, dict) else None
+                    if isinstance(candidates, list):
+                        source_slice_candidates += len(candidates)
                     artifacts_uploaded += uploaded
                     artifact_errors += upload_failed
                     artifacts_skipped += upload_skipped
@@ -250,6 +257,16 @@ def run_backend_sync(
                     pass
                 failed += 1
 
+    with db.connect_closing() as conn:
+        source_slice_jobs_waiting = max(
+            source_slice_jobs_waiting,
+            sum(
+                1
+                for job in db.list_jobs(conn, statuses=["waiting_confirmation"])
+                if job.capability == "read_source_slice"
+            ),
+        )
+
     summary = {
         "pulled": pulled,
         "completed": completed,
@@ -265,6 +282,8 @@ def run_backend_sync(
         "artifact_errors": artifact_errors,
         "source_slices_uploaded": source_slices_uploaded,
         "source_slice_errors": source_slice_errors,
+        "source_slice_candidates": source_slice_candidates,
+        "source_slice_jobs_waiting": source_slice_jobs_waiting,
         "inbox_events": inbox_events,
         "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }

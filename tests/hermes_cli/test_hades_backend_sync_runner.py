@@ -140,6 +140,83 @@ def test_sync_runner_expires_waiting_jobs_after_deadline(monkeypatch, tmp_path):
     assert fake.statuses == [("job_expired", "expired", fake.statuses[0][2])]
 
 
+def test_sync_runner_counts_pending_source_slice_jobs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.statuses = []
+
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def pull_jobs(self, **payload):
+            return {
+                "jobs": [
+                    {
+                        "job_id": "job_slice",
+                        "capability": "read_source_slice",
+                        "policy": "confirm",
+                        "requires_confirmation": True,
+                        "payload": {
+                            "path": "app/Http/Controllers/BookingController.php",
+                            "start_line": 1,
+                            "end_line": 25,
+                            "candidate_key": "a" * 64,
+                        },
+                    }
+                ]
+            }
+
+        def update_job_status(self, job_id, **payload):
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+    fake = FakeClient()
+    result = run_backend_sync(client_factory=lambda: fake)
+
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_slice")
+        summary = hdb.get_sync_state(conn, "last_sync_summary")
+
+    assert result.exit_code == 0
+    assert result.summary["waiting"] == 1
+    assert result.summary["source_slice_jobs_waiting"] == 1
+    assert job is not None
+    assert job.status == "waiting_confirmation"
+    assert summary["source_slice_jobs_waiting"] == 1
+
+
 def test_cleanup_orphaned_memory_cache_removes_unlinked_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
