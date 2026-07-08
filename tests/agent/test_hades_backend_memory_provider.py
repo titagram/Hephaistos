@@ -4322,6 +4322,15 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "path": "resources/views/orders/show.blade.php",
                 "line": 25,
             },
+            {
+                "kind": "blade_alpine_data_factory",
+                "from": "view:orders.show",
+                "to": "alpine_factory:filtersForm",
+                "alpine_data_factory": "filtersForm",
+                "alpine_data_source": "factory",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 26,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4511,6 +4520,27 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         "alpine_action=applyFilters" in item["summary"]
         and "alpine_event=click" in item["summary"]
         for item in result["items"]
+    )
+    factory_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view alpine filtersForm factory", "limit": 10},
+        )
+    )
+    factory_graph_refs = [item["graph_ref"] for item in factory_result["items"]]
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_alpine_data_factory"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "alpine_factory:filtersForm"
+        and ref["provenance"]["alpine_data_factory"] == "filtersForm"
+        and ref["provenance"]["alpine_data_source"] == "factory"
+        for ref in factory_graph_refs
+    )
+    assert any(
+        "alpine_data_factory=filtersForm" in item["summary"]
+        and "alpine_data_source=factory" in item["summary"]
+        for item in factory_result["items"]
     )
 
 

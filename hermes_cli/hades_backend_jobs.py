@@ -1919,6 +1919,12 @@ def _alpine_data_top_level_keys(data: str) -> list[str]:
     return keys[:24]
 
 
+def _alpine_data_factory_name(data: str) -> str:
+    source = str(data or "").strip()
+    match = re.fullmatch(r"(?P<name>\$?[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*){0,4})(?:\s*\(\s*\))?", source)
+    return match.group("name") if match else ""
+
+
 def _php_schedule_cadence(chain: str) -> str:
     ignored = {"name", "timezone", "withoutOverlapping", "onOneServer", "runInBackground", "evenInMaintenanceMode"}
     for match in PHP_SCHEDULE_CADENCE_RE.finditer(chain or ""):
@@ -2308,6 +2314,31 @@ def _append_blade_view_graph(
                 max_edges=max_edges,
             ) or truncated
 
+    def append_blade_alpine_data_factory(data: str, offset: int) -> None:
+        nonlocal truncated
+        factory_name = _alpine_data_factory_name(data)
+        if not factory_name:
+            return
+        line = _line_number(source, offset)
+        target = f"alpine_factory:{factory_name}"
+        key = ("blade_alpine_data_factory", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_alpine_data_factory",
+                "from": view_id,
+                "to": target,
+                "alpine_data_factory": factory_name,
+                "alpine_data_source": "factory",
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_blade_alpine_model_data(model: str, offset: int) -> None:
         nonlocal truncated
         model = str(model or "").strip()
@@ -2623,6 +2654,7 @@ def _append_blade_view_graph(
         append_livewire_model_validations(match.group("model"), match.start("model"))
     for match in BLADE_ALPINE_DATA_RE.finditer(source):
         append_blade_alpine_data(match.group("data"), match.start("data"))
+        append_blade_alpine_data_factory(match.group("data"), match.start("data"))
     for match in BLADE_ALPINE_MODEL_RE.finditer(source):
         append_blade_alpine_model(match.group("model"), match.group("modifiers"), match.start("model"))
         append_blade_alpine_model_data(match.group("model"), match.start("model"))
