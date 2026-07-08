@@ -169,6 +169,59 @@ def test_doctor_cleanup_stale_jobs_dry_run_keeps_rows(monkeypatch, tmp_path, cap
     assert job is not None
 
 
+def test_doctor_cleanup_stale_task_work_dry_run_keeps_rows(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from hermes_cli import hades_backend_db as db
+    import hermes_cli.doctor as doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    now = 2_000_000
+    old = now - 31 * 86400
+    with db.connect_closing() as conn:
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_done_old",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="completed",
+            payload={"prompt": "old done"},
+            result={"final_response": "done"},
+        )
+        conn.execute(
+            "UPDATE plugin_work_items SET updated_at = ? WHERE work_item_id = ?",
+            (old, "awi_done_old"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(db, "_now", lambda: now)
+    doctor.run_doctor(
+        SimpleNamespace(
+            fix=False,
+            ack=None,
+            doctor_action="cleanup",
+            orphaned_cache=False,
+            stale_jobs=False,
+            stale_task_work=True,
+            stale_proposals=False,
+            stale_inbox=False,
+            retention_days=30,
+            all=False,
+            yes=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with db.connect_closing() as conn:
+        item = db.get_plugin_work_item(conn, "awi_done_old")
+
+    assert "Would remove 1 stale terminal Hades backend task work item" in output
+    assert "dry run only" in output
+    assert item is not None
+
+
 def test_doctor_backend_report_is_explicit_and_structured(monkeypatch, tmp_path, capsys, caplog):
     import logging
 

@@ -22,6 +22,14 @@ TERMINAL_BACKEND_JOB_STATUSES = (
     "skipped",
     "unlinked",
 )
+TERMINAL_PLUGIN_WORK_ITEM_STATUSES = (
+    "cancelled",
+    "completed",
+    "completed_with_incomplete_memory",
+    "expired",
+    "failed",
+    "skipped",
+)
 REVIEWED_MEMORY_PROPOSAL_STATUSES = ("accepted", "acknowledged")
 
 
@@ -851,6 +859,51 @@ def cleanup_terminal_backend_jobs(
         with write_txn(conn):
             for job_id in remove_ids:
                 conn.execute("DELETE FROM backend_jobs WHERE job_id = ?", (job_id,))
+    removed = 0 if dry_run else len(remove_ids)
+    return {
+        "candidates": len(rows),
+        "would_remove": len(remove_ids),
+        "removed": removed,
+        "bytes": total_bytes,
+        **{f"status_{status}": count for status, count in sorted(by_status.items())},
+    }
+
+
+def cleanup_terminal_plugin_work_items(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool = False,
+    retention_days: int = 30,
+    now: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    current = int(now if now is not None else _now())
+    cutoff = current - (max(0, int(retention_days)) * 86400)
+    placeholders = ",".join("?" for _ in TERMINAL_PLUGIN_WORK_ITEM_STATUSES)
+    rows = conn.execute(
+        f"""
+        SELECT work_item_id, status, payload, result, updated_at
+        FROM plugin_work_items
+        WHERE status IN ({placeholders})
+        ORDER BY updated_at ASC
+        """,
+        list(TERMINAL_PLUGIN_WORK_ITEM_STATUSES),
+    ).fetchall()
+    remove_ids: list[str] = []
+    by_status: dict[str, int] = {}
+    total_bytes = 0
+    for row in rows:
+        if not (include_all or retention_days == 0 or int(row["updated_at"]) <= cutoff):
+            continue
+        remove_ids.append(str(row["work_item_id"]))
+        status = str(row["status"])
+        by_status[status] = by_status.get(status, 0) + 1
+        total_bytes += len(str(row["payload"]).encode("utf-8"))
+        total_bytes += len(str(row["result"] or "").encode("utf-8"))
+    if remove_ids and not dry_run:
+        with write_txn(conn):
+            for work_item_id in remove_ids:
+                conn.execute("DELETE FROM plugin_work_items WHERE work_item_id = ?", (work_item_id,))
     removed = 0 if dry_run else len(remove_ids)
     return {
         "candidates": len(rows),

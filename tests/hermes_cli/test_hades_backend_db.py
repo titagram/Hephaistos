@@ -186,3 +186,70 @@ def test_plugin_work_items_are_tracked_separately_from_backend_jobs(tmp_path):
     assert loaded.status == "completed"
     assert loaded.lease_token == "lease_1"
     assert loaded.result == {"final_response": "done"}
+
+
+def test_cleanup_terminal_plugin_work_items_keeps_active_and_fresh_items(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    now = 2_000_000
+    old = now - 31 * 86400
+    fresh = now - 2 * 86400
+    with db.connect_closing(tmp_path / "hades_backend.db") as conn:
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_completed_old",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="completed",
+            payload={"prompt": "old completed"},
+            result={"final_response": "done"},
+        )
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_failed_fresh",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="failed",
+            payload={"prompt": "fresh failure"},
+            result={"message": "failed"},
+        )
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_queued_old",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="queued",
+            payload={"prompt": "active old"},
+        )
+        conn.execute(
+            "UPDATE plugin_work_items SET updated_at = ? WHERE work_item_id = ?",
+            (old, "awi_completed_old"),
+        )
+        conn.execute(
+            "UPDATE plugin_work_items SET updated_at = ? WHERE work_item_id = ?",
+            (fresh, "awi_failed_fresh"),
+        )
+        conn.execute(
+            "UPDATE plugin_work_items SET updated_at = ? WHERE work_item_id = ?",
+            (old, "awi_queued_old"),
+        )
+        conn.commit()
+
+        dry_run = db.cleanup_terminal_plugin_work_items(conn, retention_days=30, now=now, dry_run=True)
+        before_delete = db.list_plugin_work_items(conn)
+        deleted = db.cleanup_terminal_plugin_work_items(conn, retention_days=30, now=now)
+        remaining = db.list_plugin_work_items(conn)
+
+    assert dry_run["would_remove"] == 1
+    assert dry_run["removed"] == 0
+    assert dry_run["status_completed"] == 1
+    assert {item.work_item_id for item in before_delete} == {
+        "awi_completed_old",
+        "awi_failed_fresh",
+        "awi_queued_old",
+    }
+    assert deleted["removed"] == 1
+    assert {item.work_item_id for item in remaining} == {"awi_failed_fresh", "awi_queued_old"}

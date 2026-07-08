@@ -560,13 +560,14 @@ def _run_hades_doctor_cleanup(args) -> None:
     selected = {
         "orphaned_cache": getattr(args, "orphaned_cache", False),
         "stale_jobs": getattr(args, "stale_jobs", False),
+        "stale_task_work": getattr(args, "stale_task_work", False),
         "stale_proposals": getattr(args, "stale_proposals", False),
         "stale_inbox": getattr(args, "stale_inbox", False),
     }
     if not any(selected.values()):
         print(
             "doctor cleanup: pass one of --orphaned-cache, --stale-jobs, "
-            "--stale-proposals, or --stale-inbox"
+            "--stale-task-work, --stale-proposals, or --stale-inbox"
         )
         return
     dry_run = not getattr(args, "yes", False)
@@ -605,6 +606,16 @@ def _run_hades_doctor_cleanup(args) -> None:
             _print_report(
                 "stale terminal Hades backend job(s)",
                 hdb.cleanup_terminal_backend_jobs(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_task_work"]:
+            _print_report(
+                "stale terminal Hades backend task work item(s)",
+                hdb.cleanup_terminal_plugin_work_items(
                     conn,
                     include_all=include_all,
                     retention_days=_retention(30),

@@ -41,6 +41,7 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
     cleanup = doctor_sub.add_parser("cleanup", help="Run local Hades maintenance cleanup")
     cleanup.add_argument("--orphaned-cache", action="store_true", help="Remove orphaned Hades shared-memory cache")
     cleanup.add_argument("--stale-jobs", action="store_true", help="Remove stale terminal Hades backend jobs")
+    cleanup.add_argument("--stale-task-work", action="store_true", help="Remove stale terminal Hades backend task work")
     cleanup.add_argument(
         "--stale-proposals",
         action="store_true",
