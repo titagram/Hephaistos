@@ -4075,6 +4075,43 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "path": "resources/views/orders/partials/summary.blade.php",
                 "line": 2,
             },
+            {
+                "kind": "blade_authorization_include_model",
+                "from": "ability:view",
+                "to": "App\\Models\\Order",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "include_parent_view": "view:orders.show",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 2,
+            },
+            {
+                "kind": "blade_authorization_include_policy_method",
+                "from": "ability:view",
+                "to": "OrderPolicy@view",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "include_parent_view": "view:orders.show",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "policy_class": "App\\Policies\\OrderPolicy",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 2,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4102,7 +4139,7 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders partial summary include data order route param", "limit": 10},
+            {"query": "orders partial summary include data order route param policy model", "limit": 10},
         )
     )
 
@@ -4141,6 +4178,22 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         and ref["from"] == "ability:view"
         and ref["to"] == "route_param:orders.show.order"
         and ref["provenance"]["included_view"] == "orders.partials.summary"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_include_model"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "App\\Models\\Order"
+        and ref["provenance"]["table"] == "orders"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_include_policy_method"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "OrderPolicy@view"
+        and ref["provenance"]["policy_class"] == "App\\Policies\\OrderPolicy"
         for ref in graph_refs
     )
     assert any(

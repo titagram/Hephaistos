@@ -6836,8 +6836,42 @@ Integrazione locale:
 
 Resta fuori da questa tranche:
 
-- Propagazione verso model/policy dal partial data slot, include alias multipli,
-  component props, `@each` e data-flow attraverso nested partials.
+- Include alias multipli, component props, `@each` e data-flow attraverso
+  nested partials.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_include_data_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `119 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade partial authorization model/policy graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per collegare authorization nei
+partial Blade a model e policy method quando il context parent e' noto.
+
+Integrazione locale:
+
+- Estende il post-processing metadata-only degli edge include authorization con
+  la mappa route model binding e le policy gia' indicizzate.
+- Aggiunge `blade_authorization_include_model` quando il partial authorization
+  passa da include data a un route param con model binding tipizzato.
+- Aggiunge `blade_authorization_include_policy_method` quando quel model ha una
+  policy mappata e il metodo policy per l'ability e' indicizzato.
+- Gli edge salvano solo ability, helper, subject, included view, data key,
+  parent view, route param, model/table, policy class, path e line.
+- Non conserva template/source raw e non interpreta espressioni dinamiche.
+
+Resta fuori da questa tranche:
+
+- Alias multipli tra parent e partial, component props, `@each`, nested
+  partials e policy dinamiche non mappate staticamente.
 
 Verifiche eseguite:
 

@@ -4357,7 +4357,14 @@ def _php_route_model_binding_index(
     return bindings
 
 
-def _append_blade_include_authorization_edges(edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+def _append_blade_include_authorization_edges(
+    edges: list[dict[str, Any]],
+    *,
+    route_model_binding_by_route: dict[str, dict[str, dict[str, str]]],
+    policy_by_model: dict[str, str],
+    php_method_symbols: dict[tuple[str, str], str],
+    max_edges: int,
+) -> bool:
     include_data_by_slot: dict[str, list[dict[str, Any]]] = {}
     route_param_by_slot: dict[str, list[dict[str, Any]]] = {}
     authorization_by_slot: dict[str, list[dict[str, Any]]] = {}
@@ -4424,6 +4431,8 @@ def _append_blade_include_authorization_edges(edges: list[dict[str, Any]], *, ma
                     seen.add(key)
                     truncated = not _edge_append(edges, include_data_edge, max_edges=max_edges) or truncated
                 for route_edge in route_edges:
+                    route_name = str(route_edge.get("route_name") or "")
+                    route_param = str(route_edge.get("route_param") or "")
                     route_param_edge = {
                         "kind": "blade_authorization_include_route_param",
                         "from": f"ability:{ability}",
@@ -4435,8 +4444,8 @@ def _append_blade_include_authorization_edges(edges: list[dict[str, Any]], *, ma
                         "include_data_key": include_edge.get("include_data_key"),
                         "include_source_variable": include_edge.get("include_source_variable"),
                         "include_parent_view": include_edge.get("from"),
-                        "route_name": route_edge.get("route_name"),
-                        "route_param": route_edge.get("route_param"),
+                        "route_name": route_name,
+                        "route_param": route_param,
                         "path": auth_edge.get("path"),
                         "line": auth_edge.get("line"),
                     }
@@ -4451,6 +4460,71 @@ def _append_blade_include_authorization_edges(edges: list[dict[str, Any]], *, ma
                         continue
                     seen.add(route_key)
                     truncated = not _edge_append(edges, route_param_edge, max_edges=max_edges) or truncated
+                    binding = (route_model_binding_by_route.get(route_name) or {}).get(route_param) or {}
+                    model_class = str(binding.get("model") or "")
+                    model_table = str(binding.get("table") or "")
+                    if model_class:
+                        model_edge = {
+                            "kind": "blade_authorization_include_model",
+                            "from": f"ability:{ability}",
+                            "to": model_class,
+                            "ability": ability,
+                            "authorization_helper": helper,
+                            "authorization_subject": subject,
+                            "included_view": include_edge.get("included_view"),
+                            "include_data_key": include_edge.get("include_data_key"),
+                            "include_source_variable": include_edge.get("include_source_variable"),
+                            "include_parent_view": include_edge.get("from"),
+                            "route_name": route_name,
+                            "route_param": route_param,
+                            "model": model_class,
+                            "table": model_table,
+                            "path": auth_edge.get("path"),
+                            "line": auth_edge.get("line"),
+                        }
+                        model_key = (
+                            str(model_edge.get("kind") or ""),
+                            str(model_edge.get("from") or ""),
+                            str(model_edge.get("to") or ""),
+                            str(model_edge.get("path") or ""),
+                            str(model_edge.get("line") or ""),
+                        )
+                        if model_key not in seen:
+                            seen.add(model_key)
+                            truncated = not _edge_append(edges, model_edge, max_edges=max_edges) or truncated
+                    policy_class = policy_by_model.get(model_class, "") if model_class else ""
+                    policy_method_symbol = php_method_symbols.get((policy_class, ability), "") if policy_class else ""
+                    if policy_method_symbol:
+                        policy_edge = {
+                            "kind": "blade_authorization_include_policy_method",
+                            "from": f"ability:{ability}",
+                            "to": policy_method_symbol,
+                            "ability": ability,
+                            "authorization_helper": helper,
+                            "authorization_subject": subject,
+                            "included_view": include_edge.get("included_view"),
+                            "include_data_key": include_edge.get("include_data_key"),
+                            "include_source_variable": include_edge.get("include_source_variable"),
+                            "include_parent_view": include_edge.get("from"),
+                            "route_name": route_name,
+                            "route_param": route_param,
+                            "policy_class": policy_class,
+                            "model": model_class,
+                            "table": model_table,
+                            "path": auth_edge.get("path"),
+                            "line": auth_edge.get("line"),
+                        }
+                        policy_key = (
+                            str(policy_edge.get("kind") or ""),
+                            str(policy_edge.get("from") or ""),
+                            str(policy_edge.get("to") or ""),
+                            str(policy_edge.get("path") or ""),
+                            str(policy_edge.get("line") or ""),
+                        )
+                        if policy_key in seen:
+                            continue
+                        seen.add(policy_key)
+                        truncated = not _edge_append(edges, policy_edge, max_edges=max_edges) or truncated
     return truncated
 
 
@@ -9068,7 +9142,13 @@ def _build_php_graph(
         "truncated": len(log_events) > MAX_LOG_EVENTS,
         "raw_source_included": False,
     }
-    truncated = _append_blade_include_authorization_edges(edges, max_edges=max_edges) or truncated
+    truncated = _append_blade_include_authorization_edges(
+        edges,
+        route_model_binding_by_route=route_model_binding_by_route,
+        policy_by_model=policy_by_model,
+        php_method_symbols=php_method_symbols,
+        max_edges=max_edges,
+    ) or truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",

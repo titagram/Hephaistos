@@ -1923,6 +1923,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_authorization", "view:orders.partials.summary", "ability:view") in edges
     assert ("blade_authorization_include_data", "ability:view", "view_data:orders.partials.summary.order") in edges
     assert ("blade_authorization_include_route_param", "ability:view", "route_param:orders.show.order") in edges
+    assert ("blade_authorization_include_model", "ability:view", "App\\Models\\Order") in edges
+    assert ("blade_authorization_include_policy_method", "ability:view", "OrderPolicy@view") in edges
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
@@ -2145,6 +2147,43 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "include_parent_view": "view:orders.show",
         "route_name": "orders.show",
         "route_param": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 2,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_include_model",
+        "from": "ability:view",
+        "to": "App\\Models\\Order",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 2,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_include_policy_method",
+        "from": "ability:view",
+        "to": "OrderPolicy@view",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "policy_class": "App\\Policies\\OrderPolicy",
+        "model": "App\\Models\\Order",
+        "table": "orders",
         "path": "resources/views/orders/partials/summary.blade.php",
         "line": 2,
     } in artifact["edges"]
