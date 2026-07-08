@@ -390,7 +390,12 @@ EVIDENCE_PACK_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
             },
             "payload": {
                 "type": "object",
-                "description": "Optional bounded structured bundle detail.",
+                "description": (
+                    "Optional bounded structured bundle detail. Prefer operational fields such as "
+                    "reproduction_steps, expected_behavior, actual_behavior, runtime_context, "
+                    "deploy_context, minimal_input, last_changed_refs, and missing_evidence. "
+                    "Do not include raw project dumps or unredacted secrets."
+                ),
                 "additionalProperties": True,
             },
             "head_commit": {
