@@ -1281,6 +1281,77 @@ def test_backend_status_reports_partial_project_awareness(monkeypatch, tmp_path)
     }
 
 
+def test_backend_status_reports_pending_source_slice_candidates(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.replace_memory_cache(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            version="mem_v1",
+            items=[{"kind": "resolved_bug", "summary": "Known login regression"}],
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "memory_snapshots": 1,
+                "artifacts_uploaded": 1,
+                "artifacts_skipped": 0,
+                "artifact_errors": 0,
+                "source_slices_uploaded": 0,
+                "source_slice_errors": 0,
+                "source_slice_candidates": 1,
+                "source_slice_jobs_waiting": 1,
+                "bug_evidence_items": 1,
+                "proposal_errors": 0,
+            },
+        )
+
+    monkeypatch.chdir(workspace)
+    payload = load_backend_status_payload()
+    binding_awareness = payload["bindings"][0]["awareness"]
+
+    assert binding_awareness["diagnosable_without_source"] is False
+    assert binding_awareness["coverage"]["source_slices"]["status"] == "missing"
+    assert binding_awareness["coverage"]["source_slice_candidates"] == {
+        "status": "pending",
+        "count": 1,
+        "waiting_jobs": 1,
+    }
+    assert binding_awareness["quality"]["missing"] == ["source_slice_index"]
+    assert binding_awareness["quality"]["actions"] == ["approve_source_slice_jobs"]
+
+
 def test_backend_status_explains_new_device_without_current_workspace_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

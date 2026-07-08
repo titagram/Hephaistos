@@ -527,6 +527,8 @@ def _binding_awareness_payload(
     artifact_errors = _count(last_summary, "artifact_errors")
     source_slices_uploaded = _count(last_summary, "source_slices_uploaded")
     source_slice_errors = _count(last_summary, "source_slice_errors")
+    source_slice_candidates = _count(last_summary, "source_slice_candidates")
+    source_slice_jobs_waiting = _count(last_summary, "source_slice_jobs_waiting")
     proposal_errors = _count(last_summary, "proposal_errors")
     bug_evidence_items = (
         _count(last_summary, "bug_evidence_items")
@@ -549,6 +551,11 @@ def _binding_awareness_payload(
 
     has_errors = bool(last_error or artifact_errors or source_slice_errors or proposal_errors)
     diagnosable_without_source = bool(is_linked and not has_errors and not missing)
+    quality_actions: list[str] = []
+    if source_slice_jobs_waiting:
+        quality_actions.append("approve_source_slice_jobs")
+    elif "source_slice_index" in missing and is_linked:
+        quality_actions.append("sync_source_slices")
     if not is_linked:
         status = "unlinked"
     elif has_errors:
@@ -579,6 +586,15 @@ def _binding_awareness_payload(
                 "uploaded_last_sync": source_slices_uploaded,
                 "errors_last_sync": source_slice_errors,
             },
+            "source_slice_candidates": {
+                "status": _source_slice_candidate_status(
+                    candidates=source_slice_candidates,
+                    waiting_jobs=source_slice_jobs_waiting,
+                    summary_scope=summary_scope,
+                ),
+                "count": source_slice_candidates,
+                "waiting_jobs": source_slice_jobs_waiting,
+            },
             "bug_evidence": {
                 "status": _coverage_status(bug_evidence_items, summary_scope, missing_status="unknown"),
                 "items_last_sync": bug_evidence_items,
@@ -587,6 +603,7 @@ def _binding_awareness_payload(
         "quality": {
             "confidence": "ready" if diagnosable_without_source else ("blocked" if has_errors or not is_linked else "incomplete"),
             "missing": missing,
+            "actions": quality_actions,
             "summary_scope": summary_scope,
             "last_sync_summary_updated_at": last_summary_updated_at,
         },
@@ -596,6 +613,16 @@ def _binding_awareness_payload(
 def _coverage_status(count: int, summary_scope: str, *, missing_status: str = "missing") -> str:
     if count <= 0:
         return missing_status
+    if summary_scope == "binding":
+        return "present"
+    return "aggregate"
+
+
+def _source_slice_candidate_status(*, candidates: int, waiting_jobs: int, summary_scope: str) -> str:
+    if waiting_jobs > 0:
+        return "pending"
+    if candidates <= 0:
+        return "none"
     if summary_scope == "binding":
         return "present"
     return "aggregate"
