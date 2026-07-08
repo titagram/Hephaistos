@@ -4021,16 +4021,36 @@ def test_hades_backend_graph_search_finds_local_blade_route_params(monkeypatch, 
 
 def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
-    graph_payload["edges"].append(
-        {
-            "kind": "blade_authorization",
-            "from": "view:orders.show",
-            "to": "ability:view",
-            "ability": "view",
-            "authorization_helper": "can",
-            "path": "resources/views/orders/show.blade.php",
-            "line": 14,
-        }
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "blade_authorization",
+                "from": "view:orders.show",
+                "to": "ability:view",
+                "ability": "view",
+                "authorization_helper": "can",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 14,
+            },
+            {
+                "kind": "blade_authorization",
+                "from": "view:orders.show",
+                "to": "ability:update",
+                "ability": "update",
+                "authorization_helper": "canany",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 17,
+            },
+            {
+                "kind": "blade_authorization",
+                "from": "view:orders.show",
+                "to": "ability:delete",
+                "ability": "delete",
+                "authorization_helper": "canany",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 17,
+            },
+        ]
     )
     provider = _create_linked_provider(
         monkeypatch,
@@ -4057,7 +4077,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view blade authorization can ability view", "limit": 10},
+            {"query": "orders view blade authorization can canany ability view update delete", "limit": 10},
         )
     )
 
@@ -4075,7 +4095,29 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "ability:update"
+        and ref["provenance"]["ability"] == "update"
+        and ref["provenance"]["authorization_helper"] == "canany"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "ability:delete"
+        and ref["provenance"]["ability"] == "delete"
+        and ref["provenance"]["authorization_helper"] == "canany"
+        for ref in graph_refs
+    )
+    assert any(
         "ability=view" in item["summary"] and "authorization_helper=can" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "ability=update" in item["summary"] and "authorization_helper=canany" in item["summary"]
         for item in result["items"]
     )
 

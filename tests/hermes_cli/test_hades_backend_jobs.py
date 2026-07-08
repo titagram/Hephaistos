@@ -947,6 +947,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@can('view', $order)\n"
         "<span>Allowed</span>\n"
         "@endcan\n"
+        "@canany(['update', 'delete'], $order)\n"
+        "<span>Bulk allowed</span>\n"
+        "@endcanany\n"
         "<input type=\"text\" name=\"customer_id\" value=\"{{ old('customer_id') }}\">\n"
         "@error('customer_id')\n"
         "<span>{{ $message }}</span>\n"
@@ -1899,6 +1902,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_route_param", "view:orders.show", "route_param:invoices.update.invoice") in edges
     assert ("blade_route_param", "view:orders.show", "route_param:orders.show.order") in edges
     assert ("blade_authorization", "view:orders.show", "ability:view") in edges
+    assert ("blade_authorization", "view:orders.show", "ability:update") in edges
+    assert ("blade_authorization", "view:orders.show", "ability:delete") in edges
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
@@ -1977,13 +1982,31 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 14,
     } in artifact["edges"]
     assert {
+        "kind": "blade_authorization",
+        "from": "view:orders.show",
+        "to": "ability:update",
+        "ability": "update",
+        "authorization_helper": "canany",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization",
+        "from": "view:orders.show",
+        "to": "ability:delete",
+        "ability": "delete",
+        "authorization_helper": "canany",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 17,
+    } in artifact["edges"]
+    assert {
         "kind": "blade_form_field",
         "from": "view:orders.show",
         "to": "request_field:customer_id",
         "form_field": "customer_id",
         "form_field_tag": "input",
         "path": "resources/views/orders/show.blade.php",
-        "line": 17,
+        "line": 20,
     } in artifact["edges"]
     assert {
         "kind": "blade_old_input",
@@ -1992,7 +2015,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "form_field": "customer_id",
         "input_helper": "old",
         "path": "resources/views/orders/show.blade.php",
-        "line": 17,
+        "line": 20,
     } in artifact["edges"]
     assert {
         "kind": "blade_validation_error",
@@ -2001,7 +2024,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "form_field": "customer_id",
         "validation_helper": "error",
         "path": "resources/views/orders/show.blade.php",
-        "line": 18,
+        "line": 21,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_model",
@@ -2010,7 +2033,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_model": "status",
         "wire_modifiers": ["defer"],
         "path": "resources/views/orders/show.blade.php",
-        "line": 21,
+        "line": 24,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_model_property",
@@ -2022,7 +2045,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "livewire_property": "status",
         "livewire_property_type": "string",
         "path": "resources/views/orders/show.blade.php",
-        "line": 21,
+        "line": 24,
     } in artifact["edges"]
     assert {
         "kind": "livewire_validation",
@@ -2050,7 +2073,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_path": "app/Livewire/OrdersStatus.php",
         "validation_line": 6,
         "path": "resources/views/orders/show.blade.php",
-        "line": 21,
+        "line": 24,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_model",
@@ -2059,7 +2082,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_model": "order.status",
         "wire_modifiers": ["lazy"],
         "path": "resources/views/orders/show.blade.php",
-        "line": 23,
+        "line": 26,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_model_property",
@@ -2071,7 +2094,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "livewire_property": "order",
         "livewire_property_type": "array",
         "path": "resources/views/orders/show.blade.php",
-        "line": 23,
+        "line": 26,
     } in artifact["edges"]
     assert {
         "kind": "livewire_validation",
@@ -2099,7 +2122,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_path": "app/Livewire/OrdersStatus.php",
         "validation_line": 6,
         "path": "resources/views/orders/show.blade.php",
-        "line": 23,
+        "line": 26,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_data",
@@ -2108,7 +2131,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_data_key": "filters",
         "alpine_data_source": "object",
         "path": "resources/views/orders/show.blade.php",
-        "line": 24,
+        "line": 27,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_data",
@@ -2117,7 +2140,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_data_key": "open",
         "alpine_data_source": "object",
         "path": "resources/views/orders/show.blade.php",
-        "line": 24,
+        "line": 27,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_model",
@@ -2126,7 +2149,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_model": "filters.status",
         "alpine_modifiers": ["debounce"],
         "path": "resources/views/orders/show.blade.php",
-        "line": 24,
+        "line": 27,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_model_data",
@@ -2135,7 +2158,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_model": "filters.status",
         "alpine_data_key": "filters",
         "path": "resources/views/orders/show.blade.php",
-        "line": 24,
+        "line": 27,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_action",
@@ -2145,7 +2168,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_event": "click",
         "alpine_modifiers": ["prevent"],
         "path": "resources/views/orders/show.blade.php",
-        "line": 25,
+        "line": 28,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_data_factory",
@@ -2154,7 +2177,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "alpine_data_factory": "filtersForm",
         "alpine_data_source": "factory",
         "path": "resources/views/orders/show.blade.php",
-        "line": 26,
+        "line": 29,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_action",
@@ -2164,7 +2187,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_event": "click",
         "wire_modifiers": ["debounce"],
         "path": "resources/views/orders/show.blade.php",
-        "line": 22,
+        "line": 25,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_action_method",
@@ -2174,7 +2197,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "livewire_class": "App\\Livewire\\OrdersStatus",
         "wire_action": "saveOrder",
         "path": "resources/views/orders/show.blade.php",
-        "line": 22,
+        "line": 25,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",

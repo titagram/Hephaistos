@@ -6625,8 +6625,8 @@ Integrazione locale:
 
 Resta fuori da questa tranche:
 
-- Parsing di `@canany`, espressioni dinamiche, model argument e variabili
-  Blade; questa tranche indicizza solo ability letterali sicure.
+- Array di ability, espressioni dinamiche, model argument e variabili Blade;
+  questa tranche indicizza solo ability singole letterali sicure.
 
 Verifiche eseguite:
 
@@ -6636,6 +6636,39 @@ Verifiche eseguite:
 - Locale graph/provider/docs:
   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
   passato: `115 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade canany authorization graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per authorization awareness di
+array ability nei template Blade metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` estende edge `blade_authorization` a direttive Blade
+  `@canany` e `@elsecanany` con array di ability letterali safe.
+- Ogni ability letterale produce un edge separato verso `ability:<name>` e
+  salva solo `ability`, `authorization_helper`, path e line.
+- Il parser resta bounded e non conserva array raw, model argument, expression
+  dinamiche, variabili Blade o template/source raw.
+- Il fallback locale di `hades_backend_graph_search` espone gli edge canany da
+  cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Risoluzione del model argument, array costruiti dinamicamente, variabili
+  contenenti ability e correlazione completa con policy method signature.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_authorization_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `118 passed`.
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
