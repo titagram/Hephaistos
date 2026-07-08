@@ -680,6 +680,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        $request->hasFile('invoice_pdf');\n"
         "        \\Illuminate\\Support\\Facades\\Cookie::queue('orders_filter', 'private cookie value');\n"
         "        DB::transaction(function () { DB::table('orders')->update(['status' => 'rolled_back_secret']); });\n"
+        "        Order::withTrashed()->where('status', 'archived')->first();\n"
+        "        Order::lockForUpdate()->first();\n"
+        "        Order::onlyTrashed()->forceDelete();\n"
+        "        Order::where('status', 'archived')->restore();\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1687,6 +1691,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("query_operation", "OrderController@show", "query:customers:join") in edges
     assert ("query_operation", "OrderController@show", "query:orders:first") in edges
     assert ("query_operation", "OrderController@show", "query:orders:update") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:withTrashed") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:lockForUpdate") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:forceDelete") in edges
+    assert ("query_operation", "OrderController@show", "query:orders:restore") in edges
     assert ("query_read", "OrderController@show", "table:orders") in edges
     assert ("query_write", "OrderController@show", "table:orders") in edges
     assert {
@@ -1721,6 +1729,54 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "access": "write",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 23,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:withTrashed",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "model": "App\\Models\\Order",
+        "operation": "withTrashed",
+        "access": "scope",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 39,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:lockForUpdate",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "model": "App\\Models\\Order",
+        "operation": "lockForUpdate",
+        "access": "lock",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 40,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:forceDelete",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "model": "App\\Models\\Order",
+        "operation": "forceDelete",
+        "access": "write",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 41,
+    } in artifact["edges"]
+    assert {
+        "kind": "query_operation",
+        "from": "OrderController@show",
+        "to": "query:orders:restore",
+        "class_context": "App\\Http\\Controllers\\OrderController",
+        "table": "orders",
+        "model": "App\\Models\\Order",
+        "operation": "restore",
+        "access": "write",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 42,
     } in artifact["edges"]
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges

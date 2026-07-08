@@ -374,11 +374,13 @@ PHP_QUERY_WRITE_TERMINALS = {
     "decrement",
     "delete",
     "firstorcreate",
+    "forcedelete",
     "forcecreate",
     "increment",
     "insert",
     "insertgetid",
     "insertorignore",
+    "restore",
     "truncate",
     "update",
     "updateorcreate",
@@ -386,6 +388,14 @@ PHP_QUERY_WRITE_TERMINALS = {
     "upsert",
 }
 PHP_QUERY_TABLE_METHODS = {"from", "join", "leftjoin", "rightjoin", "crossjoin"}
+PHP_QUERY_SCOPE_METHODS = {
+    "onlytrashed",
+    "withtrashed",
+    "withoutglobalscope",
+    "withoutglobalscopes",
+    "withouttrashed",
+}
+PHP_QUERY_LOCK_METHODS = {"lock", "lockforupdate", "sharedlock"}
 PHP_QUERY_SHAPE_METHODS = {
     "addselect",
     "groupby",
@@ -414,6 +424,8 @@ PHP_QUERY_TRACKED_METHODS = (
     PHP_QUERY_READ_TERMINALS
     | PHP_QUERY_WRITE_TERMINALS
     | PHP_QUERY_TABLE_METHODS
+    | PHP_QUERY_SCOPE_METHODS
+    | PHP_QUERY_LOCK_METHODS
     | PHP_QUERY_SHAPE_METHODS
     | PHP_QUERY_FILTER_METHODS
 )
@@ -482,15 +494,25 @@ PHP_ELOQUENT_QUERY_METHODS = {
     "first",
     "firstOrFail",
     "firstOrCreate",
+    "forceDelete",
     "get",
     "has",
+    "lock",
+    "lockForUpdate",
+    "onlyTrashed",
     "pluck",
     "query",
+    "restore",
+    "sharedLock",
     "update",
     "updateOrCreate",
     "value",
     "where",
     "whereHas",
+    "withTrashed",
+    "withoutGlobalScope",
+    "withoutGlobalScopes",
+    "withoutTrashed",
     "with",
 }
 PHP_SCHEMA_ACTION_RE = re.compile(
@@ -2557,6 +2579,10 @@ def _php_query_operation_access(method: str) -> str:
         return "write"
     if normalized in PHP_QUERY_READ_TERMINALS:
         return "read"
+    if normalized in PHP_QUERY_SCOPE_METHODS:
+        return "scope"
+    if normalized in PHP_QUERY_LOCK_METHODS:
+        return "lock"
     if normalized in PHP_QUERY_TABLE_METHODS:
         return "join" if normalized.endswith("join") else "table"
     if normalized in PHP_QUERY_FILTER_METHODS:
