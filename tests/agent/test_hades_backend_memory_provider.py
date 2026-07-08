@@ -4077,6 +4077,35 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
                 "path": "resources/views/orders/show.blade.php",
                 "line": 17,
             },
+            {
+                "kind": "blade_authorization_model",
+                "from": "ability:view",
+                "to": "App\\Models\\Order",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 14,
+            },
+            {
+                "kind": "blade_authorization_policy_method",
+                "from": "ability:view",
+                "to": "OrderPolicy@view",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "policy_class": "App\\Policies\\OrderPolicy",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 14,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4104,7 +4133,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders order view blade authorization can canany ability view update delete", "limit": 10},
+            {"query": "orders order view blade authorization policy model can canany ability view update delete", "limit": 10},
         )
     )
 
@@ -4161,6 +4190,22 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         and ref["to"] == "route_param:orders.show.order"
         and ref["provenance"]["route_name"] == "orders.show"
         and ref["provenance"]["route_param"] == "order"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_model"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "App\\Models\\Order"
+        and ref["provenance"]["table"] == "orders"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_policy_method"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "OrderPolicy@view"
+        and ref["provenance"]["policy_class"] == "App\\Policies\\OrderPolicy"
         for ref in graph_refs
     )
 

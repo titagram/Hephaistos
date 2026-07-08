@@ -1976,6 +1976,9 @@ def _append_blade_view_graph(
     edges: list[dict[str, Any]],
     *,
     route_by_name: dict[str, dict[str, Any]] | None = None,
+    route_model_binding_by_route: dict[str, dict[str, dict[str, str]]] | None = None,
+    policy_by_model: dict[str, str] | None = None,
+    php_method_symbols: dict[tuple[str, str], str] | None = None,
     livewire_component_by_alias: dict[str, dict[str, Any]] | None = None,
     max_symbols: int,
     max_edges: int,
@@ -1987,6 +1990,9 @@ def _append_blade_view_graph(
     truncated = False
     view_id = f"view:{view_name}"
     known_routes = route_by_name or {}
+    known_route_model_bindings = route_model_binding_by_route or {}
+    known_policies = policy_by_model or {}
+    known_php_method_symbols = php_method_symbols or {}
     known_livewire = livewire_component_by_alias or {}
     referenced_livewire_aliases: set[str] = set()
     referenced_alpine_data_keys: set[str] = set()
@@ -2132,6 +2138,56 @@ def _append_blade_view_graph(
             },
             max_edges=max_edges,
         ) or truncated
+        binding = (known_route_model_bindings.get(route_name) or {}).get(normalized_subject) or {}
+        model_class = str(binding.get("model") or "")
+        model_table = str(binding.get("table") or "")
+        if model_class:
+            model_key = ("blade_authorization_model", f"ability:{ability}", model_class, line)
+            if model_key not in seen_edges:
+                seen_edges.add(model_key)
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "blade_authorization_model",
+                        "from": f"ability:{ability}",
+                        "to": model_class,
+                        "ability": ability,
+                        "authorization_helper": str(helper or "").lower(),
+                        "authorization_subject": normalized_subject,
+                        "route_name": route_name,
+                        "route_param": normalized_subject,
+                        "model": model_class,
+                        "table": model_table,
+                        "path": rel,
+                        "line": line,
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+        policy_class = known_policies.get(model_class, "") if model_class else ""
+        policy_method_symbol = known_php_method_symbols.get((policy_class, ability), "") if policy_class else ""
+        if policy_method_symbol:
+            policy_key = ("blade_authorization_policy_method", f"ability:{ability}", policy_method_symbol, line)
+            if policy_key not in seen_edges:
+                seen_edges.add(policy_key)
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "blade_authorization_policy_method",
+                        "from": f"ability:{ability}",
+                        "to": policy_method_symbol,
+                        "ability": ability,
+                        "authorization_helper": str(helper or "").lower(),
+                        "authorization_subject": normalized_subject,
+                        "route_name": route_name,
+                        "route_param": normalized_subject,
+                        "policy_class": policy_class,
+                        "model": model_class,
+                        "table": model_table,
+                        "path": rel,
+                        "line": line,
+                    },
+                    max_edges=max_edges,
+                ) or truncated
 
     def append_blade_authorization(helper: str, ability: str, offset: int, subject: str = "") -> None:
         nonlocal truncated
@@ -4151,6 +4207,71 @@ def _append_php_route_model_binding_edges(
         }
         truncated = not _edge_append(edges, table_edge, max_edges=max_edges) or truncated
     return truncated
+
+
+def _php_route_model_binding_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    model_table_by_class: dict[str, str],
+    max_file_bytes: int,
+) -> dict[str, dict[str, dict[str, str]]]:
+    bindings: dict[str, dict[str, dict[str, str]]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for class_match in PHP_CLASS_RE.finditer(source):
+            class_name = class_match.group("name")
+            extends = class_match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            classes.append(
+                {
+                    "name": fqcn,
+                    "short_name": class_name,
+                    "role": _php_role(rel, fqcn, extends_fqcn or extends),
+                    "offset": class_match.start(),
+                    "line": _line_number(source, class_match.start()),
+                }
+            )
+        classes.sort(key=lambda item: int(item["offset"]))
+        for method_match in PHP_METHOD_RE.finditer(source):
+            class_info = _class_context(classes, method_match.start())
+            if not class_info:
+                continue
+            method_symbol = f"{_php_short_name(str(class_info['name']))}@{method_match.group('name')}"
+            route_candidates = routes_by_handler.get(method_symbol) or []
+            if not route_candidates:
+                continue
+            for param_match in PHP_TYPED_PARAM_RE.finditer(method_match.group("params") or ""):
+                param_name = str(param_match.group("name") or "")
+                param_class = _php_fqcn_resolved(namespace, param_match.group("class"), uses)
+                model_table = _php_model_table_for_class(param_class, model_table_by_class)
+                if not param_name or not model_table:
+                    continue
+                for route in route_candidates:
+                    route_name = str(route.get("name") or _php_route_id(route))
+                    if not route_name or param_name not in _php_route_params(route):
+                        continue
+                    bindings.setdefault(route_name, {})[param_name] = {
+                        "model": param_class,
+                        "table": model_table,
+                        "handler": method_symbol,
+                    }
+    return bindings
 
 
 def _php_form_request_validation_index(
@@ -7051,6 +7172,13 @@ def _build_php_graph(
         route_name = str(route.get("name") or "")
         if route_name:
             route_by_name.setdefault(route_name, route)
+    route_model_binding_by_route = _php_route_model_binding_index(
+        workspace_root,
+        php_files,
+        routes_by_handler=routes_by_handler,
+        model_table_by_class=model_table_by_class,
+        max_file_bytes=max_file_bytes,
+    )
     middleware_catalog = _laravel_middleware_catalog(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -7101,6 +7229,9 @@ def _build_php_graph(
             symbols,
             edges,
             route_by_name=route_by_name,
+            route_model_binding_by_route=route_model_binding_by_route,
+            policy_by_model=policy_by_model,
+            php_method_symbols=php_method_symbols,
             livewire_component_by_alias=livewire_component_by_alias,
             max_symbols=max_symbols,
             max_edges=max_edges,

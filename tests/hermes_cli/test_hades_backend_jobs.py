@@ -1907,6 +1907,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_authorization_route_param", "ability:view", "route_param:orders.show.order") in edges
     assert ("blade_authorization_route_param", "ability:update", "route_param:orders.show.order") in edges
     assert ("blade_authorization_route_param", "ability:delete", "route_param:orders.show.order") in edges
+    assert ("blade_authorization_model", "ability:view", "App\\Models\\Order") in edges
+    assert ("blade_authorization_model", "ability:update", "App\\Models\\Order") in edges
+    assert ("blade_authorization_model", "ability:delete", "App\\Models\\Order") in edges
+    assert ("blade_authorization_policy_method", "ability:view", "OrderPolicy@view") in edges
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
@@ -2040,6 +2044,35 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_param": "order",
         "path": "resources/views/orders/show.blade.php",
         "line": 17,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_model",
+        "from": "ability:view",
+        "to": "App\\Models\\Order",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_policy_method",
+        "from": "ability:view",
+        "to": "OrderPolicy@view",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "policy_class": "App\\Policies\\OrderPolicy",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 14,
     } in artifact["edges"]
     assert {
         "kind": "blade_form_field",
