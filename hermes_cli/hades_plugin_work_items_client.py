@@ -26,6 +26,7 @@ class HadesPluginWorkItemsClient:
         base_url: str,
         token: str,
         *,
+        device_id: str | None = None,
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -33,15 +34,20 @@ class HadesPluginWorkItemsClient:
         self.token = str(token or "").strip()
         if not self.token:
             raise ValueError("plugin API token is required")
+        default_headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+            "X-DevBoard-Protocol": "v1",
+            "User-Agent": "hades-agent/plugin-work-items-client",
+        }
+        clean_device_id = str(device_id or "").strip()
+        if clean_device_id:
+            default_headers["X-DevBoard-Device-Id"] = clean_device_id
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=timeout,
             transport=transport,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/json",
-                "User-Agent": "hades-agent/plugin-work-items-client",
-            },
+            headers=default_headers,
         )
 
     def close(self) -> None:
@@ -60,6 +66,10 @@ class HadesPluginWorkItemsClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        if json_body is not None:
+            json_body = {"protocol_version": "v1", **json_body}
+        elif method.upper() not in {"GET", "HEAD"}:
+            json_body = {"protocol_version": "v1"}
         try:
             response = self._client.request(
                 method,
@@ -198,7 +208,7 @@ class HadesPluginWorkItemsClient:
         return self._request(
             "POST",
             f"agent-work-items/{work_item_id}/fail",
-            json_body={"lease_token": lease_token, "message": message},
+            json_body={"lease_token": lease_token, "failure_reason": message},
         )
 
 

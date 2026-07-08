@@ -13,6 +13,7 @@ def test_plugin_work_items_client_uses_plugin_routes_and_bearer_auth():
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         assert request.headers["authorization"] == "Bearer plugin-token"
+        assert request.headers["x-devboard-protocol"] == "v1"
         if request.method == "GET":
             assert request.url.path == "/api/plugin/v1/agent-work-items"
             assert request.url.params["project_id"] == "proj_1"
@@ -20,10 +21,10 @@ def test_plugin_work_items_client_uses_plugin_routes_and_bearer_auth():
             return httpx.Response(200, json={"items": [{"id": "awi_1"}]})
         payload = json.loads(request.content.decode("utf-8"))
         if request.url.path.endswith("/claim"):
-            assert payload == {"local_workspace_id": "lw_1"}
+            assert payload == {"protocol_version": "v1", "local_workspace_id": "lw_1"}
             return httpx.Response(200, json={"lease_token": "lease_1", "item": {"id": "awi_1"}})
         if request.url.path.endswith("/heartbeat"):
-            assert payload == {"lease_token": "lease_1"}
+            assert payload == {"protocol_version": "v1", "lease_token": "lease_1"}
             return httpx.Response(200, json={"ok": True})
         raise AssertionError(f"unexpected request {request.method} {request.url.path}")
 
@@ -68,6 +69,7 @@ def test_plugin_complete_sends_chat_message_and_optional_memory_entry():
 
     assert bodies == [
         {
+            "protocol_version": "v1",
             "lease_token": "lease_1",
             "chat_message": "Done from local Hades.",
             "memory_entry": {"kind": "agent_note", "summary": "done", "payload": {"changed": []}},
@@ -82,7 +84,7 @@ def test_plugin_fail_uses_message_payload_and_redacts_errors():
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
         assert request.url.path == "/api/plugin/v1/agent-work-items/awi_1/fail"
-        assert payload == {"lease_token": "lease_1", "message": "nope"}
+        assert payload == {"protocol_version": "v1", "lease_token": "lease_1", "failure_reason": "nope"}
         return httpx.Response(500, json={"message": "token=super-secret-token failed"})
 
     client = HadesPluginWorkItemsClient(
@@ -148,6 +150,7 @@ def test_plugin_client_supports_device_repository_and_workspace_setup_routes():
         if request.url.path == "/api/plugin/v1/auth/check":
             return httpx.Response(200, json={"authenticated": True})
         if request.url.path == "/api/plugin/v1/devices/register":
+            assert body["protocol_version"] == "v1"
             assert body["fingerprint_hash"] == "sha256:device"
             return httpx.Response(200, json={"device_id": "dev_1", "status": "active"})
         if request.url.path == "/api/plugin/v1/projects":
@@ -156,6 +159,7 @@ def test_plugin_client_supports_device_repository_and_workspace_setup_routes():
             return httpx.Response(200, json={"repositories": [{"repository_id": "repo_1"}]})
         if request.url.path == "/api/plugin/v1/repositories/repo_1/local-workspaces":
             assert request.headers["x-devboard-device-id"] == "dev_1"
+            assert body["protocol_version"] == "v1"
             assert body["display_path"] == "~/repo"
             return httpx.Response(200, json={"local_workspace_id": "lw_1", "status": "linked"})
         raise AssertionError(f"unexpected request {request.method} {request.url.path}")
@@ -193,3 +197,20 @@ def test_plugin_client_supports_device_repository_and_workspace_setup_routes():
         "/api/plugin/v1/projects/proj_1/repositories",
         "/api/plugin/v1/repositories/repo_1/local-workspaces",
     ]
+
+
+def test_plugin_client_sends_configured_device_header_on_work_item_routes():
+    from hermes_cli.hades_plugin_work_items_client import HadesPluginWorkItemsClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-devboard-device-id"] == "dev_1"
+        return httpx.Response(200, json={"items": []})
+
+    client = HadesPluginWorkItemsClient(
+        "https://backend.example",
+        "plugin-token",
+        device_id="dev_1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.list_agent_work_items(project_id="proj_1") == {"items": []}

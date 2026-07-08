@@ -846,6 +846,98 @@ def test_backend_tasks_list_preserves_plugin_error_code(monkeypatch, tmp_path, c
     assert payload["error"]["next_step"] == "Run `hades backend worker-setup` in this checkout."
 
 
+def test_backend_tasks_list_returns_json_error_when_plugin_token_missing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_tasks as tasks
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    def raise_missing_token():
+        raise RuntimeError(
+            "Hades plugin API token is missing; set backend.plugin_token_env_key "
+            "or HADES_BACKEND_PLUGIN_TOKEN. Do not use the Hades agent token for plugin work."
+        )
+
+    monkeypatch.setattr(tasks.runtime, "plugin_work_items_client_from_config", raise_missing_token)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="list",
+            project_id=None,
+            repository_id=None,
+            agent_key="local_agent",
+            status="queued",
+            limit=20,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["error"]["code"] == "list_work_items_failed"
+    assert "plugin API token is missing" in payload["error"]["message"]
+    assert "plugin token" in payload["error"]["next_step"]
+
+
+def test_backend_worker_setup_returns_json_error_when_plugin_token_missing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_plugin_tasks as tasks
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    def raise_missing_token():
+        raise RuntimeError(
+            "Hades plugin API token is missing; set backend.plugin_token_env_key "
+            "or HADES_BACKEND_PLUGIN_TOKEN. Do not use the Hades agent token for plugin work."
+        )
+
+    monkeypatch.setattr(tasks.runtime, "plugin_work_items_client_from_config", raise_missing_token)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="worker-setup",
+            workspace=str(workspace),
+            repository_id=None,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["error"]["code"] == "worker_setup_failed"
+    assert "plugin API token is missing" in payload["error"]["message"]
+    assert "plugin token" in payload["error"]["next_step"]
+
+
 def test_backend_tasks_work_reuses_plugin_worker(monkeypatch, capsys):
     import hermes_cli.hades_backend_cmd as cmd
     import hermes_cli.hades_plugin_worker as worker

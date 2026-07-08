@@ -42,6 +42,12 @@ hades backend tasks work --loop --interval 5 --idle-exit-after 3 --json
 hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json --record
 ```
 
+The local task worker uses the plugin API, not the Hades agent token. Configure
+a dedicated plugin token through `backend.plugin_token_env_key` or
+`HADES_BACKEND_PLUGIN_TOKEN`; it must include `projects.read`,
+`repositories.read`, and `runs.write`. Do not put the raw token in
+`config.yaml`.
+
 Expected evidence:
 
 - `worker-setup` returns `status=linked`, `device_id`, `repository_id`, and
@@ -55,6 +61,12 @@ Expected evidence:
 - `quality-report --record` has no `repair_agent_work_shared_memory`,
   `repair_agent_work_structured_diagnosis`, or
   `agent_work_repair_causal_pack_coverage` blockers for completed bug work.
+
+If `worker-setup` and `tasks list` pass but `tasks work` fails during model
+startup or the first provider call, debug model credentials separately with
+`hades setup` or the provider-specific setup path. A provider authentication
+failure after claim must be reported back to the backend as a failed work item;
+it should not leave the item running indefinitely.
 
 If a bug task is part of a no-codebase release fixture, the work item payload
 may include `quality_eval.no_codebase_fixture_id`. Completed work must then

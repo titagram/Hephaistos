@@ -60,7 +60,8 @@ def plugin_work_items_client_from_config() -> HadesPluginWorkItemsClient:
             "Hades plugin API token is missing; set backend.plugin_token_env_key "
             "or HADES_BACKEND_PLUGIN_TOKEN. Do not use the Hades agent token for plugin work."
         )
-    return HadesPluginWorkItemsClient(agent.base_url, token)
+    cfg = backend_config()
+    return HadesPluginWorkItemsClient(agent.base_url, token, device_id=str(cfg.get("plugin_device_id") or "").strip())
 
 
 def plugin_local_workspace_id() -> str:

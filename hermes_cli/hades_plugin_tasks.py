@@ -45,8 +45,9 @@ def setup_plugin_worker(
         )
 
     root = Path(workspace or os.getcwd()).expanduser().resolve()
-    selected_client = client or runtime.plugin_work_items_client_from_config()
+    selected_client = None
     try:
+        selected_client = client or runtime.plugin_work_items_client_from_config()
         device = selected_client.register_device(
             name=runtime.default_agent_label(),
             fingerprint_hash=_device_fingerprint_hash(agent.agent_id),
@@ -91,7 +92,7 @@ def setup_plugin_worker(
             1,
         )
     finally:
-        if client is None:
+        if client is None and selected_client is not None:
             _close_client(selected_client)
 
     local_workspace_id = str(registered.get("local_workspace_id") or "").strip()
@@ -144,8 +145,9 @@ def list_plugin_tasks(
         )
 
     selected_project_id = str(project_id or agent.project_id).strip()
-    selected_client = client or runtime.plugin_work_items_client_from_config()
+    selected_client = None
     try:
+        selected_client = client or runtime.plugin_work_items_client_from_config()
         response = selected_client.list_agent_work_items(
             project_id=selected_project_id,
             repository_id=repository_id,
@@ -166,7 +168,7 @@ def list_plugin_tasks(
             next_step,
         )
     finally:
-        if client is None:
+        if client is None and selected_client is not None:
             _close_client(selected_client)
 
     items = [_task_from_item(item) for item in _response_items(response)]
