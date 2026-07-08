@@ -349,3 +349,70 @@ def test_plugin_worker_fails_claimed_item_with_redacted_message(monkeypatch, tmp
     assert "super-secret-token" not in records[0].hades_error
     assert "lease_1" not in records[0].getMessage()
     assert "lease_1" not in str(records[0].__dict__)
+
+
+def test_plugin_worker_does_not_fail_backend_item_after_completion_lease_rejection(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli.hades_plugin_worker import run_plugin_worker_once
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.failures = []
+
+        def list_agent_work_items(self, **payload):
+            return {"items": [{"id": "awi_1", "project_id": "proj_1", "payload": {"prompt": "Do it"}}]}
+
+        def claim_agent_work_item(self, work_item_id, *, local_workspace_id):
+            return {"lease_token": "lease_1", "item": {"id": work_item_id, "payload": {"prompt": "Do it"}}}
+
+        def heartbeat_agent_work_item(self, work_item_id, *, lease_token):
+            return {"ok": True}
+
+        def complete_agent_work_item(self, work_item_id, **payload):
+            raise HadesBackendError(
+                "Active lease has expired.",
+                status_code=409,
+                code="lease_expired",
+                next_step="Claim the work item again to receive a fresh lease token.",
+            )
+
+        def fail_agent_work_item(self, work_item_id, **payload):
+            self.failures.append((work_item_id, payload))
+            return {"ok": True}
+
+    fake = FakeClient()
+    result = run_plugin_worker_once(
+        client_factory=lambda: fake,
+        agent_runner=lambda prompt, item: "done",
+        local_workspace_id="lw_1",
+        quiet=True,
+    )
+
+    with db.connect_closing() as conn:
+        item = db.get_plugin_work_item(conn, "awi_1")
+
+    assert result.exit_code == 1
+    assert result.summary["failed"] == 1
+    assert fake.failures == []
+    assert item is not None
+    assert item.status == "failed"
+    assert item.result == {
+        "code": "lease_expired",
+        "message": "Active lease has expired.",
+        "next_step": "Claim the work item again to receive a fresh lease token.",
+        "status_code": 409,
+    }

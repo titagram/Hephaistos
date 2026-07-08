@@ -254,7 +254,8 @@ def run_plugin_worker_once(
             completed += 1
         except Exception as exc:
             failed += 1
-            message = redact_secret(str(exc))
+            error_result = _worker_failure_result(exc)
+            message = error_result["message"]
             logger.warning(
                 "hades_backend.worker.failed",
                 extra={
@@ -266,13 +267,13 @@ def run_plugin_worker_once(
                     "hades_error": message,
                 },
             )
-            if lease_token:
+            if lease_token and _should_report_worker_failure_to_backend(exc):
                 try:
                     client.fail_agent_work_item(work_item_id, lease_token=lease_token, message=message)
                 except Exception:
                     pass
             with db.connect_closing() as conn:
-                db.update_plugin_work_item_status(conn, work_item_id, "failed", result={"message": message})
+                db.update_plugin_work_item_status(conn, work_item_id, "failed", result=error_result)
             if not quiet:
                 print(f"backend worker: failed work item {work_item_id}: {message}")
 
@@ -325,6 +326,30 @@ def _plugin_exception_error(
         code = fallback_code
         next_step = fallback_next_step
     return code, f"{fallback_message}: {redact_secret(str(exc))}", next_step
+
+
+def _worker_failure_result(exc: Exception) -> dict[str, Any]:
+    message = redact_secret(str(exc))
+    if isinstance(exc, HadesBackendError):
+        return {
+            "code": str(exc.code or "backend_error"),
+            "message": message,
+            "next_step": str(exc.next_step or ""),
+            "status_code": exc.status_code,
+        }
+    return {"message": message}
+
+
+def _should_report_worker_failure_to_backend(exc: Exception) -> bool:
+    if not isinstance(exc, HadesBackendError):
+        return True
+    return str(exc.code or "") not in {
+        "lease_expired",
+        "lease_invalid",
+        "lease_required",
+        "work_item_completion_rejected",
+        "work_item_not_claimed_by_device",
+    }
 
 
 def _run_with_periodic_heartbeat(
