@@ -53,6 +53,46 @@ The profile names map to local `config.yaml` model profiles such as
 - For artifacts, prefer bounded read-only snapshots and redact secrets before
   upload.
 
+## Natural-Language Bug Intake
+
+When the user describes a bug informally in a Hades-linked project, do not make
+them manually format the full `hades backend bug-intake` command. Extract a
+structured intake locally, then run the CLI command yourself.
+
+Map the user's text into:
+
+- `title`: a short noun phrase naming the failing behavior.
+- `symptom`: the visible failure, exception, bad state, or user-facing problem.
+- `steps`: reproduction steps when stated; otherwise a concise "not specified"
+  phrase rather than inventing steps.
+- `expected`: expected behavior when stated; otherwise "not specified".
+- `actual`: actual behavior when stated; otherwise repeat the concrete symptom.
+- `severity`: only when the user states or strongly implies impact.
+- `environment`: current project/workspace plus any stated browser, route,
+  deploy, local/staging/production, or commit context.
+- evidence files: attach logs, failing test output, HTTP request/response files,
+  or deploy commit only when the user provides paths or values.
+
+Before running intake, check `hades backend status --json` from the current
+workspace. If the workspace is not linked, say so and stop. If the description
+is missing only optional fields, proceed with explicit "not specified" values.
+Ask a clarification only when both `title` and `symptom` cannot be recovered.
+
+Use this command shape:
+
+```bash
+hades backend bug-intake \
+  --title "..." \
+  --symptom "..." \
+  --steps "..." \
+  --expected "..." \
+  --actual "..." \
+  --environment "..."
+```
+
+After intake, run `hades backend status --json` or `hades backend sync` as
+needed, then continue with `hades-bug-diagnosis` if the user wants diagnosis.
+
 ## Handoff Checklist
 
 - `hades backend status --json` has no unexpected degraded action.

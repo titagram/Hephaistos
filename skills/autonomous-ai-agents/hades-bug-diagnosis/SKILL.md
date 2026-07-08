@@ -20,23 +20,28 @@ the evidence source; do not infer precise causes from memory alone.
 ## Required Workflow
 
 1. Check `hades_backend_project_awareness_status`.
-2. If freshness is `stale`, `unknown`, or coverage is missing, state the exact
+2. If the user supplied a natural-language bug description and no bug report or
+   bug evidence id is available, create structured bug evidence first with
+   `hades backend bug-intake`. Extract title, symptom, steps, expected, actual,
+   environment, and optional evidence files from the user's text; use explicit
+   "not specified" values for optional fields that were not provided.
+3. If freshness is `stale`, `unknown`, or coverage is missing, state the exact
    missing coverage before any precise claim.
-3. Search existing packs with `hades_backend_evidence_pack_search` using the
+4. Search existing packs with `hades_backend_evidence_pack_search` using the
    symptom, exception, bug report id, route, or failing test. If a current pack
    already contains sufficient refs, cite it instead of rebuilding the pack.
-4. Search typed evidence with `hades_backend_bug_evidence_search` using the
+5. Search typed evidence with `hades_backend_bug_evidence_search` using the
    symptom, exception, route, test, frame, or deploy term.
-5. Search project graph/artifacts with `hades_backend_graph_search`.
-6. Fetch only the minimal relevant source with
+6. Search project graph/artifacts with `hades_backend_graph_search`.
+7. Fetch only the minimal relevant source with
    `hades_backend_source_slice_fetch` after evidence or graph results identify a
    concrete file, symbol, or line.
-7. Compare evidence, graph, source slices, and freshness. If the evidence does
+8. Compare evidence, graph, source slices, and freshness. If the evidence does
    not uniquely support a cause, say `insufficient evidence` and list the exact
    missing item.
-8. Save the supporting bundle with `hades_backend_evidence_pack_create` once
+9. Save the supporting bundle with `hades_backend_evidence_pack_create` once
    bug evidence refs, graph refs, and source slice ids are known.
-9. Save the outcome with `hades_backend_diagnosis_report_create` when the
+10. Save the outcome with `hades_backend_diagnosis_report_create` when the
    workflow has enough evidence for a final report or when preserving an
    insufficient-evidence result would avoid redoing the investigation.
 
