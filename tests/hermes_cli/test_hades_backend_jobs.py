@@ -954,7 +954,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<input type=\"text\" wire:model.defer=\"status\">\n"
         "<button wire:click.debounce=\"saveOrder\">Save</button>\n"
         "<input type=\"text\" wire:model.lazy=\"order.status\">\n"
-        "<input type=\"text\" x-model.debounce=\"filters.status\">\n"
+        "<input type=\"text\" x-data=\"{ filters: { status: '' }, open: false }\" x-model.debounce=\"filters.status\">\n"
         "<button @click.prevent=\"applyFilters\">Apply</button>\n"
         "@endsection\n",
         encoding="utf-8",
@@ -1917,6 +1917,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     ) in edges
     assert ("livewire_validation", "App\\Livewire\\OrdersStatus", "validation:order.status") in edges
     assert ("blade_wire_model_validation", "livewire_property:order.status", "validation:order.status") in edges
+    assert ("blade_alpine_data", "view:orders.show", "alpine_state:filters") in edges
+    assert ("blade_alpine_data", "view:orders.show", "alpine_state:open") in edges
     assert ("blade_alpine_model", "view:orders.show", "alpine_state:filters.status") in edges
     assert ("blade_alpine_action", "view:orders.show", "alpine_action:applyFilters") in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
@@ -2095,6 +2097,24 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_line": 6,
         "path": "resources/views/orders/show.blade.php",
         "line": 23,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_alpine_data",
+        "from": "view:orders.show",
+        "to": "alpine_state:filters",
+        "alpine_data_key": "filters",
+        "alpine_data_source": "object",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 24,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_alpine_data",
+        "from": "view:orders.show",
+        "to": "alpine_state:open",
+        "alpine_data_key": "open",
+        "alpine_data_source": "object",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 24,
     } in artifact["edges"]
     assert {
         "kind": "blade_alpine_model",

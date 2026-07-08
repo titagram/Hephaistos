@@ -4286,6 +4286,24 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "line": 24,
             },
             {
+                "kind": "blade_alpine_data",
+                "from": "view:orders.show",
+                "to": "alpine_state:filters",
+                "alpine_data_key": "filters",
+                "alpine_data_source": "object",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 24,
+            },
+            {
+                "kind": "blade_alpine_data",
+                "from": "view:orders.show",
+                "to": "alpine_state:open",
+                "alpine_data_key": "open",
+                "alpine_data_source": "object",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 24,
+            },
+            {
                 "kind": "blade_alpine_action",
                 "from": "view:orders.show",
                 "to": "alpine_action:applyFilters",
@@ -4322,7 +4340,7 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view livewire wire model order.status status property validation alpine filters.status applyFilters", "limit": 20},
+            {"query": "orders view livewire wire model order.status status property validation alpine filters.status filters open applyFilters", "limit": 20},
         )
     )
 
@@ -4413,6 +4431,24 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     )
     assert any(
         ref["type"] == "edge"
+        and ref["kind"] == "blade_alpine_data"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "alpine_state:filters"
+        and ref["provenance"]["alpine_data_key"] == "filters"
+        and ref["provenance"]["alpine_data_source"] == "object"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_alpine_data"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "alpine_state:open"
+        and ref["provenance"]["alpine_data_key"] == "open"
+        and ref["provenance"]["alpine_data_source"] == "object"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
         and ref["kind"] == "blade_alpine_action"
         and ref["from"] == "view:orders.show"
         and ref["to"] == "alpine_action:applyFilters"
@@ -4441,6 +4477,11 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     assert any(
         "alpine_model=filters.status" in item["summary"]
         and "alpine_modifiers=['debounce']" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "alpine_data_key=filters" in item["summary"]
+        and "alpine_data_source=object" in item["summary"]
         for item in result["items"]
     )
     assert any(

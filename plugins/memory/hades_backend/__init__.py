@@ -2961,6 +2961,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "wire_action",
         "wire_event",
         "wire_modifiers",
+        "alpine_data_key",
+        "alpine_data_source",
         "alpine_model",
         "alpine_action",
         "alpine_event",
