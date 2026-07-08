@@ -6467,3 +6467,36 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade form metadata graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per Blade form method/CSRF awareness
+metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge `blade_form_method` per `@method('...')` nei
+  template Blade e `blade_csrf_token` per `@csrf`/`csrf_field()`.
+- Questo rende diagnosticabili source-free classi di bug 405/419 quando una
+  view punta a una route ma usa method spoofing o token CSRF inattesi.
+- Il payload salva solo view id, metodo HTTP spoofato o presenza CSRF, path e
+  line; non conserva form body, parametri o sorgente raw.
+- Il fallback locale di `hades_backend_graph_search` espone
+  `form_method`/`csrf` da cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Correlazione automatica tra singola form, route target e metodo route
+  accettato; questa tranche espone i fatti minimi per la traversata source-free.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_form_metadata`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `112 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

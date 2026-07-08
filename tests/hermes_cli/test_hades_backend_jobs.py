@@ -923,6 +923,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "<x-alert type=\"info\" />\n"
         "@livewire('orders-status')\n"
         "<form action=\"{{ route('invoices.update', ['invoice' => 7]) }}\" method=\"POST\"></form>\n"
+        "@csrf\n"
+        "@method('PUT')\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1855,6 +1857,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
     assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
     assert ("blade_route_ref", "view:orders.show", "route:invoices.update") in edges
+    assert ("blade_csrf_token", "view:orders.show", "csrf:present") in edges
+    assert ("blade_form_method", "view:orders.show", "http_method:PUT") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1862,6 +1866,22 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_name": "invoices.update",
         "path": "resources/views/orders/show.blade.php",
         "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_csrf_token",
+        "from": "view:orders.show",
+        "to": "csrf:present",
+        "csrf": "present",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 7,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_form_method",
+        "from": "view:orders.show",
+        "to": "http_method:PUT",
+        "form_method": "PUT",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 8,
     } in artifact["edges"]
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("model_fillable", "App\\Models\\Order", "table:orders.customer_id") in edges

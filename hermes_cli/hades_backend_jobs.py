@@ -516,6 +516,8 @@ BLADE_LIVEWIRE_RE = re.compile(
     re.MULTILINE,
 )
 BLADE_ROUTE_FUNCTION_RE = re.compile(r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]", re.MULTILINE)
+BLADE_FORM_METHOD_RE = re.compile(r"@method\s*\(\s*['\"](?P<method>GET|POST|PUT|PATCH|DELETE)['\"]\s*\)", re.IGNORECASE | re.MULTILINE)
+BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1880,6 +1882,50 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_form_method(method: str, offset: int) -> None:
+        nonlocal truncated
+        normalized = str(method or "").upper()
+        if normalized not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            return
+        line = _line_number(source, offset)
+        target = f"http_method:{normalized}"
+        key = ("blade_form_method", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_form_method",
+                "from": view_id,
+                "to": target,
+                "form_method": normalized,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    def append_csrf(offset: int) -> None:
+        nonlocal truncated
+        line = _line_number(source, offset)
+        key = ("blade_csrf_token", "csrf:present", line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_csrf_token",
+                "from": view_id,
+                "to": "csrf:present",
+                "csrf": "present",
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     for match in BLADE_EXTENDS_RE.finditer(source):
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())
     for match in BLADE_INCLUDE_RE.finditer(source):
@@ -1895,6 +1941,10 @@ def _append_blade_view_graph(
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
+    for match in BLADE_FORM_METHOD_RE.finditer(source):
+        append_form_method(match.group("method"), match.start())
+    for match in BLADE_CSRF_RE.finditer(source):
+        append_csrf(match.start())
 
     return truncated
 

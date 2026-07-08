@@ -3932,6 +3932,81 @@ def test_hades_backend_graph_search_finds_local_blade_route_refs(monkeypatch, tm
     )
 
 
+def test_hades_backend_graph_search_finds_local_blade_form_metadata(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "blade_csrf_token",
+                "from": "view:orders.show",
+                "to": "csrf:present",
+                "csrf": "present",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 7,
+            },
+            {
+                "kind": "blade_form_method",
+                "from": "view:orders.show",
+                "to": "http_method:PUT",
+                "form_method": "PUT",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 8,
+            },
+        ]
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view csrf PUT form method", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_csrf_token"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "csrf:present"
+        and ref["provenance"]["csrf"] == "present"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_form_method"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "http_method:PUT"
+        and ref["provenance"]["form_method"] == "PUT"
+        for ref in graph_refs
+    )
+    assert any("csrf=present" in item["summary"] for item in result["items"])
+    assert any("form_method=PUT" in item["summary"] for item in result["items"])
+
+
 def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
