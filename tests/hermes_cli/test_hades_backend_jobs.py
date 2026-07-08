@@ -578,6 +578,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Observers").mkdir(parents=True)
     (workspace / "app" / "Broadcasting").mkdir(parents=True)
     (workspace / "app" / "Exceptions").mkdir(parents=True)
+    (workspace / "app" / "View" / "Components" / "Orders").mkdir(parents=True)
     (workspace / "database" / "migrations").mkdir(parents=True)
     (workspace / "resources" / "views" / "orders" / "partials").mkdir(parents=True)
     (workspace / "resources" / "views" / "layouts").mkdir(parents=True)
@@ -749,6 +750,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    public array $order = [];\n"
         "    public function saveOrder() {}\n"
         "    public function render() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "View" / "Components" / "Orders" / "Card.php").write_text(
+        "<?php\n"
+        "namespace App\\View\\Components\\Orders;\n"
+        "use Illuminate\\View\\Component;\n"
+        "class Card extends Component {\n"
+        "    public function __construct(public $order) {}\n"
+        "    public function render() { return view('components.orders.card'); }\n"
         "}\n",
         encoding="utf-8",
     )
@@ -1053,7 +1064,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component", "component:alert") in symbols
     assert ("blade_component", "component:orders.card") in symbols
     assert ("class", "App\\Livewire\\OrdersStatus") in symbols
+    assert ("class", "App\\View\\Components\\Orders\\Card") in symbols
     assert ("method", "OrdersStatus@saveOrder") in symbols
+    assert ("method", "Card@render") in symbols
+    assert any(
+        symbol["kind"] == "class"
+        and symbol["name"] == "App\\View\\Components\\Orders\\Card"
+        and symbol["role"] == "view_component"
+        for symbol in artifact["symbols"]
+    )
     assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
@@ -1901,6 +1920,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_include", "view:layouts.app", "view:shared.banner") in edges
     assert ("blade_component", "view:orders.show", "component:alert") in edges
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
+    assert ("blade_component_class", "component:orders.card", "App\\View\\Components\\Orders\\Card") in edges
+    assert ("blade_component_render_method", "component:orders.card", "Card@render") in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
     assert (
         "blade_component_prop_include_data",
@@ -2121,6 +2142,27 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "table": "orders",
         "path": "resources/views/orders/show.blade.php",
         "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_class",
+        "from": "component:orders.card",
+        "to": "App\\View\\Components\\Orders\\Card",
+        "component": "orders.card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_path": "app/View/Components/Orders/Card.php",
+        "component_line": 4,
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_render_method",
+        "from": "component:orders.card",
+        "to": "Card@render",
+        "component": "orders.card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_method": "render",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
     } in artifact["edges"]
     assert {
         "kind": "blade_component_prop",

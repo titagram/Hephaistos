@@ -4123,6 +4123,27 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "line": 1,
             },
             {
+                "kind": "blade_component_class",
+                "from": "component:orders.card",
+                "to": "App\\View\\Components\\Orders\\Card",
+                "component": "orders.card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_path": "app/View/Components/Orders/Card.php",
+                "component_line": 4,
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component_render_method",
+                "from": "component:orders.card",
+                "to": "Card@render",
+                "component": "orders.card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_method": "render",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
+            {
                 "kind": "blade_component_prop_include_data",
                 "from": "component_prop:orders.card.order",
                 "to": "view_data:orders.partials.summary.order",
@@ -4275,6 +4296,22 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
     )
     assert any(
         ref["type"] == "edge"
+        and ref["kind"] == "blade_component_class"
+        and ref["from"] == "component:orders.card"
+        and ref["to"] == "App\\View\\Components\\Orders\\Card"
+        and ref["provenance"]["component_class"] == "App\\View\\Components\\Orders\\Card"
+        for ref in component_graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_render_method"
+        and ref["from"] == "component:orders.card"
+        and ref["to"] == "Card@render"
+        and ref["provenance"]["component_method"] == "render"
+        for ref in component_graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
         and ref["kind"] == "blade_component_prop_include_data"
         and ref["from"] == "component_prop:orders.card.order"
         and ref["to"] == "view_data:orders.partials.summary.order"
@@ -4307,6 +4344,11 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         "include_parent_view=view:orders.show" in item["summary"]
         and "authorization_subject=order" in item["summary"]
         for item in result["items"]
+    )
+    assert any(
+        "component=orders.card" in item["summary"]
+        and "component_class=App\\View\\Components\\Orders\\Card" in item["summary"]
+        for item in component_result["items"]
     )
     assert any(
         "component=orders.card" in item["summary"]

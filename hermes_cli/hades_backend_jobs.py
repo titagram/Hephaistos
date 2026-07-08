@@ -1275,6 +1275,8 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
         return "controller"
     if path.startswith(("app/Livewire/", "app/Http/Livewire/")) or extends.strip("\\") == "Livewire\\Component":
         return "livewire_component"
+    if path.startswith("app/View/Components/") or extends.strip("\\") == "Illuminate\\View\\Component":
+        return "view_component"
     if path.startswith("app/Http/Requests/") or _php_short_name(extends) == "FormRequest" or short.endswith("Request"):
         return "form_request"
     if (
@@ -1983,6 +1985,20 @@ def _blade_component_target(raw: str) -> str:
     return f"component:{component}" if component else ""
 
 
+def _blade_component_alias_from_class(rel: str, class_name: str) -> str:
+    suffix = ""
+    prefix = "app/View/Components/"
+    if rel.startswith(prefix):
+        suffix = rel[len(prefix) :]
+    elif class_name.startswith("App\\View\\Components\\"):
+        suffix = class_name[len("App\\View\\Components\\") :].replace("\\", "/")
+    if not suffix:
+        return ""
+    suffix = suffix.removesuffix(".php")
+    parts = [_livewire_alias_segment(part) for part in suffix.split("/") if part]
+    return ".".join(part for part in parts if part)
+
+
 def _append_blade_view_graph(
     source: str,
     rel: str,
@@ -1994,6 +2010,7 @@ def _append_blade_view_graph(
     policy_by_model: dict[str, str] | None = None,
     php_method_symbols: dict[tuple[str, str], str] | None = None,
     livewire_component_by_alias: dict[str, dict[str, Any]] | None = None,
+    blade_component_class_by_alias: dict[str, dict[str, Any]] | None = None,
     max_symbols: int,
     max_edges: int,
 ) -> bool:
@@ -2008,6 +2025,7 @@ def _append_blade_view_graph(
     known_policies = policy_by_model or {}
     known_php_method_symbols = php_method_symbols or {}
     known_livewire = livewire_component_by_alias or {}
+    known_blade_components = blade_component_class_by_alias or {}
     referenced_livewire_aliases: set[str] = set()
     referenced_alpine_data_keys: set[str] = set()
     if len(symbols) < max_symbols:
@@ -2057,6 +2075,59 @@ def _append_blade_view_graph(
                 "kind": kind,
                 "from": view_id,
                 "to": target,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    def append_blade_component_class(component_raw: str, offset: int) -> None:
+        nonlocal truncated
+        component_target = _blade_component_target(component_raw)
+        component = component_target.removeprefix("component:")
+        if not component_target or not component:
+            return
+        component_info = known_blade_components.get(component)
+        if not component_info:
+            return
+        component_class = str(component_info.get("class") or "")
+        if not component_class:
+            return
+        line = _line_number(source, offset)
+        key = ("blade_component_class", component_target, component_class, line)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "blade_component_class",
+                    "from": component_target,
+                    "to": component_class,
+                    "component": component,
+                    "component_class": component_class,
+                    "component_path": component_info.get("path"),
+                    "component_line": component_info.get("line"),
+                    "path": rel,
+                    "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+        render_method = str(component_info.get("render_method") or "")
+        if not render_method:
+            return
+        render_key = ("blade_component_render_method", component_target, render_method, line)
+        if render_key in seen_edges:
+            return
+        seen_edges.add(render_key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_component_render_method",
+                "from": component_target,
+                "to": render_method,
+                "component": component,
+                "component_class": component_class,
+                "component_method": "render",
                 "path": rel,
                 "line": line,
             },
@@ -2913,8 +2984,10 @@ def _append_blade_view_graph(
             )
     for match in BLADE_COMPONENT_DIRECTIVE_RE.finditer(source):
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
+        append_blade_component_class(match.group("component"), match.start())
     for match in BLADE_ANONYMOUS_COMPONENT_RE.finditer(source):
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
+        append_blade_component_class(match.group("component"), match.start())
         for prop_match in BLADE_COMPONENT_PROP_RE.finditer(match.group("attrs") or ""):
             append_blade_component_prop(
                 match.group("component"),
@@ -5214,6 +5287,63 @@ def _php_livewire_component_index(
                     "path": rel,
                     "line": class_info.get("line"),
                 }
+    return components
+
+
+def _php_blade_component_class_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    php_method_symbols: dict[tuple[str, str], str],
+    max_file_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    components: dict[str, dict[str, Any]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            role = _php_role(rel, fqcn, extends_fqcn or extends)
+            classes.append(
+                {
+                    "name": fqcn,
+                    "short_name": class_name,
+                    "role": role,
+                    "offset": match.start(),
+                    "line": _line_number(source, match.start()),
+                }
+            )
+        classes.sort(key=lambda item: int(item["offset"]))
+        for class_info in classes:
+            if class_info.get("role") != "view_component":
+                continue
+            fqcn = str(class_info["name"])
+            alias = _blade_component_alias_from_class(rel, fqcn)
+            if not alias:
+                continue
+            render_method = php_method_symbols.get((fqcn, "render"), "")
+            components[alias] = {
+                "alias": alias,
+                "class": fqcn,
+                "render_method": render_method,
+                "path": rel,
+                "line": class_info.get("line"),
+            }
     return components
 
 
@@ -7624,6 +7754,12 @@ def _build_php_graph(
         php_method_symbols=php_method_symbols,
         max_file_bytes=max_file_bytes,
     )
+    blade_component_class_by_alias = _php_blade_component_class_index(
+        workspace_root,
+        php_files,
+        php_method_symbols=php_method_symbols,
+        max_file_bytes=max_file_bytes,
+    )
     container_bindings_by_abstract = _php_container_binding_index(
         workspace_root,
         php_files,
@@ -7717,6 +7853,7 @@ def _build_php_graph(
             policy_by_model=policy_by_model,
             php_method_symbols=php_method_symbols,
             livewire_component_by_alias=livewire_component_by_alias,
+            blade_component_class_by_alias=blade_component_class_by_alias,
             max_symbols=max_symbols,
             max_edges=max_edges,
         ) or truncated
