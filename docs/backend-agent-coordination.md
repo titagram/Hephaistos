@@ -6847,3 +6847,41 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Livewire nested validation graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per correlare binding Livewire
+nested a validation fields nested metadata-only.
+
+Integrazione locale:
+
+- `blade_wire_model_validation` ora considera sia il match root gia' coperto
+  sia il match esatto tra binding e validation field, ad esempio
+  `wire:model="order.status"` verso `validation:order.status`.
+- Il matcher supporta anche wildcard segment-safe nei validation field, cosi'
+  un pattern come `items.*.name` puo' collegarsi a binding con la stessa forma
+  segmentata senza conservare payload runtime.
+- `blade_wire_model_property` continua a puntare alla root public property,
+  mentre `blade_wire_model_validation` conserva il field validato completo.
+- Il payload salva solo alias, classe, binding, root property, field, rule
+  names, path e line; non conserva valori runtime, default property, argomenti
+  Livewire o template/source raw.
+- Il fallback locale di `hades_backend_graph_search` espone questi dettagli da
+  cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Validation rules costruite dinamicamente a runtime e disambiguazione tra piu'
+  componenti Livewire con lo stesso field nested validato nella stessa view.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_wire_model_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `118 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

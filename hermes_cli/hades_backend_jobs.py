@@ -1840,6 +1840,21 @@ def _php_livewire_validation_fields(source: str, classes: list[dict[str, Any]], 
     return fields
 
 
+def _php_livewire_validation_field_matches_model(field_name: str, model: str, root_property: str) -> bool:
+    field_name = str(field_name or "")
+    model = str(model or "")
+    root_property = str(root_property or "")
+    if not field_name or not model or not root_property:
+        return False
+    if field_name == model or field_name == root_property:
+        return True
+    field_parts = field_name.split(".")
+    model_parts = model.split(".")
+    if len(field_parts) != len(model_parts):
+        return False
+    return all(field_part == "*" or field_part == model_part for field_part, model_part in zip(field_parts, model_parts, strict=False))
+
+
 def _php_schedule_cadence(chain: str) -> str:
     ignored = {"name", "timezone", "withoutOverlapping", "onOneServer", "runInBackground", "evenInMaintenanceMode"}
     for match in PHP_SCHEDULE_CADENCE_RE.finditer(chain or ""):
@@ -2292,7 +2307,7 @@ def _append_blade_view_graph(
                 continue
             for field_info in component.get("validation_fields") or []:
                 field_name = str(field_info.get("field") or "")
-                if field_name != root_property:
+                if not _php_livewire_validation_field_matches_model(field_name, model, root_property):
                     continue
                 key = ("blade_wire_model_validation", f"{component_class}.{field_name}", line)
                 if key in seen_edges:

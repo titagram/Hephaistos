@@ -745,7 +745,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use Livewire\\Component;\n"
         "class OrdersStatus extends Component {\n"
         "    public string $status = '';\n"
-        "    protected array $rules = ['status' => 'required|string'];\n"
+        "    protected array $rules = ['status' => 'required|string', 'order.status' => 'required|string'];\n"
+        "    public array $order = [];\n"
         "    public function saveOrder() {}\n"
         "    public function render() {}\n"
         "}\n",
@@ -952,6 +953,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@enderror\n"
         "<input type=\"text\" wire:model.defer=\"status\">\n"
         "<button wire:click.debounce=\"saveOrder\">Save</button>\n"
+        "<input type=\"text\" wire:model.lazy=\"order.status\">\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1905,6 +1907,14 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     ) in edges
     assert ("livewire_validation", "App\\Livewire\\OrdersStatus", "validation:status") in edges
     assert ("blade_wire_model_validation", "livewire_property:status", "validation:status") in edges
+    assert ("blade_wire_model", "view:orders.show", "livewire_property:order.status") in edges
+    assert (
+        "blade_wire_model_property",
+        "livewire_property:order.status",
+        "livewire_property:App\\Livewire\\OrdersStatus.order",
+    ) in edges
+    assert ("livewire_validation", "App\\Livewire\\OrdersStatus", "validation:order.status") in edges
+    assert ("blade_wire_model_validation", "livewire_property:order.status", "validation:order.status") in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
     assert ("blade_wire_action_method", "livewire_action:saveOrder", "OrdersStatus@saveOrder") in edges
     assert {
@@ -2032,6 +2042,55 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_line": 6,
         "path": "resources/views/orders/show.blade.php",
         "line": 21,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model",
+        "from": "view:orders.show",
+        "to": "livewire_property:order.status",
+        "wire_model": "order.status",
+        "wire_modifiers": ["lazy"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 23,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model_property",
+        "from": "livewire_property:order.status",
+        "to": "livewire_property:App\\Livewire\\OrdersStatus.order",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "wire_model": "order.status",
+        "livewire_property": "order",
+        "livewire_property_type": "array",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 23,
+    } in artifact["edges"]
+    assert {
+        "kind": "livewire_validation",
+        "from": "App\\Livewire\\OrdersStatus",
+        "to": "validation:order.status",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "field": "order.status",
+        "validation_rules": ["required", "string"],
+        "validation_path": "app/Livewire/OrdersStatus.php",
+        "validation_line": 6,
+        "path": "app/Livewire/OrdersStatus.php",
+        "line": 6,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model_validation",
+        "from": "livewire_property:order.status",
+        "to": "validation:order.status",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "wire_model": "order.status",
+        "livewire_property": "order",
+        "field": "order.status",
+        "validation_rules": ["required", "string"],
+        "validation_path": "app/Livewire/OrdersStatus.php",
+        "validation_line": 6,
+        "path": "resources/views/orders/show.blade.php",
+        "line": 23,
     } in artifact["edges"]
     assert {
         "kind": "blade_wire_action",

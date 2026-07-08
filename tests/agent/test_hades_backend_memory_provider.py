@@ -4227,6 +4227,55 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "path": "resources/views/orders/show.blade.php",
                 "line": 21,
             },
+            {
+                "kind": "blade_wire_model",
+                "from": "view:orders.show",
+                "to": "livewire_property:order.status",
+                "wire_model": "order.status",
+                "wire_modifiers": ["lazy"],
+                "path": "resources/views/orders/show.blade.php",
+                "line": 23,
+            },
+            {
+                "kind": "blade_wire_model_property",
+                "from": "livewire_property:order.status",
+                "to": "livewire_property:App\\Livewire\\OrdersStatus.order",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "wire_model": "order.status",
+                "livewire_property": "order",
+                "livewire_property_type": "array",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 23,
+            },
+            {
+                "kind": "livewire_validation",
+                "from": "App\\Livewire\\OrdersStatus",
+                "to": "validation:order.status",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "field": "order.status",
+                "validation_rules": ["required", "string"],
+                "validation_path": "app/Livewire/OrdersStatus.php",
+                "validation_line": 6,
+                "path": "app/Livewire/OrdersStatus.php",
+                "line": 6,
+            },
+            {
+                "kind": "blade_wire_model_validation",
+                "from": "livewire_property:order.status",
+                "to": "validation:order.status",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "wire_model": "order.status",
+                "livewire_property": "order",
+                "field": "order.status",
+                "validation_rules": ["required", "string"],
+                "validation_path": "app/Livewire/OrdersStatus.php",
+                "validation_line": 6,
+                "path": "resources/views/orders/show.blade.php",
+                "line": 23,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4254,7 +4303,7 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view livewire wire model status property defer", "limit": 10},
+            {"query": "orders view livewire wire model order.status status property validation", "limit": 20},
         )
     )
 
@@ -4298,6 +4347,43 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_model"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "livewire_property:order.status"
+        and ref["provenance"]["wire_model"] == "order.status"
+        and ref["provenance"]["wire_modifiers"] == ["lazy"]
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_model_property"
+        and ref["from"] == "livewire_property:order.status"
+        and ref["to"] == "livewire_property:App\\Livewire\\OrdersStatus.order"
+        and ref["provenance"]["livewire_property"] == "order"
+        and ref["provenance"]["livewire_property_type"] == "array"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "livewire_validation"
+        and ref["from"] == "App\\Livewire\\OrdersStatus"
+        and ref["to"] == "validation:order.status"
+        and ref["provenance"]["field"] == "order.status"
+        and ref["provenance"]["validation_rules"] == ["required", "string"]
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_model_validation"
+        and ref["from"] == "livewire_property:order.status"
+        and ref["to"] == "validation:order.status"
+        and ref["provenance"]["livewire_property"] == "order"
+        and ref["provenance"]["field"] == "order.status"
+        and ref["provenance"]["validation_rules"] == ["required", "string"]
+        for ref in graph_refs
+    )
+    assert any(
         "wire_model=status" in item["summary"] and "wire_modifiers=['defer']" in item["summary"]
         for item in result["items"]
     )
@@ -4308,6 +4394,11 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     )
     assert any(
         "validation_rules=['required', 'string']" in item["summary"] for item in result["items"]
+    )
+    assert any(
+        "wire_model=order.status" in item["summary"]
+        and "field=order.status" in item["summary"]
+        for item in result["items"]
     )
 
 
