@@ -1,0 +1,9 @@
+case_id: rc_incomplete_missing_source_slice
+observed_at: 2026-07-08T07:05:00Z
+environment: eval
+symptom: Offering a waitlist spot for a tournament registration appears to leave the registration unavailable to the player.
+request: POST /console/tournament-registrations/{registration}/offer
+trace:
+  route: console.tournament-registrations.offer
+  handler: App\Http\Controllers\Console\TournamentController::offerWaitlistSpot
+  graph path exists through routes/web.php:92, but the eval intentionally withholds a source slice for the handler body.

@@ -1,0 +1,47 @@
+{
+  "bug_id": "rc_filament_or_inertia_policy",
+  "root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+  "bug_class": "authorization",
+  "failure_classification": "confirmed",
+  "affected_refs": [
+    "symbol:AdminPanelProvider@panel",
+    "middleware:Filament\\Http\\Middleware\\Authenticate"
+  ],
+  "freshness": {
+    "status": "current",
+    "head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+  },
+  "awareness": {
+    "diagnosable_without_source": true
+  },
+  "evidence_refs": [
+    {
+      "type": "bug_evidence",
+      "id": "01KX0ER4JX85R0KB607DVT7AME"
+    },
+    {
+      "type": "evidence_pack",
+      "id": "01KX0ER4Q27WFADP81F27CB0S0"
+    }
+  ],
+  "graph_refs": [
+    {
+      "type": "symbol",
+      "ref": "AdminPanelProvider@panel"
+    },
+    {
+      "type": "class",
+      "ref": "App\\Providers\\Filament\\AdminPanelProvider"
+    },
+    {
+      "type": "middleware",
+      "ref": "Filament\\Http\\Middleware\\Authenticate"
+    }
+  ],
+  "source_slice_refs": [
+    {
+      "type": "source_slice",
+      "id": "01KX0EEV53ADS8BHYABWVYVWNB"
+    }
+  ]
+}

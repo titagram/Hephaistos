@@ -1,0 +1,47 @@
+{
+  "bug_id": "rc_payment_or_subscription_schema",
+  "root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+  "bug_class": "domain_invariant",
+  "failure_classification": "confirmed",
+  "affected_refs": [
+    "symbol:RecordManualPayment@buildFifoAllocations",
+    "exception:DomainException"
+  ],
+  "freshness": {
+    "status": "current",
+    "head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+  },
+  "awareness": {
+    "diagnosable_without_source": true
+  },
+  "evidence_refs": [
+    {
+      "type": "bug_evidence",
+      "id": "01KX0ER47BBNPA6WZ5RFQZYKZJ"
+    },
+    {
+      "type": "evidence_pack",
+      "id": "01KX0ER4BDKS4CQE3Y6Q9X1XZY"
+    }
+  ],
+  "graph_refs": [
+    {
+      "type": "symbol",
+      "ref": "RecordManualPayment@buildFifoAllocations"
+    },
+    {
+      "type": "edge",
+      "ref": "edge:local_rocket_eval_populate_backend_ast:edge:258"
+    },
+    {
+      "type": "exception",
+      "ref": "DomainException"
+    }
+  ],
+  "source_slice_refs": [
+    {
+      "type": "source_slice",
+      "id": "01KX0EESGA854G190Z4SBBERB6"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{"completed": true, "error": null, "fixture_id": "deepseek-v4-pro__rc_booking_controller_or_model", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/trajectories/deepseek-v4-pro/deepseek-v4-pro__rc_booking_controller_or_model.json"}
+{"completed": true, "error": null, "fixture_id": "deepseek-v4-pro__rc_payment_or_subscription_schema", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/trajectories/deepseek-v4-pro/deepseek-v4-pro__rc_payment_or_subscription_schema.json"}
+⚠️ Iteration budget exhausted (14/14) — asking model to summarise
+⚠️  Reached maximum iterations (14). Requesting summary...
+{"completed": false, "error": null, "fixture_id": "deepseek-v4-pro__rc_filament_or_inertia_policy", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/trajectories/deepseek-v4-pro/deepseek-v4-pro__rc_filament_or_inertia_policy.json"}
+Traceback (most recent call last):
+  File "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/run_no_codebase_diagnoses.py", line 272, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/run_no_codebase_diagnoses.py", line 256, in main
+    entry = _run_fixture(args, fixture)
+  File "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/run_no_codebase_diagnoses.py", line 208, in _run_fixture
+    result = agent.run_conversation(prompt)
+  File "/Users/gabriele/Dev/Hephaistos/run_agent.py", line 5424, in run_conversation
+    return run_conversation(
+        self,
+    ...<7 lines>...
+        moa_config=moa_config,
+    )
+  File "/Users/gabriele/Dev/Hephaistos/agent/conversation_loop.py", line 1207, in run_conversation
+    response = run_llm_execution_middleware(
+        api_kwargs,
+    ...<12 lines>...
+        middleware_trace=list(_llm_middleware_trace),
+    )
+  File "/Users/gabriele/Dev/Hephaistos/hermes_cli/middleware.py", line 181, in run_llm_execution_middleware
+    return next_call(request)
+  File "/Users/gabriele/Dev/Hephaistos/agent/conversation_loop.py", line 1200, in _perform_api_call
+    return agent._interruptible_streaming_api_call(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        next_api_kwargs, on_first_delta=_stop_spinner
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/gabriele/Dev/Hephaistos/run_agent.py", line 4419, in _interruptible_streaming_api_call
+    return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
+  File "/Users/gabriele/Dev/Hephaistos/agent/chat_completion_helpers.py", line 2684, in interruptible_streaming_api_call
+    t.join(timeout=0.3)
+    ~~~~~~^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.14/Frameworks/Python.framework/Versions/3.13/lib/python3.13/threading.py", line 1095, in join
+    self._handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+{"completed": true, "error": null, "fixture_id": "deepseek-v4-pro__rc_booking_controller_or_model", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/trajectories/deepseek-v4-pro/deepseek-v4-pro__rc_booking_controller_or_model.json"}
+{"completed": true, "error": null, "fixture_id": "deepseek-v4-pro__rc_incomplete_missing_source_slice", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-awareness-hardening-eval/trajectories/deepseek-v4-pro/deepseek-v4-pro__rc_incomplete_missing_source_slice.json"}
