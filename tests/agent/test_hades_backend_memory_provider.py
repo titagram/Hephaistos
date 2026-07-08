@@ -6464,6 +6464,7 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
                 ],
                 "freshness": {"status": "current", "workspace_head_commit": "abc123"},
                 "awareness": {"diagnosable_without_source": True},
+                "causal_pack_refs": ["pack_1"],
                 "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
                 "redactions": 2,
             },
@@ -6501,7 +6502,11 @@ def test_hades_backend_diagnosis_report_create_tool_persists_live_backend(monkey
                 "artifact_head_commit": "abc123",
                 "index_status": "live_query",
             },
-            "payload": {"next_verification": "Run OrderControllerTest::test_show_missing_customer"},
+            "causal_pack_refs": ["pack_1"],
+            "payload": {
+                "causal_pack_refs": ["pack_1"],
+                "next_verification": "Run OrderControllerTest::test_show_missing_customer",
+            },
             "redactions": 2,
         }
     ]
@@ -6557,6 +6562,7 @@ def test_hades_backend_diagnosis_report_create_forwards_taxonomy_fields(monkeypa
                 "bug_class": "missing_validation",
                 "failure_classification": "source_slice_policy_gap",
                 "affected_refs": ["route:bookings.store", "class:BookingController"],
+                "causal_pack_refs": ["pack_1"],
             },
         )
     )
@@ -6566,6 +6572,7 @@ def test_hades_backend_diagnosis_report_create_forwards_taxonomy_fields(monkeypa
     assert payload["bug_class"] == "missing_validation"
     assert payload["failure_classification"] == "source_slice_policy_gap"
     assert payload["affected_refs"] == ["route:bookings.store", "class:BookingController"]
+    assert payload["causal_pack_refs"] == ["pack_1"]
 
 
 def test_hades_backend_diagnosis_report_create_tool_requires_root_cause(monkeypatch, tmp_path):
@@ -6616,6 +6623,26 @@ def test_hades_backend_diagnosis_report_create_tool_requires_evidence_for_precis
 
     assert result["error"] == "High/medium confidence diagnosis reports require evidence_refs."
     assert result["required_for_confidence"] == "medium"
+
+
+def test_hades_backend_diagnosis_report_create_tool_requires_causal_pack_for_precise_claim(monkeypatch, tmp_path):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_diagnosis_report_create",
+            {
+                "confidence": "high",
+                "root_cause": "OrderController dereferences a nullable relation.",
+                "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
+                "freshness": {"status": "current"},
+                "awareness": {"diagnosable_without_source": True},
+            },
+        )
+    )
+
+    assert result["error"] == "High/medium confidence source-free diagnosis reports require causal_pack_refs."
+    assert result["required_for_confidence"] == "high"
 
 
 def test_hades_backend_diagnosis_report_create_tool_blocks_incomplete_awareness(monkeypatch, tmp_path):
@@ -6686,6 +6713,7 @@ def test_hades_backend_diagnosis_report_create_tool_uses_live_awareness_gate(mon
                 "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
                 "freshness": {"status": "current", "workspace_head_commit": "claimed-current"},
                 "awareness": {"diagnosable_without_source": True},
+                "causal_pack_refs": ["pack_1"],
             },
         )
     )

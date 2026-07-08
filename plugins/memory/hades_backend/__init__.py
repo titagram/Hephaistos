@@ -512,6 +512,14 @@ DIAGNOSIS_REPORT_CREATE_TOOL_SCHEMA: Dict[str, Any] = {
                 "description": "Stable route, symbol, table, graph, or source-slice refs involved in the diagnosis.",
                 "items": {"type": "string"},
             },
+            "causal_pack_refs": {
+                "type": "array",
+                "description": (
+                    "Replayable Hades causal pack ids or refs that prove the precise "
+                    "source-free diagnosis from backend evidence."
+                ),
+                "items": {"type": "string"},
+            },
             "redactions": {
                 "type": "integer",
                 "minimum": 0,
@@ -848,6 +856,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
         affected_refs = _string_list(args.get("affected_refs"))
         if affected_refs:
             enriched_payload["affected_refs"] = affected_refs
+        causal_pack_refs = _string_list(args.get("causal_pack_refs"))
+        if causal_pack_refs:
+            enriched_payload["causal_pack_refs"] = causal_pack_refs
         payload = enriched_payload or None
         precise_confidence = confidence in {"high", "medium"}
         if precise_confidence:
@@ -866,6 +877,11 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 return tool_error(
                     "High/medium confidence diagnosis reports require awareness.diagnosable_without_source=true.",
                     diagnosable_without_source=bool((awareness or {}).get("diagnosable_without_source")),
+                )
+            if not causal_pack_refs:
+                return tool_error(
+                    "High/medium confidence source-free diagnosis reports require causal_pack_refs.",
+                    required_for_confidence=confidence,
                 )
 
         if self._binding is None:
@@ -927,6 +943,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             mechanism=str(args.get("mechanism") or "").strip(),
             evidence_refs=evidence_refs,
             freshness=freshness,
+            causal_pack_refs=causal_pack_refs,
             payload=payload,
             redactions=_bounded_int(args.get("redactions"), default=0, minimum=0, maximum=100_000),
         )
@@ -1664,6 +1681,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         mechanism: str,
         evidence_refs: list[Any],
         freshness: dict[str, Any] | None,
+        causal_pack_refs: list[str],
         payload: dict[str, Any] | None,
         redactions: int,
     ) -> tuple[dict[str, Any] | None, str | None]:
@@ -1682,6 +1700,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
                     mechanism=mechanism or None,
                     evidence_refs=evidence_refs,
                     freshness=freshness,
+                    causal_pack_refs=causal_pack_refs,
                     payload=payload,
                     redactions=redactions,
                 )
