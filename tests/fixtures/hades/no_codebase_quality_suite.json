@@ -1,0 +1,12 @@
+{
+  "schema": "hades.no_codebase_quality_suite.v1",
+  "suites": [
+    {
+      "id": "default_no_codebase",
+      "fixture": "no_codebase_bug_cases.json",
+      "min_accuracy": 1.0,
+      "min_root_cause_accuracy": 1.0,
+      "min_insufficient_accuracy": 1.0
+    }
+  ]
+}

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "hades" / "no_codebase_bug_cases.json"
+SUITE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "hades" / "no_codebase_quality_suite.json"
 
 
 def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
@@ -35,6 +36,36 @@ def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
     assert report["metrics"]["no_codebase"]["tool_order_coverage"] == 1.0
     assert report["metrics"]["support"]["awareness_status"] == "ready"
     assert report["action_queue"] == []
+
+
+def test_quality_suite_aggregates_no_codebase_fixtures():
+    from hermes_cli.hades_quality_suite import load_quality_suite, run_quality_suite
+
+    suite = load_quality_suite(SUITE_PATH)
+    report = run_quality_suite(suite)
+
+    assert report["schema"] == "hades.no_codebase_quality_suite_report.v1"
+    assert report["status"] == "passed"
+    assert report["total"] >= 1
+    assert report["suites"][0]["id"] == "default_no_codebase"
+    assert report["suites"][0]["status"] == "passed"
+
+
+def test_quality_report_blocks_failed_quality_suite():
+    from hermes_cli.hades_quality_report import build_hades_quality_report
+
+    report = build_hades_quality_report(
+        no_codebase_report={"status": "passed", "total": 1, "passed": 1, "failed": 0, "taxonomy_coverage": 1.0},
+        suite_report={
+            "schema": "hades.no_codebase_quality_suite_report.v1",
+            "status": "failed",
+            "failed": 1,
+            "suites": [{"id": "rocket_club", "status": "failed"}],
+        },
+    )
+
+    assert report["status"] == "failed"
+    assert any(action["id"] == "fix_no_codebase_quality_suite" for action in report["action_queue"])
 
 
 def test_note_backfill_quality_report_counts_review_candidates():
@@ -240,6 +271,35 @@ def test_backend_quality_report_command_emits_json_for_fixture(monkeypatch, tmp_
     assert payload["status"] == "passed"
     assert payload["metrics"]["no_codebase"]["total"] == 7
     assert payload["action_queue"] == []
+
+
+def test_backend_quality_report_command_accepts_quality_suite(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import hermes_cli.hades_backend_cmd as cmd
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=None,
+            suite=str(SUITE_PATH),
+            skip_local_status=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["status"] == "attention"
+    assert payload["metrics"]["no_codebase_suite"]["status"] == "passed"
+    assert payload["metrics"]["no_codebase_suite"]["total"] == 1
+    assert payload["action_queue"] == [
+        {
+            "id": "run_no_codebase_eval",
+            "message": "Run the no-codebase diagnosis evaluation fixture before release.",
+            "severity": "warning",
+        }
+    ]
 
 
 def test_backend_quality_report_includes_pending_note_backfill_proposals(monkeypatch, tmp_path, capsys):

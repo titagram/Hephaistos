@@ -69,6 +69,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     support_report.add_argument("--json", action="store_true", help="Emit machine-readable support report JSON")
     quality_report = sub.add_parser("quality-report", help="Emit a Hades awareness quality report")
     quality_report.add_argument("--no-codebase-eval", default=None, help="Path to a no-codebase diagnosis eval fixture JSON")
+    quality_report.add_argument("--suite", default=None, help="Path to a Hades no-codebase quality suite JSON")
     quality_report.add_argument("--skip-local-status", action="store_true", help="Do not include local backend support status")
     quality_report.add_argument("--record", action="store_true", help="Store this report as the latest local Hades quality snapshot")
     quality_report.add_argument("--json", action="store_true", help="Emit machine-readable quality report JSON")
@@ -80,6 +81,7 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     schedule_quality.add_argument("--name", default="Hades backend quality report", help="Cron job name")
     schedule_quality.add_argument("--deliver", default="local", help="Cron delivery target")
     schedule_quality.add_argument("--no-codebase-eval", default=None, help="Optional no-codebase diagnosis eval fixture JSON")
+    schedule_quality.add_argument("--suite", default=None, help="Optional Hades no-codebase quality suite JSON")
     schedule_quality.add_argument("--json", action="store_true", help="Emit machine-readable schedule result")
     privacy_export = sub.add_parser("privacy-export", help="Export backend diagnosis/evidence data for the current workspace")
     privacy_export.add_argument(
@@ -353,10 +355,16 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
 
         fixtures, runs = load_no_codebase_eval_fixture(args.no_codebase_eval)
         no_codebase_report = evaluate_no_codebase_diagnoses(fixtures, runs).to_dict()
+    suite_report = None
+    if getattr(args, "suite", None):
+        from hermes_cli.hades_quality_suite import load_quality_suite, run_quality_suite
+
+        suite_report = run_quality_suite(load_quality_suite(args.suite))
     with db.connect_closing() as conn:
         note_backfill_report = build_note_backfill_quality_report(db.list_memory_proposals(conn))
     report = build_hades_quality_report(
         no_codebase_report=no_codebase_report,
+        suite_report=suite_report,
         support_report=None if getattr(args, "skip_local_status", False) else support_report_payload(),
         note_backfill_report=note_backfill_report,
     )
@@ -379,23 +387,24 @@ QUALITY_REPORT_CRON_SCRIPT_NAME = "hades_backend_quality_report.py"
 QUALITY_REPORT_CRON_PROMPT = "Record the Hades backend quality report."
 
 
-def _quality_report_eval_path(value: str | None) -> str | None:
+def _quality_report_existing_path(value: str | None, *, label: str) -> str | None:
     clean = str(value or "").strip()
     if not clean:
         return None
     path = Path(clean).expanduser()
     if not path.exists():
-        raise FileNotFoundError(f"no-codebase eval fixture not found: {path}")
+        raise FileNotFoundError(f"{label} not found: {path}")
     return str(path.resolve())
 
 
-def _write_quality_report_cron_script(*, no_codebase_eval: str | None) -> Path:
+def _write_quality_report_cron_script(*, no_codebase_eval: str | None, suite: str | None) -> Path:
     from hermes_constants import get_hermes_home
 
     scripts_dir = get_hermes_home() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     script_path = scripts_dir / QUALITY_REPORT_CRON_SCRIPT_NAME
-    eval_path = _quality_report_eval_path(no_codebase_eval)
+    eval_path = _quality_report_existing_path(no_codebase_eval, label="no-codebase eval fixture")
+    suite_path = _quality_report_existing_path(suite, label="Hades quality suite")
     script = f"""from types import SimpleNamespace
 
 from hermes_cli.hades_backend_cmd import hades_backend_command
@@ -404,6 +413,7 @@ from hermes_cli.hades_backend_cmd import hades_backend_command
 args = SimpleNamespace(
     backend_action="quality-report",
     no_codebase_eval={json.dumps(eval_path)},
+    suite={json.dumps(suite_path)},
     skip_local_status=False,
     record=True,
     json=True,
@@ -423,6 +433,7 @@ def _cmd_schedule_quality(args: argparse.Namespace) -> int:
     try:
         script_path = _write_quality_report_cron_script(
             no_codebase_eval=getattr(args, "no_codebase_eval", None),
+            suite=getattr(args, "suite", None),
         )
         from cron.jobs import create_job, list_jobs, update_job
 

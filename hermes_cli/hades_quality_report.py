@@ -10,6 +10,7 @@ from typing import Any, Iterable
 def build_hades_quality_report(
     *,
     no_codebase_report: dict[str, Any] | None = None,
+    suite_report: dict[str, Any] | None = None,
     support_report: dict[str, Any] | None = None,
     note_backfill_report: dict[str, Any] | None = None,
     generated_at: int | None = None,
@@ -28,6 +29,23 @@ def build_hades_quality_report(
     else:
         metrics["no_codebase"] = _no_codebase_metrics(no_codebase_report)
         actions.extend(_no_codebase_actions(no_codebase_report))
+
+    if suite_report is not None:
+        metrics["no_codebase_suite"] = {
+            "status": suite_report.get("status"),
+            "total": int(suite_report.get("total") or 0),
+            "passed": int(suite_report.get("passed") or 0),
+            "failed": int(suite_report.get("failed") or 0),
+        }
+        if suite_report.get("status") != "passed":
+            actions.append(
+                _action(
+                    "fix_no_codebase_quality_suite",
+                    "blocker",
+                    "Fix failing no-codebase quality suite entries.",
+                    count=int(suite_report.get("failed") or 0),
+                )
+            )
 
     if support_report is not None:
         metrics["support"] = {
