@@ -1,4 +1,4 @@
-import { buildHermesWebSocketUrl } from "@hermes/shared";
+import { buildHermesWebSocketUrl } from "@hades/shared";
 
 // The dashboard can be served either at the root of its host (e.g.
 // https://kanban.tilos.com/) or under a URL prefix when reverse-proxied
@@ -75,6 +75,7 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/mcp",
   "/api/messaging/platforms",
   "/api/messaging/telegram/onboarding",
+  "/api/hades/backend",
   "/api/model/info",
   "/api/model/set",
   "/api/model/auxiliary",
@@ -203,7 +204,7 @@ async function getSessionToken(): Promise<string> {
     _sessionToken = injected;
     return _sessionToken;
   }
-  throw new Error("Session token not available — page must be served by the Hermes dashboard server");
+  throw new Error("Session token not available — page must be served by the Hades dashboard server");
 }
 
 /**
@@ -317,6 +318,69 @@ function appendProfileParam(url: string, profile?: string): string {
 export const api = {
   buildWsUrl,
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getHadesBackendStatus: () =>
+    fetchJSON<HadesBackendStatus>("/api/hades/backend/status"),
+  runHadesBackendSync: () =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/sync", {
+      method: "POST",
+    }),
+  createHadesBackendBugIntake: (body: HadesBackendBugIntakeRequest) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/bug-intake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  getHadesBackendBugReport: (bugReportId: string) =>
+    fetchJSON<HadesBackendBugReportDetailResponse>(
+      `/api/hades/backend/bug-reports/${encodeURIComponent(bugReportId)}`,
+    ),
+  promoteHadesBackendDiagnosis: (body: HadesBackendPromoteDiagnosisRequest) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/promote-diagnosis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  runHadesBackendPrivacyExport: (includeContent = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/privacy-export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ include_content: includeContent }),
+    }),
+  runHadesBackendPrivacyDelete: (confirm = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/privacy-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm }),
+    }),
+  runHadesBackendRetentionCleanup: (retentionDays = 30, confirm = false) =>
+    fetchJSON<HadesBackendActionResponse>("/api/hades/backend/retention-cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ retention_days: retentionDays, confirm }),
+    }),
+  getHadesBackendJobs: () =>
+    fetchJSON<HadesBackendJobsResponse>("/api/hades/backend/jobs"),
+  approveHadesBackendJob: (jobId: string) =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/jobs/${encodeURIComponent(jobId)}/approve`,
+      { method: "POST" },
+    ),
+  refuseHadesBackendJob: (jobId: string, reason = "dashboard_refused") =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/jobs/${encodeURIComponent(jobId)}/refuse`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      },
+    ),
+  getHadesBackendProposals: () =>
+    fetchJSON<HadesBackendProposalsResponse>("/api/hades/backend/proposals"),
+  acknowledgeHadesBackendProposal: (proposalId: string) =>
+    fetchJSON<HadesBackendActionResponse>(
+      `/api/hades/backend/proposals/${encodeURIComponent(proposalId)}/ack`,
+      { method: "POST" },
+    ),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
@@ -1603,6 +1667,318 @@ export interface CheckpointSession {
 export interface CheckpointsResponse {
   sessions: CheckpointSession[];
   total_bytes: number;
+}
+
+export interface HadesBackendAgent {
+  agent_id: string;
+  project_id: string;
+  base_url: string;
+  label: string;
+  capabilities: string[];
+}
+
+export interface HadesBackendAwarenessSummary {
+  status: string;
+  bindings: number;
+  ready_bindings: number;
+  partial_bindings: number;
+  degraded_bindings: number;
+  diagnosable_without_source_bindings: number;
+}
+
+export interface HadesBackendCoverageItem {
+  status: string;
+  items?: number;
+  version?: string | null;
+  updated_at?: number | null;
+  uploaded_last_sync?: number;
+  errors_last_sync?: number;
+  items_last_sync?: number;
+}
+
+export interface HadesBackendBindingAwareness {
+  status: string;
+  diagnosable_without_source: boolean;
+  coverage: {
+    memory_cache?: HadesBackendCoverageItem;
+    project_artifacts?: HadesBackendCoverageItem;
+    source_slices?: HadesBackendCoverageItem;
+    bug_evidence?: HadesBackendCoverageItem;
+  };
+  quality: {
+    confidence: string;
+    missing: string[];
+    summary_scope?: string;
+    last_sync_summary_updated_at?: number | null;
+  };
+}
+
+export interface HadesBackendIdentity {
+  personal_memory: {
+    scope: string;
+    provider: string;
+    portable_between_devices: boolean;
+  };
+  project_memory: {
+    scope: string;
+    provider: string | null;
+    project_id: string | null;
+    available: boolean;
+    cached_items: number;
+    portable_between_devices: boolean;
+  };
+  workspace_binding: {
+    scope: string;
+    total_bindings: number;
+    linked_bindings: number;
+    current_workspace_binding_id: string | null;
+    current_display_path: string | null;
+    current_status?: string | null;
+    current_source_free_ready?: boolean;
+    source_free_ready: number;
+  };
+  login_recovery?: {
+    can_use_project_memory_without_old_device: boolean;
+    current_workspace_mapped: boolean;
+    source_free_diagnosis_ready: boolean;
+    requires_workspace_binding_for_indexing: boolean;
+    recommended_next_action: string;
+  };
+}
+
+export interface HadesBackendBinding {
+  workspace_fingerprint: string | null;
+  workspace_binding_id: string | null;
+  project_id: string | null;
+  local_project_id: string | null;
+  display_path: string | null;
+  head_commit?: string | null;
+  status: string | null;
+  awareness?: HadesBackendBindingAwareness;
+}
+
+export interface HadesBackendSyncState {
+  last_summary: Record<string, unknown> | null;
+  last_summary_updated_at?: number | null;
+  last_error: Record<string, unknown> | null;
+  last_error_updated_at?: number | null;
+  background: Record<string, unknown> | null;
+  background_updated_at?: number | null;
+}
+
+export interface HadesBackendQualityAction {
+  id?: string;
+  severity?: string;
+  message?: string;
+  count?: number;
+  value?: number;
+  status?: string;
+}
+
+export interface HadesBackendQualityReport {
+  schema?: string | null;
+  status?: string | null;
+  summary?: Record<string, number>;
+  metrics?: Record<string, unknown>;
+  action_queue?: HadesBackendQualityAction[];
+}
+
+export interface HadesBackendQualityHistoryEntry {
+  generated_at?: number | null;
+  recorded_at?: number | null;
+  status?: string | null;
+  summary?: Record<string, number>;
+  action_ids?: string[];
+  action_queue?: HadesBackendQualityAction[];
+}
+
+export interface HadesBackendQualityHistory {
+  schema?: string | null;
+  updated_at?: number | null;
+  limit?: number;
+  total?: number;
+  by_status?: Record<string, number>;
+  entries?: HadesBackendQualityHistoryEntry[];
+  latest_failure?: HadesBackendQualityHistoryEntry | null;
+}
+
+export interface HadesBackendQualityState {
+  last_report: HadesBackendQualityReport | null;
+  last_report_updated_at?: number | null;
+  staleness?: Record<string, unknown>;
+  history?: HadesBackendQualityHistory;
+}
+
+export interface HadesBackendTaskWorkStatus {
+  schema?: string;
+  project_id?: string | null;
+  total: number;
+  queued: number;
+  claimed: number;
+  failed: number;
+  by_status: Record<string, number>;
+  shared_memory_required: number;
+  shared_memory_context: number;
+  missing_shared_memory_context: number;
+  shared_memory_context_coverage: number;
+  missing_work_item_ids: string[];
+  worker_setup?: {
+    status?: string;
+    local_workspace_id_present?: boolean;
+    next_step?: string;
+  };
+  next_step?: string;
+}
+
+export interface HadesBackendStatus {
+  configured: boolean;
+  agent: HadesBackendAgent | null;
+  bindings: HadesBackendBinding[];
+  awareness?: HadesBackendAwarenessSummary;
+  identity?: HadesBackendIdentity;
+  quality?: HadesBackendQualityState;
+  task_work?: HadesBackendTaskWorkStatus;
+  job_counts: Record<string, number>;
+  proposal_counts: Record<string, number>;
+  inbox_counts: Record<string, number>;
+  sync: HadesBackendSyncState;
+  degraded: boolean;
+  actions: string[];
+}
+
+export interface HadesBackendJob {
+  job_id: string;
+  project_id: string;
+  workspace_binding_id: string;
+  capability: string;
+  status: string;
+  payload_keys: string[];
+  result: Record<string, unknown> | null;
+}
+
+export interface HadesBackendJobsResponse {
+  jobs: HadesBackendJob[];
+}
+
+export interface HadesBackendMemoryProposal {
+  proposal_id: string;
+  project_id: string;
+  workspace_binding_id: string;
+  action: string;
+  intent: string;
+  summary: string;
+  status: string;
+  reason: string | null;
+}
+
+export interface HadesBackendProposalsResponse {
+  proposals: HadesBackendMemoryProposal[];
+}
+
+export interface HadesBackendBugIntakeRequest {
+  title: string;
+  symptom: string;
+  workspace_binding_id?: string | null;
+  steps?: string | null;
+  expected?: string | null;
+  actual?: string | null;
+  severity?: string | null;
+  environment?: string | null;
+  failing_test?: string | null;
+  runtime_log?: string | null;
+  deploy_commit?: string | null;
+  workspace_head?: string | null;
+  request_url?: string | null;
+  request_method?: string | null;
+  response_status?: number | null;
+}
+
+export interface HadesBackendBugReportDetail {
+  id?: string | null;
+  title?: string | null;
+  symptom?: string | null;
+  status?: string | null;
+  severity?: string | null;
+  environment?: string | null;
+  payload?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendBugReportEvidenceItem {
+  id?: string | null;
+  kind?: string | null;
+  summary?: string | null;
+  source?: string | null;
+  retention_class?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendDiagnosisReportSummary {
+  id?: string | null;
+  confidence?: string | null;
+  root_cause?: string | null;
+  status?: string | null;
+  final?: boolean | null;
+  evidence_refs?: Array<Record<string, unknown>>;
+  freshness?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendEvidencePackSummary {
+  id?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  evidence_refs?: Array<Record<string, unknown>>;
+  graph_refs?: Array<Record<string, unknown>>;
+  source_slice_ids?: string[];
+  freshness?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+export interface HadesBackendBugReportDetailResponse extends HadesBackendActionResponse {
+  bug_report?: HadesBackendBugReportDetail | null;
+  evidence?: HadesBackendBugReportEvidenceItem[];
+  evidence_items?: HadesBackendBugReportEvidenceItem[];
+  diagnosis_reports?: HadesBackendDiagnosisReportSummary[];
+  evidence_packs?: HadesBackendEvidencePackSummary[];
+  evidence_pack_count?: number;
+  evidence_pack_freshness?: Record<string, unknown> | null;
+  evidence_pack_error?: string | null;
+}
+
+export interface HadesBackendPromoteDiagnosisRequest {
+  diagnosis_report_id: string;
+  verification_status: string;
+  fix_commit?: string | null;
+  fix_pr_url?: string | null;
+  affected_symbols?: string[];
+  regression_tests?: string[];
+  notes?: string | null;
+}
+
+export interface HadesBackendActionResponse {
+  ok: boolean;
+  status: string;
+  summary: string;
+  job?: HadesBackendJob;
+  proposal?: HadesBackendMemoryProposal;
+  bug_report_id?: string | null;
+  evidence_ids?: Array<string | null>;
+  project_id?: string | null;
+  workspace_binding_id?: string | null;
+  diagnosis_report_id?: string | null;
+  resolved_bug_memory_id?: string | null;
+  resolved_bug?: Record<string, unknown>;
+  sync?: Record<string, number>;
+  include_content?: boolean;
+  counts?: Record<string, number>;
+  collections?: Record<string, unknown>;
+  dry_run?: boolean;
+  would_delete?: Record<string, number>;
+  deleted?: Record<string, number>;
+  retention_days?: number;
 }
 
 /** Per-call overrides for {@link fetchJSON}. */

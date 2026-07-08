@@ -16,6 +16,10 @@ core tools that live in `tools/` and `toolsets.py`.
 
 **→ [Build a Hermes Plugin](/guides/build-a-hermes-plugin)** — step-by-step guide with a complete working example.
 
+For what ships by default, what is official optional content, and what remains
+community/upstream catalog data, see
+[Plugin And Skill Distribution](/user-guide/features/plugin-skill-distribution).
+
 ## Quick overview
 
 Drop a directory into `~/.hermes/plugins/` with a `plugin.yaml` and Python code:

@@ -10,7 +10,7 @@
 // but matches their historical behaviour.
 //
 // We also try to pull a fresh copy of skills-index.json (the unified
-// multi-source catalog) from the live docs site if it's not already on disk.
+// multi-source catalog) from the canonical docs site if it's not already on disk.
 // That way local `npm run build` doesn't have to wait on
 // scripts/build_skills_index.py crawling every skill source — which takes
 // several minutes and burns GitHub API quota — but still gets the same
@@ -35,7 +35,7 @@ const cronBlueprintsScript = join(scriptDir, "extract-automation-blueprints.py")
 const outputFile = join(websiteDir, "static", "api", "skills.json");
 const unifiedIndexFile = join(websiteDir, "static", "api", "skills-index.json");
 const UNIFIED_INDEX_URL =
-  "https://hermes-agent.nousresearch.com/docs/api/skills-index.json";
+  "https://hades-agent.local/docs/api/skills-index.json";
 const UNIFIED_INDEX_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
 function writeEmptyFallback(reason) {

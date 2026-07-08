@@ -1,0 +1,10 @@
+case_id: rc_booking_controller_or_model
+observed_at: 2026-07-08T07:05:00Z
+environment: eval
+symptom: POST /console/bookings returns HTTP 422 when the payload has neither user_id nor ghost_alias.
+request: POST /console/bookings
+stack:
+  Illuminate\Http\Exceptions\HttpResponseException: Serve un utente registrato o un alias ghost.
+  at app/Http/Controllers/Console/BookingController.php:236
+  App\Http\Controllers\Console\BookingController::validateBooking() at app/Http/Controllers/Console/BookingController.php:72
+  App\Http\Controllers\Console\BookingController::storeBooking() at routes/web.php:77

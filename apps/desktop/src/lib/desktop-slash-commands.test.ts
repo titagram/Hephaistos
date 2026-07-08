@@ -73,6 +73,16 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/browser')?.args).toBe(true)
   })
 
+  it('opens the Hades bug intake wizard as a desktop action', () => {
+    expect(isDesktopSlashCommand('/bug-intake')).toBe(true)
+    expect(isDesktopSlashSuggestion('/bug-intake')).toBe(true)
+    expect(isDesktopSlashCommand('/bug')).toBe(true)
+    expect(isDesktopSlashSuggestion('/bug')).toBe(false)
+    expect(desktopSlashUnavailableMessage('/bug-intake')).toBeNull()
+    expect(resolveDesktopCommand('/bug-intake')?.surface).toEqual({ kind: 'action', action: 'bug-intake' })
+    expect(resolveDesktopCommand('/bug')?.surface).toEqual({ kind: 'action', action: 'bug-intake' })
+  })
+
   it('allows aliases to execute without cluttering the popover', () => {
     expect(isDesktopSlashSuggestion('/reset')).toBe(false)
     expect(isDesktopSlashCommand('/reset')).toBe(true)

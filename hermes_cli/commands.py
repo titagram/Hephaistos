@@ -1,4 +1,4 @@
-"""Slash command definitions and autocomplete for the Hermes CLI.
+"""Slash command definitions and autocomplete for the Hades CLI.
 
 Central registry for all slash commands. Every consumer -- CLI help, gateway
 dispatch, Telegram BotCommands, Slack subcommand mapping, autocomplete --
@@ -92,7 +92,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[here [N] | focus topic]"),
     CommandDef("rollback", "List or restore filesystem checkpoints", "Session",
                args_hint="[number]"),
-    CommandDef("snapshot", "Create or restore state snapshots of Hermes config/state", "Session",
+    CommandDef("snapshot", "Create or restore state snapshots of Hades config/state", "Session",
                cli_only=True, aliases=("snap",), args_hint="[create|restore <id>|prune]"),
     CommandDef("stop", "Kill all running background processes", "Session"),
     CommandDef("approve", "Approve a pending dangerous command", "Session",
@@ -107,7 +107,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("q",), args_hint="<prompt>"),
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>"),
-    CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
+    CommandDef("goal", "Set a standing goal Hades works on across turns until achieved", "Session",
                args_hint="[text | draft <text> | show | pause | resume | clear | status | wait <pid> | unwait]"),
     CommandDef("moa", "Run one prompt through the default Mixture of Agents preset, then restore your model", "Session",
                args_hint="<prompt>"),
@@ -161,7 +161,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("kaomoji", "emoji", "unicode", "ascii")),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
-    CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
+    CommandDef("busy", "Control what Enter does while Hades is working", "Configuration",
                cli_only=True, args_hint="[queue|steer|interrupt|status]",
                subcommands=("queue", "steer", "interrupt", "status")),
 
@@ -217,6 +217,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("connect", "disconnect", "status")),
     CommandDef("plugins", "List installed plugins and their status",
                "Tools & Skills", cli_only=True),
+    CommandDef("backend", "Manage the Hades shared backend integration",
+               "Tools & Skills", cli_only=True, args_hint="[subcommand]",
+               subcommands=("setup", "bootstrap", "status", "profiles", "worker", "sync")),
+    CommandDef("project", "Manage local Hades projects and backend links",
+               "Tools & Skills", cli_only=True, args_hint="[subcommand]",
+               subcommands=("create", "list", "ls", "show", "add-folder",
+                            "remove-folder", "rename", "set-primary", "use",
+                            "archive", "restore", "bind-board", "link", "unlink")),
 
     # Info
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
@@ -240,11 +248,16 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("image", "Attach a local image file for your next prompt", "Info",
                cli_only=True, args_hint="<path>"),
-    CommandDef("update", "Update Hermes Agent to the latest version", "Info"),
-    CommandDef("version", "Show Hermes Agent version", "Info", aliases=("v",)),
+    CommandDef("doctor", "Diagnose Hades setup and run local maintenance",
+               "Info", cli_only=True, args_hint="[cleanup|--fix|--report-backend]",
+               subcommands=("cleanup",)),
+    CommandDef("update", "Update Hades Agent to the latest version", "Info"),
+    CommandDef("version", "Show Hades Agent version", "Info", aliases=("v",)),
     CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info"),
 
     # Exit
+    CommandDef("uninstall", "Uninstall Hades Agent", "Exit",
+               cli_only=True, args_hint="[--gui|--full] [--yes]"),
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
                cli_only=True, aliases=("exit",), args_hint="[--delete]"),
 ]
@@ -275,6 +288,17 @@ def resolve_command(name: str) -> CommandDef | None:
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
+def is_hades_visible_command(name: str | None) -> bool:
+    """Return True if a slash command belongs in the local Hades surface."""
+    if not name:
+        return False
+    resolved = resolve_command(name)
+    canonical = resolved.name if resolved else str(name).lower().lstrip("/")
+    from hermes_cli.hades_exclusions import is_hades_visible_slash_command_name
+
+    return is_hades_visible_slash_command_name(canonical)
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:
@@ -298,6 +322,24 @@ for _cmd in COMMAND_REGISTRY:
         _cat[f"/{_cmd.name}"] = COMMANDS[f"/{_cmd.name}"]
         for _alias in _cmd.aliases:
             _cat[f"/{_alias}"] = COMMANDS[f"/{_alias}"]
+
+
+def hades_cli_commands_by_category() -> dict[str, dict[str, str]]:
+    """Return the curated local command help surface for Hades.
+
+    ``COMMANDS`` and ``COMMANDS_BY_CATEGORY`` remain the compatibility maps for
+    registry tests and gateway infrastructure. Local discovery surfaces use
+    this narrower view.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for cmd in COMMAND_REGISTRY:
+        if cmd.gateway_only or not is_hades_visible_command(cmd.name):
+            continue
+        cat = result.setdefault(cmd.category, {})
+        cat[f"/{cmd.name}"] = _build_description(cmd)
+        for alias in cmd.aliases:
+            cat[f"/{alias}"] = f"{cmd.description} (alias for /{cmd.name})"
+    return result
 
 
 # Subcommands lookup: "/cmd" -> ["sub1", "sub2", ...]
@@ -538,7 +580,7 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     return result
 
 
-# Telegram allows up to 100 BotCommands. Hermes ships ~50 built-in commands;
+# Telegram allows up to 100 BotCommands. Hades ships ~50 built-in commands;
 # a 60-slot default keeps every built-in plus common skill commands visible in
 # the `/` menu while staying comfortably under Telegram's ~4KB payload limit.
 # Users can tune this via platforms.telegram.extra.command_menu.max_commands.
@@ -577,7 +619,7 @@ _TELEGRAM_MENU_PRIORITY = (
 )
 """Built-in commands that should stay visible in Telegram's capped menu.
 
-Telegram only displays a small BotCommand menu in practice.  The full Hermes
+Telegram only displays a small BotCommand menu in practice.  The full Hades
 registry is still dispatchable when typed manually, but operational commands
 need to survive the visible menu cap ahead of lower-priority built-ins.
 """
@@ -1199,7 +1241,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     seen: set[str] = set()
 
     # Reserve /hermes as the catch-all top-level command.
-    entries.append(("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]"))
+    entries.append(("hermes", "Talk to Hades or run a subcommand", "[subcommand] [args]"))
     seen.add("hermes")
 
     def _add(name: str, desc: str, hint: str) -> None:

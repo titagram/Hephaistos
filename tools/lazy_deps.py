@@ -79,6 +79,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from hermes_cli.hades_exclusions import is_excluded_lazy_feature
+
 logger = logging.getLogger(__name__)
 
 
@@ -692,6 +694,8 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
 
 def feature_specs(feature: str) -> tuple[str, ...]:
     """Return the registered specs for a feature, or raise KeyError."""
+    if is_excluded_lazy_feature(feature):
+        raise KeyError(f"Lazy feature excluded from Hades: {feature!r}")
     if feature not in LAZY_DEPS:
         raise KeyError(f"Unknown lazy feature: {feature!r}")
     return LAZY_DEPS[feature]
@@ -714,6 +718,10 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     batch) get prompt=False and skip the confirmation — config flag is
     the gate in that case.
     """
+    if is_excluded_lazy_feature(feature):
+        raise FeatureUnavailable(
+            feature, (), f"feature {feature!r} is excluded from Hades"
+        )
     if feature not in LAZY_DEPS:
         raise FeatureUnavailable(
             feature, (), f"feature {feature!r} not in LAZY_DEPS allowlist"
@@ -804,6 +812,8 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
 
 def is_available(feature: str) -> bool:
     """Return True if the feature's deps are already satisfied."""
+    if is_excluded_lazy_feature(feature):
+        return False
     if feature not in LAZY_DEPS:
         return False
     return not feature_missing(feature)
@@ -811,6 +821,8 @@ def is_available(feature: str) -> bool:
 
 def feature_install_command(feature: str) -> Optional[str]:
     """Return the ``pip install`` command a user could run manually, or None."""
+    if is_excluded_lazy_feature(feature):
+        return None
     if feature not in LAZY_DEPS:
         return None
     specs = LAZY_DEPS[feature]
@@ -829,6 +841,8 @@ def active_features() -> list[str]:
     """
     active = []
     for feature, specs in LAZY_DEPS.items():
+        if is_excluded_lazy_feature(feature):
+            continue
         if any(_is_present(s) for s in specs):
             active.append(feature)
     return active

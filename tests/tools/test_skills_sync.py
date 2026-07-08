@@ -280,8 +280,8 @@ class TestExternalDirsIndexing:
         bundled = tmp_path / "bundled_skills"
         (bundled / "devops" / "clair-qa").mkdir(parents=True)
         (bundled / "devops" / "clair-qa" / "SKILL.md").write_text("# bundled clair")
-        (bundled / "creative" / "ascii-art").mkdir(parents=True)
-        (bundled / "creative" / "ascii-art" / "SKILL.md").write_text("# bundled ascii")
+        (bundled / "software-development" / "ascii-art").mkdir(parents=True)
+        (bundled / "software-development" / "ascii-art" / "SKILL.md").write_text("# bundled ascii")
         return bundled
 
     def _setup_external(self, tmp_path):
@@ -453,6 +453,19 @@ class TestSyncSkills:
         assert (skills_dir / "category" / "new-skill" / "SKILL.md").exists()
         assert (skills_dir / "old-skill" / "SKILL.md").exists()
         assert (skills_dir / "category" / "DESCRIPTION.md").exists()
+
+    def test_hades_excluded_category_descriptions_are_not_copied(self, tmp_path):
+        bundled = self._setup_bundled(tmp_path)
+        (bundled / "productivity").mkdir()
+        (bundled / "productivity" / "DESCRIPTION.md").write_text("Productivity desc")
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            sync_skills(quiet=True)
+
+        assert (skills_dir / "category" / "DESCRIPTION.md").exists()
+        assert not (skills_dir / "productivity" / "DESCRIPTION.md").exists()
 
     def test_fresh_install_records_origin_hashes(self, tmp_path):
         """After fresh install, manifest should have v2 format with hashes."""
@@ -958,8 +971,8 @@ class TestResetBundledSkill:
     def _setup_bundled(self, tmp_path):
         """Create a minimal bundled skills tree with a single 'google-workspace' skill."""
         bundled = tmp_path / "bundled_skills"
-        (bundled / "productivity" / "google-workspace").mkdir(parents=True)
-        (bundled / "productivity" / "google-workspace" / "SKILL.md").write_text(
+        (bundled / "software-development" / "google-workspace").mkdir(parents=True)
+        (bundled / "software-development" / "google-workspace" / "SKILL.md").write_text(
             "---\nname: google-workspace\n---\n# GW v2 (upstream)\n"
         )
         return bundled
@@ -981,7 +994,7 @@ class TestResetBundledSkill:
 
         # Simulate the stuck state: user edited the skill on an older bundled version,
         # so manifest has an old origin hash that no longer matches anything on disk.
-        dest = skills_dir / "productivity" / "google-workspace"
+        dest = skills_dir / "software-development" / "google-workspace"
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text("---\nname: google-workspace\n---\n# GW v2 (upstream)\n")
         # Stale origin_hash — from some prior bundled version. User "restored" by pasting
@@ -1002,7 +1015,7 @@ class TestResetBundledSkill:
 
             # After reset, the manifest should hold the *current* bundled hash
             manifest_after = _read_manifest()
-            expected = _dir_hash(bundled / "productivity" / "google-workspace")
+            expected = _dir_hash(bundled / "software-development" / "google-workspace")
             assert manifest_after["google-workspace"] == expected
         # User's copy was preserved (we didn't delete)
         assert dest.exists()
@@ -1014,7 +1027,7 @@ class TestResetBundledSkill:
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"
 
-        dest = skills_dir / "productivity" / "google-workspace"
+        dest = skills_dir / "software-development" / "google-workspace"
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text("# heavily edited by user\n")
         (dest / "my_custom_file.py").write_text("print('user-added')\n")
@@ -1050,7 +1063,7 @@ class TestResetBundledSkill:
         bundled = self._setup_bundled(tmp_path)
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"
-        dest = skills_dir / "productivity" / "ghost-skill"
+        dest = skills_dir / "software-development" / "ghost-skill"
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text("---\nname: ghost-skill\n---\n# Ghost\n")
         manifest_file.write_text("ghost-skill:OLDHASH00000000000000000000000000\n")
@@ -1080,7 +1093,7 @@ class TestResetBundledSkill:
             # Manifest entry still present (re-baselined), user copy still present
             post_manifest = _read_manifest()
             assert "google-workspace" in post_manifest
-        assert (skills_dir / "productivity" / "google-workspace" / "SKILL.md").exists()
+        assert (skills_dir / "software-development" / "google-workspace" / "SKILL.md").exists()
 
     def test_reset_restore_succeeds_on_readonly_nix_tree(self, tmp_path):
         """#34972: --restore must succeed even when the user copy is a fully
@@ -1093,7 +1106,7 @@ class TestResetBundledSkill:
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"
 
-        dest = skills_dir / "productivity" / "google-workspace"
+        dest = skills_dir / "software-development" / "google-workspace"
         sub = dest / "references"
         sub.mkdir(parents=True)
         (dest / "SKILL.md").write_text("# user version\n")
@@ -1138,7 +1151,7 @@ class TestResetBundledSkill:
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"
 
-        dest = skills_dir / "productivity" / "google-workspace"
+        dest = skills_dir / "software-development" / "google-workspace"
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text("# user version\n")
         manifest_file.write_text(

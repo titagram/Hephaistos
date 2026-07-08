@@ -56,6 +56,16 @@ class TestIRCProtocolHelpers:
 
 class TestIRCAdapterInit:
 
+    def test_default_runtime_nickname_stays_legacy_hermes(self, monkeypatch):
+        for key in ("IRC_SERVER", "IRC_PORT", "IRC_NICKNAME", "IRC_CHANNEL", "IRC_USE_TLS"):
+            monkeypatch.delenv(key, raising=False)
+
+        from gateway.config import PlatformConfig
+        cfg = PlatformConfig(enabled=True, extra={"server": "irc.test.net", "channel": "#test"})
+        adapter = IRCAdapter(cfg)
+
+        assert adapter.nickname == "hermes-bot"
+
     def test_init_from_env(self, monkeypatch):
         monkeypatch.setenv("IRC_SERVER", "irc.test.net")
         monkeypatch.setenv("IRC_PORT", "6667")
@@ -578,7 +588,7 @@ class TestIRCStandaloneSend:
         # NICK uses the cron-suffixed identity to avoid colliding with the
         # long-running gateway adapter that may already hold the nickname.
         assert any(line.startswith("NICK hermesbot-cron") for line in sent_lines)
-        assert any(line.startswith("USER hermesbot-cron 0 * :Hermes Agent (cron)")
+        assert any(line.startswith("USER hermesbot-cron 0 * :Hades Agent (cron)")
                    for line in sent_lines)
         assert any(line == "PRIVMSG #cron :hello from cron" for line in sent_lines)
         assert any(line.startswith("QUIT ") for line in sent_lines)

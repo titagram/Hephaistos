@@ -30,7 +30,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
-from toolsets import resolve_toolset, validate_toolset
+from toolsets import is_excluded_toolset, resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +208,17 @@ except Exception as e:
 # Backward-compat constants  (built once after discovery)
 # =============================================================================
 
-TOOL_TO_TOOLSET_MAP: Dict[str, str] = registry.get_tool_to_toolset_map()
+TOOL_TO_TOOLSET_MAP: Dict[str, str] = {
+    tool_name: toolset_name
+    for tool_name, toolset_name in registry.get_tool_to_toolset_map().items()
+    if not is_excluded_toolset(toolset_name)
+}
 
-TOOLSET_REQUIREMENTS: Dict[str, dict] = registry.get_toolset_requirements()
+TOOLSET_REQUIREMENTS: Dict[str, dict] = {
+    toolset_name: info
+    for toolset_name, info in registry.get_toolset_requirements().items()
+    if not is_excluded_toolset(toolset_name)
+}
 
 # Resolved tool names from the last get_tool_definitions() call.
 # Used by code_execution_tool to know which tools are available in this session.
@@ -237,6 +245,15 @@ _LEGACY_TOOLSET_MAP = {
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
 }
+
+
+def _filter_excluded_tool_names(tool_names: List[str]) -> List[str]:
+    """Remove tools that belong to toolsets hidden from Hades."""
+    return [
+        tool_name
+        for tool_name in tool_names
+        if not is_excluded_toolset(registry.get_toolset_for_tool(tool_name) or "")
+    ]
 
 
 # =============================================================================
@@ -376,7 +393,7 @@ def _compute_tool_definitions(
                 if not quiet_mode:
                     print(f"✅ Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
-                legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
+                legacy_tools = _filter_excluded_tool_names(_LEGACY_TOOLSET_MAP[toolset_name])
                 tools_to_include.update(legacy_tools)
                 if not quiet_mode:
                     print(f"✅ Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
@@ -421,7 +438,7 @@ def _compute_tool_definitions(
                 if not quiet_mode:
                     print(f"🚫 Disabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
-                legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
+                legacy_tools = _filter_excluded_tool_names(_LEGACY_TOOLSET_MAP[toolset_name])
                 tools_to_include.difference_update(legacy_tools)
                 if not quiet_mode:
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
@@ -1232,24 +1249,39 @@ def handle_function_call(
 
 def get_all_tool_names() -> List[str]:
     """Return all registered tool names."""
-    return registry.get_all_tool_names()
+    return _filter_excluded_tool_names(registry.get_all_tool_names())
 
 
 def get_toolset_for_tool(tool_name: str) -> Optional[str]:
     """Return the toolset a tool belongs to."""
-    return registry.get_toolset_for_tool(tool_name)
+    toolset_name = registry.get_toolset_for_tool(tool_name)
+    if toolset_name and is_excluded_toolset(toolset_name):
+        return None
+    return toolset_name
 
 
 def get_available_toolsets() -> Dict[str, dict]:
     """Return toolset availability info for UI display."""
-    return registry.get_available_toolsets()
+    return {
+        toolset_name: info
+        for toolset_name, info in registry.get_available_toolsets().items()
+        if not is_excluded_toolset(toolset_name)
+    }
 
 
 def check_toolset_requirements() -> Dict[str, bool]:
     """Return {toolset: available_bool} for every registered toolset."""
-    return registry.check_toolset_requirements()
+    return {
+        toolset_name: available
+        for toolset_name, available in registry.check_toolset_requirements().items()
+        if not is_excluded_toolset(toolset_name)
+    }
 
 
 def check_tool_availability(quiet: bool = False) -> Tuple[List[str], List[dict]]:
     """Return (available_toolsets, unavailable_info)."""
-    return registry.check_tool_availability(quiet=quiet)
+    available, unavailable = registry.check_tool_availability(quiet=quiet)
+    return (
+        [toolset_name for toolset_name in available if not is_excluded_toolset(toolset_name)],
+        [item for item in unavailable if not is_excluded_toolset(item.get("name", ""))],
+    )

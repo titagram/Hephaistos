@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled, fast_safe_load
 from hermes_cli.config import cfg_get
+from hermes_cli.hades_exclusions import is_excluded_bundled_plugin
 from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE
 
 
@@ -1275,6 +1276,16 @@ class PluginManager:
         enabled = _get_enabled_plugins()  # None = opt-in default (nothing enabled)
         winners: Dict[str, PluginManifest] = {}
         for manifest in manifests:
+            if is_excluded_bundled_plugin(
+                key=manifest.key or manifest.name,
+                name=manifest.name,
+                source=manifest.source,
+            ):
+                logger.debug(
+                    "Skipping bundled plugin '%s' (excluded from Hades)",
+                    manifest.key or manifest.name,
+                )
+                continue
             winners[manifest.key or manifest.name] = manifest
         for manifest in winners.values():
             lookup_key = manifest.key or manifest.name

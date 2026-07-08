@@ -1,0 +1,22 @@
+{
+  "artifacts": [
+    {
+      "capability": "sync_git_tree",
+      "schema": "hades.git_tree.v1",
+      "summary": "Collected 530 git tree entries; indexed 84 route(s), 2 dependency manifest(s).",
+      "sha256": "3791cfbd37816ea9397036c970019be560fe183be6e639871e6cfb852331f80d",
+      "backend_artifact_id": "01KX08CHQDV0KYS02ZCZ7N1GHM",
+      "deduplicated": false,
+      "compressed": true
+    },
+    {
+      "capability": "populate_backend_ast",
+      "schema": "hades.php_graph.v1",
+      "summary": "PHP graph; routes:84; symbols:530; edges:7657; tables:82; tests:28; logs:0; api_resource:46, blade_view:1, controller:147, database_table:82, form_request:8, middleware:12, middleware_alias:2, model:123",
+      "sha256": "786de2a7248407875f37035ddde371b355a69919f1fd6629eda10b583b55d169",
+      "backend_artifact_id": "01KX08CK4A3Y0RP15RVY2GYGZQ",
+      "deduplicated": false,
+      "compressed": true
+    }
+  ]
+}

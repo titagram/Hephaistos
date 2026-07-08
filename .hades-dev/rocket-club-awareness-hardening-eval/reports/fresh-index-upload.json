@@ -1,0 +1,28 @@
+{
+  "uploaded": [
+    {
+      "job_id": "fresh_rocket_eval_sync_git_tree",
+      "status": "completed",
+      "upload": {
+        "schema": "hades.git_tree.v1",
+        "sha256": "513e826e0dfc95f55ad0e94fbbe6d268032a699f6e7f157e689017054cc224a4",
+        "artifact_id": "01KX0EBME6QKDPGYDMCTP7RQ1G",
+        "compressed": false,
+        "candidate_count": 0,
+        "summary": "Project index; routes: none; dependencies: fakerphp/faker, filament/filament, inertiajs/inertia-laravel, laravel/framework, laravel/pail, @eslint/js, @headlessui/react, @inertiajs/react, @playwright/test, @radix-ui/react-avatar; migrations: 7"
+      }
+    },
+    {
+      "job_id": "fresh_rocket_eval_populate_backend_ast",
+      "status": "completed",
+      "upload": {
+        "schema": "hades.php_graph.v1",
+        "sha256": "2dd7e6fbdfdf188b3efa94968ef9858ef7cd43c9d097a2e74e2626d96483e39e",
+        "artifact_id": "01KX0EDZ546GXK6KGCNNFJTAR4",
+        "compressed": true,
+        "candidate_count": 7,
+        "summary": "PHP graph; routes:84; symbols:530; edges:7657; tables:82; tests:28; logs:0; api_resource:46, blade_view:1, controller:147, database_table:82, form_request:8, middleware:12, middleware_alias:2, model:123; source_slice_candidates:500; filtered_source_slice_candidates:6"
+      }
+    }
+  ]
+}

@@ -255,6 +255,34 @@ class TestFindAllSkills:
             skills = _find_all_skills()
         assert len(skills[0]["description"]) <= MAX_DESCRIPTION_LENGTH
 
+    def test_hades_hides_pristine_disallowed_bundled_but_keeps_personal_backend_skill(
+        self, tmp_path, monkeypatch
+    ):
+        from tools.skills_sync import _dir_hash
+
+        apple_dir = _make_skill(tmp_path, "apple-notes", category="apple")
+        backend_dir = _make_skill(
+            tmp_path,
+            "backend-knowledge-sync",
+            category="autonomous-ai-agents",
+            frontmatter_extra="metadata:\n  hermes:\n    tags: [backend, shared-memory]\n",
+        )
+        manifest = tmp_path / ".bundled_manifest"
+        manifest.write_text(f"apple-notes:{_dir_hash(apple_dir)}\n")
+
+        monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", tmp_path)
+        monkeypatch.setattr("agent.skill_utils.get_external_skills_dirs", lambda: [])
+        monkeypatch.setattr(
+            "tools.skills_tool._get_disabled_skill_names", lambda: set()
+        )
+
+        skills = _find_all_skills()
+        names = {skill["name"] for skill in skills}
+
+        assert "apple-notes" not in names
+        assert "backend-knowledge-sync" in names
+        assert backend_dir.exists()
+
     def test_skips_git_directories(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "real-skill")

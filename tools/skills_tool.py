@@ -67,6 +67,7 @@ Usage:
 """
 
 import json
+import hashlib
 import logging
 
 from hermes_constants import get_hermes_home, display_hermes_home
@@ -109,6 +110,71 @@ _REMOTE_ENV_BACKENDS = frozenset(
     {"docker", "singularity", "modal", "ssh", "daytona"}
 )
 _secret_capture_callback = None
+_BUNDLED_MANIFEST_NAME = ".bundled_manifest"
+
+
+def _read_bundled_manifest_for_skills_dir() -> Dict[str, str]:
+    """Read SKILLS_DIR/.bundled_manifest without importing skills_sync.
+
+    ``tools.skills_sync`` binds its own SKILLS_DIR at import time, while tests
+    and profile switches patch this module's SKILLS_DIR directly. Keep this
+    tiny reader local so the runtime skill filter follows the active directory.
+    """
+    manifest_file = SKILLS_DIR / _BUNDLED_MANIFEST_NAME
+    if not manifest_file.exists():
+        return {}
+    result: Dict[str, str] = {}
+    try:
+        for line in manifest_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if ":" in line:
+                name, _, hash_val = line.partition(":")
+                result[name.strip()] = hash_val.strip()
+            else:
+                result[line] = ""
+    except OSError:
+        return {}
+    return result
+
+
+def _skill_dir_hash(directory: Path) -> str:
+    """Compute the same directory hash shape used by skills_sync."""
+    hasher = hashlib.md5()
+    try:
+        for fpath in sorted(directory.rglob("*")):
+            if fpath.is_file():
+                hasher.update(fpath.relative_to(directory).as_posix().encode())
+                hasher.update(fpath.read_bytes())
+    except OSError:
+        pass
+    return hasher.hexdigest()
+
+
+def _is_hades_hidden_pristine_bundled_skill(skill_dir: Path, skill_name: str) -> bool:
+    """Return True for unmodified bundled skills outside Hades' local surface.
+
+    Personal skills are not in the bundled manifest and return False. Bundled
+    skills the user edited also return False because their current hash no
+    longer matches the manifest origin hash.
+    """
+    try:
+        rel = skill_dir.relative_to(SKILLS_DIR)
+    except ValueError:
+        return False
+
+    from hermes_cli.hades_exclusions import is_allowed_bundled_skill_rel_path
+
+    rel_posix = rel.as_posix().strip("/")
+    if is_allowed_bundled_skill_rel_path(rel_posix):
+        return False
+
+    manifest = _read_bundled_manifest_for_skills_dir()
+    origin_hash = manifest.get(skill_name) or manifest.get(skill_dir.name)
+    if not origin_hash:
+        return False
+    return _skill_dir_hash(skill_dir) == origin_hash
 
 
 def _skill_lookup_path_error(name: str) -> Optional[str]:
@@ -648,6 +714,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     continue
                 if name in disabled:
                     continue
+                if _is_hades_hidden_pristine_bundled_skill(skill_dir, name):
+                    continue
 
                 description = frontmatter.get("description", "")
                 if not description:
@@ -1012,6 +1080,15 @@ def skill_view(
         seen_md: set = set()
 
         def _record(sd: Optional[Path], smd: Path) -> None:
+            if sd is not None:
+                try:
+                    fm_content = smd.read_text(encoding="utf-8")
+                    fm, _ = _parse_frontmatter(fm_content)
+                except Exception:
+                    fm = {}
+                candidate_name = str(fm.get("name") or sd.name)
+                if _is_hades_hidden_pristine_bundled_skill(sd, candidate_name):
+                    return
             try:
                 key = smd.resolve()
             except Exception:

@@ -1,0 +1,49 @@
+#
+# Production compose profile for Hades Agent.
+#
+# This file is intentionally separate from docker-compose.yml so existing
+# host-network deployments keep their current behavior.
+#
+# Usage:
+#   export HERMES_UID="$(id -u)"
+#   export HERMES_GID="$(id -g)"
+#   export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="admin"
+#   export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="<scrypt-hash>"
+#   export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
+#   docker compose -f docker-compose.production.yml up -d
+#
+# See docs/hades/docker-production.md for password hashing, reverse proxy,
+# egress proxy, backup, restore, update, and break-glass procedures.
+#
+services:
+  hades:
+    build: .
+    image: hermes-agent
+    container_name: hades
+    restart: unless-stopped
+    volumes:
+      - ~/.hermes:/opt/data
+    ports:
+      # Dashboard is reachable from the host only. Use SSH tunneling, VPN, or a
+      # reverse proxy with TLS/auth for remote access.
+      - "127.0.0.1:9119:9119"
+    networks:
+      - hades_egress
+    environment:
+      HERMES_UID: "${HERMES_UID:-10000}"
+      HERMES_GID: "${HERMES_GID:-10000}"
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:?set HERMES_DASHBOARD_BASIC_AUTH_USERNAME}"
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH: "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:?set HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH}"
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:?set HERMES_DASHBOARD_BASIC_AUTH_SECRET}"
+      HERMES_DASHBOARD_PUBLIC_URL: "${HERMES_DASHBOARD_PUBLIC_URL:-http://127.0.0.1:9119}"
+      HTTP_PROXY: "${HADES_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HADES_HTTPS_PROXY:-}"
+      NO_PROXY: "${HADES_NO_PROXY:-127.0.0.1,localhost,hades}"
+    command: ["gateway", "run"]
+
+networks:
+  hades_egress:
+    driver: bridge

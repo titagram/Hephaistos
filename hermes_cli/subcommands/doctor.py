@@ -1,4 +1,4 @@
-"""``hermes doctor`` subcommand parser.
+"""``hades doctor`` subcommand parser.
 
 Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
 Handler injected to avoid importing ``main``.
@@ -17,7 +17,7 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check configuration and dependencies",
-        description="Diagnose issues with Hermes Agent setup",
+        description="Diagnose issues with Hades Agent setup",
     )
     doctor_parser.add_argument(
         "--fix", action="store_true", help="Attempt to fix issues automatically"
@@ -28,8 +28,32 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
         default=None,
         help=(
             "Acknowledge a security advisory by ID and exit. After ack, the "
-            "advisory will no longer trigger startup banners. Run `hermes "
+            "advisory will no longer trigger startup banners. Run `hades "
             "doctor` first to see active advisories and their IDs."
         ),
     )
+    doctor_parser.add_argument(
+        "--report-backend",
+        action="store_true",
+        help="Explicitly submit a compact Hades doctor report to the configured backend",
+    )
+    doctor_sub = doctor_parser.add_subparsers(dest="doctor_action")
+    cleanup = doctor_sub.add_parser("cleanup", help="Run local Hades maintenance cleanup")
+    cleanup.add_argument("--orphaned-cache", action="store_true", help="Remove orphaned Hades shared-memory cache")
+    cleanup.add_argument("--stale-jobs", action="store_true", help="Remove stale terminal Hades backend jobs")
+    cleanup.add_argument("--stale-task-work", action="store_true", help="Remove stale terminal Hades backend task work")
+    cleanup.add_argument(
+        "--stale-proposals",
+        action="store_true",
+        help="Remove stale accepted or acknowledged Hades memory proposals",
+    )
+    cleanup.add_argument("--stale-inbox", action="store_true", help="Remove stale local Hades inbox events")
+    cleanup.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="Override the selected cleanup retention window",
+    )
+    cleanup.add_argument("--all", action="store_true", help="Include non-expired selected cleanup candidates")
+    cleanup.add_argument("--yes", action="store_true", help="Proceed without an interactive confirmation")
     doctor_parser.set_defaults(func=cmd_doctor)

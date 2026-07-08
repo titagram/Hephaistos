@@ -1,0 +1,211 @@
+{
+  "agent_id": "ha_63d6b1ed16da5a75",
+  "awareness": {
+    "actions": [
+      "Import or accept shared project memory before relying on historical project facts."
+    ],
+    "coverage": {
+      "artifacts": {
+        "artifact_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+        "artifact_head_source": "hades.php_graph.v1",
+        "count": 2,
+        "latest_schema": "hades.php_graph.v1",
+        "redactions": 40,
+        "schemas": {
+          "hades.git_tree.v1": 1,
+          "hades.php_graph.v1": 1
+        },
+        "status": "current",
+        "truncated_count": 0,
+        "updated_at": "2026-07-08T06:59:31.000000Z"
+      },
+      "bug_evidence": {
+        "count": 4,
+        "status": "current",
+        "updated_at": "2026-07-08T07:06:47.000000Z"
+      },
+      "code_graph": {
+        "count": 1,
+        "coverage_type": "code_graph",
+        "schema": "hades.php_graph.v1",
+        "status": "current",
+        "updated_at": "2026-07-08T06:59:31.000000Z"
+      },
+      "evidence_packs": {
+        "count": 4,
+        "status": "current",
+        "updated_at": "2026-07-08T07:06:48.000000Z"
+      },
+      "memory": {
+        "count": 0,
+        "status": "missing",
+        "updated_at": null
+      },
+      "source_slices": {
+        "count": 3,
+        "redactions": 0,
+        "source_slice_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+        "stale_reason": null,
+        "status": "current",
+        "truncated_count": 0,
+        "updated_at": "2026-07-08T07:06:46.000000Z"
+      }
+    },
+    "diagnosable_without_source": true,
+    "freshness": {
+      "artifact_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+      "artifact_head_source": "hades.php_graph.v1",
+      "index_status": "live_query",
+      "last_artifact_at": "2026-07-08T06:59:31.000000Z",
+      "last_evidence_at": "2026-07-08T07:06:47.000000Z",
+      "stale_reason": null,
+      "status": "current",
+      "workspace_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+    },
+    "overall_status": "ready",
+    "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+    "protocol_version": "v1",
+    "server_time": "2026-07-08T07:06:48.251375Z",
+    "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR",
+    "workspace_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+  },
+  "cases": {
+    "rc_booking_controller_or_model": {
+      "bug_report_id": "01KX08SW99W81TE462EVPWBBSQ",
+      "evidence_id": "01KX08SWDTMP8PWQNTJ0CQ28C7",
+      "evidence_pack_id": "01KX08SWJA4Y9WP0JJTHJ1HTF5",
+      "evidence_ref": "bug_evidence:01KX08SWDTMP8PWQNTJ0CQ28C7",
+      "graph_refs": [
+        {
+          "ref": "BookingController@validateBooking",
+          "type": "symbol"
+        },
+        {
+          "kind": "http_abort",
+          "ref": "edge:local_rocket_eval_populate_backend_ast:edge:1428",
+          "type": "edge"
+        },
+        {
+          "kind": "request_validation",
+          "ref": "edge:local_rocket_eval_populate_backend_ast:edge:1491",
+          "type": "edge"
+        },
+        {
+          "ref": "route:console.bookings.store",
+          "type": "route"
+        }
+      ],
+      "source_slice_ids": [
+        "01KX08SVS5BAMJ8NZC85GFBD59"
+      ],
+      "source_slice_refs": [
+        "source_slice:01KX08SVS5BAMJ8NZC85GFBD59"
+      ]
+    },
+    "rc_filament_or_inertia_policy": {
+      "bug_report_id": "01KX08SX2S2CTVKMMRV1YXEGK9",
+      "evidence_id": "01KX08SX9N6BB309HGFPQ7JAYY",
+      "evidence_pack_id": "01KX08SXE86C2FBJ8S6ENXAVEK",
+      "evidence_ref": "bug_evidence:01KX08SX9N6BB309HGFPQ7JAYY",
+      "graph_refs": [
+        {
+          "ref": "AdminPanelProvider@panel",
+          "type": "symbol"
+        },
+        {
+          "ref": "App\\Providers\\Filament\\AdminPanelProvider",
+          "type": "class"
+        },
+        {
+          "ref": "Filament\\Http\\Middleware\\Authenticate",
+          "type": "middleware"
+        }
+      ],
+      "source_slice_ids": [
+        "01KX08SW22N53XYKGWS6PHDD9R"
+      ],
+      "source_slice_refs": [
+        "source_slice:01KX08SW22N53XYKGWS6PHDD9R"
+      ]
+    },
+    "rc_incomplete_missing_source_slice": {
+      "bug_report_id": "01KX08SXHZT5Z0FME68E4KSR8C",
+      "evidence_id": "01KX08SXNYEE9NC0YW3F398GZT",
+      "evidence_pack_id": "01KX08SXTNQ34YGZHE8PKPC63K",
+      "evidence_ref": "bug_evidence:01KX08SXNYEE9NC0YW3F398GZT",
+      "graph_refs": [
+        {
+          "ref": "route:console.tournament-registrations.offer",
+          "type": "route"
+        },
+        {
+          "kind": "route_handler",
+          "ref": "edge:local_rocket_eval_populate_backend_ast:edge:75",
+          "type": "edge"
+        },
+        {
+          "ref": "TournamentController@offerWaitlistSpot",
+          "type": "symbol"
+        }
+      ],
+      "source_slice_ids": [],
+      "source_slice_refs": []
+    },
+    "rc_payment_or_subscription_schema": {
+      "bug_report_id": "01KX08SWP9TVK9GDTFE8W1M51Q",
+      "evidence_id": "01KX08SWTBPR4RB01A9V9CVG4T",
+      "evidence_pack_id": "01KX08SWYKKARP4KEW86G3KCFQ",
+      "evidence_ref": "bug_evidence:01KX08SWTBPR4RB01A9V9CVG4T",
+      "graph_refs": [
+        {
+          "ref": "RecordManualPayment@buildFifoAllocations",
+          "type": "symbol"
+        },
+        {
+          "kind": "instantiates",
+          "ref": "edge:local_rocket_eval_populate_backend_ast:edge:258",
+          "type": "edge"
+        },
+        {
+          "ref": "DomainException",
+          "type": "class"
+        }
+      ],
+      "source_slice_ids": [
+        "01KX08SVXZACHFHHVDE6883Z2C"
+      ],
+      "source_slice_refs": [
+        "source_slice:01KX08SVXZACHFHHVDE6883Z2C"
+      ]
+    }
+  },
+  "head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+  "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+  "source_slices": {
+    "booking_validate": {
+      "end_line": 238,
+      "id": "01KX08SVS5BAMJ8NZC85GFBD59",
+      "path": "app/Http/Controllers/Console/BookingController.php",
+      "sha256": "b48f6bb265d1d6d9e537147fd850856c3f0cbcae48b285b2d0bccee5dddc674d",
+      "start_line": 220,
+      "symbol": "BookingController@validateBooking"
+    },
+    "filament_panel": {
+      "end_line": 57,
+      "id": "01KX08SW22N53XYKGWS6PHDD9R",
+      "path": "app/Providers/Filament/AdminPanelProvider.php",
+      "sha256": "986af5648b35f841bfcc43f8519f190d8f62414f93bf908a0cda2710473e5128",
+      "start_line": 24,
+      "symbol": "AdminPanelProvider@panel"
+    },
+    "payment_fifo": {
+      "end_line": 85,
+      "id": "01KX08SVXZACHFHHVDE6883Z2C",
+      "path": "app/Actions/Accounts/RecordManualPayment.php",
+      "sha256": "a8217c000d93acb0ba29bf9a4951175dfbb0ac1b0c405c00b955fa81718bbab7",
+      "start_line": 64,
+      "symbol": "RecordManualPayment@buildFifoAllocations"
+    }
+  },
+  "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR"
+}

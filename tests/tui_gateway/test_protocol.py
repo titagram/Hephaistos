@@ -1233,6 +1233,15 @@ def test_cli_exec_blocked(server, argv):
     assert server._cli_exec_blocked(argv) is not None
 
 
+def test_cli_exec_blocked_user_copy_uses_hades(server):
+    assert "`hades`" in server._cli_exec_blocked([])
+    assert "/hades chat -q" in server._cli_exec_blocked([])
+    assert "`hades setup`" in server._cli_exec_blocked(["setup"])
+    assert "`hades gateway`" in server._cli_exec_blocked(["gateway"])
+    assert "`hades sessions browse`" in server._cli_exec_blocked(["sessions", "browse"])
+    assert "`hades config edit`" in server._cli_exec_blocked(["config", "edit"])
+
+
 @pytest.mark.parametrize("argv", [
     ["version"],
     ["sessions", "list"],

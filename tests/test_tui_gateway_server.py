@@ -2993,6 +2993,7 @@ def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypa
 
     assert resp["result"]["ok"] is False
     assert resp["result"]["provider"] == "bedrock"
+    assert resp["result"]["error"] == "No Hades provider is configured."
 
 
 def test_setup_runtime_check_honors_requested_provider(monkeypatch):
@@ -4370,6 +4371,47 @@ def test_input_detect_drop_attaches_image(monkeypatch):
     assert resp["result"]["matched"] is True
     assert resp["result"]["is_image"] is True
     assert resp["result"]["text"] == "[User attached image: cat.png]"
+
+
+def test_backend_bug_intake_rpc_calls_shared_action(monkeypatch):
+    calls = {}
+
+    def fake_create_bug_intake(**payload):
+        calls.update(payload)
+        return types.SimpleNamespace(
+            ok=True,
+            status="created",
+            summary="Bug report created",
+            payload={
+                "bug_report_id": "bug_1",
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "evidence_ids": ["ev_1"],
+            },
+        )
+
+    import hermes_cli.hades_backend_actions as actions
+
+    monkeypatch.setattr(actions, "create_bug_intake", fake_create_bug_intake)
+
+    resp = server._methods["backend.bug_intake"](
+        "r1",
+        {
+            "title": "Checkout 500",
+            "symptom": "POST /checkout fails",
+            "workspace_binding_id": "wb_1",
+            "failing_test": "FAILED tests/test_checkout.py",
+            "runtime_log": "Bearer secret-token-123456",
+            "response_status": "500",
+        },
+    )
+
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["bug_report_id"] == "bug_1"
+    assert calls["title"] == "Checkout 500"
+    assert calls["workspace_binding_id"] == "wb_1"
+    assert calls["response_status"] == 500
+    assert calls["source"] == "desktop"
 
 
 def test_input_detect_drop_path_with_spaces(tmp_path):
@@ -6539,6 +6581,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
             ),
+            patch("platform.system", return_value="Linux"),
         ):
             resp = server.handle_request(
                 {

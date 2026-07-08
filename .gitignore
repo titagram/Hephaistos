@@ -143,3 +143,11 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Hades local evaluation state. Keep compact, redacted reports/fixtures only;
+# never commit runtime homes, tokens, raw trajectories, or temporary backend
+# patch copies.
+.hades-dev/**/secure/
+.hades-dev/**/hermes-home/
+.hades-dev/**/trajectories/
+.hades-dev/tmp_remote_patch/

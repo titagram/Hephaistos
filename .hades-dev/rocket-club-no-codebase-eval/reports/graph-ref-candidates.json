@@ -1,0 +1,1163 @@
+{
+  "booking": {
+    "status": "ok",
+    "tool_domain": "graph",
+    "domain": "artifacts",
+    "searched_cache_only": true,
+    "query": "console bookings storeBooking validateBooking ghost_alias user_id abort_if",
+    "kind": "all",
+    "include_raw_chunks": false,
+    "artifact_id": "local_rocket_eval_populate_backend_ast",
+    "schema": "hades.php_graph.v1",
+    "count": 8,
+    "candidate_count": 8894,
+    "graph_node_count": 1511,
+    "graph_edge_count": 7383,
+    "ranking": "local_bm25",
+    "truncated": true,
+    "raw_chunks_omitted": 0,
+    "freshness": {
+      "status": "cached",
+      "index_status": "local_graph_cache",
+      "workspace_head_commit": null
+    },
+    "provenance": {
+      "source": "local_graph_cache",
+      "artifacts": [
+        {
+          "artifact_id": "local_rocket_eval_populate_backend_ast",
+          "schema": "hades.php_graph.v1",
+          "origin": "backend_job",
+          "cache_version": null,
+          "cache_updated_at": null,
+          "job_id": "local_rocket_eval_populate_backend_ast"
+        }
+      ]
+    },
+    "items": [
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:1491",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "request_validation: BookingController@validateBooking -> validation:ghost_alias (validation_rules=['nullable', 'string', 'max']; path=app/Http/Controllers/Console/BookingController.php; line=225)",
+        "score": 3351,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:1491",
+          "kind": "request_validation",
+          "from": "BookingController@validateBooking",
+          "to": "validation:ghost_alias",
+          "provenance": {
+            "class_context": "App\\Http\\Controllers\\Console\\BookingController",
+            "line": 225,
+            "path": "app/Http/Controllers/Console/BookingController.php",
+            "validation_rules": [
+              "nullable",
+              "string",
+              "max"
+            ],
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "http_abort: BookingController@validateBooking -> http_status:422 (status_code=422; abort_helper=abort_if; path=app/Http/Controllers/Console/BookingController.php; line=236)",
+        "score": 3340,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:1428",
+          "kind": "http_abort",
+          "from": "BookingController@validateBooking",
+          "to": "http_status:422",
+          "provenance": {
+            "abort_helper": "abort_if",
+            "line": 236,
+            "path": "app/Http/Controllers/Console/BookingController.php",
+            "status_code": 422,
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:test:tests/Feature/Console/ConsoleWorkflowTest.php",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "test_file: test:tests/Feature/Console/ConsoleWorkflowTest.php (tests/Feature/Console/ConsoleWorkflowTest.php)",
+        "score": 3059,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "test:tests/Feature/Console/ConsoleWorkflowTest.php",
+          "kind": "test_file",
+          "path": "tests/Feature/Console/ConsoleWorkflowTest.php",
+          "attributes": {
+            "framework": "phpunit",
+            "language": "php",
+            "test_count": 2,
+            "cases": [
+              {
+                "line": 22,
+                "name": "test_manager_can_run_core_room_workflow_from_console_routes",
+                "ordinal": 1
+              },
+              {
+                "line": 109,
+                "name": "test_manager_can_start_table_for_registered_customer_without_ghost_alias",
+                "ordinal": 2
+              }
+            ],
+            "target_candidates": [
+              "Console",
+              "ConsoleWorkflow",
+              "ConsoleWorkflowTest"
+            ],
+            "symbol_refs": [
+              "App\\Http\\Controllers\\Console\\AccountItemController",
+              "AccountItemController@split",
+              "App\\Http\\Controllers\\Console\\AccountParticipantController",
+              "AccountParticipantController@store",
+              "App\\Http\\Controllers\\Console\\AccountShowController",
+              "AccountShowController@__invoke",
+              "AccountShowController@auditLogsFor",
+              "App\\Http\\Controllers\\Console\\AccountSplitController",
+              "AccountSplitController@__invoke",
+              "App\\Http\\Controllers\\Console\\BookingController",
+              "BookingController@__construct",
+              "BookingController@index",
+              "BookingController@storeWindow",
+              "BookingController@storeBooking",
+              "BookingController@confirm",
+              "BookingController@arrive",
+              "BookingController@complete",
+              "BookingController@cancel",
+              "BookingController@convertToWaitlist",
+              "BookingController@markNoShow",
+              "BookingController@transition",
+              "BookingController@storeWaitlist",
+              "BookingController@storeNews",
+              "BookingController@validateBooking",
+              "App\\Http\\Controllers\\Console\\DashboardController"
+            ],
+            "route_refs": [
+              "route:register",
+              "route:POST register",
+              "route:dashboard",
+              "route:player.home"
+            ],
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:route:console.bookings.store",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route: route:console.bookings.store (routes/web.php)",
+        "score": 2879,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "route:console.bookings.store",
+          "kind": "route",
+          "path": "routes/web.php",
+          "attributes": {
+            "method": "POST",
+            "uri": "console/bookings",
+            "handler": "BookingController@storeBooking",
+            "name": "console.bookings.store",
+            "line": 77,
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:1459",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_request_validation: route:console.waitlist.store -> validation:ghost_alias (handler=BookingController@storeWaitlist; source=inline_validate; uri=console/waitlist; validation_path=app/Http/Controllers/Console/BookingController.php; validation_line=171; validation_rules=['nullable', 'string', 'max']; path=routes/web.php; line=84)",
+        "score": 2757,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:1459",
+          "kind": "route_request_validation",
+          "from": "route:console.waitlist.store",
+          "to": "validation:ghost_alias",
+          "provenance": {
+            "handler": "BookingController@storeWaitlist",
+            "line": 84,
+            "method": "POST",
+            "path": "routes/web.php",
+            "source": "inline_validate",
+            "uri": "console/waitlist",
+            "validation_line": 171,
+            "validation_path": "app/Http/Controllers/Console/BookingController.php",
+            "validation_rules": [
+              "nullable",
+              "string",
+              "max"
+            ],
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:60",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_handler: route:console.bookings.store -> BookingController@storeBooking (uri=console/bookings; path=routes/web.php; line=77)",
+        "score": 2679,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:60",
+          "kind": "route_handler",
+          "from": "route:console.bookings.store",
+          "to": "BookingController@storeBooking",
+          "provenance": {
+            "line": 77,
+            "method": "POST",
+            "path": "routes/web.php",
+            "uri": "console/bookings",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:1458",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "request_validation: BookingController@storeWaitlist -> validation:ghost_alias (validation_rules=['nullable', 'string', 'max']; path=app/Http/Controllers/Console/BookingController.php; line=171)",
+        "score": 2622,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:1458",
+          "kind": "request_validation",
+          "from": "BookingController@storeWaitlist",
+          "to": "validation:ghost_alias",
+          "provenance": {
+            "class_context": "App\\Http\\Controllers\\Console\\BookingController",
+            "line": 171,
+            "path": "app/Http/Controllers/Console/BookingController.php",
+            "validation_rules": [
+              "nullable",
+              "string",
+              "max"
+            ],
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:1723",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "query_operation: BookingController@storeBooking -> query:bookings:query (operation=query; access=shape; table=bookings; model=App\\Models\\Booking; path=app/Http/Controllers/Console/BookingController.php; line=74)",
+        "score": 2579,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:1723",
+          "kind": "query_operation",
+          "from": "BookingController@storeBooking",
+          "to": "query:bookings:query",
+          "provenance": {
+            "access": "shape",
+            "class_context": "App\\Http\\Controllers\\Console\\BookingController",
+            "line": 74,
+            "model": "App\\Models\\Booking",
+            "operation": "query",
+            "path": "app/Http/Controllers/Console/BookingController.php",
+            "table": "bookings",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      }
+    ],
+    "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+    "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR",
+    "backend_live_error": "422: {\"errors\": {\"include_raw_chunks\": [\"The include raw chunks field must be true or false.\"]}, \"message\": \"The include raw chunks field must be true or false.\"}"
+  },
+  "payment": {
+    "status": "ok",
+    "tool_domain": "graph",
+    "domain": "artifacts",
+    "searched_cache_only": true,
+    "query": "RecordManualPayment Payment exceeds account balance buildFifoAllocations",
+    "kind": "all",
+    "include_raw_chunks": false,
+    "artifact_id": "local_rocket_eval_populate_backend_ast",
+    "schema": "hades.php_graph.v1",
+    "count": 8,
+    "candidate_count": 1301,
+    "graph_node_count": 1511,
+    "graph_edge_count": 7383,
+    "ranking": "local_bm25",
+    "truncated": true,
+    "raw_chunks_omitted": 0,
+    "freshness": {
+      "status": "cached",
+      "index_status": "local_graph_cache",
+      "workspace_head_commit": null
+    },
+    "provenance": {
+      "source": "local_graph_cache",
+      "artifacts": [
+        {
+          "artifact_id": "local_rocket_eval_populate_backend_ast",
+          "schema": "hades.php_graph.v1",
+          "origin": "backend_job",
+          "cache_version": null,
+          "cache_updated_at": null,
+          "job_id": "local_rocket_eval_populate_backend_ast"
+        }
+      ]
+    },
+    "items": [
+      {
+        "id": "node:RecordManualPayment@buildFifoAllocations",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "method: RecordManualPayment@buildFifoAllocations (app/Actions/Accounts/RecordManualPayment.php)",
+        "score": 5679,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "RecordManualPayment@buildFifoAllocations",
+          "kind": "method",
+          "path": "app/Actions/Accounts/RecordManualPayment.php",
+          "attributes": {
+            "class": "App\\Actions\\Accounts\\RecordManualPayment",
+            "line": 64,
+            "method": "buildFifoAllocations",
+            "role": "php_class",
+            "visibility": "private",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:214",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "uses_dependency: RecordManualPayment@buildFifoAllocations -> App\\Models\\OpenAccount (path=app/Actions/Accounts/RecordManualPayment.php; line=64)",
+        "score": 5571,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:214",
+          "kind": "uses_dependency",
+          "from": "RecordManualPayment@buildFifoAllocations",
+          "to": "App\\Models\\OpenAccount",
+          "provenance": {
+            "line": 64,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "instantiates: RecordManualPayment@buildFifoAllocations -> DomainException (path=app/Actions/Accounts/RecordManualPayment.php; line=82)",
+        "score": 5368,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:258",
+          "kind": "instantiates",
+          "from": "RecordManualPayment@buildFifoAllocations",
+          "to": "DomainException",
+          "provenance": {
+            "class_context": "App\\Actions\\Accounts\\RecordManualPayment",
+            "line": 82,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:213",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "throws_exception: RecordManualPayment@buildFifoAllocations -> DomainException (exception_class=DomainException; exception_short_name=DomainException; path=app/Actions/Accounts/RecordManualPayment.php; line=82)",
+        "score": 5314,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:213",
+          "kind": "throws_exception",
+          "from": "RecordManualPayment@buildFifoAllocations",
+          "to": "DomainException",
+          "provenance": {
+            "exception_class": "DomainException",
+            "exception_short_name": "DomainException",
+            "line": 82,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:215",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "calls_method: RecordManualPayment@buildFifoAllocations -> OpenAccount@activeItems (call_type=instance; target_method=activeItems; target_class=App\\Models\\OpenAccount; receiver=account; path=app/Actions/Accounts/RecordManualPayment.php; line=69)",
+        "score": 5113,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:215",
+          "kind": "calls_method",
+          "from": "RecordManualPayment@buildFifoAllocations",
+          "to": "OpenAccount@activeItems",
+          "provenance": {
+            "call_type": "instance",
+            "line": 69,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "receiver": "account",
+            "target_class": "App\\Models\\OpenAccount",
+            "target_method": "activeItems",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:RecordManualPayment@assertAllocations",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "method: RecordManualPayment@assertAllocations (app/Actions/Accounts/RecordManualPayment.php)",
+        "score": 3682,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "RecordManualPayment@assertAllocations",
+          "kind": "method",
+          "path": "app/Actions/Accounts/RecordManualPayment.php",
+          "attributes": {
+            "class": "App\\Actions\\Accounts\\RecordManualPayment",
+            "line": 88,
+            "method": "assertAllocations",
+            "role": "php_class",
+            "visibility": "private",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:218",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "uses_dependency: RecordManualPayment@assertAllocations -> App\\Models\\OpenAccount (path=app/Actions/Accounts/RecordManualPayment.php; line=88)",
+        "score": 3624,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:218",
+          "kind": "uses_dependency",
+          "from": "RecordManualPayment@assertAllocations",
+          "to": "App\\Models\\OpenAccount",
+          "provenance": {
+            "line": 88,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:248",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "eloquent_query: RecordManualPayment@assertAllocations -> App\\Models\\AccountItem::query (path=app/Actions/Accounts/RecordManualPayment.php; line=97)",
+        "score": 3560,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:248",
+          "kind": "eloquent_query",
+          "from": "RecordManualPayment@assertAllocations",
+          "to": "App\\Models\\AccountItem::query",
+          "provenance": {
+            "class_context": "App\\Actions\\Accounts\\RecordManualPayment",
+            "line": 97,
+            "path": "app/Actions/Accounts/RecordManualPayment.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      }
+    ],
+    "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+    "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR",
+    "backend_live_error": "422: {\"errors\": {\"include_raw_chunks\": [\"The include raw chunks field must be true or false.\"]}, \"message\": \"The include raw chunks field must be true or false.\"}"
+  },
+  "filament": {
+    "status": "ok",
+    "tool_domain": "graph",
+    "domain": "artifacts",
+    "searched_cache_only": true,
+    "query": "AdminPanelProvider admin authMiddleware Authenticate Filament",
+    "kind": "all",
+    "include_raw_chunks": false,
+    "artifact_id": "local_rocket_eval_populate_backend_ast",
+    "schema": "hades.php_graph.v1",
+    "count": 8,
+    "candidate_count": 1338,
+    "graph_node_count": 1511,
+    "graph_edge_count": 7383,
+    "ranking": "local_bm25",
+    "truncated": true,
+    "raw_chunks_omitted": 0,
+    "freshness": {
+      "status": "cached",
+      "index_status": "local_graph_cache",
+      "workspace_head_commit": null
+    },
+    "provenance": {
+      "source": "local_graph_cache",
+      "artifacts": [
+        {
+          "artifact_id": "local_rocket_eval_populate_backend_ast",
+          "schema": "hades.php_graph.v1",
+          "origin": "backend_job",
+          "cache_version": null,
+          "cache_updated_at": null,
+          "job_id": "local_rocket_eval_populate_backend_ast"
+        }
+      ]
+    },
+    "items": [
+      {
+        "id": "node:App\\Providers\\Filament\\AdminPanelProvider",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "class: App\\Providers\\Filament\\AdminPanelProvider (app/Providers/Filament/AdminPanelProvider.php)",
+        "score": 4627,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "App\\Providers\\Filament\\AdminPanelProvider",
+          "kind": "class",
+          "path": "app/Providers/Filament/AdminPanelProvider.php",
+          "attributes": {
+            "extends": "Filament\\PanelProvider",
+            "line": 22,
+            "role": "php_class",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:AdminPanelProvider@panel",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "method: AdminPanelProvider@panel (app/Providers/Filament/AdminPanelProvider.php)",
+        "score": 4580,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "AdminPanelProvider@panel",
+          "kind": "method",
+          "path": "app/Providers/Filament/AdminPanelProvider.php",
+          "attributes": {
+            "class": "App\\Providers\\Filament\\AdminPanelProvider",
+            "line": 24,
+            "method": "panel",
+            "role": "php_class",
+            "visibility": "public",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:4344",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "extends: App\\Providers\\Filament\\AdminPanelProvider -> Filament\\PanelProvider (path=app/Providers/Filament/AdminPanelProvider.php; line=22)",
+        "score": 4475,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:4344",
+          "kind": "extends",
+          "from": "App\\Providers\\Filament\\AdminPanelProvider",
+          "to": "Filament\\PanelProvider",
+          "provenance": {
+            "line": 22,
+            "path": "app/Providers/Filament/AdminPanelProvider.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:4345",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "uses_dependency: AdminPanelProvider@panel -> Filament\\Panel (path=app/Providers/Filament/AdminPanelProvider.php; line=24)",
+        "score": 4475,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:4345",
+          "kind": "uses_dependency",
+          "from": "AdminPanelProvider@panel",
+          "to": "Filament\\Panel",
+          "provenance": {
+            "line": 24,
+            "path": "app/Providers/Filament/AdminPanelProvider.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:Filament\\PanelProvider",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "symbol: Filament\\PanelProvider",
+        "score": 3034,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "Filament\\PanelProvider",
+          "kind": "symbol",
+          "path": "",
+          "attributes": {
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:Filament\\Panel",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "symbol: Filament\\Panel",
+        "score": 2262,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "Filament\\Panel",
+          "kind": "symbol",
+          "path": "",
+          "attributes": {
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "node:LoginRequest@authenticate",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "method: LoginRequest@authenticate (app/Http/Requests/Auth/LoginRequest.php)",
+        "score": 2126,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "LoginRequest@authenticate",
+          "kind": "method",
+          "path": "app/Http/Requests/Auth/LoginRequest.php",
+          "attributes": {
+            "class": "App\\Http\\Requests\\Auth\\LoginRequest",
+            "line": 41,
+            "method": "authenticate",
+            "role": "form_request",
+            "visibility": "public",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:4281",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "uses_dependency: User@canAccessPanel -> Filament\\Panel (path=app/Models/User.php; line=68)",
+        "score": 1896,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:4281",
+          "kind": "uses_dependency",
+          "from": "User@canAccessPanel",
+          "to": "Filament\\Panel",
+          "provenance": {
+            "line": 68,
+            "path": "app/Models/User.php",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      }
+    ],
+    "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+    "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR",
+    "backend_live_error": "422: {\"errors\": {\"include_raw_chunks\": [\"The include raw chunks field must be true or false.\"]}, \"message\": \"The include raw chunks field must be true or false.\"}"
+  },
+  "incomplete": {
+    "status": "ok",
+    "tool_domain": "graph",
+    "domain": "artifacts",
+    "searched_cache_only": true,
+    "query": "TournamentController offerWaitlistSpot tournament registrations offer waitlist",
+    "kind": "all",
+    "include_raw_chunks": false,
+    "artifact_id": "local_rocket_eval_populate_backend_ast",
+    "schema": "hades.php_graph.v1",
+    "count": 8,
+    "candidate_count": 3880,
+    "graph_node_count": 1511,
+    "graph_edge_count": 7383,
+    "ranking": "local_bm25",
+    "truncated": true,
+    "raw_chunks_omitted": 0,
+    "freshness": {
+      "status": "cached",
+      "index_status": "local_graph_cache",
+      "workspace_head_commit": null
+    },
+    "provenance": {
+      "source": "local_graph_cache",
+      "artifacts": [
+        {
+          "artifact_id": "local_rocket_eval_populate_backend_ast",
+          "schema": "hades.php_graph.v1",
+          "origin": "backend_job",
+          "cache_version": null,
+          "cache_updated_at": null,
+          "job_id": "local_rocket_eval_populate_backend_ast"
+        }
+      ]
+    },
+    "items": [
+      {
+        "id": "node:route:console.tournament-registrations.offer",
+        "domain": "artifacts",
+        "kind": "graph_node",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route: route:console.tournament-registrations.offer (routes/web.php)",
+        "score": 6162,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "node",
+          "id": "route:console.tournament-registrations.offer",
+          "kind": "route",
+          "path": "routes/web.php",
+          "attributes": {
+            "method": "POST",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "handler": "TournamentController@offerWaitlistSpot",
+            "name": "console.tournament-registrations.offer",
+            "line": 92,
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:75",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_handler: route:console.tournament-registrations.offer -> TournamentController@offerWaitlistSpot (uri=console/tournament-registrations/{registration}/offer; path=routes/web.php; line=92)",
+        "score": 5962,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:75",
+          "kind": "route_handler",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "TournamentController@offerWaitlistSpot",
+          "provenance": {
+            "line": 92,
+            "method": "POST",
+            "path": "routes/web.php",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3493",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_uses_form_request: route:console.tournament-registrations.offer -> Illuminate\\Http\\Request (param=request; handler=TournamentController@offerWaitlistSpot; uri=console/tournament-registrations/{registration}/offer; path=routes/web.php; line=92)",
+        "score": 5734,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3493",
+          "kind": "route_uses_form_request",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "Illuminate\\Http\\Request",
+          "provenance": {
+            "handler": "TournamentController@offerWaitlistSpot",
+            "line": 92,
+            "method": "POST",
+            "param": "request",
+            "path": "routes/web.php",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3496",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_model_table: route:console.tournament-registrations.offer -> table:tournament_registrations (model=App\\Models\\TournamentRegistration; param=registration; handler=TournamentController@offerWaitlistSpot; uri=console/tournament-registrations/{registration}/offer; path=routes/web.php; line=92)",
+        "score": 5734,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3496",
+          "kind": "route_model_table",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "table:tournament_registrations",
+          "provenance": {
+            "handler": "TournamentController@offerWaitlistSpot",
+            "line": 92,
+            "method": "POST",
+            "model": "App\\Models\\TournamentRegistration",
+            "param": "registration",
+            "path": "routes/web.php",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3495",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_model_binding: route:console.tournament-registrations.offer -> App\\Models\\TournamentRegistration (table=tournament_registrations; param=registration; handler=TournamentController@offerWaitlistSpot; uri=console/tournament-registrations/{registration}/offer; path=routes/web.php; line=92)",
+        "score": 5699,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3495",
+          "kind": "route_model_binding",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "App\\Models\\TournamentRegistration",
+          "provenance": {
+            "handler": "TournamentController@offerWaitlistSpot",
+            "line": 92,
+            "method": "POST",
+            "param": "registration",
+            "path": "routes/web.php",
+            "table": "tournament_registrations",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3498",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "model_instance_operation: TournamentController@offerWaitlistSpot -> model_operation:tournament_registrations:update (operation=update; access=write; table=tournament_registrations; model=App\\Models\\TournamentRegistration; receiver=registration; source_path=app/Http/Controllers/Console/TournamentController.php; source_line=219; path=app/Http/Controllers/Console/TournamentController.php; line=219)",
+        "score": 5699,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3498",
+          "kind": "model_instance_operation",
+          "from": "TournamentController@offerWaitlistSpot",
+          "to": "model_operation:tournament_registrations:update",
+          "provenance": {
+            "access": "write",
+            "line": 219,
+            "model": "App\\Models\\TournamentRegistration",
+            "operation": "update",
+            "path": "app/Http/Controllers/Console/TournamentController.php",
+            "receiver": "registration",
+            "source_line": 219,
+            "source_path": "app/Http/Controllers/Console/TournamentController.php",
+            "table": "tournament_registrations",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3491",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_db_transaction: route:console.tournament-registrations.offer -> db_transaction:transaction (transaction_operation=transaction; transaction_method=DB::transaction; handler=TournamentController@offerWaitlistSpot; uri=console/tournament-registrations/{registration}/offer; source_path=app/Http/Controllers/Console/TournamentController.php; source_line=217; path=routes/web.php; line=92)",
+        "score": 5665,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3491",
+          "kind": "route_db_transaction",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "db_transaction:transaction",
+          "provenance": {
+            "handler": "TournamentController@offerWaitlistSpot",
+            "line": 92,
+            "method": "POST",
+            "path": "routes/web.php",
+            "source_line": 217,
+            "source_path": "app/Http/Controllers/Console/TournamentController.php",
+            "transaction_method": "DB::transaction",
+            "transaction_operation": "transaction",
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      },
+      {
+        "id": "edge:local_rocket_eval_populate_backend_ast:edge:3488",
+        "domain": "artifacts",
+        "kind": "graph_edge",
+        "schema": "hades.php_graph.v1",
+        "source": "local_graph_cache",
+        "summary": "route_http_abort: route:console.tournament-registrations.offer -> http_status:404 (status_code=404; abort_helper=abort_unless; handler=TournamentController@offerWaitlistSpot; uri=console/tournament-registrations/{registration}/offer; source_path=app/Http/Controllers/Console/TournamentController.php; source_line=210; path=routes/web.php; line=92)",
+        "score": 5567,
+        "raw_chunk": false,
+        "match_fields": [
+          "tokens",
+          "bm25"
+        ],
+        "graph_ref": {
+          "type": "edge",
+          "id": "local_rocket_eval_populate_backend_ast:edge:3488",
+          "kind": "route_http_abort",
+          "from": "route:console.tournament-registrations.offer",
+          "to": "http_status:404",
+          "provenance": {
+            "abort_helper": "abort_unless",
+            "handler": "TournamentController@offerWaitlistSpot",
+            "line": 92,
+            "method": "POST",
+            "path": "routes/web.php",
+            "source_line": 210,
+            "source_path": "app/Http/Controllers/Console/TournamentController.php",
+            "status_code": 404,
+            "uri": "console/tournament-registrations/{registration}/offer",
+            "schema": "hades.php_graph.v1",
+            "artifact_id": "local_rocket_eval_populate_backend_ast"
+          }
+        }
+      }
+    ],
+    "project_id": "01KX0865SN30AQMMSJ0FGK9KQK",
+    "workspace_binding_id": "01KX086SN5HH5VYZMDQ6ZTDGSR",
+    "backend_live_error": "422: {\"errors\": {\"include_raw_chunks\": [\"The include raw chunks field must be true or false.\"]}, \"message\": \"The include raw chunks field must be true or false.\"}"
+  }
+}

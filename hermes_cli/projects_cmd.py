@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import functools
 import sys
+from pathlib import Path
 
 from hermes_cli import projects_db as pdb
 
@@ -101,6 +102,17 @@ def build_parser(
         "board", nargs="?", default="", help="Board slug (omit to unbind)"
     )
 
+    p_link = sub.add_parser("link", help="Link a project folder to the Hades backend")
+    p_link.add_argument("project", help="Project id or slug")
+    p_link.add_argument("--path", default=None, help="Workspace path (default: project primary path)")
+    p_link.add_argument("--backend-project-id", default=None, help="Override backend project id")
+    p_link.add_argument("--yes", action="store_true", help="Allow intentional relink when required")
+
+    p_unlink = sub.add_parser("unlink", help="Disable a Hades backend workspace binding")
+    p_unlink.add_argument("project", help="Project id or slug")
+    p_unlink.add_argument("--path", default=None, help="Workspace path (default: project primary path)")
+    p_unlink.add_argument("--yes", action="store_true", help="Proceed without an interactive confirmation")
+
     parser.set_defaults(_project_parser=parser)
     return parser
 
@@ -133,6 +145,8 @@ def projects_command(args: argparse.Namespace) -> int:
         "archive": _cmd_archive,
         "restore": _cmd_restore,
         "bind-board": _cmd_bind_board,
+        "link": _cmd_link_backend,
+        "unlink": _cmd_unlink_backend,
     }
     handler = handlers.get(action)
     if handler is None:
@@ -312,6 +326,99 @@ def _cmd_bind_board(args, conn, proj) -> int:
     else:
         print(f"Unbound board from {proj.slug}")
     return 0
+
+
+@_with_project
+def _cmd_link_backend(args, conn, proj) -> int:
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_runtime import display_path, git_metadata, workspace_fingerprint
+
+    agent = _default_backend_agent()
+    backend_project_id = args.backend_project_id or agent.project_id
+    path = Path(args.path or proj.primary_path or ".").expanduser().resolve()
+    fp = workspace_fingerprint(path, backend_project_id)
+    shown = display_path(path)
+    metadata = git_metadata(path)
+    client = _backend_client_from_config()
+    response = client.bind_workspace(
+        project_id=backend_project_id,
+        agent_id=agent.agent_id,
+        local_project_id=proj.id,
+        workspace_fingerprint=fp,
+        display_path=shown,
+        git_remote_display=metadata["git_remote_display"],
+        git_remote_hash=metadata["git_remote_hash"],
+        head_commit=metadata["head_commit"],
+    )
+    backend_binding_id = str(
+        response.get("workspace_binding_id")
+        or response.get("id")
+        or fp
+    )
+    try:
+        with hdb.connect_closing() as hconn:
+            hdb.upsert_workspace_binding(
+                hconn,
+                project_id=backend_project_id,
+                agent_id=agent.agent_id,
+                local_project_id=proj.id,
+                workspace_fingerprint=fp,
+                display_path=shown,
+                repo_root=str(path),
+                git_remote_display=metadata["git_remote_display"],
+                git_remote_hash=metadata["git_remote_hash"],
+                head_commit=metadata["head_commit"],
+                backend_workspace_binding_id=backend_binding_id,
+            )
+    except hdb.WorkspaceBindingConflict as exc:
+        print(f"project: {exc}", file=sys.stderr)
+        return 2
+    print(f"Linked {proj.slug} to backend project {backend_project_id} ({backend_binding_id})")
+    return 0
+
+
+@_with_project
+def _cmd_unlink_backend(args, conn, proj) -> int:
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import redact_secret
+    from hermes_cli.hades_backend_runtime import workspace_fingerprint
+
+    agent = _default_backend_agent()
+    path = Path(args.path or proj.primary_path or ".").expanduser().resolve()
+    fp = workspace_fingerprint(path, agent.project_id)
+    with hdb.connect_closing() as hconn:
+        binding = hdb.get_binding_for_fingerprint(hconn, fp)
+    if binding is None or binding.status != "linked":
+        print(f"project: no linked Hades backend workspace for {proj.slug}", file=sys.stderr)
+        return 1
+    try:
+        _backend_client_from_config().unlink_workspace(
+            binding.backend_workspace_binding_id,
+            project_id=binding.project_id,
+            agent_id=agent.agent_id,
+        )
+    except Exception as exc:
+        print(f"project: backend unlink failed: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+    with hdb.connect_closing() as hconn:
+        hdb.mark_binding_unlinked(hconn, fp)
+    print(f"Unlinked {proj.slug} from backend workspace {binding.backend_workspace_binding_id}")
+    return 0
+
+
+def _backend_client_from_config():
+    from hermes_cli.hades_backend_runtime import client_from_config
+
+    return client_from_config()
+
+
+def _default_backend_agent():
+    from hermes_cli.hades_backend_runtime import current_agent
+
+    agent = current_agent()
+    if agent is None:
+        raise RuntimeError("Hades backend is not configured; run `hades backend setup` first")
+    return agent
 
 
 def _sync_board_default_workdir(proj, board_slug: str) -> None:

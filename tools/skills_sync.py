@@ -30,6 +30,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import is_excluded_skill_path
+from hermes_cli.hades_exclusions import (
+    is_allowed_bundled_skill_path,
+    is_excluded_bundled_skill,
+)
 from typing import Dict, List, Optional, Set, Tuple
 from utils import atomic_replace
 
@@ -201,7 +205,11 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
     return fallback
 
 
-def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
+def _discover_bundled_skills(
+    bundled_dir: Path,
+    *,
+    include_excluded: bool = False,
+) -> List[Tuple[str, Path]]:
     """
     Find all SKILL.md files in the bundled directory.
     Returns list of (skill_name, skill_directory_path) tuples.
@@ -214,6 +222,8 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
         if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
+        if not include_excluded and is_excluded_bundled_skill(skill_dir, bundled_dir):
+            continue
         skill_name = _read_skill_name(skill_md, skill_dir.name)
         skills.append((skill_name, skill_dir))
 
@@ -693,8 +703,10 @@ def sync_skills(quiet: bool = False) -> dict:
     for name in cleaned:
         del manifest[name]
 
-    # Also copy DESCRIPTION.md files for categories (if not already present)
+    # Also copy DESCRIPTION.md files for categories in Hades' visible surface.
     for desc_md in bundled_dir.rglob("DESCRIPTION.md"):
+        if not is_allowed_bundled_skill_path(desc_md.parent, bundled_dir):
+            continue
         rel = desc_md.relative_to(bundled_dir)
         dest_desc = SKILLS_DIR / rel
         if not dest_desc.exists():
@@ -952,7 +964,7 @@ def diff_bundled_skill(name: str) -> dict:
     import difflib
 
     bundled_dir = _get_bundled_dir()
-    bundled_by_name = dict(_discover_bundled_skills(bundled_dir))
+    bundled_by_name = dict(_discover_bundled_skills(bundled_dir, include_excluded=True))
     bundled_src = bundled_by_name.get(name)
     if bundled_src is None:
         return {
@@ -1115,7 +1127,9 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
     """
     manifest = _read_manifest()
     bundled_dir = _get_bundled_dir()
-    bundled_by_name = dict(_discover_bundled_skills(bundled_dir))
+    bundled_by_name = dict(
+        _discover_bundled_skills(bundled_dir, include_excluded=True)
+    )
 
     removed: List[str] = []
     skipped: List[dict] = []
@@ -1157,6 +1171,68 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
     return {
         "ok": True, "removed": removed, "skipped": skipped,
         "dry_run": dry_run, "message": message,
+    }
+
+
+def remove_pristine_disallowed_bundled_skills(dry_run: bool = False) -> dict:
+    """Delete pristine bundled skills outside Hades' developer/AI surface.
+
+    This is narrower than ``remove_pristine_bundled_skills``. It is intended
+    for Hades migrations where developer, AI-ops, backend, and user-authored
+    skills should remain, while old consumer/productivity/media skills should
+    disappear if they are still byte-identical to the seeded bundled copy.
+    """
+    manifest = _read_manifest()
+    bundled_dir = _get_bundled_dir()
+    bundled_by_name = dict(
+        _discover_bundled_skills(bundled_dir, include_excluded=True)
+    )
+
+    removed: List[str] = []
+    skipped: List[dict] = []
+
+    for name, origin_hash in sorted(manifest.items()):
+        src = bundled_by_name.get(name)
+        if src is None:
+            skipped.append({"name": name, "reason": "no bundled source (kept)"})
+            continue
+        if is_allowed_bundled_skill_path(src, bundled_dir):
+            continue
+        dest = _compute_relative_dest(src, bundled_dir)
+        if not dest.exists():
+            if not dry_run and name in manifest:
+                del manifest[name]
+            continue
+        if not origin_hash:
+            skipped.append({"name": name, "reason": "legacy manifest without origin hash"})
+            continue
+        on_disk = _dir_hash(dest)
+        if on_disk != origin_hash:
+            skipped.append({"name": name, "reason": "user-modified (kept)"})
+            continue
+        if dry_run:
+            removed.append(name)
+            continue
+        try:
+            _rmtree_writable(dest)
+        except (OSError, IOError) as e:
+            skipped.append({"name": name, "reason": f"delete failed: {e}"})
+            continue
+        if name in manifest:
+            del manifest[name]
+        removed.append(name)
+
+    if not dry_run and removed:
+        _write_manifest(manifest)
+
+    verb = "Would remove" if dry_run else "Removed"
+    message = f"{verb} {len(removed)} disallowed pristine bundled skill(s); kept {len(skipped)}."
+    return {
+        "ok": True,
+        "removed": removed,
+        "skipped": skipped,
+        "dry_run": dry_run,
+        "message": message,
     }
 
 

@@ -156,6 +156,7 @@ import { UpdatesOverlay } from './updates-overlay'
 
 const AgentsView = lazy(async () => ({ default: (await import('./agents')).AgentsView }))
 const ArtifactsView = lazy(async () => ({ default: (await import('./artifacts')).ArtifactsView }))
+const BugIntakeView = lazy(async () => ({ default: (await import('./bug-intake')).BugIntakeView }))
 const CommandCenterView = lazy(async () => ({ default: (await import('./command-center')).CommandCenterView }))
 const CronView = lazy(async () => ({ default: (await import('./cron')).CronView }))
 const MessagingView = lazy(async () => ({ default: (await import('./messaging')).MessagingView }))
@@ -252,6 +253,7 @@ export function DesktopController() {
 
   const {
     agentsOpen,
+    bugIntakeOpen,
     chatOpen,
     closeOverlayToPreviousRoute,
     commandCenterInitialSection,
@@ -1117,9 +1119,7 @@ export function DesktopController() {
   // layer) so pane resize handles still paint above it. Terminals own their state
   // (incl. a snapshotted cwd) independent of the session, so switching sessions
   // never rebuilds or closes them; toggling the pane never rebuilds the shells.
-  const mainOverlays = (
-    <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
-  )
+  const mainOverlays = <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
 
   const overlays = (
     <>
@@ -1184,6 +1184,12 @@ export function DesktopController() {
       {agentsOpen && (
         <Suspense fallback={null}>
           <AgentsView onClose={closeOverlayToPreviousRoute} />
+        </Suspense>
+      )}
+
+      {bugIntakeOpen && (
+        <Suspense fallback={null}>
+          <BugIntakeView onClose={closeOverlayToPreviousRoute} />
         </Suspense>
       )}
 

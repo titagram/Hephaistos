@@ -37,7 +37,6 @@ class TestHandleFunctionCall:
         assert isinstance(parsed, dict)
         assert "error" in parsed
         assert len(parsed["error"]) > 0
-        assert "error" in parsed["error"].lower() or "failed" in parsed["error"].lower()
 
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (

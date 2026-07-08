@@ -4,6 +4,7 @@ Doctor command for hermes CLI.
 Diagnoses issues with Hermes Agent setup.
 """
 
+import logging
 import os
 import sys
 import subprocess
@@ -27,6 +28,8 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.models import _HERMES_USER_AGENT
 from hermes_constants import OPENROUTER_MODELS_URL
 from utils import base_url_host_matches
+
+logger = logging.getLogger("hermes_cli.hades_backend")
 
 
 _PROVIDER_ENV_HINTS = (
@@ -247,7 +250,7 @@ def _check_version_consistency(issues: list[str]) -> None:
         _fail_and_issue(
             "Version mismatch between source files",
             f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
-            "Re-sync version files (e.g. run 'hermes update', or set "
+            "Re-sync version files (e.g. run 'hades update', or set "
             "hermes_cli/__init__.py __version__ to match pyproject.toml)",
             issues,
         )
@@ -291,7 +294,7 @@ def _check_s6_supervision(issues: list[str]) -> None:
 
     profiles = mgr.list_profile_gateways()
     if not profiles:
-        check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
+        check_info("No per-profile gateways registered yet — create one with `hades profile create <name>`")
         return
 
     up_count = sum(1 for p in profiles if mgr.is_running(f"gateway-{p}"))
@@ -482,8 +485,248 @@ def managed_scope_check() -> None:
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 
+def _hades_backend_client_from_config():
+    from hermes_cli.hades_backend_runtime import client_from_config
+
+    return client_from_config()
+
+
+def _check_hades_backend(issues: list[str]) -> None:
+    """Report local Hades Laravel backend registration state."""
+    try:
+        from agent.secret_scope import get_secret
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        check_warn("Hades backend check skipped", f"({exc})")
+        return
+
+    try:
+        with hdb.connect_closing() as conn:
+            agent = hdb.get_default_agent(conn)
+            bindings = hdb.list_workspace_bindings(conn, status="linked") if agent else []
+            job_counts = hdb.count_jobs_by_status(conn) if agent else {}
+            proposal_counts = hdb.count_memory_proposals_by_status(conn) if agent else {}
+            inbox_counts = hdb.count_inbox_events(conn) if agent else {"total": 0, "unread": 0}
+            last_summary = hdb.get_sync_state(conn, "last_sync_summary") if agent else None
+            last_error = hdb.get_sync_state(conn, "last_sync_error") if agent else None
+    except Exception as exc:
+        check_warn("Hades backend state unreadable", f"({exc})")
+        issues.append("Repair Hades backend state or rerun `hades backend setup`")
+        return
+
+    if agent is None:
+        check_warn("Hades backend not configured", "(run: hades backend setup)")
+        issues.append("Run `hades backend setup` to connect this profile to Laravel")
+        return
+
+    check_ok("Hades backend configured", f"({agent.project_id}, {agent.agent_id})")
+    token_present = bool(get_secret(agent.token_env_key, ""))
+    if token_present:
+        check_ok("Hades backend agent token present", f"({agent.token_env_key})")
+    else:
+        check_warn("Hades backend agent token missing", f"({agent.token_env_key})")
+        issues.append(f"Restore {agent.token_env_key} in .env or rerun `hades backend setup`")
+
+    if bindings:
+        check_ok("Linked backend workspaces", f"({len(bindings)})")
+    else:
+        check_warn("No linked backend workspace", "(run: hades project link <project>)")
+
+    if job_counts:
+        check_ok("Backend jobs", f"({job_counts})")
+    if proposal_counts:
+        check_ok("Memory proposals", f"({proposal_counts})")
+    if inbox_counts.get("total"):
+        check_ok("Persephone inbox", f"({inbox_counts})")
+    if last_summary:
+        check_ok("Last backend sync", f"({last_summary})")
+    if last_error:
+        check_warn("Last backend sync error", f"({last_error.get('message', 'unknown error')})")
+
+    if not token_present:
+        return
+    try:
+        client = _hades_backend_client_from_config()
+        health = client.health()
+        check_ok("Hades backend health reachable", f"({health.get('status', 'ok')})")
+        capabilities = client.capabilities()
+        check_ok("Hades backend capabilities", f"({capabilities.get('capabilities', capabilities)})")
+    except Exception as exc:
+        check_warn("Hades backend remote check failed", f"({exc})")
+        issues.append("Check backend URL/token/network or rerun `hades backend setup`")
+
+
+def _run_hades_doctor_cleanup(args) -> None:
+    selected = {
+        "orphaned_cache": getattr(args, "orphaned_cache", False),
+        "stale_jobs": getattr(args, "stale_jobs", False),
+        "stale_task_work": getattr(args, "stale_task_work", False),
+        "stale_proposals": getattr(args, "stale_proposals", False),
+        "stale_inbox": getattr(args, "stale_inbox", False),
+    }
+    if not any(selected.values()):
+        print(
+            "doctor cleanup: pass one of --orphaned-cache, --stale-jobs, "
+            "--stale-task-work, --stale-proposals, or --stale-inbox"
+        )
+        return
+    dry_run = not getattr(args, "yes", False)
+    include_all = getattr(args, "all", False)
+    retention_days = getattr(args, "retention_days", None)
+    try:
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        print(f"doctor cleanup: Hades backend state unavailable ({exc})")
+        return
+
+    def _retention(default: int) -> int:
+        return default if retention_days is None else max(0, int(retention_days))
+
+    def _print_report(label: str, report: dict[str, int]) -> None:
+        count_key = "would_remove" if dry_run else "removed"
+        count = report.get(count_key, 0)
+        verb = "Would remove" if dry_run else "Removed"
+        print(
+            f"{verb} {count} {label} "
+            f"({report.get('candidates', 0)} candidate(s), {report.get('bytes', 0)} byte(s))."
+        )
+
+    with hdb.connect_closing() as conn:
+        if selected["orphaned_cache"]:
+            _print_report(
+                "orphaned Hades memory cache row(s)",
+                hdb.cleanup_orphaned_memory_cache(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(90),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_jobs"]:
+            _print_report(
+                "stale terminal Hades backend job(s)",
+                hdb.cleanup_terminal_backend_jobs(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_task_work"]:
+            _print_report(
+                "stale terminal Hades backend task work item(s)",
+                hdb.cleanup_terminal_plugin_work_items(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_proposals"]:
+            _print_report(
+                "stale reviewed Hades memory proposal(s)",
+                hdb.cleanup_reviewed_memory_proposals(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(90),
+                    dry_run=dry_run,
+                ),
+            )
+        if selected["stale_inbox"]:
+            _print_report(
+                "stale Hades inbox event(s)",
+                hdb.cleanup_inbox_events(
+                    conn,
+                    include_all=include_all,
+                    retention_days=_retention(30),
+                    dry_run=dry_run,
+                ),
+            )
+    if dry_run:
+        print("doctor cleanup: dry run only; rerun with --yes to remove selected state.")
+
+
+def _submit_hades_doctor_report(issues: list[str]) -> None:
+    try:
+        from hermes_cli import hades_backend_db as hdb
+    except Exception as exc:
+        check_warn("Hades backend doctor report skipped", f"({exc})")
+        return
+
+    try:
+        with hdb.connect_closing() as conn:
+            agent = hdb.get_default_agent(conn)
+            if agent is None:
+                check_warn("Hades backend doctor report skipped", "(backend not configured)")
+                return
+            bindings = hdb.list_workspace_bindings(conn, status="linked")
+            job_counts = hdb.count_jobs_by_status(conn)
+            proposal_counts = hdb.count_memory_proposals_by_status(conn)
+            inbox_counts = hdb.count_inbox_events(conn)
+            last_summary = hdb.get_sync_state(conn, "last_sync_summary")
+            last_error = hdb.get_sync_state(conn, "last_sync_error")
+    except Exception as exc:
+        check_warn("Hades backend doctor report skipped", f"({exc})")
+        return
+
+    binding = bindings[0] if bindings else None
+    status = "warning" if issues or last_error else "ok"
+    payload = {
+        "schema": "hades.doctor_report.v1",
+        "agent_id": agent.agent_id,
+        "project_id": agent.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+        "binding_count": len(bindings),
+        "job_counts": job_counts,
+        "proposal_counts": proposal_counts,
+        "inbox_counts": inbox_counts,
+        "last_sync_summary": last_summary,
+        "last_sync_error": last_error,
+        "issue_count": len(issues),
+    }
+
+    try:
+        response = _hades_backend_client_from_config().submit_doctor_report(
+            project_id=agent.project_id,
+            workspace_binding_id=binding.backend_workspace_binding_id if binding else None,
+            status=status,
+            payload=payload,
+        )
+        report = response.get("report") if isinstance(response, dict) else None
+        report_id = report.get("id") if isinstance(report, dict) else "submitted"
+        logger.info(
+            "hades_backend.doctor_report.submitted",
+            extra={
+                "hades_event": "doctor_report.submitted",
+                "hades_project_id": agent.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+                "hades_report_id": report_id,
+                "hades_status": status,
+                "hades_issue_count": len(issues),
+            },
+        )
+        check_ok("Hades backend doctor report submitted", f"({report_id})")
+    except Exception as exc:
+        from hermes_cli.hades_backend_client import redact_secret
+
+        logger.warning(
+            "hades_backend.doctor_report.failed",
+            extra={
+                "hades_event": "doctor_report.failed",
+                "hades_project_id": agent.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id if binding else None,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
+        check_warn("Hades backend doctor report failed", f"({redact_secret(str(exc))})")
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
+    if getattr(args, "doctor_action", None) == "cleanup":
+        _run_hades_doctor_cleanup(args)
+        return
+
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
 
@@ -560,7 +803,7 @@ def run_doctor(args):
                     f"Resolve security advisory {hit.advisory.id}: "
                     f"uninstall {hit.package}=={hit.installed_version} and "
                     f"rotate credentials, then run "
-                    f"`hermes doctor --ack {hit.advisory.id}`."
+                    f"`hades doctor --ack {hit.advisory.id}`."
                 )
             # Acked-but-still-installed: show as informational so the user
             # knows the package is still on disk after the ack.
@@ -664,6 +907,8 @@ def run_doctor(args):
     _section("Configuration Files")
     # Managed scope (administrator-pinned config/env), when present.
     managed_scope_check()
+    _section("Hades Backend")
+    _check_hades_backend(issues)
     # Check ~/.hermes/.env (primary location for user config)
     env_path = HERMES_HOME / '.env'
     if env_path.exists():
@@ -678,7 +923,7 @@ def run_doctor(args):
             check_ok("API key or custom endpoint configured")
         else:
             check_warn(f"No API key found in {_DHH}/.env")
-            issues.append("Run 'hermes setup' to configure API keys")
+            issues.append("Run 'hades setup' to configure API keys")
     else:
         # Also check project root as fallback
         fallback_env = PROJECT_ROOT / '.env'
@@ -697,11 +942,11 @@ def run_doctor(args):
                 except OSError:
                     pass
                 check_ok(f"Created empty {_DHH}/.env")
-                check_info("Run 'hermes setup' to configure API keys")
+                check_info("Run 'hades setup' to configure API keys")
                 fixed_count += 1
             else:
-                check_info("Run 'hermes setup' to create one")
-                issues.append("Run 'hermes setup' to create .env")
+                check_info("Run 'hades setup' to create one")
+                issues.append("Run 'hades setup' to create .env")
     
     # Check ~/.hermes/config.yaml (primary) or project cli-config.yaml (fallback)
     config_path = HERMES_HOME / 'config.yaml'
@@ -799,7 +1044,7 @@ def run_doctor(args):
                         (
                             f"model.provider '{provider_raw}' is unknown. "
                             f"Valid providers: {known_list}. "
-                            f"Fix: run 'hermes config set model.provider <valid_provider>'"
+                            f"Fix: run 'hades config set model.provider <valid_provider>'"
                         ),
                         issues,
                     )
@@ -870,11 +1115,11 @@ def run_doctor(args):
                     if not configured:
                         _fail_and_issue(
                             f"model.provider '{runtime_provider}' is set but no API key is configured",
-                            "(check ~/.hermes/.env or run 'hermes setup')",
+                            "(check ~/.hermes/.env or run 'hades setup')",
                             (
                                 f"No credentials found for provider '{runtime_provider}'. "
-                                f"Run 'hermes setup' or set the provider's API key in {_DHH}/.env, "
-                                f"or switch providers with 'hermes config set model.provider <name>'"
+                                f"Run 'hades setup' or set the provider's API key in {_DHH}/.env, "
+                                f"or switch providers with 'hades config set model.provider <name>'"
                             ),
                             issues,
                         )
@@ -920,9 +1165,9 @@ def run_doctor(args):
                         fixed_count += 1
                     except Exception as mig_err:
                         check_warn(f"Auto-migration failed: {mig_err}")
-                        issues.append("Run 'hermes setup' to migrate config")
+                        issues.append("Run 'hades setup' to migrate config")
                 else:
-                    issues.append("Run 'hermes doctor --fix' or 'hermes setup' to migrate config")
+                    issues.append("Run 'hades doctor --fix' or 'hades setup' to migrate config")
             else:
                 check_ok(f"Config version up to date (v{current_ver})")
         except Exception:
@@ -962,7 +1207,7 @@ def run_doctor(args):
                     check_ok("Migrated stale root-level keys into model section")
                     fixed_count += 1
                 else:
-                    issues.append("Stale root-level provider/base_url in config.yaml — run 'hermes doctor --fix'")
+                    issues.append("Stale root-level provider/base_url in config.yaml — run 'hades doctor --fix'")
         except Exception:
             pass
 
@@ -1000,7 +1245,7 @@ def run_doctor(args):
                 check_warn(
                     f"HERMES_MAX_ITERATIONS={env_ghost} in .env shadows "
                     f"agent.max_turns={cfg_max_turns} in config.yaml",
-                    "(stale ghost from an earlier `hermes setup` run)",
+                    "(stale ghost from an earlier `hades setup` run)",
                 )
                 if should_fix:
                     if remove_env_value("HERMES_MAX_ITERATIONS"):
@@ -1018,7 +1263,7 @@ def run_doctor(args):
                 else:
                     issues.append(
                         "Stale HERMES_MAX_ITERATIONS in .env shadows config.yaml — "
-                        "run 'hermes doctor --fix'"
+                        "run 'hades doctor --fix'"
                     )
         except Exception:
             pass
@@ -1239,7 +1484,7 @@ def run_doctor(args):
                         )
                 else:
                     issues.append(
-                        "state.db FTS write corruption — run 'hermes doctor --fix' "
+                        "state.db FTS write corruption — run 'hades doctor --fix' "
                         "(or 'hermes sessions repair') to rebuild the FTS index"
                     )
         except Exception as e:
@@ -1285,7 +1530,7 @@ def run_doctor(args):
                         )
                 else:
                     issues.append(
-                        "state.db schema malformed — run 'hermes doctor --fix' "
+                        "state.db schema malformed — run 'hades doctor --fix' "
                         "(or 'hermes sessions repair') to recover hidden sessions"
                     )
             else:
@@ -1312,7 +1557,7 @@ def run_doctor(args):
                     check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
                     fixed_count += 1
                 else:
-                    issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
+                    issues.append("Large WAL file — run 'hades doctor --fix' to checkpoint")
             elif wal_size > 10 * 1024 * 1024:  # 10 MB
                 check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
         except Exception:
@@ -1326,7 +1571,7 @@ def run_doctor(args):
         # Determine the venv entry point location
         _venv_bin = None
         for _venv_name in ("venv", ".venv"):
-            _candidate = PROJECT_ROOT / _venv_name / "bin" / "hermes"
+            _candidate = PROJECT_ROOT / _venv_name / "bin" / "hades"
             if _candidate.exists():
                 _venv_bin = _candidate
                 break
@@ -1340,12 +1585,12 @@ def run_doctor(args):
         else:
             _cmd_link_dir = Path.home() / ".local" / "bin"
             _cmd_link_display = "~/.local/bin"
-        _cmd_link = _cmd_link_dir / "hermes"
+        _cmd_link = _cmd_link_dir / "hades"
 
         if _venv_bin is None:
             check_warn(
                 "Venv entry point not found",
-                "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')"
+                "(hades not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')"
             )
             manual_issues.append(
                 f"Reinstall entry point: cd {PROJECT_ROOT} && source venv/bin/activate && pip install -e '.[all]'"
@@ -1358,31 +1603,31 @@ def run_doctor(args):
                 _target = _cmd_link.resolve()
                 _expected = _venv_bin.resolve()
                 if _target == _expected:
-                    check_ok(f"{_cmd_link_display}/hermes → correct target")
+                    check_ok(f"{_cmd_link_display}/hades → correct target")
                 else:
                     check_warn(
-                        f"{_cmd_link_display}/hermes points to wrong target",
+                        f"{_cmd_link_display}/hades points to wrong target",
                         f"(→ {_target}, expected → {_expected})"
                     )
                     if should_fix:
                         _cmd_link.unlink()
                         _cmd_link.symlink_to(_venv_bin)
-                        check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
+                        check_ok(f"Fixed symlink: {_cmd_link_display}/hades → {_venv_bin}")
                         fixed_count += 1
                     else:
-                        issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
+                        issues.append(f"Broken symlink at {_cmd_link_display}/hades — run 'hades doctor --fix'")
             elif _cmd_link.exists():
                 # It's a regular file, not a symlink — possibly a wrapper script
-                check_ok(f"{_cmd_link_display}/hermes exists (non-symlink)")
+                check_ok(f"{_cmd_link_display}/hades exists (non-symlink)")
             else:
                 check_fail(
-                    f"{_cmd_link_display}/hermes not found",
-                    "(hermes command may not work outside the venv)"
+                    f"{_cmd_link_display}/hades not found",
+                    "(hades command may not work outside the venv)"
                 )
                 if should_fix:
                     _cmd_link_dir.mkdir(parents=True, exist_ok=True)
                     _cmd_link.symlink_to(_venv_bin)
-                    check_ok(f"Created symlink: {_cmd_link_display}/hermes → {_venv_bin}")
+                    check_ok(f"Created symlink: {_cmd_link_display}/hades → {_venv_bin}")
                     fixed_count += 1
 
                     # Check if the link dir is on PATH
@@ -1394,7 +1639,7 @@ def run_doctor(args):
                         )
                         manual_issues.append(f"Add {_cmd_link_display} to your PATH")
                 else:
-                    issues.append(f"Missing {_cmd_link_display}/hermes symlink — run 'hermes doctor --fix'")
+                    issues.append(f"Missing {_cmd_link_display}/hades symlink — run 'hades doctor --fix'")
 
     _section("External Tools")
     # Git
@@ -1765,7 +2010,7 @@ def run_doctor(args):
                     [(color("✗", Colors.RED), "OpenRouter API",
                       color("(out of credits — payment required)", Colors.DIM))],
                     ["OpenRouter account has insufficient credits. "
-                     "Fix: run 'hermes config set model.provider <provider>' "
+                     "Fix: run 'hades config set model.provider <provider>' "
                      "to switch providers, or fund your OpenRouter account "
                      "at https://openrouter.ai/settings/credits"],
                 )
@@ -2164,7 +2409,7 @@ def run_doctor(args):
         # Count disabled tools with API key requirements
         api_disabled = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
         if api_disabled:
-            issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
+            issues.append("Run 'hades setup' to configure missing API keys for full tool access")
     except Exception as e:
         check_warn("Could not check tool availability", f"({e})")
     
@@ -2186,7 +2431,7 @@ def run_doctor(args):
         if q_count > 0:
             check_warn(f"{q_count} skill(s) in quarantine", "(pending review)")
     else:
-        check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
+        check_warn("Skills Hub directory not initialized", "(run: hades skills list)")
 
     from hermes_cli.config import get_env_value
 
@@ -2243,14 +2488,14 @@ def run_doctor(args):
                         f"config file {_honcho_cfg_path} not found, using HONCHO_API_KEY env var",
                     )
                 else:
-                    check_warn("Honcho config not found", "run: hermes memory setup")
+                    check_warn("Honcho config not found", "run: hades memory setup")
             elif not hcfg.enabled:
                 check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
             elif not (hcfg.api_key or hcfg.base_url):
                 _fail_and_issue(
                     "Honcho API key or base URL not set",
-                    "run: hermes memory setup",
-                    "No Honcho API key — run 'hermes memory setup'",
+                    "run: hades memory setup",
+                    "No Honcho API key — run 'hades memory setup'",
                     issues,
                 )
             else:
@@ -2284,7 +2529,7 @@ def run_doctor(args):
             else:
                 _fail_and_issue(
                     "Mem0 API key not set",
-                    "(set MEM0_API_KEY in .env or run hermes memory setup)",
+                    "(set MEM0_API_KEY in .env or run hades memory setup)",
                     "Mem0 is set as memory provider but API key is missing",
                     issues,
                 )
@@ -2305,9 +2550,9 @@ def run_doctor(args):
             if _provider and _provider.is_available():
                 check_ok(f"{_active_memory_provider} provider active")
             elif _provider:
-                check_warn(f"{_active_memory_provider} configured but not available", "run: hermes memory status")
+                check_warn(f"{_active_memory_provider} configured but not available", "run: hades memory status")
             else:
-                check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
+                check_warn(f"{_active_memory_provider} plugin not found", "run: hades memory setup")
         except Exception as _e:
             check_warn(f"{_active_memory_provider} check failed", str(_e))
 
@@ -2354,6 +2599,9 @@ def run_doctor(args):
     except Exception:
         pass
 
+    if getattr(args, "report_backend", False):
+        _submit_hades_doctor_report(issues + manual_issues)
+
     print()
     remaining_issues = issues + manual_issues
     if should_fix and fixed_count > 0:
@@ -2376,7 +2624,7 @@ def run_doctor(args):
             print(f"  {i}. {issue}")
         print()
         if not should_fix:
-            print(color("  Tip: run 'hermes doctor --fix' to auto-fix what's possible.", Colors.DIM))
+            print(color("  Tip: run 'hades doctor --fix' to auto-fix what's possible.", Colors.DIM))
     else:
         print(color("─" * 60, Colors.GREEN))
         print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))

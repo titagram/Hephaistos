@@ -810,6 +810,18 @@ def test_nonconversational_fallback_requires_self_improvement_emoji():
     )
 
 
+def test_nonconversational_fallback_matches_legacy_and_current_update_statuses():
+    assert discord_platform._looks_like_nonconversational_history_message(
+        "✅ Hermes update finished. Gateway restarted successfully."
+    )
+    assert discord_platform._looks_like_nonconversational_history_message(
+        "❌ Hermes update failed. Check the gateway logs."
+    )
+    assert discord_platform._looks_like_nonconversational_history_message(
+        "✅ Hades update finished. Gateway restarted successfully."
+    )
+
+
 @pytest.mark.asyncio
 async def test_fetch_channel_context_skips_other_bots_when_allow_bots_none(adapter, monkeypatch):
     monkeypatch.setenv("DISCORD_ALLOW_BOTS", "none")
@@ -1153,4 +1165,3 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
     await adapter._handle_message(message)
 
     adapter._fetch_channel_context.assert_not_awaited()
-

@@ -1,0 +1,51 @@
+{
+  "bug_id": "rc_booking_controller_or_model",
+  "root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+  "bug_class": "validation",
+  "failure_classification": "confirmed",
+  "affected_refs": [
+    "route:console.bookings.store",
+    "symbol:BookingController@validateBooking"
+  ],
+  "freshness": {
+    "status": "current",
+    "head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+  },
+  "awareness": {
+    "diagnosable_without_source": true
+  },
+  "evidence_refs": [
+    {
+      "type": "bug_evidence",
+      "id": "01KX0ER3S7G3SHA08QT1QXZAT4"
+    },
+    {
+      "type": "evidence_pack",
+      "id": "01KX0ER3ZNQK5VKYQXYGFS98J3"
+    }
+  ],
+  "graph_refs": [
+    {
+      "type": "symbol",
+      "ref": "BookingController@validateBooking"
+    },
+    {
+      "type": "edge",
+      "ref": "edge:local_rocket_eval_populate_backend_ast:edge:1428"
+    },
+    {
+      "type": "edge",
+      "ref": "edge:local_rocket_eval_populate_backend_ast:edge:1491"
+    },
+    {
+      "type": "route",
+      "ref": "route:console.bookings.store"
+    }
+  ],
+  "source_slice_refs": [
+    {
+      "type": "source_slice",
+      "id": "01KX0EEP6BNQJPBTTGA2G9MHEV"
+    }
+  ]
+}

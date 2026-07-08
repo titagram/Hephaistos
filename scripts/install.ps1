@@ -1,21 +1,22 @@
 # ============================================================================
-# Hermes Agent Installer for Windows
+# Hades Agent Installer for Windows
 # ============================================================================
 # Installation script for Windows (PowerShell).
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+#   iex (irm https://hades-agent.local/install.ps1)
 #
 # Or download and run with options:
-#   .\install.ps1 -NoVenv -SkipSetup
+#   .\install.ps1 -NoVenv -SkipSetup -NoSkills
 #
 # ============================================================================
 
 param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
-    [string]$Branch = "main",
+    [switch]$NoSkills,
+    [string]$Branch = $(if ($env:HADES_INSTALL_BRANCH) { $env:HADES_INSTALL_BRANCH } else { "main" }),
     # -Commit and -Tag are higher-precedence variants of -Branch for users
     # who need reproducible installs (desktop installer pinning, CI, release
     # bundles).  When set, the repository stage clones $Branch (faster than
@@ -23,8 +24,13 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
-    [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
-    [string]$InstallDir = $(if ($env:HERMES_HOME) { "$env:HERMES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\hermes\hermes-agent" }),
+    [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } elseif ($env:HADES_HOME) { $env:HADES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
+    [string]$InstallDir = "",
+    [string]$BackendUrl = "",
+    [string]$BackendProjectId = "",
+    [string]$BackendProjectToken = "",
+    [string]$BackendWorkspace = "",
+    [string]$BackendProjectName = "",
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
     # See the "Stage protocol" section near the bottom of the file for the
@@ -58,6 +64,12 @@ param(
     #     `hermes desktop` already builds on demand.
     [switch]$IncludeDesktop
 )
+
+if (-not $PSBoundParameters.ContainsKey("InstallDir")) {
+    $InstallDir = Join-Path $HermesHome "hermes-agent"
+}
+
+$InstallerStartDir = (Get-Location).ProviderPath
 
 $ErrorActionPreference = "Stop"
 
@@ -136,8 +148,8 @@ foreach ($tmpVar in @('TEMP', 'TMP')) {
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoUrlSsh = "git@github.com:titagram/Hephaistos.git"
+$RepoUrlHttps = "https://github.com/titagram/Hephaistos.git"
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
 # available, in preference order.  uv discovers both uv-managed and system
@@ -207,9 +219,9 @@ function Get-WindowsArch {
 function Write-Banner {
     Write-Host ""
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
-    Write-Host "|             * Hermes Agent Installer                    |" -ForegroundColor Magenta
+    Write-Host "|             * Hades Agent Installer                    |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
-    Write-Host "|  An open source AI agent by Nous Research.              |" -ForegroundColor Magenta
+    Write-Host "|  Open source AI agent runtime setup.                    |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -759,7 +771,7 @@ function Install-Git {
         $gitVerTag = "$gitVer.windows.1"
 
         if ($arch -eq "32-bit-mingit") {
-            Write-Warn "32-bit Windows detected -- PortableGit is 64-bit only.  Installing MinGit 32-bit as a last resort; bash-dependent Hermes features (terminal tool, agent-browser) will not work on this machine."
+            Write-Warn "32-bit Windows detected -- PortableGit is 64-bit only.  Installing MinGit 32-bit as a last resort; bash-dependent Hades features (terminal tool, agent-browser) will not work on this machine."
             $assetName    = "MinGit-$gitVer-32-bit.zip"
             $downloadIsZip = $true
         } elseif ($arch -eq "arm64") {
@@ -839,7 +851,7 @@ function Install-Git {
         Write-Err "Could not install portable Git: $_"
         Write-Info ""
         Write-Info "Fallback: install Git manually from https://git-scm.com/download/win"
-        Write-Info "then re-run this installer.  Hermes needs Git Bash on Windows to run"
+        Write-Info "then re-run this installer.  Hades needs Git Bash on Windows to run"
         Write-Info "shell commands (same as Claude Code and other coding agents)."
         return $false
     }
@@ -893,7 +905,7 @@ function Set-GitBashEnvVar {
         }
     }
 
-    Write-Warn "Could not locate bash.exe -- Hermes may not find Git Bash."
+    Write-Warn "Could not locate bash.exe -- Hades may not find Git Bash."
     Write-Info "If needed, set HERMES_GIT_BASH_PATH manually to your bash.exe path."
 }
 
@@ -932,12 +944,12 @@ function Test-Node {
     if ((Test-Path $managedNode) -and (Test-NodeVersionOk (& $managedNode --version))) {
         $version = & $managedNode --version
         $env:Path = "$HermesHome\node;$env:Path"
-        Write-Success "Node.js $version found (Hermes-managed)"
+        Write-Success "Node.js $version found (Hades-managed)"
         $script:HasNode = $true
         return $true
     }
 
-    Write-Info "Installing Hermes-managed Node.js $NodeVersion LTS..."
+    Write-Info "Installing Hades-managed Node.js $NodeVersion LTS..."
 
     # Try the portable-zip path FIRST -- no UAC, no admin, no winget MSI.
     # winget install OpenJS.NodeJS.LTS triggers a system-wide MSI install
@@ -1397,7 +1409,7 @@ function Install-Repository {
                         if ($LASTEXITCODE -eq 0) {
                             git -c windows.appendAtomically=false stash drop $autostashRef 2>$null
                             Write-Warn "Local changes were restored on top of the updated codebase."
-                            Write-Warn "Review git diff / git status if Hermes behaves unexpectedly."
+                            Write-Warn "Review git diff / git status if Hades behaves unexpectedly."
                         } else {
                             Write-Err "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
                             Write-Info "Resolve manually with: git stash apply $autostashRef"
@@ -1483,13 +1495,13 @@ function Install-Repository {
                 # for.  GitHub supports archive URLs for commits, tags, and
                 # branches; we honour Commit > Tag > Branch.
                 if ($Commit) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/$Commit.zip"
+                    $zipUrl = "https://github.com/titagram/Hephaistos/archive/$Commit.zip"
                     $zipLabel = $Commit
                 } elseif ($Tag) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/tags/$Tag.zip"
+                    $zipUrl = "https://github.com/titagram/Hephaistos/archive/refs/tags/$Tag.zip"
                     $zipLabel = $Tag
                 } else {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
+                    $zipUrl = "https://github.com/titagram/Hephaistos/archive/refs/heads/$Branch.zip"
                     $zipLabel = $Branch
                 }
                 $zipPath = "$env:TEMP\hermes-agent-$zipLabel.zip"
@@ -1933,7 +1945,7 @@ print(','.join(scripts))
 }
 
 function Set-PathVariable {
-    Write-Info "Setting up hermes command..."
+    Write-Info "Setting up hades command..."
     
     if ($NoVenv) {
         $hermesBin = "$InstallDir"
@@ -1941,8 +1953,9 @@ function Set-PathVariable {
         $hermesBin = "$InstallDir\venv\Scripts"
     }
     
-    # Add the venv Scripts dir to user PATH so hermes is globally available
-    # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
+    # Add the venv Scripts dir to user PATH so hades is globally available.
+    # On Windows, the hades.exe/hermes.exe launchers in venv\Scripts\ have
+    # the venv Python baked in.
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
     
     if ($currentPath -notlike "*$hermesBin*") {
@@ -1965,11 +1978,12 @@ function Set-PathVariable {
         Write-Success "Set HERMES_HOME=$HermesHome"
     }
     $env:HERMES_HOME = $HermesHome
+    $env:HADES_HOME = $HermesHome
     
     # Update current session
     $env:Path = "$hermesBin;$env:Path"
     
-    Write-Success "hermes command ready"
+    Write-Success "hades command ready"
 }
 
 function Write-BootstrapMarker {
@@ -2021,7 +2035,7 @@ function Write-BootstrapMarker {
 
     $pinnedBranch = $Branch
     if (-not $pinnedBranch) {
-        $pinnedBranch = "main"  # install.ps1's own default for -Branch
+        $pinnedBranch = $(if ($env:HADES_INSTALL_BRANCH) { $env:HADES_INSTALL_BRANCH } else { "main" })
     }
 
     $markerPath = Join-Path $InstallDir ".hermes-bootstrap-complete"
@@ -2106,7 +2120,7 @@ function Copy-ConfigTemplates {
         # upgrades the old comment-only scaffold to this text on next run, so
         # drift is self-healing, but keep them in sync to avoid first-run churn.
         $soulContent = @"
-You are Hermes Agent, an intelligent AI assistant created by Nous Research. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.
+You are Hades Agent, an intelligent AI assistant created for Hades. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.
 "@
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($soulPath, $soulContent, $utf8NoBom)
@@ -2115,20 +2129,25 @@ You are Hermes Agent, an intelligent AI assistant created by Nous Research. You 
     
     Write-Success "Configuration directory ready: $HermesHome"
     
-    # Seed bundled skills into $HermesHome\skills (manifest-based, one-time per skill)
-    Write-Info "Syncing bundled skills to $HermesHome\skills ..."
-    $pythonExe = "$InstallDir\venv\Scripts\python.exe"
-    if (Test-Path $pythonExe) {
-        try {
-            & $pythonExe "$InstallDir\tools\skills_sync.py" 2>$null
-            Write-Success "Skills synced to $HermesHome\skills"
-        } catch {
-            # Fallback: simple directory copy
-            $bundledSkills = "$InstallDir\skills"
-            $userSkills = "$HermesHome\skills"
-            if ((Test-Path $bundledSkills) -and -not (Get-ChildItem $userSkills -Exclude '.bundled_manifest' -ErrorAction SilentlyContinue)) {
-                Copy-Item -Path "$bundledSkills\*" -Destination $userSkills -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Success "Skills copied to $HermesHome\skills"
+    if ($NoSkills) {
+        New-Item -ItemType File -Force -Path "$HermesHome\.no-bundled-skills" | Out-Null
+        Write-Info "Skipping bundled skills (-NoSkills). Wrote $HermesHome\.no-bundled-skills"
+    } else {
+        # Seed bundled skills into $HermesHome\skills (manifest-based, one-time per skill)
+        Write-Info "Syncing bundled skills to $HermesHome\skills ..."
+        $pythonExe = "$InstallDir\venv\Scripts\python.exe"
+        if (Test-Path $pythonExe) {
+            try {
+                & $pythonExe "$InstallDir\tools\skills_sync.py" 2>$null
+                Write-Success "Skills synced to $HermesHome\skills"
+            } catch {
+                # Fallback: simple directory copy
+                $bundledSkills = "$InstallDir\skills"
+                $userSkills = "$HermesHome\skills"
+                if ((Test-Path $bundledSkills) -and -not (Get-ChildItem $userSkills -Exclude '.bundled_manifest' -ErrorAction SilentlyContinue)) {
+                    Copy-Item -Path "$bundledSkills\*" -Destination $userSkills -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Success "Skills copied to $HermesHome\skills"
+                }
             }
         }
     }
@@ -2161,7 +2180,7 @@ function Install-NodeDeps {
     $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
     if (-not $npmCmd) {
         Write-Warn "npm not found on PATH -- skipping Node.js dependencies."
-        Write-Info "Open a new PowerShell window and re-run 'hermes setup tools' later."
+        Write-Info "Open a new PowerShell window and re-run 'hades setup tools' later."
         return
     }
     $npmExe = $npmCmd.Source
@@ -2755,7 +2774,7 @@ function New-DesktopShortcuts {
                 $sc.TargetPath = $TargetExe
                 $sc.WorkingDirectory = $workDir
                 $sc.IconLocation = $iconLocation
-                $sc.Description = 'Hermes Agent'
+                $sc.Description = 'Hades Agent'
                 $sc.Save()
                 Write-Success "Shortcut created: $lnkPath"
             } catch {
@@ -2898,7 +2917,7 @@ function Invoke-SetupWizard {
         # The setup wizard prompts for API keys, model choice, persona, etc.
         # Non-interactive callers (GUI installer) own that UX themselves; let
         # them drive it after install.ps1 returns.
-        Write-Info "Skipping setup wizard (non-interactive). Configure via the GUI or 'hermes setup'."
+        Write-Info "Skipping setup wizard (non-interactive). Configure via the GUI or 'hades setup'."
         return
     }
 
@@ -2916,6 +2935,53 @@ function Invoke-SetupWizard {
     }
 
     Pop-Location
+}
+
+function Invoke-BackendBootstrap {
+    $hasBackendArgs = -not [string]::IsNullOrWhiteSpace($BackendUrl) -or
+        -not [string]::IsNullOrWhiteSpace($BackendProjectId) -or
+        -not [string]::IsNullOrWhiteSpace($BackendProjectToken)
+    if (-not $hasBackendArgs) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($BackendUrl) -or
+        [string]::IsNullOrWhiteSpace($BackendProjectId) -or
+        [string]::IsNullOrWhiteSpace($BackendProjectToken)) {
+        throw "Backend bootstrap requires -BackendUrl, -BackendProjectId, and -BackendProjectToken."
+    }
+
+    Write-Info "Configuring Hades backend project link..."
+    $args = @(
+        "backend", "bootstrap",
+        "--url", $BackendUrl,
+        "--project-id", $BackendProjectId,
+        "--project-token", $BackendProjectToken,
+        "--non-interactive"
+    )
+    $effectiveBackendWorkspace = $BackendWorkspace
+    if ([string]::IsNullOrWhiteSpace($effectiveBackendWorkspace)) {
+        $effectiveBackendWorkspace = $InstallerStartDir
+    }
+    if (-not [string]::IsNullOrWhiteSpace($effectiveBackendWorkspace)) {
+        $args += @("--workspace", $effectiveBackendWorkspace)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BackendProjectName)) {
+        $args += @("--project-name", $BackendProjectName)
+    }
+
+    Push-Location $InstallDir
+    try {
+        if (-not $NoVenv) {
+            & ".\venv\Scripts\python.exe" -m hermes_cli.main @args
+        } else {
+            python -m hermes_cli.main @args
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "hades backend bootstrap failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 function Start-GatewayIfConfigured {
@@ -2971,7 +3037,7 @@ function Start-GatewayIfConfigured {
     # services on the build agent, etc.).  Treat it like the user declined.
     if ($NonInteractive) {
         Write-Info "Skipping gateway autostart prompt (non-interactive)."
-        Write-Info "Start the gateway later with: hermes gateway"
+        Write-Info "Start the gateway later with: hades gateway"
         return
     }
 
@@ -2989,10 +3055,10 @@ function Start-GatewayIfConfigured {
             Write-Info "Logs: $logFile"
             Write-Info "To stop: close the gateway process from Task Manager"
         } catch {
-            Write-Warn "Failed to start gateway. Run manually: hermes gateway"
+            Write-Warn "Failed to start gateway. Run manually: hades gateway"
         }
     } else {
-        Write-Info "Skipped. Start the gateway later with: hermes gateway"
+        Write-Info "Skipped. Start the gateway later with: hades gateway"
     }
 }
 
@@ -3020,18 +3086,20 @@ function Write-Completion {
     Write-Host ""
     Write-Host "* Commands:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "   hermes              " -NoNewline -ForegroundColor Green
+    Write-Host "   hades               " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "   hermes setup        " -NoNewline -ForegroundColor Green
+    Write-Host "   hades setup         " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "   hermes config       " -NoNewline -ForegroundColor Green
+    Write-Host "   hades config        " -NoNewline -ForegroundColor Green
     Write-Host "View/edit configuration"
-    Write-Host "   hermes config edit  " -NoNewline -ForegroundColor Green
+    Write-Host "   hades config edit   " -NoNewline -ForegroundColor Green
     Write-Host "Open config in editor"
-    Write-Host "   hermes gateway      " -NoNewline -ForegroundColor Green
+    Write-Host "   hades gateway       " -NoNewline -ForegroundColor Green
     Write-Host "Start messaging gateway (Telegram, Discord, etc.)"
-    Write-Host "   hermes update       " -NoNewline -ForegroundColor Green
+    Write-Host "   hades update        " -NoNewline -ForegroundColor Green
     Write-Host "Update to latest version"
+    Write-Host "   hades uninstall     " -NoNewline -ForegroundColor Green
+    Write-Host "Uninstall Hades (keeps data unless --full)"
     Write-Host ""
     
     Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
@@ -3332,6 +3400,7 @@ function Invoke-PostInstallMode {
 function Main {
     Write-Banner
     Invoke-AllStages
+    Invoke-BackendBootstrap
     if (-not $Json) {
         Write-Completion
     } else {
@@ -3431,7 +3500,7 @@ try {
     Write-Err "Installation failed: $_"
     Write-Host ""
     Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://hermes-agent.nousresearch.com/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
+    Write-Host "  Invoke-WebRequest -Uri 'https://hades-agent.local/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
     Write-Host "  .\install.ps1" -ForegroundColor Yellow
     Write-Host ""
 }

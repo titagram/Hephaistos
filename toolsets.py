@@ -25,6 +25,8 @@ Usage:
 
 from typing import List, Dict, Any, Set, Optional
 
+from hermes_cli.hades_exclusions import is_excluded_toolset
+
 
 # Shared tool list for CLI and all messaging platform toolsets.
 # Edit this once to update all platforms simultaneously.
@@ -39,8 +41,8 @@ _HERMES_CORE_TOOLS = [
     "read_terminal", "close_terminal",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
-    "vision_analyze", "image_generate",
+    # Vision
+    "vision_analyze",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -335,7 +337,7 @@ TOOLSETS = {
     "safe": {
         "description": "Safe toolkit without terminal access",
         "tools": [],
-        "includes": ["web", "vision", "image_gen"]
+        "includes": ["web", "vision"]
     },
 
     # Coding posture (base Hermes — CLI/TUI/desktop/ACP). Auto-selected in a
@@ -402,8 +404,8 @@ TOOLSETS = {
             "terminal", "process",
             # File manipulation
             "read_file", "write_file", "patch", "search_files",
-            # Vision + image generation
-            "vision_analyze", "image_generate",
+            # Vision
+            "vision_analyze",
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation
@@ -593,6 +595,9 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
         Dict: Toolset definition with description, tools, and includes
         None: If toolset not found
     """
+    if is_excluded_toolset(name):
+        return None
+
     toolset = TOOLSETS.get(name)
 
     try:
@@ -677,6 +682,9 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     """
     if visited is None:
         visited = set()
+
+    if is_excluded_toolset(name):
+        return []
     
     # Special aliases that represent all tools across every toolset
     # This ensures future toolsets are automatically included without changes.
@@ -789,7 +797,11 @@ def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
     Returns:
         Dict: All toolset definitions
     """
-    result = dict(TOOLSETS)
+    result = {
+        name: definition
+        for name, definition in TOOLSETS.items()
+        if not is_excluded_toolset(name)
+    }
     aliases = _get_registry_toolset_aliases()
     for ts_name in _get_plugin_toolset_names():
         display_name = ts_name
@@ -814,7 +826,7 @@ def get_toolset_names() -> List[str]:
     Returns:
         List[str]: List of toolset names
     """
-    names = set(TOOLSETS.keys())
+    names = {name for name in TOOLSETS if not is_excluded_toolset(name)}
     aliases = _get_registry_toolset_aliases()
     for ts_name in _get_plugin_toolset_names():
         for alias, canonical in aliases.items():
@@ -841,6 +853,8 @@ def validate_toolset(name: str) -> bool:
     # Accept special alias names for convenience
     if name in {"all", "*"}:
         return True
+    if is_excluded_toolset(name):
+        return False
     if name in TOOLSETS:
         return True
     if name in _get_plugin_toolset_names():

@@ -3846,24 +3846,25 @@ class TestNewEndpoints:
 
     def test_toggle_toolset_enable_disable(self):
         """PUT /api/tools/toolsets/{name} round-trips through config and the list view."""
-        # Enable a toolset that is off-by-default so the state change is observable.
-        resp = self.client.put("/api/tools/toolsets/x_search", json={"enabled": True})
+        # Enable a configurable toolset that is off in this fixture so the
+        # state change is observable.
+        resp = self.client.put("/api/tools/toolsets/memory", json={"enabled": True})
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
-        assert body["name"] == "x_search"
+        assert body["name"] == "memory"
         assert body["enabled"] is True
 
         listing = {t["name"]: t for t in self.client.get("/api/tools/toolsets").json()}
-        assert listing["x_search"]["enabled"] is True
+        assert listing["memory"]["enabled"] is True
 
         # Disable it again.
-        resp = self.client.put("/api/tools/toolsets/x_search", json={"enabled": False})
+        resp = self.client.put("/api/tools/toolsets/memory", json={"enabled": False})
         assert resp.status_code == 200
         assert resp.json()["enabled"] is False
 
         listing = {t["name"]: t for t in self.client.get("/api/tools/toolsets").json()}
-        assert listing["x_search"]["enabled"] is False
+        assert listing["memory"]["enabled"] is False
 
     def test_toggle_toolset_unknown_returns_400(self):
         resp = self.client.put(
@@ -3873,13 +3874,13 @@ class TestNewEndpoints:
 
     def test_get_toolset_config_returns_provider_matrix(self):
         """GET .../config returns provider rows with structured env_vars."""
-        resp = self.client.get("/api/tools/toolsets/tts/config")
+        resp = self.client.get("/api/tools/toolsets/web/config")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["name"] == "tts"
+        assert data["name"] == "web"
         assert data["has_category"] is True
         assert isinstance(data["providers"], list)
-        assert data["providers"], "tts always has at least the built-in providers"
+        assert data["providers"], "web always has at least the built-in providers"
         # active_provider is part of the contract so the GUI can highlight the
         # provider actually written to config (else it falls back to the first
         # keyless one). It's either None or the name of one listed provider.
@@ -3913,19 +3914,19 @@ class TestNewEndpoints:
         """
         sel = self.client.put(
             "/api/tools/toolsets/web/provider",
-            json={"provider": "Firecrawl Self-Hosted"},
+            json={"provider": "Parallel"},
         )
         assert sel.status_code == 200
 
         resp = self.client.get("/api/tools/toolsets/web/config")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["active_provider"] == "Firecrawl Self-Hosted"
+        assert data["active_provider"] == "Parallel"
         active = [p["name"] for p in data["providers"] if p["is_active"]]
         # The first active row is what the GUI highlights; it must be the
         # selected provider.
         assert active, "expected at least one provider flagged active"
-        assert active[0] == "Firecrawl Self-Hosted"
+        assert active[0] == "Parallel"
 
     def test_get_toolset_config_no_category_toolset(self):
         """A toolset without a TOOL_CATEGORIES entry returns has_category False."""
@@ -3944,17 +3945,17 @@ class TestNewEndpoints:
         """PUT .../provider writes the backend selection to config."""
         resp = self.client.put(
             "/api/tools/toolsets/web/provider",
-            json={"provider": "Firecrawl Self-Hosted"},
+            json={"provider": "Parallel"},
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
         assert body["name"] == "web"
-        assert body["provider"] == "Firecrawl Self-Hosted"
+        assert body["provider"] == "Parallel"
 
         from hermes_cli.config import load_config
         cfg = load_config()
-        assert cfg["web"]["backend"] == "firecrawl"
+        assert cfg["web"]["backend"] == "parallel"
 
     def test_select_toolset_provider_unknown_provider_returns_400(self):
         resp = self.client.put(
@@ -4844,6 +4845,16 @@ class TestGatewayBusyReadout:
 # ---------------------------------------------------------------------------
 # Dashboard theme normaliser tests
 # ---------------------------------------------------------------------------
+
+
+def test_builtin_dashboard_themes_use_hades_visible_labels():
+    from hermes_cli.web_server import _BUILTIN_DASHBOARD_THEMES
+
+    by_name = {theme["name"]: theme for theme in _BUILTIN_DASHBOARD_THEMES}
+    assert by_name["default"]["label"] == "Hades Teal"
+    assert by_name["default-large"]["label"] == "Hades Teal (Large)"
+    assert all("Hermes" not in theme["label"] for theme in _BUILTIN_DASHBOARD_THEMES)
+    assert all("Hermes" not in theme["description"] for theme in _BUILTIN_DASHBOARD_THEMES)
 
 
 class TestNormaliseThemeDefinition:

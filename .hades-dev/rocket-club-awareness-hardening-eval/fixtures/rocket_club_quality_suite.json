@@ -1,0 +1,12 @@
+{
+  "schema": "hades.no_codebase_quality_suite.v1",
+  "suites": [
+    {
+      "id": "rocket_club_existing_real_trajectories",
+      "fixture": "../../rocket-club-no-codebase-eval/fixtures/rocket_club_no_codebase_eval.json",
+      "min_accuracy": 1.0,
+      "min_root_cause_accuracy": 1.0,
+      "min_insufficient_accuracy": 1.0
+    }
+  ]
+}

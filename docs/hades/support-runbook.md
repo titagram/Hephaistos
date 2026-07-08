@@ -1,0 +1,135 @@
+# Hades Support Runbook
+
+This runbook is for beta support and incident response. It turns common launch
+failures into safe commands, expected evidence, recovery action, and escalation.
+
+## Safe Support Bundle
+
+Ask users for command output, not raw state files:
+
+```bash
+hades doctor
+hades backend support-report --json
+hades logs --level WARNING --session latest
+```
+
+Use `hades backend status --json` for local debugging. For support tickets,
+prefer `hades backend support-report --json`: it keeps setup, sync, awareness,
+and action fields, but removes local absolute paths and secrets.
+
+For Hades diagnosis/evidence support, ask for metadata-only counts first:
+
+```bash
+hades backend privacy-export --json
+```
+
+For the full source-free diagnosis workflow, use
+[no-codebase-diagnosis.md](no-codebase-diagnosis.md). It defines the required
+awareness, evidence, freshness, and confidence gates before a precise root-cause
+claim is safe without local source access.
+
+## Kanban Local Agent Task Work
+
+Use this path when a dashboard kanban task should be picked up by the local
+Hades agent:
+
+```bash
+hades backend worker-setup
+hades backend tasks list --json
+hades backend tasks status --json
+hades backend tasks work --once --limit 1 --json
+hades backend tasks work --loop --interval 5 --idle-exit-after 3 --json
+hades backend quality-report --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json --record
+```
+
+The local task worker uses the plugin API, not the Hades agent token. Configure
+a dedicated plugin token through `backend.plugin_token_env_key` or
+`HADES_BACKEND_PLUGIN_TOKEN`; it must include `projects.read`,
+`repositories.read`, and `runs.write`. Do not put the raw token in
+`config.yaml`.
+
+Expected evidence:
+
+- `worker-setup` returns `status=linked`, `device_id`, `repository_id`, and
+  `local_workspace_id`.
+- `tasks list --json` shows `hades.kanban_task_work.v1` items with
+  `contract.valid=true`.
+- `tasks work --once --json` returns `completed=1` for a successful claim/run,
+  or a structured `error.code` and `error.next_step`.
+- `tasks work --loop --json` returns `mode=loop`, aggregate cycle counts, and
+  exits cleanly when `--idle-exit-after` is reached.
+- `quality-report --record` has no `repair_agent_work_shared_memory`,
+  `repair_agent_work_structured_diagnosis`, or
+  `agent_work_repair_causal_pack_coverage` blockers for completed bug work.
+
+If `worker-setup` and `tasks list` pass but `tasks work` fails during model
+startup or the first provider call, debug model credentials separately with
+`hades setup` or the provider-specific setup path. A provider authentication
+failure after claim must be reported back to the backend as a failed work item;
+it should not leave the item running indefinitely.
+
+If a bug task is part of a no-codebase release fixture, the work item payload
+may include `quality_eval.no_codebase_fixture_id`. Completed work must then
+record `result.no_codebase_diagnosis`; a prose-only answer is a blocker because
+it cannot prove evidence refs, freshness, source-free awareness, Hades tool
+order, causal pack refs, and persisted report status.
+
+For cross-device checks, use two local profiles or two machines with separate
+`worker-setup` runs. Device B should be able to read project shared memory
+written by Device A, register its own workspace, and claim compatible unclaimed
+work. Device B must not complete or heartbeat a lease opened by Device A.
+
+Do not request `hades backend privacy-export --include-content --json` unless a
+maintainer has confirmed the user consent, project policy, and a secure sharing
+channel. Use `hades backend privacy-delete --json` and
+`hades backend retention-cleanup --retention-days <days> --json` as dry-runs
+before any destructive action.
+Successful privacy operations are audited backend-side with counts and scope
+metadata only. Audit rows are safe to reference by id during escalation; they
+must not be used as a source of raw evidence content.
+
+If the backend is configured and the user explicitly agrees, ask them to submit
+the compact backend report:
+
+```bash
+hades doctor --report-backend
+```
+
+Do not ask users to send:
+
+- `.env`, profile secret files, bootstrap tokens, derived backend agent tokens,
+  API keys, or bearer headers.
+- Raw job payloads, raw source files, generated artifact JSON, SQLite databases,
+  or full `config.yaml`.
+- Screenshots or logs that show local absolute paths, private repository URLs,
+  tokenized install commands, or query-string credentials.
+
+## Recovery Matrix
+
+| Symptom | Command | Expected evidence | Recovery | Escalate when |
+| --- | --- | --- | --- | --- |
+| Backend unreachable | `hades backend support-report --json`; `hades doctor`; `hades logs --level WARNING --session latest` | `degraded=true`, sync action, `sync.error` or `sync.client_error` warning | Confirm network/DNS/TLS/backend URL, then rerun `hades backend sync` | Health fails for multiple users or backend dashboard also cannot reach `/api/hades/v1/health` |
+| Token expired or revoked | `hades doctor`; `hades backend support-report --json` | Missing token warning, 401/403/422 setup or sync error with token redacted | Generate a new dashboard one-liner or rerun `hades backend bootstrap --url <backend-url> --project-id <project-id> --project-token <new-bootstrap-token> --workspace "$PWD" --non-interactive` | A freshly generated token fails or the backend cannot revoke the old token |
+| Failed bootstrap | `hades backend support-report --json`; `hades doctor` | Backend not configured, no linked workspace, or bootstrap command failed before initial sync | Rerun the dashboard-generated one-liner from the workspace root; local Hades still works without shared backend memory | Repeated bootstrap creates duplicate backend agents or never reaches agent registration |
+| Workspace already linked | `hades backend profiles --json`; `hades backend support-report --json` | Existing linked binding for the same workspace fingerprint or backend says workspace conflict | If it is the same project, keep the existing link and run `hades backend sync`; otherwise `hades project unlink <project>` and relink the intended project | Backend shows an active binding the user cannot see or unlink locally |
+| Job waiting confirmation | `hades backend jobs` | `waiting_confirmation` jobs and status action telling the user to review work | `hades backend approve-job <job_id>` for expected work, or `hades backend refuse-job <job_id> --reason "too broad"` | Job repeatedly returns to waiting after refusal or has unclear capability/payload |
+| Source-free awareness partial | `hades backend status --json`; `hades backend jobs --status waiting_confirmation` | Artifact/code graph current, source-slice jobs pending, or `missing=["bug_evidence"]` | Run `hades backend sync`; approve expected `read_source_slice` jobs; ingest typed bug evidence with `ingest-test`, `ingest-log`, `ingest-http`, or `bug-intake` before asking for a precise root cause | Artifacts stay missing after sync, source-slice jobs 404 repeatedly, or a real bug has evidence but awareness still reports `bug_evidence` missing |
+| Proposal refused or conflicted | `hades backend proposals`; `hades backend status --json` | Proposal status `refused` or `conflicted` with backend reason | Review reason, then `hades backend ack-proposal <proposal_id>` to silence local review state | Backend refused a proposal that should be accepted according to project policy |
+| Artifact too large or truncated | `hades backend sync`; `hades logs --level WARNING --session latest` | `artifact.uploaded` with truncation/redaction counts, or upload failure warning | Lower requested scope or rerun with smaller backend job budgets; do not ask for raw source upload | Backend needs a schema or budget change to ingest normal project size |
+| Evidence rejected by safety policy | `hades logs --level WARNING --session latest`; backend response error code | `unredacted_secret_detected`, `evidence_payload_too_large`, `source_slice_too_large`, `evidence_pack_payload_too_large`, `diagnosis_payload_too_large`, `diagnosis_evidence_refs_required`, `diagnosis_freshness_not_current`, or `diagnosis_awareness_not_diagnosable` | Redact tokens/cookies/passwords/private keys, reduce payload size, fetch a smaller source slice, or downgrade confidence until current freshness, evidence refs, and source-free awareness coverage exist; do not ask the user to share the raw rejected payload | Redacted bounded payload is still rejected or the rejection blocks an otherwise valid diagnosis workflow |
+| User requests evidence export or deletion | `hades backend privacy-export --json`; `hades backend privacy-delete --json`; `hades backend retention-cleanup --retention-days <days> --json` | Scoped counts by Hades table, dry-run mode true unless `--yes` was passed | Export metadata first; for deletion, confirm project/workspace and rerun with `--yes` only after explicit user approval | Counts include unexpected project/workspace data or confirmed deletion fails |
+| Docker permissions | `docker compose ps`; `docker compose logs --tail=100 dashboard`; `hades doctor` inside the container | Files in `~/.hermes` owned by the wrong UID/GID or dashboard cannot write logs/state | Start with `HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d`; keep dashboard bound to `127.0.0.1` unless auth is configured | State ownership remains broken after UID/GID remap or operator needs public reverse-proxy support |
+| Windows PATH issue | PowerShell: `where.exe hades`; `hades doctor` | `hades` not found or doctor reports missing/wrong command link | Open a new terminal after install; rerun the PowerShell installer; check `%LOCALAPPDATA%\hermes` remains on PATH | Native Windows install cannot create or repair the command shim |
+| Desktop/backend version mismatch | `hades version`; desktop About/version screen; `hades doctor` | Desktop starts an older backend command, `serve` fallback, or mismatched CLI/package version | Run `hades update`, restart the desktop app, and rerun `hades doctor` | Desktop still launches an old managed runtime after update/restart |
+
+## Incident Steps
+
+1. Identify whether the failure is local-only, backend-wide, or release-wide.
+2. Preserve only safe evidence: doctor output, support report JSON, warning
+   logs, and backend report ID if submitted.
+3. Revoke or rotate affected bootstrap/project tokens before asking the user to
+   retry a setup flow.
+4. Prefer recovery commands over manual SQLite edits. Manual DB edits are a last
+   resort for maintainers with a backup.
+5. Close the incident with the exact command that recovered the user, the
+   affected version, and whether docs/tests need a follow-up.

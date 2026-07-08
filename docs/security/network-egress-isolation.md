@@ -1,9 +1,17 @@
 # Network Egress Isolation for Docker Deployments
 
-When running Hermes inside Docker, the default `network_mode: host` gives the
+When running Hades inside Docker, the default `network_mode: host` gives the
 agent process unrestricted outbound network access. This guide shows how to
 segment traffic so the agent core can only reach the services it needs, while
-blocking arbitrary outbound connections.
+blocking arbitrary outbound connections. Dashboard/API exposure is a separate
+auth concern; see [`dashboard-auth-matrix.md`](dashboard-auth-matrix.md) for
+localhost-only, reverse-proxy, WebSocket, and public allowlist rules.
+
+For new self-hosted production installs, start with
+[`../hades/docker-production.md`](../hades/docker-production.md) and
+`docker-compose.production.yml`. This page covers the stricter egress proxy
+override pattern to layer on top of that profile when outbound allowlisting is
+required.
 
 This is primarily a defense against prompt injection attacks that attempt to
 exfiltrate data via `curl`, `wget`, or raw HTTP from tool-generated shell
@@ -11,7 +19,7 @@ commands.
 
 ## Threat Model
 
-The Hermes [SECURITY.md](../../SECURITY.md) §2 defines the trust model. The
+The Hades [SECURITY.md](../../SECURITY.md) §2 defines the trust model. The
 terminal backend is the primary execution boundary. However, when running with
 `network_mode: host`, any command the agent executes can reach any endpoint on
 the network, including external ones.
@@ -190,6 +198,6 @@ docker compose exec gateway \
 
 ## Related
 
-- [SECURITY.md](../../SECURITY.md) — Hermes trust model and vulnerability reporting
+- [SECURITY.md](../../SECURITY.md) — Hades trust model and vulnerability reporting
 - [Terminal backends](../../README.md) — sandboxed execution targets
 - [docker-compose.yml](../../docker-compose.yml) — default compose configuration

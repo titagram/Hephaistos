@@ -1381,6 +1381,14 @@ class TestProfileIsolation:
 class TestInternalHelpers:
     """Tests for _get_profiles_root() and _get_default_hermes_home()."""
 
+    def test_profiles_root_under_home_without_env(self, tmp_path, monkeypatch):
+        """No-env default profile root is ~/.hermes/profiles."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.delenv("HADES_HOME", raising=False)
+
+        assert _get_profiles_root() == tmp_path / ".hermes" / "profiles"
+
     def test_profiles_root_under_home(self, profile_env):
         tmp_path = profile_env
         root = _get_profiles_root()
@@ -1408,6 +1416,29 @@ class TestInternalHelpers:
         monkeypatch.setenv("HERMES_HOME", str(docker_home))
         home = _get_default_hermes_home()
         assert home == docker_home
+
+    def test_hades_home_alias_custom_root(self, tmp_path, monkeypatch):
+        """HADES_HOME is accepted as a custom root when HERMES_HOME is unset."""
+        alias_root = tmp_path / "alias-data"
+        alias_root.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setenv("HADES_HOME", str(alias_root))
+
+        assert _get_default_hermes_home() == alias_root
+        assert _get_profiles_root() == alias_root / "profiles"
+
+    def test_hermes_home_wins_over_hades_home(self, tmp_path, monkeypatch):
+        primary = tmp_path / "primary-data"
+        alias_root = tmp_path / "alias-data"
+        primary.mkdir()
+        alias_root.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(primary))
+        monkeypatch.setenv("HADES_HOME", str(alias_root))
+
+        assert _get_default_hermes_home() == primary
+        assert _get_profiles_root() == primary / "profiles"
 
     def test_profiles_root_profile_mode(self, tmp_path, monkeypatch):
         """In profile mode (HERMES_HOME under ~/.hermes), profiles root is still ~/.hermes/profiles."""

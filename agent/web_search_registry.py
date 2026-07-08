@@ -16,13 +16,10 @@ The active provider is chosen by configuration with this precedence:
 2. ``web.backend`` (shared fallback).
 3. If exactly one capability-eligible provider is registered AND available,
    use it.
-4. Legacy preference order — ``firecrawl`` → ``parallel`` → ``tavily`` →
-   ``exa`` → ``searxng`` → ``brave-free`` → ``ddgs`` — filtered by
-   availability. Matches the historic ``tools.web_tools._get_backend()``
-   candidate order so installs that never set a config key keep landing
-   on the same provider they did before the plugin migration.
+4. Hades preference order — ``parallel`` → ``searxng`` → ``brave-free`` →
+   ``ddgs`` — filtered by availability.
 5. Otherwise ``None`` — the tool surfaces a helpful error pointing at
-   ``hermes tools``.
+   ``hades tools``.
 
 The capability filter (``supports_search`` / ``supports_extract``) is
 applied at every step so a search-only provider (``brave-free``)
@@ -116,14 +113,11 @@ def _read_config_key(*path: str) -> Optional[str]:
 # Legacy preference order — preserves behaviour for users who set no
 # ``web.backend`` / ``web.<capability>_backend`` config key at all. Matches
 # the historic candidate order in :func:`tools.web_tools._get_backend`
-# (paid providers first so existing paid setups don't get downgraded to
-# a free tier on upgrade). Filtered by ``is_available()`` at walk time so
-# we don't surface a provider the user has no credentials for.
+# (paid providers first, then self-hosted/free fallbacks). Filtered by
+# ``is_available()`` at walk time so we don't surface a provider the user has
+# no credentials for.
 _LEGACY_PREFERENCE = (
-    "firecrawl",
     "parallel",
-    "tavily",
-    "exa",
     "searxng",
     "brave-free",
     "ddgs",
@@ -147,8 +141,8 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
        supports *capability* AND ``is_available()`` reports True, return it.
 
     3. **Legacy preference walk, filtered by availability.** Walk the
-       :data:`_LEGACY_PREFERENCE` order (firecrawl → parallel → tavily →
-       exa → searxng → brave-free → ddgs) looking for a provider whose
+       :data:`_LEGACY_PREFERENCE` order (parallel → searxng → brave-free →
+       ddgs) looking for a provider whose
        ``supports_<capability>()`` is True AND whose ``is_available()`` is
        True. Matches the historic ``tools.web_tools._get_backend()``
        candidate order so users with credentials but no explicit config

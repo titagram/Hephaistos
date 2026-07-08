@@ -1,0 +1,9 @@
+case_id: rc_filament_or_inertia_policy
+observed_at: 2026-07-08T07:05:00Z
+environment: eval
+symptom: GET /admin redirects/blocks a signed-in venue customer who expected to access Filament backoffice.
+request: GET /admin
+trace:
+  Filament panel id admin is registered at app/Providers/Filament/AdminPanelProvider.php:28
+  Panel path admin is registered at app/Providers/Filament/AdminPanelProvider.php:29
+  Filament auth middleware includes Filament\Http\Middleware\Authenticate at app/Providers/Filament/AdminPanelProvider.php:55-56

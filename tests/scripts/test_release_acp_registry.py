@@ -29,6 +29,9 @@ def _load_release_module(monkeypatch, tmp_root: Path):
     monkeypatch.setattr(
         module, "ACP_REGISTRY_MANIFEST", tmp_root / "acp_registry" / "agent.json"
     )
+    monkeypatch.setattr(
+        module, "DESKTOP_PACKAGE_FILE", tmp_root / "apps" / "desktop" / "package.json"
+    )
     return module
 
 
@@ -96,6 +99,12 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
         '__version__ = "0.13.0"\n__release_date__ = "2026-05-14"\n',
         encoding="utf-8",
     )
+    desktop_dir = tmp_path / "apps" / "desktop"
+    desktop_dir.mkdir(parents=True)
+    (desktop_dir / "package.json").write_text(
+        json.dumps({"name": "hades", "version": "0.13.0"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     module = _load_release_module(monkeypatch, tmp_path)
     monkeypatch.setattr(module, "VERSION_FILE", version_dir / "__init__.py")
@@ -111,3 +120,45 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     )
     assert manifest["version"] == "0.14.0"
     assert manifest["distribution"]["uvx"]["package"] == "hermes-agent[acp]==0.14.0"
+
+    desktop_package = json.loads(
+        (tmp_path / "apps" / "desktop" / "package.json").read_text(encoding="utf-8")
+    )
+    assert desktop_package["version"] == "0.14.0"
+
+
+def test_release_stage_list_includes_desktop_package(monkeypatch, tmp_path):
+    """The publish bump commit must include every file update_version_files edits."""
+    _write_manifest(tmp_path, "0.13.0")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "hermes-agent"\nversion = "0.13.0"\n',
+        encoding="utf-8",
+    )
+    version_dir = tmp_path / "hermes_cli"
+    version_dir.mkdir()
+    init_file = version_dir / "__init__.py"
+    init_file.write_text(
+        '__version__ = "0.13.0"\n__release_date__ = "2026-05-14"\n',
+        encoding="utf-8",
+    )
+    desktop_dir = tmp_path / "apps" / "desktop"
+    desktop_dir.mkdir(parents=True)
+    desktop_package = desktop_dir / "package.json"
+    desktop_package.write_text(
+        json.dumps({"name": "hades", "version": "0.13.0"}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    module = _load_release_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "VERSION_FILE", init_file)
+    monkeypatch.setattr(module, "PYPROJECT_FILE", pyproject)
+
+    staged = set(module._version_files_to_stage())
+
+    assert staged == {
+        init_file,
+        pyproject,
+        desktop_package,
+        tmp_path / "acp_registry" / "agent.json",
+    }

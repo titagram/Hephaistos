@@ -1,0 +1,76 @@
+{
+  "actions": [
+    "Import or accept shared project memory before relying on historical project facts.",
+    "Capture stack traces, failing tests, logs, or reproduction steps as typed bug evidence before precise root-cause claims."
+  ],
+  "coverage": {
+    "artifacts": {
+      "artifact_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+      "artifact_head_source": "hades.php_graph.v1",
+      "count": 3,
+      "latest_schema": "hades.php_graph.v1",
+      "redactions": 61,
+      "schemas": {
+        "hades.git_tree.v1": 1,
+        "hades.php_graph.v1": 2
+      },
+      "status": "current",
+      "truncated_count": 1,
+      "updated_at": "2026-07-08T08:45:07.000000Z"
+    },
+    "bug_evidence": {
+      "count": 0,
+      "status": "missing",
+      "updated_at": null
+    },
+    "code_graph": {
+      "count": 2,
+      "coverage_type": "code_graph",
+      "schema": "hades.php_graph.v1",
+      "status": "current",
+      "updated_at": "2026-07-08T08:45:07.000000Z"
+    },
+    "evidence_packs": {
+      "count": 0,
+      "status": "missing",
+      "updated_at": null
+    },
+    "memory": {
+      "count": 0,
+      "status": "missing",
+      "updated_at": null
+    },
+    "source_slice_candidates": {
+      "count": 7,
+      "status": "present",
+      "updated_at": "2026-07-08T08:45:36.000000Z",
+      "waiting_jobs": 0
+    },
+    "source_slices": {
+      "count": 7,
+      "redactions": 0,
+      "source_slice_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+      "stale_reason": null,
+      "status": "current",
+      "truncated_count": 0,
+      "updated_at": "2026-07-08T08:45:36.000000Z"
+    }
+  },
+  "diagnosable_without_source": false,
+  "freshness": {
+    "artifact_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d",
+    "artifact_head_source": "hades.php_graph.v1",
+    "index_status": "live_query",
+    "last_artifact_at": "2026-07-08T08:45:07.000000Z",
+    "last_evidence_at": null,
+    "stale_reason": null,
+    "status": "current",
+    "workspace_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+  },
+  "overall_status": "partial",
+  "project_id": "01KX0E53DVFDWMTCDRCA0T7RDK",
+  "protocol_version": "v1",
+  "server_time": "2026-07-08T08:47:23.619770Z",
+  "workspace_binding_id": "01KX0E67VNAPW9RV00CT5VR56M",
+  "workspace_head_commit": "dce3dae0b23825e857ddecc6ce001204b2d2792d"
+}

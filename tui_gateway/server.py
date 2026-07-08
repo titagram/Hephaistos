@@ -10365,6 +10365,60 @@ def _(rid, params, pdb, conn) -> dict:
     return _ok(rid, {"project": proj.to_dict() if proj else None, "cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
 
 
+@method("backend.status")
+def _(rid, params) -> dict:
+    try:
+        from hermes_cli.hades_backend_status import load_backend_status_payload
+
+        payload = load_backend_status_payload()
+    except Exception as exc:
+        return _err(rid, -32090, f"backend status failed: {exc}")
+
+    return _ok(rid, payload)
+
+
+@method("backend.bug_intake")
+def _(rid, params) -> dict:
+    try:
+        from hermes_cli.hades_backend_actions import create_bug_intake
+
+        raw_response_status = params.get("response_status")
+        response_status = None
+        if raw_response_status not in {None, ""}:
+            response_status = int(raw_response_status)
+
+        result = create_bug_intake(
+            title=str(params.get("title") or ""),
+            symptom=str(params.get("symptom") or ""),
+            workspace_binding_id=params.get("workspace_binding_id"),
+            steps=params.get("steps"),
+            expected=params.get("expected"),
+            actual=params.get("actual"),
+            severity=params.get("severity"),
+            environment=params.get("environment"),
+            failing_test=params.get("failing_test"),
+            runtime_log=params.get("runtime_log"),
+            deploy_commit=params.get("deploy_commit"),
+            workspace_head=params.get("workspace_head"),
+            request_url=params.get("request_url"),
+            request_method=params.get("request_method"),
+            response_status=response_status,
+            source="desktop",
+        )
+    except Exception as exc:
+        return _err(rid, -32091, f"backend bug intake failed: {exc}")
+
+    return _ok(
+        rid,
+        {
+            "ok": result.ok,
+            "status": result.status,
+            "summary": result.summary,
+            **result.payload,
+        },
+    )
+
+
 def _is_repo_junk(root: str) -> bool:
     """A git root we never auto-surface as a project: the bare home dir or
     anything under HERMES_HOME (~/.hermes by default) — config/sessions/skills,
@@ -10818,7 +10872,7 @@ def _(rid, params: dict) -> dict:
                     "provider": provider,
                     "model": runtime.get("model"),
                     "source": source,
-                    "error": "No Hermes provider is configured.",
+                    "error": "No Hades provider is configured.",
                 },
             )
 
@@ -11082,6 +11136,7 @@ def _(rid, params: dict) -> dict:
             COMMAND_REGISTRY,
             SUBCOMMANDS,
             _build_description,
+            is_hades_visible_command,
         )
 
         all_pairs: list[list[str]] = []
@@ -11091,7 +11146,11 @@ def _(rid, params: dict) -> dict:
         cat_order: list[str] = []
 
         for cmd in COMMAND_REGISTRY:
-            if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
+            if (
+                cmd.name in _TUI_HIDDEN
+                or cmd.gateway_only
+                or not is_hades_visible_command(cmd.name)
+            ):
                 continue
 
             c = f"/{cmd.name}"
@@ -11176,16 +11235,16 @@ def _(rid, params: dict) -> dict:
 def _cli_exec_blocked(argv: list[str]) -> str | None:
     """Return user hint if this argv must not run headless in the gateway process."""
     if not argv:
-        return "bare `hermes` is interactive — use `/hermes chat -q …` or run `hermes` in another terminal"
+        return "bare `hades` is interactive — use `/hades chat -q …` or run `hades` in another terminal"
     a0 = argv[0].lower()
     if a0 == "setup":
-        return "`hermes setup` needs a full terminal — run it outside the TUI"
+        return "`hades setup` needs a full terminal — run it outside the TUI"
     if a0 == "gateway":
-        return "`hermes gateway` is long-running — run it in another terminal"
+        return "`hades gateway` is long-running — run it in another terminal"
     if a0 == "sessions" and len(argv) > 1 and argv[1].lower() == "browse":
-        return "`hermes sessions browse` is interactive — use /resume here, or run browse in another terminal"
+        return "`hades sessions browse` is interactive — use /resume here, or run browse in another terminal"
     if a0 == "config" and len(argv) > 1 and argv[1].lower() == "edit":
-        return "`hermes config edit` needs $EDITOR in a real terminal"
+        return "`hades config edit` needs $EDITOR in a real terminal"
     return None
 
 
@@ -12083,7 +12142,7 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"items": []})
 
     try:
-        from hermes_cli.commands import SlashCommandCompleter
+        from hermes_cli.commands import SlashCommandCompleter, is_hades_visible_command
         from prompt_toolkit.document import Document
         from prompt_toolkit.formatted_text import to_plain_text
 
@@ -12093,6 +12152,7 @@ def _(rid, params: dict) -> dict:
         completer = SlashCommandCompleter(
             skill_commands_provider=lambda: get_skill_commands(),
             skill_bundles_provider=lambda: get_skill_bundles(),
+            command_filter=is_hades_visible_command,
         )
         doc = Document(text, len(text))
         items = [
@@ -12227,7 +12287,7 @@ def _(rid, params: dict) -> dict:
                 rid,
                 4003,
                 f"{pconfig.name} uses {pconfig.auth_type} auth — "
-                f"run `hermes model` to configure",
+                f"run `hades model` to configure",
             )
         if not pconfig.api_key_env_vars:
             return _err(rid, 4004, f"no env var defined for {pconfig.name}")

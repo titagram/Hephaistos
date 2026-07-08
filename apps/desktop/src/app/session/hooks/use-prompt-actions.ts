@@ -1,7 +1,9 @@
 import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 
+import { BUG_INTAKE_ROUTE } from '@/app/routes'
 import { getProfiles, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
@@ -433,6 +435,7 @@ export function usePromptActions({
 }: PromptActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
+  const navigate = useNavigate()
 
   const appendSessionTextMessage = useCallback(
     (sessionId: string, role: ChatMessage['role'], text: string) => {
@@ -1364,6 +1367,9 @@ export function usePromptActions({
           } catch (err) {
             renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
           }
+        },
+        'bug-intake': async () => {
+          navigate(BUG_INTAKE_ROUTE)
         }
       }
 
@@ -1465,6 +1471,7 @@ export function usePromptActions({
       createBackendSessionForSend,
       handleSkinCommand,
       handoffSession,
+      navigate,
       refreshSessions,
       requestGateway,
       resumeStoredSession,

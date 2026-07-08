@@ -1,0 +1,10 @@
+Backend setup complete
+  Project: 01KX0E53DVFDWMTCDRCA0T7RDK
+  Agent:   ha_3a8797043a01d525 (MacBook-Pro-di-Gabriele.local:default)
+  Memory:  hades_backend
+Hades backend sync: pulled 0 job(s), completed 0, waiting 0, failed 0, skipped 0, expired 0, memory 1, proposals 0, artifacts 0, inbox 0
+Hades backend bootstrap complete
+  Local project: rocket-club-awareness-hardening-eval (Rocket Club Awareness Hardening Eval)
+  Workspace:     /Users/gabriele/Dev/rocket-club/progetto-biliardo-codex
+  Binding:       01KX0E67VNAPW9RV00CT5VR56M
+  Next:          run `hades doctor` or start Hades from this workspace
