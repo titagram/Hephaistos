@@ -535,6 +535,9 @@ BLADE_ANONYMOUS_COMPONENT_RE = re.compile(r"<x[-:](?P<component>[A-Za-z0-9_.:-]+
 BLADE_COMPONENT_PROP_RE = re.compile(
     r"(?P<bound>:)?(?P<prop>[A-Za-z_][A-Za-z0-9_-]{0,127})\s*=\s*['\"]\$(?P<variable>[A-Za-z_][A-Za-z0-9_]{0,127})['\"]"
 )
+BLADE_TEMPLATE_VARIABLE_RE = re.compile(
+    r"\$(?P<variable>[A-Za-z_][A-Za-z0-9_]{0,127})(?:->(?P<field>[A-Za-z_][A-Za-z0-9_]{0,127}))?"
+)
 BLADE_LIVEWIRE_RE = re.compile(
     r"(?:@livewire\s*\(\s*['\"](?P<directive>[^'\"]+)['\"]|<livewire:(?P<tag>[A-Za-z0-9_.:-]+)\b)",
     re.MULTILINE,
@@ -2145,6 +2148,71 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_component_template_params() -> None:
+        nonlocal truncated
+        if not component_symbol:
+            return
+        component = component_symbol.removeprefix("component:")
+        component_info = known_blade_components.get(component) or {}
+        component_class = str(component_info.get("class") or "")
+        constructor_params = component_info.get("constructor_params") if isinstance(component_info.get("constructor_params"), dict) else {}
+        if not component_class or not constructor_params:
+            return
+        for match in BLADE_TEMPLATE_VARIABLE_RE.finditer(source):
+            variable = str(match.group("variable") or "")
+            field = str(match.group("field") or "")
+            param_info = constructor_params.get(variable) if isinstance(constructor_params, dict) else None
+            if not isinstance(param_info, dict):
+                continue
+            line = _line_number(source, match.start())
+            param_type = str(param_info.get("type") or "")
+            param_target = f"component_param:{component_class}.{variable}"
+            model_table = known_model_tables.get(param_type, "") if param_type else ""
+            param_edge = {
+                "kind": "blade_component_template_param",
+                "from": component_symbol,
+                "to": param_target,
+                "component": component,
+                "component_class": component_class,
+                "component_param": variable,
+                "component_param_type": param_type,
+                "template_variable": variable,
+                "component_path": component_info.get("path"),
+                "component_line": param_info.get("line") or component_info.get("line"),
+                "path": rel,
+                "line": line,
+            }
+            if model_table:
+                param_edge["model"] = param_type
+                param_edge["table"] = model_table
+            param_key = ("blade_component_template_param", component_symbol, param_target, variable, line)
+            if param_key not in seen_edges:
+                seen_edges.add(param_key)
+                truncated = not _edge_append(edges, param_edge, max_edges=max_edges) or truncated
+            if not field or not model_table:
+                continue
+            field_edge = {
+                "kind": "blade_component_template_model_field",
+                "from": param_target,
+                "to": f"table:{model_table}.{field}",
+                "component": component,
+                "component_class": component_class,
+                "component_param": variable,
+                "component_param_type": param_type,
+                "template_variable": variable,
+                "template_field": field,
+                "model": param_type,
+                "table": model_table,
+                "field": field,
+                "path": rel,
+                "line": line,
+            }
+            field_key = ("blade_component_template_model_field", param_target, field_edge["to"], field, line)
+            if field_key in seen_edges:
+                continue
+            seen_edges.add(field_key)
+            truncated = not _edge_append(edges, field_edge, max_edges=max_edges) or truncated
+
     def append_route_ref(route_name: str, offset: int) -> None:
         nonlocal truncated
         if not route_name:
@@ -3002,6 +3070,8 @@ def _append_blade_view_graph(
         while offset < len(source) and source[offset].isspace():
             offset += 1
         return offset < len(source) and source[offset] == ","
+
+    append_blade_component_template_params()
 
     for match in BLADE_EXTENDS_RE.finditer(source):
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())

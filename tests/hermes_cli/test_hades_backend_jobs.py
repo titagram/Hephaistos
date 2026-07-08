@@ -1002,7 +1002,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "components" / "orders" / "card.blade.php").write_text(
-        "<article>{{ $slot }}</article>\n",
+        "<article>{{ $order->status }}</article>\n",
         encoding="utf-8",
     )
 
@@ -1927,6 +1927,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component_class", "component:orders-card", "App\\View\\Components\\Orders\\Card") in edges
     assert ("blade_component_render_method", "component:orders.card", "Card@render") in edges
     assert ("blade_component_render_method", "component:orders-card", "Card@render") in edges
+    assert (
+        "blade_component_template_param",
+        "component:orders.card",
+        "component_param:App\\View\\Components\\Orders\\Card.order",
+    ) in edges
+    assert (
+        "blade_component_template_model_field",
+        "component_param:App\\View\\Components\\Orders\\Card.order",
+        "table:orders.status",
+    ) in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders-card.order") in edges
     assert (
@@ -2202,6 +2212,38 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "component_class": "App\\View\\Components\\Orders\\Card",
         "component_method": "render",
         "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_template_param",
+        "from": "component:orders.card",
+        "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+        "component": "orders.card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_param": "order",
+        "component_param_type": "App\\Models\\Order",
+        "template_variable": "order",
+        "component_path": "app/View/Components/Orders/Card.php",
+        "component_line": 5,
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "resources/views/components/orders/card.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_template_model_field",
+        "from": "component_param:App\\View\\Components\\Orders\\Card.order",
+        "to": "table:orders.status",
+        "component": "orders.card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_param": "order",
+        "component_param_type": "App\\Models\\Order",
+        "template_variable": "order",
+        "template_field": "status",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "field": "status",
+        "path": "resources/views/components/orders/card.blade.php",
         "line": 1,
     } in artifact["edges"]
     assert {

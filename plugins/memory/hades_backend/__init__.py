@@ -2970,6 +2970,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "component_param",
         "component_param_type",
         "component_source_variable",
+        "template_variable",
+        "template_field",
         "form_field",
         "form_field_tag",
         "input_helper",

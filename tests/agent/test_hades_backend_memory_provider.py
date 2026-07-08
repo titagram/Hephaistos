@@ -4185,6 +4185,38 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "line": 1,
             },
             {
+                "kind": "blade_component_template_param",
+                "from": "component:orders.card",
+                "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+                "component": "orders.card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_param": "order",
+                "component_param_type": "App\\Models\\Order",
+                "template_variable": "order",
+                "component_path": "app/View/Components/Orders/Card.php",
+                "component_line": 5,
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/components/orders/card.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component_template_model_field",
+                "from": "component_param:App\\View\\Components\\Orders\\Card.order",
+                "to": "table:orders.status",
+                "component": "orders.card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_param": "order",
+                "component_param_type": "App\\Models\\Order",
+                "template_variable": "order",
+                "template_field": "status",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "field": "status",
+                "path": "resources/views/components/orders/card.blade.php",
+                "line": 1,
+            },
+            {
                 "kind": "blade_component_render_method",
                 "from": "component:orders.card",
                 "to": "Card@render",
@@ -4422,6 +4454,37 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         and "component_prop=order" in item["summary"]
         and "component_source_variable=order" in item["summary"]
         for item in component_result["items"]
+    )
+
+    template_component_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders card template order status model field", "limit": 10},
+        )
+    )
+    template_component_refs = [item["graph_ref"] for item in template_component_result["items"]]
+
+    assert template_component_result["status"] == "ok"
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_template_param"
+        and ref["from"] == "component:orders.card"
+        and ref["to"] == "component_param:App\\View\\Components\\Orders\\Card.order"
+        and ref["provenance"]["template_variable"] == "order"
+        for ref in template_component_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_template_model_field"
+        and ref["from"] == "component_param:App\\View\\Components\\Orders\\Card.order"
+        and ref["to"] == "table:orders.status"
+        and ref["provenance"]["template_field"] == "status"
+        for ref in template_component_refs
+    )
+    assert any(
+        "template_variable=order" in item["summary"]
+        and "template_field=status" in item["summary"]
+        for item in template_component_result["items"]
     )
 
     registered_component_result = json.loads(
