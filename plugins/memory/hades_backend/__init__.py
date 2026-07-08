@@ -2931,6 +2931,7 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "lifecycle_event",
         "ability",
         "authorization_helper",
+        "authorization_subject",
         "authorization_result",
         "authorization_path",
         "authorization_line",

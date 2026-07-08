@@ -1978,6 +1978,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "ability:view",
         "ability": "view",
         "authorization_helper": "can",
+        "authorization_subject": "order",
         "path": "resources/views/orders/show.blade.php",
         "line": 14,
     } in artifact["edges"]
@@ -1987,6 +1988,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "ability:update",
         "ability": "update",
         "authorization_helper": "canany",
+        "authorization_subject": "order",
         "path": "resources/views/orders/show.blade.php",
         "line": 17,
     } in artifact["edges"]
@@ -1996,6 +1998,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "ability:delete",
         "ability": "delete",
         "authorization_helper": "canany",
+        "authorization_subject": "order",
         "path": "resources/views/orders/show.blade.php",
         "line": 17,
     } in artifact["edges"]

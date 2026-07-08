@@ -4029,6 +4029,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
                 "to": "ability:view",
                 "ability": "view",
                 "authorization_helper": "can",
+                "authorization_subject": "order",
                 "path": "resources/views/orders/show.blade.php",
                 "line": 14,
             },
@@ -4038,6 +4039,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
                 "to": "ability:update",
                 "ability": "update",
                 "authorization_helper": "canany",
+                "authorization_subject": "order",
                 "path": "resources/views/orders/show.blade.php",
                 "line": 17,
             },
@@ -4047,6 +4049,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
                 "to": "ability:delete",
                 "ability": "delete",
                 "authorization_helper": "canany",
+                "authorization_subject": "order",
                 "path": "resources/views/orders/show.blade.php",
                 "line": 17,
             },
@@ -4077,7 +4080,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view blade authorization can canany ability view update delete", "limit": 10},
+            {"query": "orders order view blade authorization can canany ability view update delete", "limit": 10},
         )
     )
 
@@ -4092,6 +4095,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         and ref["to"] == "ability:view"
         and ref["provenance"]["ability"] == "view"
         and ref["provenance"]["authorization_helper"] == "can"
+        and ref["provenance"]["authorization_subject"] == "order"
         for ref in graph_refs
     )
     assert any(
@@ -4101,6 +4105,7 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         and ref["to"] == "ability:update"
         and ref["provenance"]["ability"] == "update"
         and ref["provenance"]["authorization_helper"] == "canany"
+        and ref["provenance"]["authorization_subject"] == "order"
         for ref in graph_refs
     )
     assert any(
@@ -4110,14 +4115,19 @@ def test_hades_backend_graph_search_finds_local_blade_authorization_edges(monkey
         and ref["to"] == "ability:delete"
         and ref["provenance"]["ability"] == "delete"
         and ref["provenance"]["authorization_helper"] == "canany"
+        and ref["provenance"]["authorization_subject"] == "order"
         for ref in graph_refs
     )
     assert any(
-        "ability=view" in item["summary"] and "authorization_helper=can" in item["summary"]
+        "ability=view" in item["summary"]
+        and "authorization_helper=can" in item["summary"]
+        and "authorization_subject=order" in item["summary"]
         for item in result["items"]
     )
     assert any(
-        "ability=update" in item["summary"] and "authorization_helper=canany" in item["summary"]
+        "ability=update" in item["summary"]
+        and "authorization_helper=canany" in item["summary"]
+        and "authorization_subject=order" in item["summary"]
         for item in result["items"]
     )
 

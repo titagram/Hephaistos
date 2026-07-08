@@ -6651,8 +6651,8 @@ Integrazione locale:
   `@canany` e `@elsecanany` con array di ability letterali safe.
 - Ogni ability letterale produce un edge separato verso `ability:<name>` e
   salva solo `ability`, `authorization_helper`, path e line.
-- Il parser resta bounded e non conserva array raw, model argument, expression
-  dinamiche, variabili Blade o template/source raw.
+- Il parser resta bounded e non conserva array raw, expression dinamiche,
+  variabili Blade contenenti ability o template/source raw.
 - Il fallback locale di `hades_backend_graph_search` espone gli edge canany da
   cache artifact anche a backend offline.
 
@@ -6660,6 +6660,43 @@ Resta fuori da questa tranche:
 
 - Risoluzione del model argument, array costruiti dinamicamente, variabili
   contenenti ability e correlazione completa con policy method signature.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_authorization_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `118 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade authorization subject graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per collegare authorization Blade
+al soggetto safe usato dalla policy.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge `authorization_subject` agli edge
+  `blade_authorization` quando `@can`, `@cannot`, `@elsecan`, `@elsecannot`,
+  `@canany` o `@elsecanany` ricevono un model argument variabile semplice,
+  ad esempio `$order`.
+- L'edge continua a collegare la view a `ability:<name>` e salva solo ability,
+  helper, subject variable name, path e line.
+- Il parser ignora espressioni, property access, array dinamici, valori raw e
+  template/source raw.
+- Il fallback locale di `hades_backend_graph_search` include
+  `authorization_subject` nei summary, cosi' l'agent puo' cercare UI
+  authorization su `order` anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Risoluzione type-aware del subject verso `App\Models\Order`, collegamento
+  automatico Blade subject -> route model binding -> policy class, e signature
+  analysis dei metodi policy.
 
 Verifiche eseguite:
 

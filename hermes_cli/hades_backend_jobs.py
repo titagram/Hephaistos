@@ -530,11 +530,13 @@ BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
 BLADE_FORM_BLOCK_RE = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
 BLADE_FORM_HTML_METHOD_RE = re.compile(r"\bmethod\s*=\s*['\"](?P<method>GET|POST)['\"]", re.IGNORECASE)
 BLADE_AUTHORIZATION_RE = re.compile(
-    r"@(?P<helper>can|cannot|elsecan|elsecannot)\s*\(\s*['\"](?P<ability>[A-Za-z0-9_.:-]{1,128})['\"]",
+    r"@(?P<helper>can|cannot|elsecan|elsecannot)\s*\(\s*['\"](?P<ability>[A-Za-z0-9_.:-]{1,128})['\"]"
+    r"(?:\s*,\s*\$(?P<subject>[A-Za-z_][A-Za-z0-9_]{0,127}))?",
     re.MULTILINE,
 )
 BLADE_AUTHORIZATION_ANY_RE = re.compile(
-    r"@(?P<helper>canany|elsecanany)\s*\(\s*\[(?P<abilities>.{0,512}?)\]",
+    r"@(?P<helper>canany|elsecanany)\s*\(\s*\[(?P<abilities>.{0,512}?)\]"
+    r"(?:\s*,\s*\$(?P<subject>[A-Za-z_][A-Za-z0-9_]{0,127}))?",
     re.MULTILINE | re.DOTALL,
 )
 BLADE_FORM_FIELD_RE = re.compile(
@@ -2098,35 +2100,46 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
-    def append_blade_authorization(helper: str, ability: str, offset: int) -> None:
+    def append_blade_authorization(helper: str, ability: str, offset: int, subject: str = "") -> None:
         nonlocal truncated
         ability = str(ability or "").strip()
         if not ability or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", ability):
             return
         normalized_helper = str(helper or "").lower()
+        normalized_subject = str(subject or "").strip()
+        if normalized_subject and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", normalized_subject):
+            normalized_subject = ""
         line = _line_number(source, offset)
         target = f"ability:{ability}"
-        key = ("blade_authorization", target, line)
+        key = ("blade_authorization", target, normalized_subject, line)
         if key in seen_edges:
             return
         seen_edges.add(key)
+        payload = {
+            "kind": "blade_authorization",
+            "from": view_id,
+            "to": target,
+            "ability": ability,
+            "authorization_helper": normalized_helper,
+            "path": rel,
+            "line": line,
+        }
+        if normalized_subject:
+            payload["authorization_subject"] = normalized_subject
         truncated = not _edge_append(
             edges,
-            {
-                "kind": "blade_authorization",
-                "from": view_id,
-                "to": target,
-                "ability": ability,
-                "authorization_helper": normalized_helper,
-                "path": rel,
-                "line": line,
-            },
+            payload,
             max_edges=max_edges,
         ) or truncated
 
-    def append_blade_authorization_any(helper: str, abilities_source: str, offset: int) -> None:
+    def append_blade_authorization_any(helper: str, abilities_source: str, offset: int, subject: str = "") -> None:
         for ability_match in PHP_QUOTED_VALUE_RE.finditer(str(abilities_source or "")):
-            append_blade_authorization(helper, ability_match.group("value"), offset + ability_match.start("value"))
+            append_blade_authorization(
+                helper,
+                ability_match.group("value"),
+                offset + ability_match.start("value"),
+                subject,
+            )
 
     def append_blade_form_field(field: str, tag: str, offset: int) -> None:
         nonlocal truncated
@@ -2649,9 +2662,19 @@ def _append_blade_view_graph(
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
         append_livewire_component_class(livewire_name, match.start())
     for match in BLADE_AUTHORIZATION_RE.finditer(source):
-        append_blade_authorization(match.group("helper"), match.group("ability"), match.start())
+        append_blade_authorization(
+            match.group("helper"),
+            match.group("ability"),
+            match.start(),
+            match.group("subject") or "",
+        )
     for match in BLADE_AUTHORIZATION_ANY_RE.finditer(source):
-        append_blade_authorization_any(match.group("helper"), match.group("abilities"), match.start("abilities"))
+        append_blade_authorization_any(
+            match.group("helper"),
+            match.group("abilities"),
+            match.start("abilities"),
+            match.group("subject") or "",
+        )
     for match in BLADE_FORM_FIELD_RE.finditer(source):
         append_blade_form_field(match.group("field"), match.group("tag"), match.start("field"))
     for match in BLADE_OLD_INPUT_RE.finditer(source):
