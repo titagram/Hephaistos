@@ -345,6 +345,10 @@ PHP_SCHEDULE_JOB_RE = re.compile(
 )
 PHP_SCHEDULE_CADENCE_RE = re.compile(r"->(?P<cadence>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
 PHP_DB_TABLE_RE = re.compile(r"\bDB::table\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
+PHP_DB_TRANSACTION_RE = re.compile(
+    r"\bDB::(?P<method>transaction|beginTransaction|commit|rollBack)\s*\(",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_QUERY_FROM_RE = re.compile(r"->from\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_JOIN_RE = re.compile(r"->(?P<method>join|leftJoin|rightJoin|crossJoin)\s*\(\s*['\"](?P<table>[^'\"]+)['\"]")
 PHP_QUERY_CHAIN_CALL_RE = re.compile(r"->(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(")
@@ -4545,6 +4549,79 @@ def _append_php_route_cache_access_edges(
     return truncated
 
 
+def _php_db_transaction_operation(method: str) -> str:
+    normalized = method.lower()
+    if normalized == "begintransaction":
+        return "begin"
+    if normalized == "rollback":
+        return "rollback"
+    return normalized
+
+
+def _php_db_transactions_for_method(
+    source: str,
+    method_body: str,
+    method_body_offset: int,
+) -> list[dict[str, Any]]:
+    transactions: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for match in PHP_DB_TRANSACTION_RE.finditer(method_body):
+        method = str(match.group("method") or "")
+        operation = _php_db_transaction_operation(method)
+        line = _line_number(source, method_body_offset + match.start())
+        key = (operation, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        transactions.append(
+            {
+                "transaction_operation": operation,
+                "transaction_method": f"DB::{method}",
+                "line": line,
+            }
+        )
+    return transactions
+
+
+def _append_php_route_db_transaction_edges(
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    method_symbol: str,
+    rel: str,
+    transactions: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not transactions:
+        return False
+    truncated = False
+    for route in routes_by_handler.get(method_symbol) or []:
+        route_ref = f"route:{_php_route_id(route)}"
+        for transaction in transactions:
+            operation = str(transaction.get("transaction_operation") or "")
+            if not operation:
+                continue
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_db_transaction",
+                    "from": route_ref,
+                    "to": f"db_transaction:{operation}",
+                    "handler": method_symbol,
+                    "transaction_operation": operation,
+                    "transaction_method": transaction.get("transaction_method"),
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                    "source_path": rel,
+                    "source_line": transaction.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_http_target_from_url(raw: str) -> dict[str, Any] | None:
     literal = _php_quoted_literal(raw)
     if not literal:
@@ -6234,6 +6311,32 @@ def _build_php_graph(
                 method_symbol,
                 rel,
                 cache_accesses,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+            db_transactions = _php_db_transactions_for_method(source, method_body, method_body_offset)
+            for transaction in db_transactions:
+                operation = str(transaction.get("transaction_operation") or "")
+                if not operation:
+                    continue
+                truncated = not _edge_append(
+                    edges,
+                    {
+                        "kind": "db_transaction",
+                        "from": method_symbol,
+                        "to": f"db_transaction:{operation}",
+                        "transaction_operation": operation,
+                        "transaction_method": transaction.get("transaction_method"),
+                        "path": rel,
+                        "line": transaction.get("line"),
+                    },
+                    max_edges=max_edges,
+                ) or truncated
+            truncated = _append_php_route_db_transaction_edges(
+                routes_by_handler,
+                method_symbol,
+                rel,
+                db_transactions,
                 edges,
                 max_edges=max_edges,
             ) or truncated

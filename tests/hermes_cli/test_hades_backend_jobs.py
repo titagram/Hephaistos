@@ -679,6 +679,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        $request->input('customer_note', 'private fallback note');\n"
         "        $request->hasFile('invoice_pdf');\n"
         "        \\Illuminate\\Support\\Facades\\Cookie::queue('orders_filter', 'private cookie value');\n"
+        "        DB::transaction(function () { DB::table('orders')->update(['status' => 'rolled_back_secret']); });\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1087,6 +1088,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("route_request_file_access", "route:orders.show", "request_file:invoice_pdf") in edges
     assert ("cookie_access", "OrderController@show", "cookie:orders_filter") in edges
     assert ("route_cookie_access", "route:orders.show", "cookie:orders_filter") in edges
+    assert ("db_transaction", "OrderController@show", "db_transaction:transaction") in edges
+    assert ("route_db_transaction", "route:orders.show", "db_transaction:transaction") in edges
     assert ("throws_exception", "OrderService@format", "App\\Exceptions\\OrderLockedException") in edges
     assert {
         "kind": "route_model_binding",
@@ -1369,6 +1372,29 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 4,
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 37,
+    } in artifact["edges"]
+    assert {
+        "kind": "db_transaction",
+        "from": "OrderController@show",
+        "to": "db_transaction:transaction",
+        "transaction_operation": "transaction",
+        "transaction_method": "DB::transaction",
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 38,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_db_transaction",
+        "from": "route:orders.show",
+        "to": "db_transaction:transaction",
+        "handler": "OrderController@show",
+        "transaction_operation": "transaction",
+        "transaction_method": "DB::transaction",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 38,
     } in artifact["edges"]
     assert {
         "kind": "calls_method",
@@ -1906,6 +1932,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert "$this->authorize" not in str(artifact)
     assert "pending" not in str(artifact)
     assert "paid" not in str(artifact)
+    assert "rolled_back_secret" not in str(artifact)
+    assert "function ()" not in str(artifact)
     assert "$request->validate" not in str(artifact)
     assert "exists:customers,id" not in str(artifact)
     assert "DB::table" not in str(artifact)

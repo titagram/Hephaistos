@@ -2874,6 +2874,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "cache_operation",
         "cache_method",
         "cache_ttl_present",
+        "transaction_operation",
+        "transaction_method",
         "http_client",
         "http_method",
         "http_scheme",
