@@ -483,6 +483,7 @@ PHP_OBSERVER_LIFECYCLE_METHODS = {
 PHP_VIEW_FUNCTION_RE = re.compile(r"\bview\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 PHP_VIEW_MAKE_RE = re.compile(r"\bView::make\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
 PHP_INERTIA_RENDER_RE = re.compile(r"\bInertia::render\s*\(\s*['\"](?P<view>[^'\"]+)['\"]", re.MULTILINE)
+PHP_BLADE_COMPONENT_CALL_RE = re.compile(r"\bBlade::component\s*\(", re.MULTILINE)
 PHP_BROADCAST_CHANNEL_RE = re.compile(
     r"\bBroadcast::channel\s*\(\s*['\"](?P<channel>[^'\"]+)['\"]\s*,\s*(?P<handler>.*?)\)",
     re.DOTALL,
@@ -2112,6 +2113,9 @@ def _append_blade_view_graph(
                     "to": component_class,
                     "component": component,
                     "component_class": component_class,
+                    "component_alias_source": component_info.get("component_alias_source"),
+                    "component_registration_path": component_info.get("component_registration_path"),
+                    "component_registration_line": component_info.get("component_registration_line"),
                     "component_path": component_info.get("path"),
                     "component_line": component_info.get("line"),
                     "path": rel,
@@ -2265,6 +2269,9 @@ def _append_blade_view_graph(
                 "component_prop": prop,
                 "component_source_variable": variable,
                 "component_class": component_class,
+                "component_alias_source": component_info.get("component_alias_source"),
+                "component_registration_path": component_info.get("component_registration_path"),
+                "component_registration_line": component_info.get("component_registration_line"),
                 "component_param": prop,
                 "component_param_type": param_type,
                 "component_path": component_info.get("path"),
@@ -5334,6 +5341,7 @@ def _php_blade_component_class_index(
     max_file_bytes: int,
 ) -> dict[str, dict[str, Any]]:
     components: dict[str, dict[str, Any]] = {}
+    components_by_class: dict[str, dict[str, Any]] = {}
 
     def constructor_params_for_class(
         source: str,
@@ -5364,6 +5372,39 @@ def _php_blade_component_class_index(
                     "line": _line_number(source, method_match.start("params") + param_offset),
                 }
         return params_by_name
+
+    def registered_component_aliases(source: str, namespace: str, uses: dict[str, str]) -> list[dict[str, Any]]:
+        registrations: list[dict[str, Any]] = []
+        for match in PHP_BLADE_COMPONENT_CALL_RE.finditer(source):
+            open_abs = match.end() - 1
+            close_abs = _balanced_end(source, open_abs, "(", ")")
+            if close_abs == -1:
+                continue
+            args = _split_top_level_items(source[open_abs + 1 : close_abs])
+            if len(args) < 2:
+                continue
+            class_name = ""
+            alias = ""
+            for arg, _arg_offset in args[:2]:
+                class_match = PHP_CLASS_CONST_RE.fullmatch(arg.strip())
+                if class_match:
+                    class_name = _php_fqcn_resolved(namespace, _php_class_ref(class_match.group("class")), uses)
+                    continue
+                literal = _php_quoted_literal(arg)
+                if literal:
+                    alias = literal.strip()
+            alias_key = alias.replace("::", ".").replace(":", ".")
+            if not class_name or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", alias_key):
+                continue
+            registrations.append(
+                {
+                    "alias": alias_key,
+                    "class": class_name,
+                    "path": "",
+                    "line": _line_number(source, match.start()),
+                }
+            )
+        return registrations
 
     for path in php_files:
         rel = path.relative_to(workspace_root).as_posix()
@@ -5412,6 +5453,34 @@ def _php_blade_component_class_index(
                 "constructor_params": constructor_params,
                 "path": rel,
                 "line": class_info.get("line"),
+            }
+            components_by_class[fqcn] = components[alias]
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        for registration in registered_component_aliases(source, namespace, uses):
+            component_class = str(registration.get("class") or "")
+            component_info = components_by_class.get(component_class)
+            alias = str(registration.get("alias") or "")
+            if not component_info or not alias:
+                continue
+            components[alias] = {
+                **component_info,
+                "alias": alias,
+                "component_alias_source": "blade_component_registration",
+                "component_registration_path": rel,
+                "component_registration_line": registration.get("line"),
             }
     return components
 

@@ -911,6 +911,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Observers\\OrderObserver;\n"
         "use App\\Policies\\OrderPolicy;\n"
         "use App\\Services\\OrderService;\n"
+        "use Illuminate\\Support\\Facades\\Blade;\n"
         "use Illuminate\\Support\\Facades\\Gate;\n"
         "class AuthServiceProvider {\n"
         "    protected array $policies = [Order::class => OrderPolicy::class];\n"
@@ -920,6 +921,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    }\n"
         "    public function boot() {\n"
         "        Order::observe(OrderObserver::class);\n"
+        "        Blade::component(\\App\\View\\Components\\Orders\\Card::class, 'orders-card');\n"
         "        Gate::policy(\\App\\Models\\Invoice::class, \\App\\Policies\\InvoicePolicy::class);\n"
         "    }\n"
         "}\n",
@@ -975,7 +977,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "orders" / "partials" / "summary.blade.php").write_text(
-        "<x-orders.card :order=\"$order\" />\n"
+        "<x-orders.card :order=\"$order\" /><x-orders-card :order=\"$order\" />\n"
         "@can('view', $order)\n"
         "<span>Partial allowed</span>\n"
         "@endcan\n",
@@ -1718,7 +1720,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "source_path": "app/Http/Controllers/OrderController.php",
         "source_line": 19,
         "listener_path": "app/Providers/AuthServiceProvider.php",
-        "listener_line": 13,
+        "listener_line": 14,
     } in artifact["edges"]
     assert {
         "kind": "route_sends_mail_method",
@@ -1920,12 +1922,21 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_include", "view:layouts.app", "view:shared.banner") in edges
     assert ("blade_component", "view:orders.show", "component:alert") in edges
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
+    assert ("blade_component", "view:orders.partials.summary", "component:orders-card") in edges
     assert ("blade_component_class", "component:orders.card", "App\\View\\Components\\Orders\\Card") in edges
+    assert ("blade_component_class", "component:orders-card", "App\\View\\Components\\Orders\\Card") in edges
     assert ("blade_component_render_method", "component:orders.card", "Card@render") in edges
+    assert ("blade_component_render_method", "component:orders-card", "Card@render") in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
+    assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders-card.order") in edges
     assert (
         "blade_component_prop_class_param",
         "component_prop:orders.card.order",
+        "component_param:App\\View\\Components\\Orders\\Card.order",
+    ) in edges
+    assert (
+        "blade_component_prop_class_param",
+        "component_prop:orders-card.order",
         "component_param:App\\View\\Components\\Orders\\Card.order",
     ) in edges
     assert (
@@ -2170,6 +2181,30 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "line": 1,
     } in artifact["edges"]
     assert {
+        "kind": "blade_component_class",
+        "from": "component:orders-card",
+        "to": "App\\View\\Components\\Orders\\Card",
+        "component": "orders-card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_alias_source": "blade_component_registration",
+        "component_registration_path": "app/Providers/AuthServiceProvider.php",
+        "component_registration_line": 20,
+        "component_path": "app/View/Components/Orders/Card.php",
+        "component_line": 4,
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_render_method",
+        "from": "component:orders-card",
+        "to": "Card@render",
+        "component": "orders-card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_method": "render",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
         "kind": "blade_component_prop",
         "from": "view:orders.partials.summary",
         "to": "component_prop:orders.card.order",
@@ -2187,6 +2222,26 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "component_prop": "order",
         "component_source_variable": "order",
         "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_param": "order",
+        "component_param_type": "App\\Models\\Order",
+        "component_path": "app/View/Components/Orders/Card.php",
+        "component_line": 5,
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_prop_class_param",
+        "from": "component_prop:orders-card.order",
+        "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+        "component": "orders-card",
+        "component_prop": "order",
+        "component_source_variable": "order",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_alias_source": "blade_component_registration",
+        "component_registration_path": "app/Providers/AuthServiceProvider.php",
+        "component_registration_line": 20,
         "component_param": "order",
         "component_param_type": "App\\Models\\Order",
         "component_path": "app/View/Components/Orders/Card.php",
@@ -2686,7 +2741,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "App\\Policies\\OrderPolicy",
         "source": "policies_property",
         "path": "app/Providers/AuthServiceProvider.php",
-        "line": 12,
+        "line": 13,
     } in artifact["edges"]
     assert {
         "kind": "policy_for",
@@ -2694,7 +2749,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "App\\Policies\\InvoicePolicy",
         "source": "gate_policy",
         "path": "app/Providers/AuthServiceProvider.php",
-        "line": 19,
+        "line": 21,
     } in artifact["edges"]
     assert ("container_binding", "App\\Contracts\\OrderFormatter", "App\\Services\\OrderService") in edges
     assert ("observed_by", "App\\Models\\Order", "App\\Observers\\OrderObserver") in edges
@@ -2708,7 +2763,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "lifecycle_event": "updated",
         "table": "orders",
         "path": "app/Providers/AuthServiceProvider.php",
-        "line": 18,
+        "line": 19,
     } in artifact["edges"]
     assert ("broadcast_channel", "routes/channels.php", "broadcast:orders.{order}") in edges
     assert ("config_ref", "App\\Http\\Controllers\\OrderController", "config:services.orders.cache") in edges

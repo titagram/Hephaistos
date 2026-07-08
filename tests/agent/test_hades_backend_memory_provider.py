@@ -637,7 +637,7 @@ def _php_graph_artifact():
                 "event_class": "App\\Events\\OrderPlaced",
                 "listener_class": "App\\Listeners\\SendOrderReceipt",
                 "listener_path": "app/Providers/AuthServiceProvider.php",
-                "listener_line": 13,
+                "listener_line": 14,
                 "path": "app/Http/Controllers/OrderController.php",
                 "line": 42,
             },
@@ -655,7 +655,7 @@ def _php_graph_artifact():
                 "source_path": "app/Http/Controllers/OrderController.php",
                 "source_line": 42,
                 "listener_path": "app/Providers/AuthServiceProvider.php",
-                "listener_line": 13,
+                "listener_line": 14,
             },
             {
                 "kind": "sends_mail",
@@ -4141,6 +4141,40 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
             },
             {
                 "kind": "blade_component_class",
+                "from": "component:orders-card",
+                "to": "App\\View\\Components\\Orders\\Card",
+                "component": "orders-card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_alias_source": "blade_component_registration",
+                "component_registration_path": "app/Providers/AuthServiceProvider.php",
+                "component_registration_line": 20,
+                "component_path": "app/View/Components/Orders/Card.php",
+                "component_line": 4,
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component_prop_class_param",
+                "from": "component_prop:orders-card.order",
+                "to": "component_param:App\\View\\Components\\Orders\\Card.order",
+                "component": "orders-card",
+                "component_prop": "order",
+                "component_source_variable": "order",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_alias_source": "blade_component_registration",
+                "component_registration_path": "app/Providers/AuthServiceProvider.php",
+                "component_registration_line": 20,
+                "component_param": "order",
+                "component_param_type": "App\\Models\\Order",
+                "component_path": "app/View/Components/Orders/Card.php",
+                "component_line": 5,
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 1,
+            },
+            {
+                "kind": "blade_component_class",
                 "from": "component:orders.card",
                 "to": "App\\View\\Components\\Orders\\Card",
                 "component": "orders.card",
@@ -4296,7 +4330,7 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
     component_result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders partial summary component prop card order route param", "limit": 10},
+            {"query": "orders partial summary component prop card order route param", "limit": 20},
         )
     )
     component_graph_refs = [item["graph_ref"] for item in component_result["items"]]
@@ -4388,6 +4422,37 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         and "component_prop=order" in item["summary"]
         and "component_source_variable=order" in item["summary"]
         for item in component_result["items"]
+    )
+
+    registered_component_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders-card blade component registration class param", "limit": 10},
+        )
+    )
+    registered_component_refs = [item["graph_ref"] for item in registered_component_result["items"]]
+
+    assert registered_component_result["status"] == "ok"
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_class"
+        and ref["from"] == "component:orders-card"
+        and ref["to"] == "App\\View\\Components\\Orders\\Card"
+        and ref["provenance"]["component_alias_source"] == "blade_component_registration"
+        for ref in registered_component_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_prop_class_param"
+        and ref["from"] == "component_prop:orders-card.order"
+        and ref["to"] == "component_param:App\\View\\Components\\Orders\\Card.order"
+        and ref["provenance"]["component_registration_path"] == "app/Providers/AuthServiceProvider.php"
+        for ref in registered_component_refs
+    )
+    assert any(
+        "component=orders-card" in item["summary"]
+        and "component_alias_source=blade_component_registration" in item["summary"]
+        for item in registered_component_result["items"]
     )
 
 
