@@ -4217,6 +4217,25 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "line": 1,
             },
             {
+                "kind": "blade_component_template_model_attribute",
+                "from": "component_param:App\\View\\Components\\Orders\\Card.order",
+                "to": "model_attribute:App\\Models\\Order.display_status",
+                "component": "orders.card",
+                "component_class": "App\\View\\Components\\Orders\\Card",
+                "component_param": "order",
+                "component_param_type": "App\\Models\\Order",
+                "template_variable": "order",
+                "template_field": "display_status",
+                "model": "App\\Models\\Order",
+                "table": "orders",
+                "field": "display_status",
+                "attribute_kind": "model_appended_attribute",
+                "attribute_path": "app/Models/Order.php",
+                "attribute_line": 11,
+                "path": "resources/views/components/orders/card.blade.php",
+                "line": 1,
+            },
+            {
                 "kind": "blade_component_render_method",
                 "from": "component:orders.card",
                 "to": "Card@render",
@@ -4485,6 +4504,29 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         "template_variable=order" in item["summary"]
         and "template_field=status" in item["summary"]
         for item in template_component_result["items"]
+    )
+
+    template_attribute_result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders card template display_status appended attribute", "limit": 10},
+        )
+    )
+    template_attribute_refs = [item["graph_ref"] for item in template_attribute_result["items"]]
+
+    assert template_attribute_result["status"] == "ok"
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_component_template_model_attribute"
+        and ref["from"] == "component_param:App\\View\\Components\\Orders\\Card.order"
+        and ref["to"] == "model_attribute:App\\Models\\Order.display_status"
+        and ref["provenance"]["attribute_kind"] == "model_appended_attribute"
+        for ref in template_attribute_refs
+    )
+    assert any(
+        "template_field=display_status" in item["summary"]
+        and "attribute_kind=model_appended_attribute" in item["summary"]
+        for item in template_attribute_result["items"]
     )
 
     registered_component_result = json.loads(

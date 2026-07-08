@@ -4944,6 +4944,76 @@ def _append_blade_include_component_prop_edges(
     return truncated
 
 
+def _append_blade_component_template_attribute_edges(edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+    attributes_by_model_field: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    template_fields: list[dict[str, Any]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        kind = str(edge.get("kind") or "")
+        if kind in {"model_accessor", "model_appended_attribute"}:
+            model = str(edge.get("from") or "")
+            field = str(edge.get("field") or "")
+            if model and field:
+                attributes_by_model_field.setdefault((model, field), []).append(edge)
+        elif kind == "blade_component_template_model_field":
+            template_fields.append(edge)
+
+    truncated = False
+    seen = {
+        (
+            str(edge.get("kind") or ""),
+            str(edge.get("from") or ""),
+            str(edge.get("to") or ""),
+            str(edge.get("path") or ""),
+            str(edge.get("line") or ""),
+        )
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+    for template_edge in template_fields:
+        model = str(template_edge.get("model") or "")
+        field = str(template_edge.get("field") or template_edge.get("template_field") or "")
+        if not model or not field:
+            continue
+        for attribute_edge in attributes_by_model_field.get((model, field), []):
+            attribute_target = str(attribute_edge.get("to") or "")
+            if not attribute_target.startswith("model_attribute:"):
+                attribute_target = f"model_attribute:{model}.{field}"
+            edge = {
+                "kind": "blade_component_template_model_attribute",
+                "from": template_edge.get("from"),
+                "to": attribute_target,
+                "component": template_edge.get("component"),
+                "component_class": template_edge.get("component_class"),
+                "component_param": template_edge.get("component_param"),
+                "component_param_type": template_edge.get("component_param_type"),
+                "template_variable": template_edge.get("template_variable"),
+                "template_field": field,
+                "model": model,
+                "table": template_edge.get("table"),
+                "field": field,
+                "attribute_kind": attribute_edge.get("kind"),
+                "attribute_method": attribute_edge.get("attribute_method"),
+                "attribute_path": attribute_edge.get("path"),
+                "attribute_line": attribute_edge.get("line"),
+                "path": template_edge.get("path"),
+                "line": template_edge.get("line"),
+            }
+            key = (
+                str(edge.get("kind") or ""),
+                str(edge.get("from") or ""),
+                str(edge.get("to") or ""),
+                str(edge.get("path") or ""),
+                str(edge.get("line") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            truncated = not _edge_append(edges, edge, max_edges=max_edges) or truncated
+    return truncated
+
+
 def _php_form_request_validation_index(
     workspace_root: Path,
     php_files: list[Path],
@@ -9730,6 +9800,7 @@ def _build_php_graph(
         route_model_binding_by_route=route_model_binding_by_route,
         max_edges=max_edges,
     ) or truncated
+    truncated = _append_blade_component_template_attribute_edges(edges, max_edges=max_edges) or truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",

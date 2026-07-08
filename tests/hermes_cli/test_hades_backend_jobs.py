@@ -1002,7 +1002,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "components" / "orders" / "card.blade.php").write_text(
-        "<article>{{ $order->status }}</article>\n",
+        "<article>{{ $order->status }} {{ $order->display_status }}</article>\n",
         encoding="utf-8",
     )
 
@@ -1937,6 +1937,11 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "component_param:App\\View\\Components\\Orders\\Card.order",
         "table:orders.status",
     ) in edges
+    assert (
+        "blade_component_template_model_attribute",
+        "component_param:App\\View\\Components\\Orders\\Card.order",
+        "model_attribute:App\\Models\\Order.display_status",
+    ) in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders.card.order") in edges
     assert ("blade_component_prop", "view:orders.partials.summary", "component_prop:orders-card.order") in edges
     assert (
@@ -2243,6 +2248,25 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "model": "App\\Models\\Order",
         "table": "orders",
         "field": "status",
+        "path": "resources/views/components/orders/card.blade.php",
+        "line": 1,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_component_template_model_attribute",
+        "from": "component_param:App\\View\\Components\\Orders\\Card.order",
+        "to": "model_attribute:App\\Models\\Order.display_status",
+        "component": "orders.card",
+        "component_class": "App\\View\\Components\\Orders\\Card",
+        "component_param": "order",
+        "component_param_type": "App\\Models\\Order",
+        "template_variable": "order",
+        "template_field": "display_status",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "field": "display_status",
+        "attribute_kind": "model_appended_attribute",
+        "attribute_path": "app/Models/Order.php",
+        "attribute_line": 11,
         "path": "resources/views/components/orders/card.blade.php",
         "line": 1,
     } in artifact["edges"]

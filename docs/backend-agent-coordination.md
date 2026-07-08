@@ -7100,6 +7100,41 @@ Verifiche eseguite:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
 
+## Esecuzione Laravel Blade component template attribute graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per collegare campi template dei
+class component agli attributi Eloquent virtuali noti.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge `blade_component_template_model_attribute`
+  quando un campo template come `$order->display_status` coincide con
+  `model_appended_attribute` o `model_accessor` gia' indicizzato.
+- L'edge punta a `model_attribute:*` e conserva solo component, parametro,
+  template field, model/table, tipo attributo e path/line dell'attributo.
+- Il fallback locale di `hades_backend_graph_search` rende cercabili
+  `attribute_kind`, `attribute_method`, `attribute_path` e `attribute_line`.
+- Non conserva espressioni Blade, valori renderizzati, template/source raw o
+  corpo accessor.
+
+Resta fuori da questa tranche:
+
+- Chiamate metodo nel template, chained relation, computed field non indicizzati,
+  conflitti tra colonna fisica e accessor, e risoluzione completa del tipo
+  ritornato dall'accessor.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_include_data_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `119 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
 ## Esecuzione Laravel Blade form field graph Hades - 2026-07-08
 
 Stato: completata una tranche locale P0-4 per collegare template Blade,
