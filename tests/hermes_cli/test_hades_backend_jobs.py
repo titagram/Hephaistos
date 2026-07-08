@@ -937,6 +937,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@error('customer_id')\n"
         "<span>{{ $message }}</span>\n"
         "@enderror\n"
+        "<input type=\"text\" wire:model.defer=\"status\">\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1879,6 +1880,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
+    assert ("blade_wire_model", "view:orders.show", "livewire_property:status") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1946,6 +1948,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "validation_helper": "error",
         "path": "resources/views/orders/show.blade.php",
         "line": 18,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_model",
+        "from": "view:orders.show",
+        "to": "livewire_property:status",
+        "wire_model": "status",
+        "wire_modifiers": ["defer"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 21,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",

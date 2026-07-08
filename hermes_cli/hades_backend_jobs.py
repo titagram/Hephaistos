@@ -535,6 +535,10 @@ BLADE_FORM_FIELD_RE = re.compile(
 )
 BLADE_OLD_INPUT_RE = re.compile(r"\bold\s*\(\s*['\"](?P<field>[A-Za-z0-9_.*:-]{1,128})['\"]", re.MULTILINE)
 BLADE_ERROR_DIRECTIVE_RE = re.compile(r"@error\s*\(\s*['\"](?P<field>[A-Za-z0-9_.*:-]{1,128})['\"]", re.MULTILINE)
+BLADE_WIRE_MODEL_RE = re.compile(
+    r"\bwire:model(?P<modifiers>(?:\.[A-Za-z0-9_-]{1,32}){0,6})\s*=\s*['\"](?P<model>[A-Za-z0-9_.*:-]{1,128})['\"]",
+    re.IGNORECASE | re.MULTILINE,
+)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -2048,6 +2052,36 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_wire_model(model: str, modifiers: str, offset: int) -> None:
+        nonlocal truncated
+        model = str(model or "").strip()
+        if not model or not re.fullmatch(r"[A-Za-z0-9_.*:-]{1,128}", model):
+            return
+        modifier_tokens = [
+            token
+            for token in str(modifiers or "").lstrip(".").split(".")
+            if token and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", token)
+        ][:6]
+        line = _line_number(source, offset)
+        target = f"livewire_property:{model}"
+        key = ("blade_wire_model", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_wire_model",
+                "from": view_id,
+                "to": target,
+                "wire_model": model,
+                "wire_modifiers": modifier_tokens,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2149,6 +2183,8 @@ def _append_blade_view_graph(
         append_blade_old_input(match.group("field"), match.start("field"))
     for match in BLADE_ERROR_DIRECTIVE_RE.finditer(source):
         append_blade_validation_error(match.group("field"), match.start("field"))
+    for match in BLADE_WIRE_MODEL_RE.finditer(source):
+        append_blade_wire_model(match.group("model"), match.group("modifiers"), match.start("model"))
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
         route = known_routes.get(match.group("route"))

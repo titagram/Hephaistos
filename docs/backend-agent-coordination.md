@@ -6673,3 +6673,35 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade Livewire wire:model graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per Livewire field binding awareness
+nei template Blade metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge edge `blade_wire_model` per attributi
+  `wire:model` e varianti con modifiers safe bounded come `.defer`.
+- L'edge collega la view a `livewire_property:<name>` e salva solo property,
+  lista modifiers, path e line, cosi' una diagnosi source-free puo' correlare
+  campi Livewire a validation/request graph senza leggere il template.
+- Il fallback locale di `hades_backend_graph_search` espone questi dettagli da
+  cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Mapping classe Livewire/metodi action, `wire:click`, Alpine `x-model` e
+  property dinamiche; questa tranche resta limitata a `wire:model` letterali.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_wire_model_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `117 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
