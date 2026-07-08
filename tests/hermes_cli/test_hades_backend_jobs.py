@@ -964,7 +964,10 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "orders" / "partials" / "summary.blade.php").write_text(
-        "<x-orders.card />\n",
+        "<x-orders.card />\n"
+        "@can('view', $order)\n"
+        "<span>Partial allowed</span>\n"
+        "@endcan\n",
         encoding="utf-8",
     )
     (workspace / "resources" / "views" / "layouts" / "app.blade.php").write_text(
@@ -1917,6 +1920,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_authorization_model", "ability:update", "App\\Models\\Order") in edges
     assert ("blade_authorization_model", "ability:delete", "App\\Models\\Order") in edges
     assert ("blade_authorization_policy_method", "ability:view", "OrderPolicy@view") in edges
+    assert ("blade_authorization", "view:orders.partials.summary", "ability:view") in edges
+    assert ("blade_authorization_include_data", "ability:view", "view_data:orders.partials.summary.order") in edges
+    assert ("blade_authorization_include_route_param", "ability:view", "route_param:orders.show.order") in edges
     assert ("blade_form_field", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_old_input", "view:orders.show", "request_field:customer_id") in edges
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
@@ -2101,6 +2107,46 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "table": "orders",
         "path": "resources/views/orders/show.blade.php",
         "line": 14,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization",
+        "from": "view:orders.partials.summary",
+        "to": "ability:view",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 2,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_include_data",
+        "from": "ability:view",
+        "to": "view_data:orders.partials.summary.order",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 2,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization_include_route_param",
+        "from": "ability:view",
+        "to": "route_param:orders.show.order",
+        "ability": "view",
+        "authorization_helper": "can",
+        "authorization_subject": "order",
+        "included_view": "orders.partials.summary",
+        "include_data_key": "order",
+        "include_source_variable": "order",
+        "include_parent_view": "view:orders.show",
+        "route_name": "orders.show",
+        "route_param": "order",
+        "path": "resources/views/orders/partials/summary.blade.php",
+        "line": 2,
     } in artifact["edges"]
     assert {
         "kind": "blade_form_field",

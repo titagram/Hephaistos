@@ -4045,6 +4045,36 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
                 "path": "resources/views/orders/show.blade.php",
                 "line": 3,
             },
+            {
+                "kind": "blade_authorization_include_data",
+                "from": "ability:view",
+                "to": "view_data:orders.partials.summary.order",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "include_parent_view": "view:orders.show",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 2,
+            },
+            {
+                "kind": "blade_authorization_include_route_param",
+                "from": "ability:view",
+                "to": "route_param:orders.show.order",
+                "ability": "view",
+                "authorization_helper": "can",
+                "authorization_subject": "order",
+                "included_view": "orders.partials.summary",
+                "include_data_key": "order",
+                "include_source_variable": "order",
+                "include_parent_view": "view:orders.show",
+                "route_name": "orders.show",
+                "route_param": "order",
+                "path": "resources/views/orders/partials/summary.blade.php",
+                "line": 2,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4098,9 +4128,30 @@ def test_hades_backend_graph_search_finds_local_blade_include_data_edges(monkeyp
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_include_data"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "view_data:orders.partials.summary.order"
+        and ref["provenance"]["include_parent_view"] == "view:orders.show"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_authorization_include_route_param"
+        and ref["from"] == "ability:view"
+        and ref["to"] == "route_param:orders.show.order"
+        and ref["provenance"]["included_view"] == "orders.partials.summary"
+        for ref in graph_refs
+    )
+    assert any(
         "included_view=orders.partials.summary" in item["summary"]
         and "include_data_key=order" in item["summary"]
         and "include_source_variable=order" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "include_parent_view=view:orders.show" in item["summary"]
+        and "authorization_subject=order" in item["summary"]
         for item in result["items"]
     )
 

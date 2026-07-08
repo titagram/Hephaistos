@@ -4357,6 +4357,103 @@ def _php_route_model_binding_index(
     return bindings
 
 
+def _append_blade_include_authorization_edges(edges: list[dict[str, Any]], *, max_edges: int) -> bool:
+    include_data_by_slot: dict[str, list[dict[str, Any]]] = {}
+    route_param_by_slot: dict[str, list[dict[str, Any]]] = {}
+    authorization_by_slot: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        kind = str(edge.get("kind") or "")
+        if kind == "blade_include_data":
+            include_data_by_slot.setdefault(str(edge.get("to") or ""), []).append(edge)
+        elif kind == "blade_include_data_route_param":
+            route_param_by_slot.setdefault(str(edge.get("from") or ""), []).append(edge)
+        elif kind == "blade_authorization":
+            from_view = str(edge.get("from") or "")
+            subject = str(edge.get("authorization_subject") or "")
+            if from_view.startswith("view:") and subject:
+                authorization_by_slot.setdefault(f"view_data:{from_view.removeprefix('view:')}.{subject}", []).append(edge)
+
+    truncated = False
+    seen = {
+        (
+            str(edge.get("kind") or ""),
+            str(edge.get("from") or ""),
+            str(edge.get("to") or ""),
+            str(edge.get("path") or ""),
+            str(edge.get("line") or ""),
+        )
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+    for slot, authorization_edges in authorization_by_slot.items():
+        include_edges = include_data_by_slot.get(slot) or []
+        if not include_edges:
+            continue
+        route_edges = route_param_by_slot.get(slot) or []
+        for auth_edge in authorization_edges:
+            ability = str(auth_edge.get("ability") or "")
+            helper = str(auth_edge.get("authorization_helper") or "")
+            subject = str(auth_edge.get("authorization_subject") or "")
+            if not ability or not subject:
+                continue
+            for include_edge in include_edges:
+                include_data_edge = {
+                    "kind": "blade_authorization_include_data",
+                    "from": f"ability:{ability}",
+                    "to": slot,
+                    "ability": ability,
+                    "authorization_helper": helper,
+                    "authorization_subject": subject,
+                    "included_view": include_edge.get("included_view"),
+                    "include_data_key": include_edge.get("include_data_key"),
+                    "include_source_variable": include_edge.get("include_source_variable"),
+                    "include_parent_view": include_edge.get("from"),
+                    "path": auth_edge.get("path"),
+                    "line": auth_edge.get("line"),
+                }
+                key = (
+                    str(include_data_edge.get("kind") or ""),
+                    str(include_data_edge.get("from") or ""),
+                    str(include_data_edge.get("to") or ""),
+                    str(include_data_edge.get("path") or ""),
+                    str(include_data_edge.get("line") or ""),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    truncated = not _edge_append(edges, include_data_edge, max_edges=max_edges) or truncated
+                for route_edge in route_edges:
+                    route_param_edge = {
+                        "kind": "blade_authorization_include_route_param",
+                        "from": f"ability:{ability}",
+                        "to": route_edge.get("to"),
+                        "ability": ability,
+                        "authorization_helper": helper,
+                        "authorization_subject": subject,
+                        "included_view": include_edge.get("included_view"),
+                        "include_data_key": include_edge.get("include_data_key"),
+                        "include_source_variable": include_edge.get("include_source_variable"),
+                        "include_parent_view": include_edge.get("from"),
+                        "route_name": route_edge.get("route_name"),
+                        "route_param": route_edge.get("route_param"),
+                        "path": auth_edge.get("path"),
+                        "line": auth_edge.get("line"),
+                    }
+                    route_key = (
+                        str(route_param_edge.get("kind") or ""),
+                        str(route_param_edge.get("from") or ""),
+                        str(route_param_edge.get("to") or ""),
+                        str(route_param_edge.get("path") or ""),
+                        str(route_param_edge.get("line") or ""),
+                    )
+                    if route_key in seen:
+                        continue
+                    seen.add(route_key)
+                    truncated = not _edge_append(edges, route_param_edge, max_edges=max_edges) or truncated
+    return truncated
+
+
 def _php_form_request_validation_index(
     workspace_root: Path,
     php_files: list[Path],
@@ -8971,6 +9068,7 @@ def _build_php_graph(
         "truncated": len(log_events) > MAX_LOG_EVENTS,
         "raw_source_included": False,
     }
+    truncated = _append_blade_include_authorization_edges(edges, max_edges=max_edges) or truncated
     graph = {
         "schema": "hades.php_graph.v1",
         "language": "php",
