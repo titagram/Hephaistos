@@ -20,6 +20,9 @@ The minimum safe state is:
 - project memory is available from the backend;
 - the target binding has current project artifacts, source slices, and bug
   evidence coverage;
+- open bugs that may receive high/medium source-free diagnoses have replayable
+  causal packs linking bug evidence, graph refs, source slices, freshness, and
+  the intended diagnosis;
 - `diagnosable_without_source=true` for the target binding;
 - no current sync error is recorded for that binding.
 
@@ -118,13 +121,16 @@ The agent should use this sequence before giving a precise cause:
    suggested by the evidence.
 5. Fetch bounded source slices only when the policy permits source-content
    access and the diagnosis needs exact lines.
-6. Produce a diagnosis with root cause, mechanism, evidence refs, freshness,
-   affected symbols, and confidence.
+6. Fetch or replay the causal evidence pack for the bug/root-cause candidate.
+7. Produce a diagnosis with root cause, mechanism, evidence refs, causal pack
+   refs, freshness, affected symbols, and confidence.
 
 High or medium confidence is valid only when all of these are true:
 
 - `freshness.status=current`;
 - `evidence_refs` is non-empty;
+- `causal_pack_refs` contains at least one replayable pack for the claimed
+  root cause;
 - `awareness.diagnosable_without_source=true`;
 - the claim is supported by current graph/source-slice/evidence references.
 
@@ -132,6 +138,18 @@ When the agent saves a high/medium diagnosis report, the local Hades provider
 refreshes live project-awareness status and uses that response for the final
 gate; the model's supplied freshness/awareness fields are not enough to bypass
 stale or incomplete backend coverage.
+The provider and backend also reject high/medium source-free reports that lack
+causal pack refs. The pack is the replayable proof bundle; ordinary evidence
+refs alone are useful context but are no longer sufficient for a precise
+source-free root-cause claim.
+
+Operators can inspect causal packs directly:
+
+```bash
+hades backend causal-pack list --bug-report-id <bug_report_id> --json
+hades backend causal-pack show <causal_pack_id> --json
+hades backend causal-pack replay <causal_pack_id> --json
+```
 
 Saved diagnosis reports should include the structured taxonomy fields when the
 evidence supports them:
@@ -191,6 +209,10 @@ The quality report also scores diagnosis taxonomy coverage. A passing
 no-codebase result should not only produce a plausible explanation; it should
 persist searchable root-cause identifiers and affected references so future
 agents can diagnose related bugs from shared memory.
+It also scores causal pack coverage, causal chain coverage, and counterfactual
+refusal coverage. The last metric must stay green: ambiguous or incomplete
+fixtures pass only when the agent refuses a precise claim and records the
+missing evidence.
 
 The quality report records blocker/warning actions locally. A failed report
 should block claims that the project is ready for source-free diagnosis.
@@ -206,8 +228,10 @@ reviewed or repaired yet.
 | `diagnosable_without_source=false` | Coverage is incomplete or stale. | Run `hades backend sync`, approve required source/index jobs, and capture current bug evidence. |
 | `bug_evidence` missing | The backend has no current evidence for this bug. | Use dashboard `Bug intake` or `hades backend bug-intake`. |
 | `source_slices` missing | Exact line evidence is not available. | Approve a bounded source-slice job or keep the diagnosis insufficient. |
+| `causal_packs` missing | Open bugs lack replayable proof bundles for precise source-free diagnosis. | Create/replay causal packs from current bug evidence, graph refs, source slices, and diagnosis fields. |
 | `freshness.status=stale` | Indexed artifacts do not match the relevant head/deploy context. | Sync the current workspace or capture deploy mismatch evidence. |
 | `diagnosis_evidence_refs_required` | A high/medium report lacks evidence references. | Attach evidence refs or downgrade confidence. |
+| `diagnosis_causal_pack_refs_required` | A high/medium source-free report lacks causal pack refs. | Fetch or create a replayable causal pack, or downgrade to insufficient. |
 | `diagnosis_awareness_not_diagnosable` | Backend awareness does not support source-free diagnosis. | Repair coverage before a precise claim. |
 
 ## Support Bundle

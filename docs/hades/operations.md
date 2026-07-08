@@ -138,6 +138,10 @@ Diagnosis outcomes should be persisted with
 once the workflow reaches either a supported root cause or a useful
 insufficient-evidence result. Reports carry confidence, root cause, runtime
 mechanism, evidence refs, freshness, bounded payload, and redaction count.
+For high/medium source-free reports, include `causal_pack_refs` from
+`hades_backend_causal_pack_fetch` or `hades backend causal-pack ...`. The causal
+pack is the replayable bundle that ties evidence refs, graph refs, source
+slices, freshness, awareness, and diagnosis taxonomy to the claim.
 
 The backend enforces a shared evidence safety policy before storing
 content-bearing diagnosis data:
@@ -158,7 +162,8 @@ diagnosis. The status distinguishes:
 
 - `freshness.status`: `current`, `stale`, `missing`, or `unknown`.
 - `coverage.memory`, `coverage.artifacts`, `coverage.bug_evidence`,
-  `coverage.code_graph`, and `coverage.source_slices`.
+  `coverage.code_graph`, `coverage.source_slices`, and
+  `coverage.causal_packs`.
 - `diagnosable_without_source`: true only when the backend has enough current
   evidence to support exact source-free diagnosis.
 
@@ -172,7 +177,9 @@ diagnosis reports when this status is not source-free diagnosable. The local
 provider refreshes the live project-awareness status again when saving a
 high/medium report, so claimed-current tool arguments do not bypass stale
 coverage. Save `low` or `insufficient` until current graph, bug evidence, and
-source-slice coverage exist.
+source-slice coverage exist. Source-free high/medium reports also need
+replayable causal pack refs; missing causal packs should stay visible as an
+awareness action for open bugs.
 
 The dashboard backend page surfaces the same local readiness picture in the
 `Diagnosis quality` panel: source-free ready bindings, blocked bindings,
@@ -184,6 +191,9 @@ use a 1 second backend timeout, source-slice fetch uses 1.5 seconds, and
 write/create/promote paths use 2 seconds. When a live lookup times out or the
 backend is unavailable, the tool must return an explicit degraded/unavailable
 state instead of silently treating cache or generic memory as current evidence.
+`hades_backend_causal_pack_fetch` is a live lookup path and follows the same
+fail-fast behavior; it has no local cache fallback because replayability must
+come from current backend data.
 
 ## Lifecycle And Cleanup
 

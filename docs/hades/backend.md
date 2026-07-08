@@ -54,12 +54,21 @@ The Hades v1 backend exposes:
 - `GET /api/hades/v1/bug-evidence/search`
 - `POST /api/hades/v1/evidence-packs`
 - `GET /api/hades/v1/evidence-packs`
+- `POST /api/hades/v1/causal-packs`
+- `GET /api/hades/v1/causal-packs`
+- `GET /api/hades/v1/causal-packs/{causal_pack_id}`
+- `POST /api/hades/v1/causal-packs/{causal_pack_id}/replay`
 
 Each item is scoped to the authenticated project and linked workspace binding.
 Evidence carries a kind, bounded summary/payload, source, sha256, redaction
 count, retention class, and occurrence timestamp. This data is searchable by the
 agent through a service-gated provider tool and is not injected into ordinary
 automatic memory recall.
+Causal packs are narrower than evidence packs: they are replayable proof
+bundles for one root-cause claim. They store refs to bug evidence, graph facts,
+source slices, freshness, awareness state, affected refs, and diagnosis
+taxonomy. They do not store full source files and should be replayed before a
+source-free high/medium diagnosis is trusted.
 
 The backend refuses content-bearing diagnosis data that is too large or appears
 to contain unredacted credentials. The current safety baseline caps bug evidence
@@ -77,6 +86,10 @@ awareness is `diagnosable_without_source=true`; failures return
 live project-awareness status before saving high/medium reports, so stale
 coverage cannot be bypassed by passing claimed-current freshness in tool
 arguments.
+For source-free high/medium reports, the backend additionally requires
+`causal_pack_refs` that resolve to a replayable causal pack for the same
+project/workspace evidence. Missing or invalid pack refs must downgrade the
+result to insufficient rather than allowing a precise claim.
 
 Privacy and retention controls are explicit and workspace scoped. The backend
 exposes:
@@ -100,9 +113,9 @@ slices, evidence payloads, diagnosis text, or other raw content.
 
 The backend exposes `GET /api/hades/v1/project-awareness/status` for a linked
 workspace. The response reports freshness and coverage for shared memory,
-artifacts, bug evidence, source slices, and code graph data. It also returns
-`overall_status`, `diagnosable_without_source`, stale reasons, and concrete
-actions.
+artifacts, bug evidence, source slices, code graph data, and causal packs. It
+also returns `overall_status`, `diagnosable_without_source`, stale reasons, and
+concrete actions.
 
 The local agent can call the service-gated
 `hades_backend_project_awareness_status` tool. Treat `stale`, `unknown`,
@@ -255,7 +268,8 @@ also surfaced in the action queue.
 Quality reports can also load a suite manifest with `--suite`. A suite groups
 one or more no-codebase evaluation fixtures and records aggregate gates such as
 root-cause accuracy, forbidden source-access violations, persistence coverage,
-tool-order coverage, and taxonomy coverage. Use suites for regression checks
+tool-order coverage, taxonomy coverage, causal pack coverage, causal chain
+coverage, and counterfactual refusal coverage. Use suites for regression checks
 before claiming that a project is ready for source-free diagnosis.
 
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`

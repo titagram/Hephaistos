@@ -7605,3 +7605,61 @@ Resta fuori:
   ancora awareness partial su binding locali, ma il gate live no-codebase e'
   passato senza violazioni; la valutazione finale usa
   `--skip-local-status` per misurare solo il contratto no-codebase.
+
+## Esecuzione causal project awareness Hades - 2026-07-08
+
+Stato: completata tranche backend/local per causal pack replayabili e gate
+source-free high/medium.
+
+Backend remoto su `fase-2`:
+
+- `378ffe0 feat: persist Hades causal evidence packs`
+- `06e9dae feat: gate source-free diagnoses on causal packs`
+- `64fac69 feat: report Hades causal pack awareness`
+
+Locale su `codex/hades-rebrand`:
+
+- `a9f64c9f6 feat: define Hades causal evidence packs`
+- `2ba0e6b47 feat: add Hades causal pack CLI`
+- `1cd5f1535 feat: require causal packs for source-free diagnoses`
+- `f34b1bfaa test: score Hades causal diagnosis quality`
+- `c759f302e feat: surface Hades causal pack awareness`
+- `c5f5bcea9 feat: expose Hades causal pack fetch tool`
+- `a8ca79804 test: require causal no-codebase regression gates`
+
+Risultato operativo:
+
+- Il backend salva causal pack con refs a bug evidence, graph, source slices,
+  freshness, awareness e diagnosis taxonomy.
+- Le API `causal-packs` supportano create/list/show/replay.
+- Il provider locale espone `hades_backend_causal_pack_fetch`, live-only e
+  fail-fast, per cercare o replayare pack prima del report.
+- `hades_backend_diagnosis_report_create` richiede `causal_pack_refs` per
+  diagnosis source-free high/medium; senza pack valido il risultato deve
+  restare `insufficient`.
+- Awareness/status espone `coverage.causal_packs` e action dedicate quando bug
+  aperti non hanno pack replayabile.
+- La no-codebase quality suite ora misura `causal_pack_coverage`,
+  `causal_chain_coverage` e `counterfactual_refusal_coverage`.
+
+Verifiche eseguite:
+
+- Locale provider causal pack:
+  `scripts/run_tests.sh tests/agent/test_hades_backend_memory_provider.py -k "causal_pack or prefetches_linked_project_cache"`
+  passato: `5 passed`.
+- Locale no-codebase/quality:
+  `scripts/run_tests.sh tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato: `31 passed`.
+- Lint locale:
+  `.venv/bin/ruff check plugins/memory/hades_backend/__init__.py tests/agent/test_hades_backend_memory_provider.py hermes_cli/hades_quality_suite.py tests/agent/test_hades_bug_diagnosis_no_codebase.py tests/hermes_cli/test_hades_quality_report.py`
+  passato.
+- Backend remoto causal/no-codebase:
+  `php artisan test tests/Feature/Hades/HadesCausalPackTest.php tests/Feature/Hades/HadesNoCodebaseDiagnosisTest.php`
+  passato: `6 tests`.
+- Backend remoto Pint sui file Hades causal/diagnosis passato.
+
+Resta fuori da questa nota:
+
+- Nuova valutazione Rocket Club con prompt aggiornato a causal pack; va eseguita
+  come regressione live separata prima di dichiarare completa la readiness
+  operativa su progetto reale.
