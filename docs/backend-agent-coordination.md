@@ -6500,3 +6500,39 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade form route-method graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per correlazione Blade form route
+method metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` aggiunge `blade_form_route_method` quando una stessa
+  form Blade contiene `route('name')` e `@method('...')`, e la route nominata
+  e' nota al graph.
+- L'edge collega la view alla route nominata e salva `form_method`,
+  `route_method` e `route_method_match`, rendendo diagnosticabili casi 405
+  source-free.
+- Il payload salva solo route name, form method, route method, match boolean,
+  path e line; non conserva form body, parametri route o source raw.
+- Il fallback locale di `hades_backend_graph_search` espone questi dettagli da
+  cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Parsing completo di form annidate/HTML malformato e inferenza su action URL
+  non generate da `route('name')`; questa tranche resta conservativa sui casi
+  Blade standard.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_form_route_method_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `113 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

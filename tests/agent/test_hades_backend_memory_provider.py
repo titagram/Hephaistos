@@ -4007,6 +4007,71 @@ def test_hades_backend_graph_search_finds_local_blade_form_metadata(monkeypatch,
     assert any("form_method=PUT" in item["summary"] for item in result["items"])
 
 
+def test_hades_backend_graph_search_finds_local_blade_form_route_method_edges(monkeypatch, tmp_path):
+    graph_payload = _php_graph_artifact()
+    graph_payload["edges"].append(
+        {
+            "kind": "blade_form_route_method",
+            "from": "view:orders.show",
+            "to": "route:invoices.update",
+            "route_name": "invoices.update",
+            "form_method": "PUT",
+            "route_method": "PUT",
+            "route_method_match": True,
+            "path": "resources/views/orders/show.blade.php",
+            "line": 8,
+        }
+    )
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_1",
+                "domain": "artifacts",
+                "schema": "hades.php_graph.v1",
+                "source": "hades.php_graph.v1",
+                "summary": "Laravel graph artifact for order route.",
+                "payload": graph_payload,
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "orders view invoices.update PUT route method match", "limit": 10},
+        )
+    )
+
+    graph_refs = [item["graph_ref"] for item in result["items"]]
+
+    assert result["status"] == "ok"
+    assert result["searched_cache_only"] is True
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_form_route_method"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "route:invoices.update"
+        and ref["provenance"]["route_method_match"] is True
+        for ref in graph_refs
+    )
+    assert any(
+        "route_name=invoices.update" in item["summary"]
+        and "form_method=PUT" in item["summary"]
+        and "route_method=PUT" in item["summary"]
+        and "route_method_match=True" in item["summary"]
+        for item in result["items"]
+    )
+
+
 def test_hades_backend_graph_search_finds_local_event_listener_edges(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

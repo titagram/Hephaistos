@@ -518,6 +518,7 @@ BLADE_LIVEWIRE_RE = re.compile(
 BLADE_ROUTE_FUNCTION_RE = re.compile(r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]", re.MULTILINE)
 BLADE_FORM_METHOD_RE = re.compile(r"@method\s*\(\s*['\"](?P<method>GET|POST|PUT|PATCH|DELETE)['\"]\s*\)", re.IGNORECASE | re.MULTILINE)
 BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
+BLADE_FORM_BLOCK_RE = re.compile(r"<form\b[^>]*>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1797,6 +1798,7 @@ def _append_blade_view_graph(
     symbols: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     *,
+    route_by_name: dict[str, dict[str, Any]] | None = None,
     max_symbols: int,
     max_edges: int,
 ) -> bool:
@@ -1806,6 +1808,7 @@ def _append_blade_view_graph(
 
     truncated = False
     view_id = f"view:{view_name}"
+    known_routes = route_by_name or {}
     if len(symbols) < max_symbols:
         symbols.append(
             {
@@ -1926,6 +1929,37 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_form_route_method(route_name: str, form_method: str, offset: int) -> None:
+        nonlocal truncated
+        route = known_routes.get(route_name)
+        if not route:
+            return
+        normalized_method = str(form_method or "").upper()
+        if normalized_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            return
+        route_method = str(route.get("method") or "").upper()
+        line = _line_number(source, offset)
+        target = f"route:{route_name}"
+        key = ("blade_form_route_method", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_form_route_method",
+                "from": view_id,
+                "to": target,
+                "route_name": route_name,
+                "form_method": normalized_method,
+                "route_method": route_method,
+                "route_method_match": normalized_method == route_method,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     for match in BLADE_EXTENDS_RE.finditer(source):
         append_edge("blade_extends", f"view:{match.group('view')}", match.start())
     for match in BLADE_INCLUDE_RE.finditer(source):
@@ -1945,6 +1979,16 @@ def _append_blade_view_graph(
         append_form_method(match.group("method"), match.start())
     for match in BLADE_CSRF_RE.finditer(source):
         append_csrf(match.start())
+    for form_match in BLADE_FORM_BLOCK_RE.finditer(source):
+        form_body = form_match.group("body") or ""
+        route_match = BLADE_ROUTE_FUNCTION_RE.search(form_match.group(0) or "")
+        method_match = BLADE_FORM_METHOD_RE.search(form_body)
+        if route_match and method_match:
+            append_form_route_method(
+                route_match.group("route"),
+                method_match.group("method"),
+                form_match.start("body") + method_match.start("method"),
+            )
 
     return truncated
 
@@ -6090,10 +6134,14 @@ def _build_php_graph(
     )
     routes = _laravel_routes(workspace_root, file_refs)
     routes_by_handler: dict[str, list[dict[str, Any]]] = {}
+    route_by_name: dict[str, dict[str, Any]] = {}
     for route in routes:
         handler = str(route.get("handler") or "")
         if handler:
             routes_by_handler.setdefault(handler, []).append(route)
+        route_name = str(route.get("name") or "")
+        if route_name:
+            route_by_name.setdefault(route_name, route)
     middleware_catalog = _laravel_middleware_catalog(workspace_root, file_refs)
     symbols: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -6143,6 +6191,7 @@ def _build_php_graph(
             rel,
             symbols,
             edges,
+            route_by_name=route_by_name,
             max_symbols=max_symbols,
             max_edges=max_edges,
         ) or truncated
