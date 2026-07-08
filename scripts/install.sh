@@ -1259,7 +1259,18 @@ clone_repo() {
             git remote set-branches origin "$BRANCH" 2>/dev/null || true
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
-            git pull --ff-only origin "$BRANCH"
+            if ! git pull --ff-only origin "$BRANCH"; then
+                local backup_branch
+                backup_branch="hades-install-backup/$(printf "%s" "$BRANCH" | tr -c 'A-Za-z0-9._-' '-')-$(date -u +%Y%m%d-%H%M%S)"
+                log_warn "Fast-forward update failed; this managed checkout has diverged from origin/$BRANCH."
+                if git branch "$backup_branch" HEAD 2>/dev/null; then
+                    log_warn "Saved current local HEAD as $backup_branch before realigning."
+                else
+                    log_warn "Could not create local backup branch; continuing with managed checkout realignment."
+                fi
+                log_warn "Resetting managed checkout to origin/$BRANCH."
+                git reset --hard "origin/$BRANCH"
+            fi
 
             if [ -n "$autostash_ref" ]; then
                 local restore_now="yes"

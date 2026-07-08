@@ -1375,7 +1375,20 @@ function Install-Repository {
                     git -c windows.appendAtomically=false checkout $Branch
                     if ($LASTEXITCODE -ne 0) { throw "git checkout $Branch failed (exit $LASTEXITCODE)" }
                     git -c windows.appendAtomically=false pull --ff-only origin $Branch
-                    if ($LASTEXITCODE -ne 0) { throw "git pull failed (exit $LASTEXITCODE)" }
+                    if ($LASTEXITCODE -ne 0) {
+                        $backupLabel = ($Branch -replace '[^A-Za-z0-9._-]', '-')
+                        $backupBranch = "hades-install-backup/$backupLabel-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+                        Write-Warn "Fast-forward update failed; this managed checkout has diverged from origin/$Branch."
+                        git -c windows.appendAtomically=false branch $backupBranch HEAD 2>$null
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Warn "Saved current local HEAD as $backupBranch before realigning."
+                        } else {
+                            Write-Warn "Could not create local backup branch; continuing with managed checkout realignment."
+                        }
+                        Write-Warn "Resetting managed checkout to origin/$Branch."
+                        git -c windows.appendAtomically=false reset --hard "origin/$Branch"
+                        if ($LASTEXITCODE -ne 0) { throw "git reset --hard origin/$Branch failed (exit $LASTEXITCODE)" }
+                    }
                 }
 
                 if ($autostashRef) {
