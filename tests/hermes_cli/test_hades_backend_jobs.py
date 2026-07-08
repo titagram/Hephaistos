@@ -684,6 +684,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        Order::lockForUpdate()->first();\n"
         "        Order::onlyTrashed()->forceDelete();\n"
         "        Order::where('status', 'archived')->restore();\n"
+        "        $order->restore();\n"
         "        return view('orders.show', ['order' => $order]);\n"
         "    }\n"
         "}\n",
@@ -1697,6 +1698,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("query_operation", "OrderController@show", "query:orders:lockForUpdate") in edges
     assert ("query_operation", "OrderController@show", "query:orders:forceDelete") in edges
     assert ("query_operation", "OrderController@show", "query:orders:restore") in edges
+    assert ("model_instance_operation", "OrderController@show", "model_operation:orders:restore") in edges
+    assert ("route_model_instance_operation", "route:orders.show", "model_operation:orders:restore") in edges
     assert ("query_read", "OrderController@show", "table:orders") in edges
     assert ("query_write", "OrderController@show", "table:orders") in edges
     assert {
@@ -1779,6 +1782,37 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "access": "write",
         "path": "app/Http/Controllers/OrderController.php",
         "line": 42,
+    } in artifact["edges"]
+    assert {
+        "kind": "model_instance_operation",
+        "from": "OrderController@show",
+        "to": "model_operation:orders:restore",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "operation": "restore",
+        "access": "restore",
+        "receiver": "order",
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 43,
+        "path": "app/Http/Controllers/OrderController.php",
+        "line": 43,
+    } in artifact["edges"]
+    assert {
+        "kind": "route_model_instance_operation",
+        "from": "route:orders.show",
+        "to": "model_operation:orders:restore",
+        "model": "App\\Models\\Order",
+        "table": "orders",
+        "operation": "restore",
+        "access": "restore",
+        "receiver": "order",
+        "source_path": "app/Http/Controllers/OrderController.php",
+        "source_line": 43,
+        "handler": "OrderController@show",
+        "method": "GET",
+        "uri": "/orders/{order}",
+        "path": "routes/web.php",
+        "line": 4,
     } in artifact["edges"]
     assert ("eloquent_query", "App\\Http\\Controllers\\OrderController", "App\\Models\\Order::where") in edges
     assert ("eloquent_query", "OrderController@show", "App\\Models\\Order::where") in edges

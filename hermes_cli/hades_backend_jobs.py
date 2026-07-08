@@ -306,6 +306,17 @@ PHP_INSTANCE_METHOD_CALL_RE = re.compile(
     r"(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
     re.MULTILINE,
 )
+PHP_MODEL_INSTANCE_OPERATION_ACCESS = {
+    "decrement": "write",
+    "delete": "delete",
+    "forceDelete": "delete",
+    "increment": "write",
+    "push": "write",
+    "restore": "restore",
+    "save": "write",
+    "touch": "write",
+    "update": "write",
+}
 PHP_LISTEN_ARRAY_RE = re.compile(
     r"(?P<event>\\?[A-Za-z0-9_\\]+)::class\s*=>\s*\[(?P<listeners>.*?)\]",
     re.DOTALL,
@@ -5384,6 +5395,77 @@ def _append_php_instance_method_call_edges(
     return truncated
 
 
+def _append_php_model_instance_operation_edges(
+    source: str,
+    rel: str,
+    method_body: str,
+    method_body_offset: int,
+    method_symbol: str,
+    typed_params: dict[str, str],
+    routes_by_handler: dict[str, list[dict[str, Any]]],
+    model_table_by_class: dict[str, str],
+    edges: list[dict[str, Any]],
+    *,
+    max_edges: int,
+) -> bool:
+    if not typed_params:
+        return False
+    truncated = False
+    for match in PHP_INSTANCE_METHOD_CALL_RE.finditer(method_body):
+        receiver = str(match.group("receiver") or "")
+        if not receiver.startswith("$") or receiver.startswith("$this->"):
+            continue
+        receiver_name = receiver[1:]
+        model_class = typed_params.get(receiver_name, "")
+        model_table = _php_model_table_for_class(model_class, model_table_by_class)
+        if not model_table:
+            continue
+        operation = str(match.group("method") or "")
+        access = PHP_MODEL_INSTANCE_OPERATION_ACCESS.get(operation)
+        if not access:
+            continue
+        source_line = _line_number(source, method_body_offset + match.start())
+        target = f"model_operation:{model_table}:{operation}"
+        operation_payload = {
+            "model": model_class,
+            "table": model_table,
+            "operation": operation,
+            "access": access,
+            "receiver": receiver_name,
+            "source_path": rel,
+            "source_line": source_line,
+        }
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "model_instance_operation",
+                "from": method_symbol,
+                "to": target,
+                **operation_payload,
+                "path": rel,
+                "line": source_line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+        for route in routes_by_handler.get(method_symbol) or []:
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "route_model_instance_operation",
+                    "from": f"route:{_php_route_id(route)}",
+                    "to": target,
+                    **operation_payload,
+                    "handler": method_symbol,
+                    "method": route.get("method"),
+                    "uri": route.get("uri"),
+                    "path": route.get("path"),
+                    "line": route.get("line"),
+                },
+                max_edges=max_edges,
+            ) or truncated
+    return truncated
+
+
 def _php_throw_exceptions_for_method(
     source: str,
     method_body: str,
@@ -6693,6 +6775,19 @@ def _build_php_graph(
                 typed_params,
                 php_method_symbols,
                 container_bindings_by_abstract,
+                edges,
+                max_edges=max_edges,
+            ) or truncated
+
+            truncated = _append_php_model_instance_operation_edges(
+                source,
+                rel,
+                method_body,
+                method_body_offset,
+                method_symbol,
+                typed_params,
+                routes_by_handler,
+                model_table_by_class,
                 edges,
                 max_edges=max_edges,
             ) or truncated
