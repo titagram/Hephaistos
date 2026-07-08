@@ -1,0 +1,776 @@
+routes/web.php:7:use App\Http\Controllers\Console\BookingController;
+routes/web.php:9:use App\Http\Controllers\Console\InventoryController;
+routes/web.php:14:use App\Http\Controllers\Console\SubscriptionController;
+routes/web.php:17:use App\Http\Controllers\Console\TournamentController;
+routes/web.php:20:use Inertia\Inertia;
+routes/web.php:22:Route::get('/', function () {
+routes/web.php:23:    return Inertia::render('welcome');
+routes/web.php:26:Route::middleware(['auth', 'venue.member'])->group(function () {
+routes/web.php:27:    Route::middleware('venue.role:manager,employee')->group(function () {
+routes/web.php:28:        Route::get('dashboard', DashboardController::class)->name('dashboard');
+routes/web.php:30:        Route::post('console/accounts', [OpenAccountController::class, 'store'])->name('console.accounts.store');
+routes/web.php:31:        Route::get('console/accounts/{account}', AccountShowController::class)->name('console.accounts.show');
+routes/web.php:32:        Route::post('console/accounts/{account}/participants', [AccountParticipantController::class, 'store'])->name('console.accounts.participants.store');
+routes/web.php:33:        Route::post('console/accounts/{account}/split', AccountSplitController::class)->name('console.accounts.split');
+routes/web.php:34:        Route::post('console/accounts/{account}/bar-items', [OpenAccountController::class, 'addBarItem'])->name('console.accounts.bar-items');
+routes/web.php:35:        Route::post('console/accounts/{account}/payments', [OpenAccountController::class, 'recordPayment'])->name('console.accounts.payments');
+routes/web.php:36:        Route::post('console/accounts/{account}/close', [OpenAccountController::class, 'close'])->name('console.accounts.close');
+routes/web.php:37:        Route::post('console/accounts/{account}/extract', [OpenAccountController::class, 'extract'])->name('console.accounts.extract');
+routes/web.php:38:        Route::post('console/accounts/{account}/subscription-free', [SubscriptionController::class, 'applyFree'])->name('console.accounts.subscription-free');
+routes/web.php:39:        Route::post('console/items/{item}/split', [AccountItemController::class, 'split'])->name('console.items.split');
+routes/web.php:40:        Route::post('console/tables/{table}/start', [TableSessionController::class, 'start'])->name('console.tables.start');
+routes/web.php:41:        Route::post('console/table-sessions/{session}/stop', [TableSessionController::class, 'stop'])->name('console.table-sessions.stop');
+routes/web.php:44:    Route::middleware('venue.role:customer')->group(function () {
+routes/web.php:45:        Route::get('player', [PlayerController::class, 'home'])->name('player.home');
+routes/web.php:46:        Route::get('player/tournaments', [PlayerController::class, 'tournaments'])->name('player.tournaments.index');
+routes/web.php:47:        Route::post('player/booking-requests', [PlayerController::class, 'storeBookingRequest'])->name('player.booking-requests.store');
+routes/web.php:50:    Route::middleware('venue.role:manager')->group(function () {
+routes/web.php:51:        Route::get('console/manage', [ManagementController::class, 'index'])->name('console.manage.index');
+routes/web.php:52:        Route::post('console/manage/games', [ManagementController::class, 'storeGame'])->name('console.manage.games.store');
+routes/web.php:53:        Route::put('console/manage/games/{game}', [ManagementController::class, 'updateGame'])->name('console.manage.games.update');
+routes/web.php:54:        Route::delete('console/manage/games/{game}', [ManagementController::class, 'destroyGame'])->name('console.manage.games.destroy');
+routes/web.php:55:        Route::post('console/manage/tables', [ManagementController::class, 'storeTable'])->name('console.manage.tables.store');
+routes/web.php:56:        Route::put('console/manage/tables/{table}', [ManagementController::class, 'updateTable'])->name('console.manage.tables.update');
+routes/web.php:57:        Route::delete('console/manage/tables/{table}', [ManagementController::class, 'destroyTable'])->name('console.manage.tables.destroy');
+routes/web.php:58:        Route::post('console/manage/categories', [ManagementController::class, 'storeCategory'])->name('console.manage.categories.store');
+routes/web.php:59:        Route::put('console/manage/categories/{category}', [ManagementController::class, 'updateCategory'])->name('console.manage.categories.update');
+routes/web.php:60:        Route::delete('console/manage/categories/{category}', [ManagementController::class, 'destroyCategory'])->name('console.manage.categories.destroy');
+routes/web.php:61:        Route::post('console/manage/products', [ManagementController::class, 'storeProduct'])->name('console.manage.products.store');
+routes/web.php:62:        Route::put('console/manage/products/{product}', [ManagementController::class, 'updateProduct'])->name('console.manage.products.update');
+routes/web.php:63:        Route::delete('console/manage/products/{product}', [ManagementController::class, 'destroyProduct'])->name('console.manage.products.destroy');
+routes/web.php:64:        Route::post('console/manage/pricing', [ManagementController::class, 'updatePricing'])->name('console.manage.pricing.update');
+routes/web.php:65:        Route::post('console/manage/users', [ManagementController::class, 'storeUser'])->name('console.manage.users.store');
+routes/web.php:67:        Route::get('console/team', [TeamController::class, 'index'])->name('console.team.index');
+routes/web.php:68:        Route::post('console/team', [TeamController::class, 'store'])->name('console.team.store');
+routes/web.php:69:        Route::get('console/reminders', [ReminderController::class, 'index'])->name('console.reminders.index');
+routes/web.php:70:        Route::post('console/reminders', [ReminderController::class, 'store'])->name('console.reminders.store');
+routes/web.php:71:        Route::post('console/reminders/{reminder}/complete', [ReminderController::class, 'complete'])->name('console.reminders.complete');
+routes/web.php:72:        Route::get('console/subscriptions', [SubscriptionController::class, 'index'])->name('console.subscriptions.index');
+routes/web.php:73:        Route::post('console/subscription-plans', [SubscriptionController::class, 'storePlan'])->name('console.subscription-plans.store');
+routes/web.php:74:        Route::post('console/user-subscriptions', [SubscriptionController::class, 'storeUserSubscription'])->name('console.user-subscriptions.store');
+routes/web.php:75:        Route::get('console/bookings', [BookingController::class, 'index'])->name('console.bookings.index');
+routes/web.php:76:        Route::post('console/booking-windows', [BookingController::class, 'storeWindow'])->name('console.booking-windows.store');
+routes/web.php:77:        Route::post('console/bookings', [BookingController::class, 'storeBooking'])->name('console.bookings.store');
+routes/web.php:78:        Route::post('console/bookings/{booking}/confirm', [BookingController::class, 'confirm'])->name('console.bookings.confirm');
+routes/web.php:79:        Route::post('console/bookings/{booking}/arrive', [BookingController::class, 'arrive'])->name('console.bookings.arrive');
+routes/web.php:80:        Route::post('console/bookings/{booking}/complete', [BookingController::class, 'complete'])->name('console.bookings.complete');
+routes/web.php:81:        Route::post('console/bookings/{booking}/cancel', [BookingController::class, 'cancel'])->name('console.bookings.cancel');
+routes/web.php:82:        Route::post('console/bookings/{booking}/convert-to-waitlist', [BookingController::class, 'convertToWaitlist'])->name('console.bookings.convert-to-waitlist');
+routes/web.php:83:        Route::post('console/bookings/{booking}/no-show', [BookingController::class, 'markNoShow'])->name('console.bookings.mark-no-show');
+routes/web.php:84:        Route::post('console/waitlist', [BookingController::class, 'storeWaitlist'])->name('console.waitlist.store');
+routes/web.php:85:        Route::post('console/news', [BookingController::class, 'storeNews'])->name('console.news.store');
+routes/web.php:86:        Route::get('console/tournaments', [TournamentController::class, 'index'])->name('console.tournaments.index');
+routes/web.php:87:        Route::post('console/game-categories', [TournamentController::class, 'storeCategory'])->name('console.game-categories.store');
+routes/web.php:88:        Route::post('console/user-game-categories', [TournamentController::class, 'storeUserCategory'])->name('console.user-game-categories.store');
+routes/web.php:89:        Route::post('console/tournaments', [TournamentController::class, 'storeTournament'])->name('console.tournaments.store');
+routes/web.php:90:        Route::post('console/tournaments/{tournament}/registrations', [TournamentController::class, 'storeRegistration'])->name('console.tournament-registrations.store');
+routes/web.php:91:        Route::post('console/tournament-registrations/{registration}/mark-paid', [TournamentController::class, 'markPaid'])->name('console.tournament-registrations.mark-paid');
+routes/web.php:92:        Route::post('console/tournament-registrations/{registration}/offer', [TournamentController::class, 'offerWaitlistSpot'])->name('console.tournament-registrations.offer');
+routes/web.php:93:        Route::post('console/tournament-registrations/{registration}/expire-offer', [TournamentController::class, 'expireWaitlistOffer'])->name('console.tournament-registrations.expire-offer');
+routes/web.php:95:        Route::get('console/reports', [ReportController::class, 'index'])->name('console.reports.index');
+routes/web.php:96:        Route::get('console/reports/export', [ReportController::class, 'export'])->name('console.reports.export');
+routes/web.php:97:        Route::post('console/inventory', [InventoryController::class, 'store'])->name('console.inventory.store');
+routes/web.php:98:        Route::put('console/inventory/{inventoryItem}', [InventoryController::class, 'update'])->name('console.inventory.update');
+routes/web.php:99:        Route::post('console/inventory/{inventoryItem}/override', [InventoryController::class, 'override'])->name('console.inventory.override');
+database/seeders/DatabaseSeeder.php:7:use App\Models\InventoryItem;
+database/seeders/DatabaseSeeder.php:12:use App\Models\Venue;
+database/seeders/DatabaseSeeder.php:13:use App\Models\VenueFeatureFlag;
+database/seeders/DatabaseSeeder.php:14:use App\Models\VenueSetting;
+database/seeders/DatabaseSeeder.php:15:use App\Models\VenueUserMembership;
+database/seeders/DatabaseSeeder.php:39:        $venue = Venue::query()->firstOrCreate(
+database/seeders/DatabaseSeeder.php:50:        VenueUserMembership::query()->firstOrCreate(
+database/seeders/DatabaseSeeder.php:110:                VenueUserMembership::query()
+database/seeders/DatabaseSeeder.php:118:            VenueUserMembership::query()->updateOrCreate(
+database/seeders/DatabaseSeeder.php:143:            VenueFeatureFlag::query()->firstOrCreate(
+database/seeders/DatabaseSeeder.php:158:            VenueSetting::query()->updateOrCreate(
+database/seeders/DatabaseSeeder.php:220:            InventoryItem::query()->firstOrCreate(
+app/Actions/Subscriptions/ResolveSubscriptionEligibility.php:3:namespace App\Actions\Subscriptions;
+app/Actions/Subscriptions/ResolveSubscriptionEligibility.php:6:use App\Models\UserSubscription;
+app/Actions/Subscriptions/ResolveSubscriptionEligibility.php:9:class ResolveSubscriptionEligibility
+app/Actions/Subscriptions/ResolveSubscriptionEligibility.php:18:        return UserSubscription::query()
+app/Actions/Subscriptions/ResolveSubscriptionEligibility.php:31:    public function assertUserEligible(OpenAccount $account, string $userId): ?UserSubscription
+app/Actions/Reports/BuildLocalReport.php:7:use App\Models\Payment;
+app/Actions/Reports/BuildLocalReport.php:8:use App\Models\Venue;
+app/Actions/Reports/BuildLocalReport.php:14:    public function handle(Venue $venue, ?Carbon $businessDate = null): array
+app/Actions/Reports/BuildLocalReport.php:26:        $payments = Payment::query()
+app/Actions/Reports/BuildLocalReport.php:40:            ->map(fn (Collection $methodPayments) => (int) $methodPayments->sum('amount'))
+app/Actions/Reports/BuildLocalReport.php:90:    private function businessDayWindow(Venue $venue, ?Carbon $businessDate): array
+app/Actions/Accounts/CreateOpenAccount.php:8:use App\Models\Venue;
+app/Actions/Accounts/CreateOpenAccount.php:15:    public function handle(Venue $venue, User $openedBy, string $displayName, string $source = 'manual'): OpenAccount
+app/Actions/Audit/WriteAuditLog.php:7:use App\Models\Venue;
+app/Actions/Audit/WriteAuditLog.php:14:        ?Venue $venue,
+resources/js/pages/player/tournaments/index.tsx:10:export default function PlayerTournamentsIndex({
+database/seeders/DemoOperationalSeeder.php:9:use App\Actions\Accounts\RecordManualPayment;
+database/seeders/DemoOperationalSeeder.php:12:use App\Models\Booking;
+database/seeders/DemoOperationalSeeder.php:13:use App\Models\BookingWindow;
+database/seeders/DemoOperationalSeeder.php:20:use App\Models\SubscriptionPlan;
+database/seeders/DemoOperationalSeeder.php:24:use App\Models\Tournament;
+database/seeders/DemoOperationalSeeder.php:25:use App\Models\TournamentRegistration;
+database/seeders/DemoOperationalSeeder.php:28:use App\Models\UserSubscription;
+database/seeders/DemoOperationalSeeder.php:29:use App\Models\Venue;
+database/seeders/DemoOperationalSeeder.php:30:use App\Models\VenueUserMembership;
+database/seeders/DemoOperationalSeeder.php:40:        $venue = Venue::query()->where('name', 'Rocket Club Demo')->firstOrFail();
+database/seeders/DemoOperationalSeeder.php:55:    private function seedCustomers(Venue $venue, User $manager): array
+database/seeders/DemoOperationalSeeder.php:89:            VenueUserMembership::query()->firstOrCreate(
+database/seeders/DemoOperationalSeeder.php:103:    private function seedRunningTable(Venue $venue, User $manager, User $customer): void
+database/seeders/DemoOperationalSeeder.php:125:    private function seedPartialAccount(Venue $venue, User $manager, User $firstCustomer, User $secondCustomer): void
+database/seeders/DemoOperationalSeeder.php:147:        app(RecordManualPayment::class)->handle($account, 500, 'manual_pos', $manager, null, 'Marco');
+database/seeders/DemoOperationalSeeder.php:150:    private function seedClosedAccount(Venue $venue, User $manager, User $customer): void
+database/seeders/DemoOperationalSeeder.php:161:        app(RecordManualPayment::class)->handle($account, 150, 'cash', $manager, null, 'Anna');
+database/seeders/DemoOperationalSeeder.php:168:    private function seedP1Operations(Venue $venue, User $manager, array $customers): void
+database/seeders/DemoOperationalSeeder.php:202:        $plan = SubscriptionPlan::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:222:        UserSubscription::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:236:        BookingWindow::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:247:        Booking::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:291:        $tournament = Tournament::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:310:        TournamentRegistration::query()->updateOrCreate(
+database/seeders/DemoOperationalSeeder.php:323:    private function demoAccount(Venue $venue, string $displayName): ?OpenAccount
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:3:namespace App\Filament\Resources\VenueSettings\Pages;
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:5:use App\Filament\Resources\VenueSettings\VenueSettingResource;
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:9:class ManageVenueSettings extends ManageRecords
+app/Filament/Resources/VenueSettings/Pages/ManageVenueSettings.php:11:    protected static string $resource = VenueSettingResource::class;
+app/Actions/Accounts/ApplySubscriptionFree.php:12:class ApplySubscriptionFree
+app/Actions/Accounts/ApplySubscriptionFree.php:29:            throw new DomainException('Subscription free amount must be within the unpaid table time balance.');
+routes/settings.php:6:use Inertia\Inertia;
+routes/settings.php:8:Route::middleware('auth')->group(function () {
+routes/settings.php:9:    Route::redirect('settings', 'settings/profile');
+routes/settings.php:11:    Route::get('settings/profile', [ProfileController::class, 'edit'])->name('profile.edit');
+routes/settings.php:12:    Route::patch('settings/profile', [ProfileController::class, 'update'])->name('profile.update');
+routes/settings.php:13:    Route::delete('settings/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+routes/settings.php:15:    Route::get('settings/password', [PasswordController::class, 'edit'])->name('password.edit');
+routes/settings.php:16:    Route::put('settings/password', [PasswordController::class, 'update'])->name('password.update');
+routes/settings.php:18:    Route::get('settings/appearance', function () {
+routes/settings.php:19:        return Inertia::render('settings/appearance');
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:3:namespace App\Filament\Resources\VenueSettings;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:5:use App\Filament\Resources\VenueSettings\Pages\ManageVenueSettings;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:6:use App\Models\VenueSetting;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:13:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:17:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:18:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:19:use Filament\Tables\Table;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:21:class VenueSettingResource extends Resource
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:23:    protected static ?string $model = VenueSetting::class;
+app/Filament/Resources/VenueSettings/VenueSettingResource.php:78:            'index' => ManageVenueSettings::route('/'),
+app/Actions/Accounts/RecordManualPayment.php:8:use App\Models\Payment;
+app/Actions/Accounts/RecordManualPayment.php:9:use App\Models\PaymentAllocation;
+app/Actions/Accounts/RecordManualPayment.php:14:class RecordManualPayment
+app/Actions/Accounts/RecordManualPayment.php:25:    ): Payment {
+app/Actions/Accounts/RecordManualPayment.php:27:            throw new DomainException('Payment amount must be positive.');
+app/Actions/Accounts/RecordManualPayment.php:35:            $payment = Payment::query()->create([
+app/Actions/Accounts/RecordManualPayment.php:48:                PaymentAllocation::query()->create([
+app/Actions/Accounts/RecordManualPayment.php:54:                AccountItem::query()->findOrFail($allocation['account_item_id'])->refreshPaymentState();
+app/Actions/Accounts/RecordManualPayment.php:82:            throw new DomainException('Payment exceeds account balance.');
+app/Actions/Accounts/RecordManualPayment.php:93:            throw new DomainException('Payment amount must equal allocated amount.');
+app/Actions/Accounts/RecordManualPayment.php:103:                throw new DomainException('Payment allocation exceeds item balance.');
+routes/auth.php:13:Route::middleware('guest')->group(function () {
+routes/auth.php:14:    Route::get('register', [RegisteredUserController::class, 'create'])
+routes/auth.php:17:    Route::post('register', [RegisteredUserController::class, 'store']);
+routes/auth.php:19:    Route::get('login', [AuthenticatedSessionController::class, 'create'])
+routes/auth.php:22:    Route::post('login', [AuthenticatedSessionController::class, 'store']);
+routes/auth.php:24:    Route::get('forgot-password', [PasswordResetLinkController::class, 'create'])
+routes/auth.php:27:    Route::post('forgot-password', [PasswordResetLinkController::class, 'store'])
+routes/auth.php:30:    Route::get('reset-password/{token}', [NewPasswordController::class, 'create'])
+routes/auth.php:33:    Route::post('reset-password', [NewPasswordController::class, 'store'])
+routes/auth.php:37:Route::middleware('auth')->group(function () {
+routes/auth.php:38:    Route::get('verify-email', EmailVerificationPromptController::class)
+routes/auth.php:41:    Route::get('verify-email/{id}/{hash}', VerifyEmailController::class)
+routes/auth.php:45:    Route::post('email/verification-notification', [EmailVerificationNotificationController::class, 'store'])
+routes/auth.php:49:    Route::get('confirm-password', [ConfirmablePasswordController::class, 'show'])
+routes/auth.php:52:    Route::post('confirm-password', [ConfirmablePasswordController::class, 'store']);
+routes/auth.php:54:    Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])
+resources/js/pages/player/home.tsx:10:interface TournamentPayload {
+resources/js/pages/player/home.tsx:23:    upcoming_tournaments: TournamentPayload[];
+app/Http/Controllers/Console/BookingController.php:7:use App\Models\Booking;
+app/Http/Controllers/Console/BookingController.php:8:use App\Models\BookingWindow;
+app/Http/Controllers/Console/BookingController.php:11:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/BookingController.php:17:use Inertia\Inertia;
+app/Http/Controllers/Console/BookingController.php:18:use Inertia\Response;
+app/Http/Controllers/Console/BookingController.php:20:class BookingController extends Controller
+app/Http/Controllers/Console/BookingController.php:26:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:28:        return Inertia::render('bookings/index', [
+app/Http/Controllers/Console/BookingController.php:31:            'customers' => VenueUserMembership::query()
+app/Http/Controllers/Console/BookingController.php:36:                ->map(fn (VenueUserMembership $membership) => $membership->user)
+app/Http/Controllers/Console/BookingController.php:39:            'booking_windows' => BookingWindow::query()->where('venue_id', $venue->id)->orderBy('starts_at')->get(),
+app/Http/Controllers/Console/BookingController.php:40:            'bookings' => Booking::query()->with('user:id,name,nickname,no_show_count')->where('venue_id', $venue->id)->orderBy('starts_at')->get(),
+app/Http/Controllers/Console/BookingController.php:48:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:59:        $window = BookingWindow::query()->create(array_merge($data, [
+app/Http/Controllers/Console/BookingController.php:69:    public function storeBooking(Request $request): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:71:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:72:        $data = $this->validateBooking($request, $venue->id);
+app/Http/Controllers/Console/BookingController.php:74:        $booking = Booking::query()->create(array_merge($data, [
+app/Http/Controllers/Console/BookingController.php:84:    public function confirm(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:89:    public function arrive(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:94:    public function complete(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:99:    public function cancel(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:104:    public function convertToWaitlist(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:106:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:138:    public function markNoShow(Request $request, Booking $booking): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:140:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:153:    private function transition(Request $request, Booking $booking, string $status, string $action): RedirectResponse
+app/Http/Controllers/Console/BookingController.php:155:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:169:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:199:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/BookingController.php:220:    private function validateBooking(Request $request, string $venueId): array
+app/Filament/Resources/Games/Pages/ManageGames.php:3:namespace App\Filament\Resources\Games\Pages;
+app/Filament/Resources/Games/Pages/ManageGames.php:5:use App\Filament\Resources\Games\GameResource;
+app/Filament/Resources/Games/Pages/ManageGames.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/Games/Pages/ManageGames.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Http/Controllers/Console/TournamentController.php:9:use App\Models\Tournament;
+app/Http/Controllers/Console/TournamentController.php:10:use App\Models\TournamentRegistration;
+app/Http/Controllers/Console/TournamentController.php:13:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/TournamentController.php:21:use Inertia\Inertia;
+app/Http/Controllers/Console/TournamentController.php:22:use Inertia\Response;
+app/Http/Controllers/Console/TournamentController.php:24:class TournamentController extends Controller
+app/Http/Controllers/Console/TournamentController.php:30:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:32:        return Inertia::render('tournaments/index', [
+app/Http/Controllers/Console/TournamentController.php:36:            'customers' => VenueUserMembership::query()
+app/Http/Controllers/Console/TournamentController.php:41:                ->map(fn (VenueUserMembership $membership) => $membership->user)
+app/Http/Controllers/Console/TournamentController.php:44:            'tournaments' => Tournament::query()
+app/Http/Controllers/Console/TournamentController.php:54:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:76:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:96:    public function storeTournament(Request $request): RedirectResponse
+app/Http/Controllers/Console/TournamentController.php:98:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:116:        $tournament = Tournament::query()->create(array_merge($data, [
+app/Http/Controllers/Console/TournamentController.php:128:    public function storeRegistration(Request $request, Tournament $tournament): RedirectResponse
+app/Http/Controllers/Console/TournamentController.php:130:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:137:        $registration = DB::transaction(function () use ($tournament, $data): TournamentRegistration {
+app/Http/Controllers/Console/TournamentController.php:139:            $this->assertTournamentEligibility($tournament, $user);
+app/Http/Controllers/Console/TournamentController.php:147:                throw new DomainException('Tournament is full and waitlist is disabled.');
+app/Http/Controllers/Console/TournamentController.php:154:            return TournamentRegistration::query()->create([
+app/Http/Controllers/Console/TournamentController.php:171:    public function markPaid(Request $request, TournamentRegistration $registration): RedirectResponse
+app/Http/Controllers/Console/TournamentController.php:173:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:206:    public function offerWaitlistSpot(Request $request, TournamentRegistration $registration): RedirectResponse
+app/Http/Controllers/Console/TournamentController.php:208:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:231:    public function expireWaitlistOffer(Request $request, TournamentRegistration $registration): RedirectResponse
+app/Http/Controllers/Console/TournamentController.php:233:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TournamentController.php:248:    private function assertTournamentEligibility(Tournament $tournament, User $user): void
+app/Http/Controllers/Console/TournamentController.php:268:            throw new DomainException('Tournament registration is closed.');
+app/Filament/Resources/Games/GameResource.php:3:namespace App\Filament\Resources\Games;
+app/Filament/Resources/Games/GameResource.php:5:use App\Filament\Resources\Games\Pages\ManageGames;
+app/Filament/Resources/Games/GameResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/Games/GameResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/Games/GameResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/Games/GameResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/Games/GameResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/Games/GameResource.php:13:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/Games/GameResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/Games/GameResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/Games/GameResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/Games/GameResource.php:17:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/Games/GameResource.php:18:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/Games/GameResource.php:19:use Filament\Tables\Table;
+resources/js/pages/reports/index.tsx:17:interface VenuePayload {
+resources/js/pages/reports/index.tsx:58:interface InventoryItemPayload {
+resources/js/pages/reports/index.tsx:85:    venue: VenuePayload;
+resources/js/pages/reports/index.tsx:88:    inventory_items: InventoryItemPayload[];
+resources/js/pages/reports/index.tsx:89:    shopping_list: InventoryItemPayload[];
+resources/js/pages/reports/index.tsx:203:                    <InventoryCreateForm products={products} />
+resources/js/pages/reports/index.tsx:204:                    <InventoryList items={inventory_items} products={products} />
+resources/js/pages/reports/index.tsx:318:function InventoryCreateForm({ products }: { products: ProductPayload[] }) {
+resources/js/pages/reports/index.tsx:439:function InventoryList({ items, products }: { items: InventoryItemPayload[]; products: ProductPayload[] }) {
+resources/js/pages/reports/index.tsx:444:                    <InventoryItemForms key={item.id} item={item} products={products} />
+resources/js/pages/reports/index.tsx:452:function InventoryItemForms({ item, products }: { item: InventoryItemPayload; products: ProductPayload[] }) {
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:3:namespace App\Filament\Resources\FeatureFlags;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:5:use App\Filament\Resources\FeatureFlags\Pages\ManageFeatureFlags;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:13:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:17:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:18:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/FeatureFlags/FeatureFlagResource.php:19:use Filament\Tables\Table;
+resources/js/pages/bookings/index.tsx:26:interface BookingPayload {
+resources/js/pages/bookings/index.tsx:35:export default function BookingsIndex({
+resources/js/pages/bookings/index.tsx:48:    bookings: BookingPayload[];
+resources/js/pages/bookings/index.tsx:70:                    <BookingForm tables={tables} customers={customers} />
+resources/js/pages/bookings/index.tsx:83:                                <BookingActions booking={booking} />
+resources/js/pages/bookings/index.tsx:109:function BookingActions({ booking }: { booking: BookingPayload }) {
+resources/js/pages/bookings/index.tsx:200:function BookingForm({ tables, customers }: { tables: TablePayload[]; customers: CustomerPayload[] }) {
+app/Http/Controllers/Console/TeamController.php:8:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/TeamController.php:12:use Inertia\Inertia;
+app/Http/Controllers/Console/TeamController.php:13:use Inertia\Response;
+app/Http/Controllers/Console/TeamController.php:21:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TeamController.php:23:        return Inertia::render('team/index', [
+app/Http/Controllers/Console/TeamController.php:36:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/TeamController.php:64:        return VenueUserMembership::query()
+app/Http/Controllers/Console/TeamController.php:70:            ->map(fn (VenueUserMembership $membership) => $membership->user)
+app/Filament/Resources/FeatureFlags/Pages/ManageFeatureFlags.php:3:namespace App\Filament\Resources\FeatureFlags\Pages;
+app/Filament/Resources/FeatureFlags/Pages/ManageFeatureFlags.php:5:use App\Filament\Resources\FeatureFlags\FeatureFlagResource;
+app/Filament/Resources/FeatureFlags/Pages/ManageFeatureFlags.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/FeatureFlags/Pages/ManageFeatureFlags.php:7:use Filament\Resources\Pages\ManageRecords;
+resources/js/pages/tournaments/index.tsx:33:interface TournamentRegistrationPayload {
+resources/js/pages/tournaments/index.tsx:41:interface TournamentPayload {
+resources/js/pages/tournaments/index.tsx:46:    registrations: TournamentRegistrationPayload[];
+resources/js/pages/tournaments/index.tsx:49:export default function TournamentsIndex({
+resources/js/pages/tournaments/index.tsx:60:    tournaments: TournamentPayload[];
+resources/js/pages/tournaments/index.tsx:79:                    <TournamentForm games={games} categories={categories} />
+resources/js/pages/tournaments/index.tsx:119:function RegistrationActions({ registration }: { registration: TournamentRegistrationPayload }) {
+resources/js/pages/tournaments/index.tsx:203:function TournamentForm({ games, categories }: { games: GamePayload[]; categories: CategoryPayload[] }) {
+resources/js/pages/tournaments/index.tsx:271:function RegistrationForm({ tournaments, customers }: { tournaments: TournamentPayload[]; customers: CustomerPayload[] }) {
+resources/js/pages/tournaments/index.tsx:272:    const firstTournament = tournaments[0]?.id ?? '';
+resources/js/pages/tournaments/index.tsx:273:    const { data, setData, post, processing } = useForm({ tournament_id: firstTournament, user_id: customers[0]?.id ?? '' });
+app/Filament/Resources/ProductCategories/Pages/ManageProductCategories.php:3:namespace App\Filament\Resources\ProductCategories\Pages;
+app/Filament/Resources/ProductCategories/Pages/ManageProductCategories.php:5:use App\Filament\Resources\ProductCategories\ProductCategoryResource;
+app/Filament/Resources/ProductCategories/Pages/ManageProductCategories.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/ProductCategories/Pages/ManageProductCategories.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Http/Controllers/Console/TableSessionController.php:14:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/TableSessionController.php:62:                VenueUserMembership::query()
+resources/js/pages/dashboard.tsx:22:interface VenuePayload {
+resources/js/pages/dashboard.tsx:48:interface SubscriptionRulesPayload {
+resources/js/pages/dashboard.tsx:73:        subscription_rules: SubscriptionRulesPayload | null;
+resources/js/pages/dashboard.tsx:118:    venue: VenuePayload | null;
+resources/js/pages/dashboard.tsx:152:const formatSubscriptionRules = (rules: SubscriptionRulesPayload | null) => {
+resources/js/pages/dashboard.tsx:1122:                                        const ruleParts = formatSubscriptionRules(participant.subscription_rules);
+resources/js/pages/dashboard.tsx:1145:                        <PaymentForm
+resources/js/pages/dashboard.tsx:1524:function PaymentForm({ accountId, defaultAmount }: { accountId: string; defaultAmount: number }) {
+resources/js/app.tsx:3:import { createInertiaApp } from '@inertiajs/react';
+resources/js/app.tsx:15:createInertiaApp({
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:3:namespace App\Filament\Resources\VenueUserMemberships\Pages;
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:5:use App\Filament\Resources\VenueUserMemberships\VenueUserMembershipResource;
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:9:class ManageVenueUserMemberships extends ManageRecords
+app/Filament/Resources/VenueUserMemberships/Pages/ManageVenueUserMemberships.php:11:    protected static string $resource = VenueUserMembershipResource::class;
+app/Http/Controllers/Console/InventoryController.php:7:use App\Models\InventoryItem;
+app/Http/Controllers/Console/InventoryController.php:8:use App\Models\InventoryMovement;
+app/Http/Controllers/Console/InventoryController.php:9:use App\Models\Venue;
+app/Http/Controllers/Console/InventoryController.php:10:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/InventoryController.php:16:class InventoryController extends Controller
+app/Http/Controllers/Console/InventoryController.php:22:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/InventoryController.php:23:        $data = $this->validateInventoryItem($request, $venue);
+app/Http/Controllers/Console/InventoryController.php:26:            $item = InventoryItem::query()->create([
+app/Http/Controllers/Console/InventoryController.php:47:    public function update(Request $request, InventoryItem $inventoryItem): RedirectResponse
+app/Http/Controllers/Console/InventoryController.php:49:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/InventoryController.php:52:        $data = $this->validateInventoryItem($request, $venue);
+app/Http/Controllers/Console/InventoryController.php:84:    public function override(Request $request, InventoryItem $inventoryItem): RedirectResponse
+app/Http/Controllers/Console/InventoryController.php:86:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/InventoryController.php:105:            InventoryMovement::query()->create([
+app/Http/Controllers/Console/InventoryController.php:128:    private function resolveVenue(Request $request): Venue
+app/Http/Controllers/Console/InventoryController.php:131:            ?? VenueUserMembership::query()
+app/Http/Controllers/Console/InventoryController.php:136:        return Venue::query()->findOrFail($membership->venue_id);
+app/Http/Controllers/Console/InventoryController.php:139:    private function validateInventoryItem(Request $request, Venue $venue): array
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:3:namespace App\Filament\Resources\ProductCategories;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:5:use App\Filament\Resources\ProductCategories\Pages\ManageProductCategories;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:13:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:17:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:18:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/ProductCategories/ProductCategoryResource.php:19:use Filament\Tables\Table;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:3:namespace App\Filament\Resources\VenueUserMemberships;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:5:use App\Filament\Resources\VenueUserMemberships\Pages\ManageVenueUserMemberships;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:7:use App\Models\VenueUserMembership;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:9:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:10:use Filament\Actions\DeleteAction;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:11:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:12:use Filament\Actions\EditAction;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:13:use Filament\Forms\Components\Hidden;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:14:use Filament\Forms\Components\Select;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:15:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:16:use Filament\Resources\Resource;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:17:use Filament\Schemas\Components\Utilities\Get;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:18:use Filament\Schemas\Schema;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:19:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:20:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:21:use Filament\Tables\Table;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:25:class VenueUserMembershipResource extends Resource
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:27:    protected static ?string $model = VenueUserMembership::class;
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:168:        return VenueUserMembership::query()
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:175:            ->mapWithKeys(fn (VenueUserMembership $membership): array => [
+app/Filament/Resources/VenueUserMemberships/VenueUserMembershipResource.php:193:            'index' => ManageVenueUserMemberships::route('/'),
+app/Http/Controllers/Console/ManagementController.php:12:use App\Models\Venue;
+app/Http/Controllers/Console/ManagementController.php:13:use App\Models\VenueSetting;
+app/Http/Controllers/Console/ManagementController.php:14:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/ManagementController.php:21:use Inertia\Inertia;
+app/Http/Controllers/Console/ManagementController.php:22:use Inertia\Response;
+app/Http/Controllers/Console/ManagementController.php:30:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:32:        return Inertia::render('manage/index', [
+app/Http/Controllers/Console/ManagementController.php:82:            'users' => VenueUserMembership::query()
+app/Http/Controllers/Console/ManagementController.php:90:                ->map(fn (VenueUserMembership $membership) => [
+app/Http/Controllers/Console/ManagementController.php:106:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:130:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:155:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:169:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:194:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:220:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:246:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:272:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:305:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:320:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:346:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:372:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:387:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:399:                $setting = VenueSetting::query()->firstOrNew(['venue_id' => $venue->id, 'key' => $key]);
+app/Http/Controllers/Console/ManagementController.php:418:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ManagementController.php:451:            $membership = VenueUserMembership::query()->create([
+app/Http/Controllers/Console/ManagementController.php:479:    private function resolveVenue(Request $request): Venue
+app/Http/Controllers/Console/ManagementController.php:482:            ?? VenueUserMembership::query()
+app/Http/Controllers/Console/ManagementController.php:487:        return Venue::query()->findOrFail($membership->venue_id);
+app/Http/Controllers/Console/ManagementController.php:490:    private function validateTable(Request $request, Venue $venue, ?Table $table = null): array
+app/Http/Controllers/Console/ManagementController.php:507:    private function validateProduct(Request $request, Venue $venue): array
+app/Http/Controllers/Console/ManagementController.php:520:    private function pricingSettings(Venue $venue): array
+app/Http/Controllers/Console/ManagementController.php:522:        $settings = VenueSetting::query()
+resources/js/pages/subscriptions/index.tsx:30:interface SubscriptionPayload {
+resources/js/pages/subscriptions/index.tsx:40:export default function SubscriptionsIndex({
+resources/js/pages/subscriptions/index.tsx:48:    subscriptions: SubscriptionPayload[];
+resources/js/pages/subscriptions/index.tsx:67:                    <SubscriptionForm customers={customers} plans={plans} />
+resources/js/pages/subscriptions/index.tsx:142:function SubscriptionForm({ customers, plans }: { customers: CustomerPayload[]; plans: PlanPayload[] }) {
+resources/js/pages/accounts/show.tsx:14:interface SubscriptionRulesPayload {
+resources/js/pages/accounts/show.tsx:41:        subscription_rules: SubscriptionRulesPayload | null;
+resources/js/pages/accounts/show.tsx:46:interface PaymentPayload {
+resources/js/pages/accounts/show.tsx:73:    payments: PaymentPayload[];
+resources/js/pages/accounts/show.tsx:91:const formatSubscriptionRules = (rules: SubscriptionRulesPayload | null) => {
+resources/js/pages/accounts/show.tsx:150:                                    const ruleParts = formatSubscriptionRules(participant.subscription_rules);
+resources/js/pages/manage/index.tsx:17:interface VenuePayload {
+resources/js/pages/manage/index.tsx:67:interface VenueUserPayload {
+resources/js/pages/manage/index.tsx:99:    venue: VenuePayload;
+resources/js/pages/manage/index.tsx:105:    users: VenueUserPayload[];
+resources/js/pages/manage/index.tsx:341:function UsersSection({ users }: { users: VenueUserPayload[] }) {
+app/Filament/Resources/Tables/Pages/ManageTables.php:3:namespace App\Filament\Resources\Tables\Pages;
+app/Filament/Resources/Tables/Pages/ManageTables.php:5:use App\Filament\Resources\Tables\TableResource;
+app/Filament/Resources/Tables/Pages/ManageTables.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/Tables/Pages/ManageTables.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Filament/Resources/Products/ProductResource.php:3:namespace App\Filament\Resources\Products;
+app/Filament/Resources/Products/ProductResource.php:5:use App\Filament\Resources\Products\Pages\ManageProducts;
+app/Filament/Resources/Products/ProductResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/Products/ProductResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/Products/ProductResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/Products/ProductResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/Products/ProductResource.php:12:use Filament\Forms\Components\Select;
+app/Filament/Resources/Products/ProductResource.php:13:use Filament\Forms\Components\Textarea;
+app/Filament/Resources/Products/ProductResource.php:14:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/Products/ProductResource.php:15:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/Products/ProductResource.php:16:use Filament\Resources\Resource;
+app/Filament/Resources/Products/ProductResource.php:17:use Filament\Schemas\Schema;
+app/Filament/Resources/Products/ProductResource.php:18:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/Products/ProductResource.php:19:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/Products/ProductResource.php:20:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/Products/ProductResource.php:21:use Filament\Tables\Table;
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:3:namespace App\Filament\Resources\VenueFeatureFlags\Pages;
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:5:use App\Filament\Resources\VenueFeatureFlags\VenueFeatureFlagResource;
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:9:class ManageVenueFeatureFlags extends ManageRecords
+app/Filament/Resources/VenueFeatureFlags/Pages/ManageVenueFeatureFlags.php:11:    protected static string $resource = VenueFeatureFlagResource::class;
+app/Http/Controllers/Console/SubscriptionController.php:5:use App\Actions\Accounts\ApplySubscriptionFree;
+app/Http/Controllers/Console/SubscriptionController.php:7:use App\Actions\Subscriptions\ResolveSubscriptionEligibility;
+app/Http/Controllers/Console/SubscriptionController.php:11:use App\Models\SubscriptionPlan;
+app/Http/Controllers/Console/SubscriptionController.php:13:use App\Models\UserSubscription;
+app/Http/Controllers/Console/SubscriptionController.php:14:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/SubscriptionController.php:20:use Inertia\Inertia;
+app/Http/Controllers/Console/SubscriptionController.php:21:use Inertia\Response;
+app/Http/Controllers/Console/SubscriptionController.php:23:class SubscriptionController extends Controller
+app/Http/Controllers/Console/SubscriptionController.php:29:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/SubscriptionController.php:31:        return Inertia::render('subscriptions/index', [
+app/Http/Controllers/Console/SubscriptionController.php:33:            'plans' => SubscriptionPlan::query()
+app/Http/Controllers/Console/SubscriptionController.php:37:            'subscriptions' => UserSubscription::query()
+app/Http/Controllers/Console/SubscriptionController.php:42:            'customers' => VenueUserMembership::query()
+app/Http/Controllers/Console/SubscriptionController.php:47:                ->map(fn (VenueUserMembership $membership) => $membership->user)
+app/Http/Controllers/Console/SubscriptionController.php:55:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/SubscriptionController.php:71:        $plan = SubscriptionPlan::query()->create([
+app/Http/Controllers/Console/SubscriptionController.php:95:    public function storeUserSubscription(Request $request): RedirectResponse
+app/Http/Controllers/Console/SubscriptionController.php:97:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/SubscriptionController.php:110:        $subscription = UserSubscription::query()->create(array_merge($data, [
+app/Http/Controllers/Console/SubscriptionController.php:123:        ApplySubscriptionFree $applySubscriptionFree,
+app/Http/Controllers/Console/SubscriptionController.php:124:        ResolveSubscriptionEligibility $eligibility
+app/Http/Controllers/Console/SubscriptionController.php:126:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/SubscriptionController.php:147:        DB::transaction(function () use ($account, $item, $subscriber, $data, $request, $applySubscriptionFree): void {
+app/Http/Controllers/Console/SubscriptionController.php:148:            $applySubscriptionFree->handle($account, $item, $subscriber, (int) $data['amount'], $request->user(), $data['reason'] ?? null);
+app/Filament/Resources/Venues/Pages/ManageVenues.php:3:namespace App\Filament\Resources\Venues\Pages;
+app/Filament/Resources/Venues/Pages/ManageVenues.php:5:use App\Filament\Resources\Venues\VenueResource;
+app/Filament/Resources/Venues/Pages/ManageVenues.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/Venues/Pages/ManageVenues.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Filament/Resources/Venues/Pages/ManageVenues.php:9:class ManageVenues extends ManageRecords
+app/Filament/Resources/Venues/Pages/ManageVenues.php:11:    protected static string $resource = VenueResource::class;
+app/Models/InventoryMovement.php:9:class InventoryMovement extends Model
+app/Models/InventoryMovement.php:24:        return $this->belongsTo(Venue::class);
+app/Models/InventoryMovement.php:29:        return $this->belongsTo(InventoryItem::class);
+app/Filament/Resources/Products/Pages/ManageProducts.php:3:namespace App\Filament\Resources\Products\Pages;
+app/Filament/Resources/Products/Pages/ManageProducts.php:5:use App\Filament\Resources\Products\ProductResource;
+app/Filament/Resources/Products/Pages/ManageProducts.php:6:use Filament\Actions\CreateAction;
+app/Filament/Resources/Products/Pages/ManageProducts.php:7:use Filament\Resources\Pages\ManageRecords;
+app/Models/BookingWindow.php:9:class BookingWindow extends Model
+app/Models/BookingWindow.php:25:        return $this->belongsTo(Venue::class);
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:3:namespace App\Filament\Resources\VenueFeatureFlags;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:5:use App\Filament\Resources\VenueFeatureFlags\Pages\ManageVenueFeatureFlags;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:6:use App\Models\VenueFeatureFlag;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:13:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:17:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:18:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:19:use Filament\Tables\Table;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:21:class VenueFeatureFlagResource extends Resource
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:23:    protected static ?string $model = VenueFeatureFlag::class;
+app/Filament/Resources/VenueFeatureFlags/VenueFeatureFlagResource.php:84:            'index' => ManageVenueFeatureFlags::route('/'),
+app/Models/User.php:7:use Filament\Models\Contracts\FilamentUser;
+app/Models/User.php:8:use Filament\Panel;
+app/Models/User.php:14:class User extends Authenticatable implements FilamentUser
+app/Http/Controllers/Player/PlayerController.php:7:use App\Models\Booking;
+app/Http/Controllers/Player/PlayerController.php:9:use App\Models\Tournament;
+app/Http/Controllers/Player/PlayerController.php:13:use Inertia\Inertia;
+app/Http/Controllers/Player/PlayerController.php:14:use Inertia\Response;
+app/Http/Controllers/Player/PlayerController.php:22:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Player/PlayerController.php:24:        return Inertia::render('player/home', [
+app/Http/Controllers/Player/PlayerController.php:37:            'upcoming_tournaments' => Tournament::query()
+app/Http/Controllers/Player/PlayerController.php:47:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Player/PlayerController.php:49:        return Inertia::render('player/tournaments/index', [
+app/Http/Controllers/Player/PlayerController.php:51:            'tournaments' => Tournament::query()
+app/Http/Controllers/Player/PlayerController.php:59:    public function storeBookingRequest(Request $request): RedirectResponse
+app/Http/Controllers/Player/PlayerController.php:61:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Player/PlayerController.php:70:        $booking = Booking::query()->create(array_merge($data, [
+app/Http/Controllers/Console/ReportController.php:9:use App\Models\InventoryItem;
+app/Http/Controllers/Console/ReportController.php:11:use App\Models\Payment;
+app/Http/Controllers/Console/ReportController.php:13:use App\Models\Venue;
+app/Http/Controllers/Console/ReportController.php:14:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/ReportController.php:18:use Inertia\Inertia;
+app/Http/Controllers/Console/ReportController.php:19:use Inertia\Response;
+app/Http/Controllers/Console/ReportController.php:28:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ReportController.php:33:        return Inertia::render('reports/index', [
+app/Http/Controllers/Console/ReportController.php:62:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/ReportController.php:92:    private function resolveVenue(Request $request): Venue
+app/Http/Controllers/Console/ReportController.php:95:            ?? VenueUserMembership::query()
+app/Http/Controllers/Console/ReportController.php:100:        return Venue::query()->findOrFail($membership->venue_id);
+app/Http/Controllers/Console/ReportController.php:103:    private function businessDate(Request $request, Venue $venue): ?Carbon
+app/Http/Controllers/Console/ReportController.php:112:    private function auditLogs(Request $request, Venue $venue): array
+app/Http/Controllers/Console/ReportController.php:138:    private function inventoryItems(Venue $venue): Collection
+app/Http/Controllers/Console/ReportController.php:140:        return InventoryItem::query()
+app/Http/Controllers/Console/ReportController.php:145:            ->map(fn (InventoryItem $item) => [
+app/Http/Controllers/Console/ReportController.php:165:    private function shoppingNeeded(InventoryItem $item): ?string
+app/Http/Controllers/Console/ReportController.php:174:    private function isUnderMinimum(InventoryItem $item): bool
+app/Http/Controllers/Console/ReportController.php:192:            Payment::class => $this->paymentUrl($log->entity_id),
+app/Http/Controllers/Console/ReportController.php:206:        $payment = Payment::query()->find($paymentId);
+app/Http/Controllers/Settings/PasswordController.php:11:use Inertia\Inertia;
+app/Http/Controllers/Settings/PasswordController.php:12:use Inertia\Response;
+app/Http/Controllers/Settings/PasswordController.php:21:        return Inertia::render('settings/password', [
+app/Models/TournamentRegistration.php:9:class TournamentRegistration extends Model
+app/Models/TournamentRegistration.php:29:        return $this->belongsTo(Tournament::class);
+app/Filament/Resources/Tables/TableResource.php:3:namespace App\Filament\Resources\Tables;
+app/Filament/Resources/Tables/TableResource.php:5:use App\Filament\Resources\Tables\Pages\ManageTables;
+app/Filament/Resources/Tables/TableResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/Tables/TableResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/Tables/TableResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/Tables/TableResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/Tables/TableResource.php:12:use Filament\Forms\Components\Select;
+app/Filament/Resources/Tables/TableResource.php:13:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/Tables/TableResource.php:14:use Filament\Forms\Components\Toggle;
+app/Filament/Resources/Tables/TableResource.php:15:use Filament\Resources\Resource;
+app/Filament/Resources/Tables/TableResource.php:16:use Filament\Schemas\Schema;
+app/Filament/Resources/Tables/TableResource.php:17:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/Tables/TableResource.php:18:use Filament\Tables\Columns\IconColumn;
+app/Filament/Resources/Tables/TableResource.php:19:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/Tables/TableResource.php:20:use Filament\Tables\Table;
+app/Http/Controllers/Auth/ConfirmablePasswordController.php:10:use Inertia\Inertia;
+app/Http/Controllers/Auth/ConfirmablePasswordController.php:11:use Inertia\Response;
+app/Http/Controllers/Auth/ConfirmablePasswordController.php:20:        return Inertia::render('auth/confirm-password');
+app/Http/Controllers/Settings/ProfileController.php:11:use Inertia\Inertia;
+app/Http/Controllers/Settings/ProfileController.php:12:use Inertia\Response;
+app/Http/Controllers/Settings/ProfileController.php:21:        return Inertia::render('settings/profile', [
+app/Filament/Resources/Venues/VenueResource.php:3:namespace App\Filament\Resources\Venues;
+app/Filament/Resources/Venues/VenueResource.php:5:use App\Filament\Resources\Venues\Pages\ManageVenues;
+app/Filament/Resources/Venues/VenueResource.php:6:use App\Models\Venue;
+app/Filament/Resources/Venues/VenueResource.php:8:use Filament\Actions\BulkActionGroup;
+app/Filament/Resources/Venues/VenueResource.php:9:use Filament\Actions\DeleteAction;
+app/Filament/Resources/Venues/VenueResource.php:10:use Filament\Actions\DeleteBulkAction;
+app/Filament/Resources/Venues/VenueResource.php:11:use Filament\Actions\EditAction;
+app/Filament/Resources/Venues/VenueResource.php:12:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/Venues/VenueResource.php:13:use Filament\Forms\Components\TimePicker;
+app/Filament/Resources/Venues/VenueResource.php:14:use Filament\Resources\Resource;
+app/Filament/Resources/Venues/VenueResource.php:15:use Filament\Schemas\Schema;
+app/Filament/Resources/Venues/VenueResource.php:16:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/Venues/VenueResource.php:17:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/Venues/VenueResource.php:18:use Filament\Tables\Table;
+app/Filament/Resources/Venues/VenueResource.php:20:class VenueResource extends Resource
+app/Filament/Resources/Venues/VenueResource.php:22:    protected static ?string $model = Venue::class;
+app/Filament/Resources/Venues/VenueResource.php:96:            'index' => ManageVenues::route('/'),
+app/Http/Controllers/Console/DashboardController.php:6:use App\Actions\Subscriptions\ResolveSubscriptionEligibility;
+app/Http/Controllers/Console/DashboardController.php:12:use App\Models\Venue;
+app/Http/Controllers/Console/DashboardController.php:13:use App\Models\VenueSetting;
+app/Http/Controllers/Console/DashboardController.php:14:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/DashboardController.php:16:use Inertia\Inertia;
+app/Http/Controllers/Console/DashboardController.php:17:use Inertia\Response;
+app/Http/Controllers/Console/DashboardController.php:21:    public function __invoke(Request $request, BuildLocalReport $report, ResolveSubscriptionEligibility $eligibility): Response
+app/Http/Controllers/Console/DashboardController.php:23:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/DashboardController.php:26:            return Inertia::render('dashboard', [
+app/Http/Controllers/Console/DashboardController.php:68:        return Inertia::render('dashboard', [
+app/Http/Controllers/Console/DashboardController.php:97:    private function resolveVenue(Request $request): ?Venue
+app/Http/Controllers/Console/DashboardController.php:100:            ?? VenueUserMembership::query()
+app/Http/Controllers/Console/DashboardController.php:105:        return $membership ? Venue::query()->findOrFail($membership->venue_id) : null;
+app/Http/Controllers/Console/DashboardController.php:136:    private function accountPayload(OpenAccount $account, ResolveSubscriptionEligibility $eligibility): array
+app/Http/Controllers/Console/DashboardController.php:144:        $activeSubscriptions = $eligibility->activeForAccount($account);
+app/Http/Controllers/Console/DashboardController.php:164:                'is_subscriber' => $participant->user_id !== null && $activeSubscriptions->has($participant->user_id),
+app/Http/Controllers/Console/DashboardController.php:165:                'subscription_plan_name' => $participant->user_id !== null ? $activeSubscriptions->get($participant->user_id)?->plan?->name : null,
+app/Http/Controllers/Console/DashboardController.php:166:                'subscription_rules' => $participant->user_id !== null ? $activeSubscriptions->get($participant->user_id)?->plan?->rules_json : null,
+app/Http/Controllers/Console/DashboardController.php:181:    private function customerPayload(Venue $venue): array
+app/Http/Controllers/Console/DashboardController.php:183:        return VenueUserMembership::query()
+app/Http/Controllers/Console/DashboardController.php:190:            ->map(fn (VenueUserMembership $membership) => [
+app/Http/Controllers/Console/DashboardController.php:205:    private function pricingSettings(Venue $venue): array
+app/Http/Controllers/Console/DashboardController.php:207:        $settings = VenueSetting::query()
+app/Models/Table.php:23:        return $this->belongsTo(Venue::class);
+app/Models/PaymentAllocation.php:9:class PaymentAllocation extends Model
+app/Models/PaymentAllocation.php:17:        return $this->belongsTo(Payment::class);
+app/Http/Controllers/Auth/RegisteredUserController.php:14:use Inertia\Inertia;
+app/Http/Controllers/Auth/RegisteredUserController.php:15:use Inertia\Response;
+app/Http/Controllers/Auth/RegisteredUserController.php:24:        return Inertia::render('auth/register');
+app/Http/Controllers/Auth/NewPasswordController.php:14:use Inertia\Inertia;
+app/Http/Controllers/Auth/NewPasswordController.php:15:use Inertia\Response;
+app/Http/Controllers/Auth/NewPasswordController.php:24:        return Inertia::render('auth/reset-password', [
+app/Http/Controllers/Console/AccountShowController.php:5:use App\Actions\Subscriptions\ResolveSubscriptionEligibility;
+app/Http/Controllers/Console/AccountShowController.php:11:use App\Models\Payment;
+app/Http/Controllers/Console/AccountShowController.php:13:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/AccountShowController.php:15:use Inertia\Inertia;
+app/Http/Controllers/Console/AccountShowController.php:16:use Inertia\Response;
+app/Http/Controllers/Console/AccountShowController.php:20:    public function __invoke(Request $request, OpenAccount $account, ResolveSubscriptionEligibility $eligibility): Response
+app/Http/Controllers/Console/AccountShowController.php:25:        $activeSubscriptions = $eligibility->activeForAccount($account);
+app/Http/Controllers/Console/AccountShowController.php:27:        $payments = Payment::query()
+app/Http/Controllers/Console/AccountShowController.php:33:        return Inertia::render('accounts/show', [
+app/Http/Controllers/Console/AccountShowController.php:51:                    'is_subscriber' => $participant->user_id !== null && $activeSubscriptions->has($participant->user_id),
+app/Http/Controllers/Console/AccountShowController.php:52:                    'subscription_plan_name' => $participant->user_id !== null ? $activeSubscriptions->get($participant->user_id)?->plan?->name : null,
+app/Http/Controllers/Console/AccountShowController.php:53:                    'subscription_rules' => $participant->user_id !== null ? $activeSubscriptions->get($participant->user_id)?->plan?->rules_json : null,
+app/Http/Controllers/Console/AccountShowController.php:67:            'payments' => $payments->map(fn (Payment $payment) => [
+app/Http/Controllers/Console/AccountShowController.php:82:            'customers' => VenueUserMembership::query()
+app/Http/Controllers/Console/AccountShowController.php:89:                ->map(fn (VenueUserMembership $membership) => [
+app/Http/Controllers/Console/AccountShowController.php:105:        $paymentIds = Payment::query()->where('open_account_id', $account->id)->pluck('id');
+app/Models/VenueSetting.php:8:class VenueSetting extends Model
+app/Http/Middleware/EnsureVenueRole.php:5:use App\Models\VenueUserMembership;
+app/Http/Middleware/EnsureVenueRole.php:10:class EnsureVenueRole
+app/Http/Middleware/EnsureVenueRole.php:14:        /** @var VenueUserMembership|null $membership */
+app/Filament/Resources/AuditLogs/Pages/ManageAuditLogs.php:3:namespace App\Filament\Resources\AuditLogs\Pages;
+app/Filament/Resources/AuditLogs/Pages/ManageAuditLogs.php:5:use App\Filament\Resources\AuditLogs\AuditLogResource;
+app/Filament/Resources/AuditLogs/Pages/ManageAuditLogs.php:6:use Filament\Resources\Pages\ManageRecords;
+app/Models/Reminder.php:27:        return $this->belongsTo(Venue::class);
+app/Http/Controllers/Console/OpenAccountController.php:9:use App\Actions\Accounts\RecordManualPayment;
+app/Http/Controllers/Console/OpenAccountController.php:15:use App\Models\Venue;
+app/Http/Controllers/Console/OpenAccountController.php:16:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/OpenAccountController.php:30:        $venue = $this->resolveVenue($request);
+app/Http/Controllers/Console/OpenAccountController.php:82:        $this->ensureAccountVenue($request, $account);
+app/Http/Controllers/Console/OpenAccountController.php:98:    public function recordPayment(Request $request, OpenAccount $account, RecordManualPayment $recordPayment): RedirectResponse
+app/Http/Controllers/Console/OpenAccountController.php:100:        $this->ensureAccountVenue($request, $account);
+app/Http/Controllers/Console/OpenAccountController.php:108:        $recordPayment->handle(
+app/Http/Controllers/Console/OpenAccountController.php:122:        $this->ensureAccountVenue($request, $account);
+app/Http/Controllers/Console/OpenAccountController.php:131:        $this->ensureAccountVenue($request, $account);
+app/Http/Controllers/Console/OpenAccountController.php:177:    private function resolveVenue(Request $request): Venue
+app/Http/Controllers/Console/OpenAccountController.php:180:            ?? VenueUserMembership::query()
+app/Http/Controllers/Console/OpenAccountController.php:185:        return Venue::query()->findOrFail($membership->venue_id);
+app/Http/Controllers/Console/OpenAccountController.php:188:    private function ensureAccountVenue(Request $request, OpenAccount $account): void
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:7:use App\Models\VenueUserMembership;
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:12:use Inertia\Inertia;
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:13:use Inertia\Response;
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:22:        return Inertia::render('auth/login', [
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:23:            'canResetPassword' => Route::has('password.request'),
+app/Http/Controllers/Auth/AuthenticatedSessionController.php:41:        $membership = VenueUserMembership::query()
+app/Models/AuditLog.php:33:        return $this->belongsTo(Venue::class);
+app/Http/Controllers/Auth/EmailVerificationPromptController.php:8:use Inertia\Inertia;
+app/Http/Controllers/Auth/EmailVerificationPromptController.php:9:use Inertia\Response;
+app/Http/Controllers/Auth/EmailVerificationPromptController.php:20:                    : Inertia::render('auth/verify-email', ['status' => $request->session()->get('status')]);
+app/Filament/Resources/AuditLogs/AuditLogResource.php:3:namespace App\Filament\Resources\AuditLogs;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:5:use App\Filament\Resources\AuditLogs\Pages\ManageAuditLogs;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:8:use Filament\Forms\Components\Textarea;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:9:use Filament\Forms\Components\TextInput;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:10:use Filament\Resources\Resource;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:11:use Filament\Schemas\Schema;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:12:use Filament\Support\Icons\Heroicon;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:13:use Filament\Tables\Columns\TextColumn;
+app/Filament/Resources/AuditLogs/AuditLogResource.php:14:use Filament\Tables\Table;
+app/Http/Controllers/Controller.php:5:use App\Models\Venue;
+app/Http/Controllers/Controller.php:6:use App\Models\VenueUserMembership;
+app/Http/Controllers/Controller.php:11:    protected function resolveActiveVenue(Request $request): Venue
+app/Http/Controllers/Controller.php:14:            ?? VenueUserMembership::query()
+app/Http/Controllers/Controller.php:19:        return Venue::query()->findOrFail($membership->venue_id);
+app/Models/Venue.php:11:class Venue extends Model
+app/Http/Middleware/HandleInertiaRequests.php:5:use App\Models\VenueUserMembership;
+app/Http/Middleware/HandleInertiaRequests.php:8:use Inertia\Middleware;
+app/Http/Middleware/HandleInertiaRequests.php:10:class HandleInertiaRequests extends Middleware
+app/Http/Middleware/HandleInertiaRequests.php:58:    private function activeMembership(Request $request): ?VenueUserMembership
+app/Http/Middleware/HandleInertiaRequests.php:62:        if ($membership instanceof VenueUserMembership) {
+app/Http/Middleware/HandleInertiaRequests.php:70:        return VenueUserMembership::query()
+app/Models/InventoryItem.php:10:class InventoryItem extends Model
+app/Models/InventoryItem.php:31:        return $this->belongsTo(Venue::class);
+app/Models/InventoryItem.php:41:        return $this->hasMany(InventoryMovement::class);
+app/Models/NewsPost.php:26:        return $this->belongsTo(Venue::class);
+app/Http/Middleware/AddSecurityHeaders.php:59:            || $request->headers->has('X-Inertia')
+app/Http/Middleware/AddSecurityHeaders.php:60:            || $response->headers->has('X-Inertia');
+app/Http/Controllers/Auth/PasswordResetLinkController.php:10:use Inertia\Inertia;
+app/Http/Controllers/Auth/PasswordResetLinkController.php:11:use Inertia\Response;
+app/Http/Controllers/Auth/PasswordResetLinkController.php:20:        return Inertia::render('auth/forgot-password', [
+app/Models/OpenAccount.php:27:        return $this->belongsTo(Venue::class);
+app/Models/OpenAccount.php:47:        return $this->hasMany(Payment::class);
+app/Http/Controllers/Console/ReminderController.php:8:use App\Models\VenueUserMembership;
+app/Http/Controllers/Console/ReminderController.php:13:use Inertia\Inertia;
+app/Http/Controllers/Console/ReminderController.php:14:use Inertia\Response;
+app/Http/Controllers/Console/ReminderController.php:22:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/ReminderController.php:24:        return Inertia::render('reminders/index', [
+app/Http/Controllers/Console/ReminderController.php:26:            'customers' => VenueUserMembership::query()
+app/Http/Controllers/Console/ReminderController.php:31:                ->map(fn (VenueUserMembership $membership) => $membership->user)
+app/Http/Controllers/Console/ReminderController.php:44:        $venue = $this->resolveActiveVenue($request);
+app/Http/Controllers/Console/ReminderController.php:69:        $venue = $this->resolveActiveVenue($request);
+app/Http/Middleware/EnsureActiveVenueMembership.php:5:use App\Models\VenueUserMembership;
+app/Http/Middleware/EnsureActiveVenueMembership.php:11:class EnsureActiveVenueMembership
+app/Http/Middleware/EnsureActiveVenueMembership.php:15:        $membership = VenueUserMembership::query()
+app/Models/Booking.php:9:class Booking extends Model
+app/Models/Booking.php:25:        return $this->belongsTo(Venue::class);
+app/Models/SubscriptionPlan.php:10:class SubscriptionPlan extends Model
+app/Models/SubscriptionPlan.php:27:        return $this->belongsTo(Venue::class);
+app/Models/SubscriptionPlan.php:32:        return $this->hasMany(UserSubscription::class);
+app/Models/AccountItem.php:41:        return $this->hasMany(PaymentAllocation::class);
+app/Models/AccountItem.php:49:    public function refreshPaymentState(): self
+app/Models/VenueFeatureFlag.php:8:class VenueFeatureFlag extends Model
+app/Providers/AppServiceProvider.php:6:use App\Models\VenueUserMembership;
+app/Providers/AppServiceProvider.php:25:        Gate::define('access-console', function (User $user, VenueUserMembership $membership): bool {
+app/Providers/AppServiceProvider.php:29:        Gate::define('manage-venue', function (User $user, VenueUserMembership $membership): bool {
+app/Models/TeamMembership.php:25:        return $this->belongsTo(Venue::class);
+app/Providers/Filament/AdminPanelProvider.php:3:namespace App\Providers\Filament;
+app/Providers/Filament/AdminPanelProvider.php:5:use Filament\Http\Middleware\Authenticate;
+app/Providers/Filament/AdminPanelProvider.php:6:use Filament\Http\Middleware\AuthenticateSession;
+app/Providers/Filament/AdminPanelProvider.php:7:use Filament\Http\Middleware\DisableBladeIconComponents;
+app/Providers/Filament/AdminPanelProvider.php:8:use Filament\Http\Middleware\DispatchServingFilamentEvent;
+app/Providers/Filament/AdminPanelProvider.php:9:use Filament\Pages\Dashboard;
+app/Providers/Filament/AdminPanelProvider.php:10:use Filament\Panel;
+app/Providers/Filament/AdminPanelProvider.php:11:use Filament\PanelProvider;
+app/Providers/Filament/AdminPanelProvider.php:12:use Filament\Support\Colors\Color;
+app/Providers/Filament/AdminPanelProvider.php:13:use Filament\Widgets\AccountWidget;
+app/Providers/Filament/AdminPanelProvider.php:14:use Filament\Widgets\FilamentInfoWidget;
+app/Providers/Filament/AdminPanelProvider.php:34:            ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
+app/Providers/Filament/AdminPanelProvider.php:35:            ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
+app/Providers/Filament/AdminPanelProvider.php:39:            ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\Filament\Widgets')
+app/Providers/Filament/AdminPanelProvider.php:42:                FilamentInfoWidget::class,
+app/Providers/Filament/AdminPanelProvider.php:53:                DispatchServingFilamentEvent::class,
+app/Models/VenueUserMembership.php:10:class VenueUserMembership extends Model
+app/Models/VenueUserMembership.php:64:        return $this->belongsTo(Venue::class);
+app/Models/Tournament.php:10:class Tournament extends Model
+app/Models/Tournament.php:29:        return $this->belongsTo(Venue::class);
+app/Models/Tournament.php:34:        return $this->hasMany(TournamentRegistration::class);
+app/Models/WaitlistEntry.php:17:        return $this->belongsTo(Venue::class);
+app/Models/Payment.php:10:class Payment extends Model
+app/Models/Payment.php:26:        return $this->hasMany(PaymentAllocation::class);
+app/Models/Payment.php:36:        return $this->belongsTo(Venue::class);
+app/Models/UserSubscription.php:9:class UserSubscription extends Model
+app/Models/UserSubscription.php:26:        return $this->belongsTo(Venue::class);
+app/Models/UserSubscription.php:36:        return $this->belongsTo(SubscriptionPlan::class, 'subscription_plan_id');

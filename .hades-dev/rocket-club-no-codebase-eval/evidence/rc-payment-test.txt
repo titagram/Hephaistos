@@ -1,0 +1,10 @@
+case_id: rc_payment_or_subscription_schema
+observed_at: 2026-07-08T07:05:00Z
+environment: eval
+symptom: Recording a manual payment larger than the unpaid account balance fails.
+test: tests/Feature/Console/AccountDetailTest.php::manager_can_record_manual_payment
+failure:
+  DomainException: Payment exceeds account balance.
+  at app/Actions/Accounts/RecordManualPayment.php:82
+  App\Actions\Accounts\RecordManualPayment::buildFifoAllocations() at app/Actions/Accounts/RecordManualPayment.php:32
+  App\Actions\Accounts\RecordManualPayment::handle() via console.accounts.payments

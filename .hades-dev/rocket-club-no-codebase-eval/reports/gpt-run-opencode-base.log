@@ -1,0 +1,91 @@
+⚠️  API call failed (attempt 1/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 0.36s  Context: 2 msgs, ~3,810 tokens
+⏳ Retrying in 2.2s (attempt 1/3)...
+⚠️  API call failed (attempt 2/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 2.79s  Context: 2 msgs, ~3,810 tokens
+⏳ Retrying in 5.7s (attempt 2/3)...
+⚠️  API call failed (attempt 3/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 8.83s  Context: 2 msgs, ~3,810 tokens
+❌ API failed after 3 retries — HTTP 404: {"detail":"Not Found"}
+   💀 Final error: HTTP 404: {"detail":"Not Found"}
+🧾 Request debug dump written to: /Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/hermes-home/sessions/request_dump_rocket-no-codebase-gpt__rc_booking_controller_or_model_20260708_091515_038651.json
+{"completed": false, "error": "HTTP 404: {\"detail\":\"Not Found\"}", "fixture_id": "gpt__rc_booking_controller_or_model", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/trajectories/gpt/gpt__rc_booking_controller_or_model.json"}
+🧾 Request debug dump written to: /Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/hermes-home/sessions/request_dump_rocket-no-codebase-gpt__rc_payment_or_subscription_schema_20260708_091515_616487.json
+⚠️  API call failed (attempt 1/3): PermissionDeniedError [HTTP 403]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 403 — HTML error page (title not found)
+   📋 Details: <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style global>body{font-family:Arial,Helvetica,sans-serif}.container{align-items:center;display:flex;flex-direction:column;gap:2rem;height:100%;justify-content:center;width:100%}@keyframes enlarge-appear{0
+   ⏱️  Elapsed: 0.12s  Context: 2 msgs, ~3,824 tokens
+❌ Non-retryable error (HTTP 403): HTTP 403 — HTML error page (title not found)
+❌ Non-retryable client error (HTTP 403). Aborting.
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   💡 Your API key was rejected by the provider. Check:
+      • Is the key valid? Run: hermes setup
+      • Does your account have access to gpt-5.5?
+{"completed": false, "error": "HTTP 403 \u2014 HTML error page (title not found)", "fixture_id": "gpt__rc_payment_or_subscription_schema", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/trajectories/gpt/gpt__rc_payment_or_subscription_schema.json"}
+🧾 Request debug dump written to: /Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/hermes-home/sessions/request_dump_rocket-no-codebase-gpt__rc_filament_or_inertia_policy_20260708_091519_359737.json
+⚠️  API call failed (attempt 1/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 0.14s  Context: 2 msgs, ~3,812 tokens
+⏳ Retrying in 2.9s (attempt 1/3)...
+⚠️  API call failed (attempt 2/3): PermissionDeniedError [HTTP 403]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 403 — HTML error page (title not found)
+   📋 Details: <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style global>body{font-family:Arial,Helvetica,sans-serif}.container{align-items:center;display:flex;flex-direction:column;gap:2rem;height:100%;justify-content:center;width:100%}@keyframes enlarge-appear{0
+   ⏱️  Elapsed: 3.34s  Context: 2 msgs, ~3,812 tokens
+❌ Non-retryable error (HTTP 403): HTTP 403 — HTML error page (title not found)
+❌ Non-retryable client error (HTTP 403). Aborting.
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   💡 Your API key was rejected by the provider. Check:
+      • Is the key valid? Run: hermes setup
+      • Does your account have access to gpt-5.5?
+{"completed": false, "error": "HTTP 403 \u2014 HTML error page (title not found)", "fixture_id": "gpt__rc_filament_or_inertia_policy", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/trajectories/gpt/gpt__rc_filament_or_inertia_policy.json"}
+⚠️  API call failed (attempt 1/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 0.16s  Context: 2 msgs, ~3,828 tokens
+⏳ Retrying in 2.1s (attempt 1/3)...
+⚠️  API call failed (attempt 2/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 2.60s  Context: 2 msgs, ~3,828 tokens
+⏳ Retrying in 5.8s (attempt 2/3)...
+⚠️  API call failed (attempt 3/3): NotFoundError [HTTP 404]
+   🔌 Provider: openai-codex  Model: gpt-5.5
+   🌐 Endpoint: https://chatgpt.com/backend-api/codex/
+   📝 Error: HTTP 404: {"detail":"Not Found"}
+   📋 Details: {'detail': 'Not Found'}
+   ⏱️  Elapsed: 8.83s  Context: 2 msgs, ~3,828 tokens
+❌ API failed after 3 retries — HTTP 404: {"detail":"Not Found"}
+   💀 Final error: HTTP 404: {"detail":"Not Found"}
+🧾 Request debug dump written to: /Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/hermes-home/sessions/request_dump_rocket-no-codebase-gpt__rc_incomplete_missing_source_slice_20260708_091528_624763.json
+{"completed": false, "error": "HTTP 404: {\"detail\":\"Not Found\"}", "fixture_id": "gpt__rc_incomplete_missing_source_slice", "path": "/Users/gabriele/Dev/Hephaistos/.hades-dev/rocket-club-no-codebase-eval/trajectories/gpt/gpt__rc_incomplete_missing_source_slice.json"}

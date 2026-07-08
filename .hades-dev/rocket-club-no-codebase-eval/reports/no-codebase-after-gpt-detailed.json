@@ -1,0 +1,227 @@
+{
+  "status": "failed",
+  "total": 8,
+  "passed": 2,
+  "failed": 6,
+  "complete_total": 6,
+  "complete_passed": 2,
+  "insufficient_total": 2,
+  "insufficient_passed": 0,
+  "accuracy": 0.25,
+  "root_cause_accuracy": 0.3333,
+  "insufficient_accuracy": 0.0,
+  "evidence_ref_coverage": 0.9474,
+  "freshness_coverage": 1.0,
+  "awareness_coverage": 1.0,
+  "tool_coverage": 1.0,
+  "tool_order_coverage": 1.0,
+  "persistence_coverage": 1.0,
+  "no_codebase_violations": [],
+  "results": [
+    {
+      "fixture_id": "gpt__rc_booking_controller_or_model",
+      "passed": true,
+      "failures": [],
+      "expected_root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+      "actual_root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+      "expected_confidence": "high",
+      "actual_confidence": "high",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": true,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SWDTMP8PWQNTJ0CQ28C7",
+        "evidence_pack:01KX08SWJA4Y9WP0JJTHJ1HTF5",
+        "graph:BookingController@validateBooking",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "source_slice:01KX08SVS5BAMJ8NZC85GFBD59"
+      ],
+      "actual_evidence_refs": [
+        "bug_evidence:01KX08SWDTMP8PWQNTJ0CQ28C7",
+        "evidence_pack:01KX08SWJA4Y9WP0JJTHJ1HTF5",
+        "graph:BookingController@validateBooking",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1491",
+        "graph:route:console.bookings.store",
+        "source_slice:01KX08SVS5BAMJ8NZC85GFBD59"
+      ]
+    },
+    {
+      "fixture_id": "gpt__rc_payment_or_subscription_schema",
+      "passed": true,
+      "failures": [],
+      "expected_root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+      "actual_root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+      "expected_confidence": "high",
+      "actual_confidence": "high",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": true,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SWTBPR4RB01A9V9CVG4T",
+        "evidence_pack:01KX08SWYKKARP4KEW86G3KCFQ",
+        "graph:RecordManualPayment@buildFifoAllocations",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "source_slice:01KX08SVXZACHFHHVDE6883Z2C"
+      ],
+      "actual_evidence_refs": [
+        "bug_evidence:01KX08SWTBPR4RB01A9V9CVG4T",
+        "evidence_pack:01KX08SWYKKARP4KEW86G3KCFQ",
+        "graph:RecordManualPayment@buildFifoAllocations",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "graph:App\\Models\\DomainException",
+        "source_slice:01KX08SVXZACHFHHVDE6883Z2C"
+      ]
+    },
+    {
+      "fixture_id": "gpt__rc_filament_or_inertia_policy",
+      "passed": false,
+      "failures": [
+        "confidence mismatch"
+      ],
+      "expected_root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+      "actual_root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+      "expected_confidence": "medium",
+      "actual_confidence": "high",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "current",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": true,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SX9N6BB309HGFPQ7JAYY",
+        "evidence_pack:01KX08SXE86C2FBJ8S6ENXAVEK",
+        "graph:AdminPanelProvider@panel",
+        "graph:Filament\\Http\\Middleware\\Authenticate",
+        "source_slice:01KX08SW22N53XYKGWS6PHDD9R"
+      ],
+      "actual_evidence_refs": [
+        "bug_evidence:01KX08SX9N6BB309HGFPQ7JAYY",
+        "evidence_pack:01KX08SXE86C2FBJ8S6ENXAVEK",
+        "graph:AdminPanelProvider@panel",
+        "graph:App\\Providers\\Filament\\AdminPanelProvider",
+        "graph:Filament\\Http\\Middleware\\Authenticate",
+        "source_slice:01KX08SW22N53XYKGWS6PHDD9R"
+      ]
+    },
+    {
+      "fixture_id": "gpt__rc_incomplete_missing_source_slice",
+      "passed": false,
+      "failures": [
+        "required evidence refs missing"
+      ],
+      "expected_root_cause_id": null,
+      "actual_root_cause_id": "not_determined",
+      "expected_confidence": "insufficient",
+      "actual_confidence": "insufficient",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "current",
+      "expected_diagnosable_without_source": false,
+      "actual_diagnosable_without_source": false,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SXNYEE9NC0YW3F398GZT",
+        "evidence_pack:01KX08SXTNQ34YGZHE8PKPC63K",
+        "graph:route:console.tournament-registrations.offer",
+        "graph:TournamentController@offerWaitlistSpot"
+      ],
+      "actual_evidence_refs": [
+        "bug_evidence:01KX08SXNYEE9NC0YW3F398GZT",
+        "evidence_pack:01KX08SXTNQ34YGZHE8PKPC63K",
+        "graph:route:console.tournament-registrations.offer",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:75"
+      ]
+    },
+    {
+      "fixture_id": "deepseek-v4-flash__rc_booking_controller_or_model",
+      "passed": false,
+      "failures": [
+        "missing diagnosis run"
+      ],
+      "expected_root_cause_id": "rc.rocket_club.booking_requires_user_or_ghost_alias",
+      "actual_root_cause_id": null,
+      "expected_confidence": "high",
+      "actual_confidence": "",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": null,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SWDTMP8PWQNTJ0CQ28C7",
+        "evidence_pack:01KX08SWJA4Y9WP0JJTHJ1HTF5",
+        "graph:BookingController@validateBooking",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:1428",
+        "source_slice:01KX08SVS5BAMJ8NZC85GFBD59"
+      ],
+      "actual_evidence_refs": []
+    },
+    {
+      "fixture_id": "deepseek-v4-flash__rc_payment_or_subscription_schema",
+      "passed": false,
+      "failures": [
+        "missing diagnosis run"
+      ],
+      "expected_root_cause_id": "rc.rocket_club.payment_exceeds_open_account_balance",
+      "actual_root_cause_id": null,
+      "expected_confidence": "high",
+      "actual_confidence": "",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": null,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SWTBPR4RB01A9V9CVG4T",
+        "evidence_pack:01KX08SWYKKARP4KEW86G3KCFQ",
+        "graph:RecordManualPayment@buildFifoAllocations",
+        "graph:edge:local_rocket_eval_populate_backend_ast:edge:258",
+        "source_slice:01KX08SVXZACHFHHVDE6883Z2C"
+      ],
+      "actual_evidence_refs": []
+    },
+    {
+      "fixture_id": "deepseek-v4-flash__rc_filament_or_inertia_policy",
+      "passed": false,
+      "failures": [
+        "missing diagnosis run"
+      ],
+      "expected_root_cause_id": "rc.rocket_club.filament_admin_requires_filament_auth",
+      "actual_root_cause_id": null,
+      "expected_confidence": "medium",
+      "actual_confidence": "",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "",
+      "expected_diagnosable_without_source": true,
+      "actual_diagnosable_without_source": null,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SX9N6BB309HGFPQ7JAYY",
+        "evidence_pack:01KX08SXE86C2FBJ8S6ENXAVEK",
+        "graph:AdminPanelProvider@panel",
+        "graph:Filament\\Http\\Middleware\\Authenticate",
+        "source_slice:01KX08SW22N53XYKGWS6PHDD9R"
+      ],
+      "actual_evidence_refs": []
+    },
+    {
+      "fixture_id": "deepseek-v4-flash__rc_incomplete_missing_source_slice",
+      "passed": false,
+      "failures": [
+        "missing diagnosis run"
+      ],
+      "expected_root_cause_id": null,
+      "actual_root_cause_id": null,
+      "expected_confidence": "insufficient",
+      "actual_confidence": "",
+      "expected_freshness_status": "current",
+      "actual_freshness_status": "",
+      "expected_diagnosable_without_source": false,
+      "actual_diagnosable_without_source": null,
+      "expected_evidence_refs": [
+        "bug_evidence:01KX08SXNYEE9NC0YW3F398GZT",
+        "evidence_pack:01KX08SXTNQ34YGZHE8PKPC63K",
+        "graph:route:console.tournament-registrations.offer",
+        "graph:TournamentController@offerWaitlistSpot"
+      ],
+      "actual_evidence_refs": []
+    }
+  ]
+}

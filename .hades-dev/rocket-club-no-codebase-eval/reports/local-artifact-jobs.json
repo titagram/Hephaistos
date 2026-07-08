@@ -1,0 +1,26 @@
+{
+  "jobs": [
+    {
+      "job_id": "local_rocket_eval_sync_git_tree",
+      "capability": "sync_git_tree",
+      "status": "completed",
+      "summary": "Collected 530 git tree entries; indexed 84 route(s), 2 dependency manifest(s).",
+      "artifact_schema": "hades.git_tree.v1",
+      "artifact_summary": "Project index; routes: GET register -> RegisteredUserController@create, POST register -> RegisteredUserController@store, GET login -> AuthenticatedSessionController@create, POST login -> AuthenticatedSessionController@store, GET forgot-password -> PasswordResetLinkController@create; dependencies: fakerphp/faker, filament/filament, inertiajs/inertia-laravel, laravel/framework, laravel/pail, @eslint/js, @headlessui/react, @inertiajs/react, @playwright/test, @radix-ui/react-avatar; migrations: 7",
+      "uploaded": 0,
+      "errors": 1,
+      "skipped": 0
+    },
+    {
+      "job_id": "local_rocket_eval_populate_backend_ast",
+      "capability": "populate_backend_ast",
+      "status": "completed",
+      "summary": "PHP graph; routes:84; symbols:530; edges:7657; tables:82; tests:28; logs:0; api_resource:46, blade_view:1, controller:147, database_table:82, form_request:8, middleware:12, middleware_alias:2, model:123",
+      "artifact_schema": "hades.php_graph.v1",
+      "artifact_summary": "PHP graph; routes:84; symbols:530; edges:7657; tables:82; tests:28; logs:0; api_resource:46, blade_view:1, controller:147, database_table:82, form_request:8, middleware:12, middleware_alias:2, model:123",
+      "uploaded": 0,
+      "errors": 1,
+      "skipped": 0
+    }
+  ]
+}
