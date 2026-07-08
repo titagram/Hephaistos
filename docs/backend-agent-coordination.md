@@ -7549,3 +7549,29 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Rocket Club no-codebase eval Hades - 2026-07-08
+
+Stato: completata valutazione reale su progetto backend fresh
+`Rocket Club No-Codebase Eval`.
+
+Risultati:
+
+- GPT/Codex baseline: 4/4 fixture passate usando `gpt-5.3-codex-spark` da cwd
+  neutro, con soli tool memory/Hades esposti.
+- DeepSeek v4 flash: 4/4 fixture passate usando `deepseek-v4-flash` via
+  `opencode-go` da cwd neutro.
+- No-codebase guard: 0 source/file/shell tool violations; freshness current;
+  diagnosable_without_source true sui casi completi e false sul caso
+  intenzionalmente incompleto.
+- Quality gate: `reports/final-quality-report.json` status `passed`, 8/8
+  fixture passate, accuracy/root cause/insufficient/evidence/tool-order/
+  persistence coverage tutte a 1.0.
+
+Resta fuori:
+
+- Nessun blocker restante per questa valutazione. Nota operativa: il support
+  status locale aggregato in `reports/status-final-before-sync.json` registra
+  ancora awareness partial su binding locali, ma il gate live no-codebase e'
+  passato senza violazioni; la valutazione finale usa
+  `--skip-local-status` per misurare solo il contratto no-codebase.
