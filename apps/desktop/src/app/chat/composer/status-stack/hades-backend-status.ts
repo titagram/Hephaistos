@@ -20,6 +20,16 @@ export interface HadesBackendStatusPayload {
     background?: Record<string, unknown> | null
     background_updated_at?: number | null
   }
+  task_work?: {
+    queued?: unknown
+    claimed?: unknown
+    failed?: unknown
+    missing_shared_memory_context?: unknown
+    next_step?: unknown
+    worker_setup?: {
+      status?: unknown
+    }
+  }
 }
 
 export interface HadesBackendStatusSummary {
@@ -52,6 +62,13 @@ export function summarizeHadesBackendStatus(
   const unread = count(inboxCounts, 'unread')
   const diagnosableBindings = count(payload.awareness, 'diagnosable_without_source_bindings')
   const bindingCount = count(payload.awareness, 'bindings')
+  const queuedTaskWork = count(payload.task_work, 'queued')
+  const claimedTaskWork = count(payload.task_work, 'claimed')
+  const failedTaskWork = count(payload.task_work, 'failed')
+  const missingTaskMemory = count(payload.task_work, 'missing_shared_memory_context')
+  const workerSetupStatus =
+    typeof payload.task_work?.worker_setup?.status === 'string' ? payload.task_work.worker_setup.status : null
+  const taskWorkNextStep = typeof payload.task_work?.next_step === 'string' ? payload.task_work.next_step : null
 
   const actions = Array.isArray(payload.actions)
     ? payload.actions.filter((item): item is string => typeof item === 'string')
@@ -75,6 +92,26 @@ export function summarizeHadesBackendStatus(
     parts.push('sync error')
   }
 
+  if (failedTaskWork) {
+    parts.push(`${failedTaskWork} failed task${failedTaskWork === 1 ? '' : 's'}`)
+  }
+
+  if (queuedTaskWork) {
+    parts.push(`${queuedTaskWork} queued task${queuedTaskWork === 1 ? '' : 's'}`)
+  }
+
+  if (claimedTaskWork) {
+    parts.push(`${claimedTaskWork} running task${claimedTaskWork === 1 ? '' : 's'}`)
+  }
+
+  if (missingTaskMemory) {
+    parts.push(`${missingTaskMemory} task${missingTaskMemory === 1 ? '' : 's'} missing memory`)
+  }
+
+  if (workerSetupStatus === 'missing') {
+    parts.push('worker setup missing')
+  }
+
   if (awarenessStatus && ['partial', 'degraded', 'unmapped'].includes(awarenessStatus)) {
     parts.push(
       bindingCount
@@ -88,8 +125,8 @@ export function summarizeHadesBackendStatus(
   }
 
   return {
-    detail: (actions[0] ?? parts.join(' · ')) || 'Backend needs attention',
+    detail: (actions[0] ?? taskWorkNextStep ?? parts.join(' · ')) || 'Backend needs attention',
     label: 'Hades backend',
-    tone: lastError || awarenessStatus === 'degraded' ? 'danger' : 'warning'
+    tone: lastError || failedTaskWork || awarenessStatus === 'degraded' ? 'danger' : 'warning'
   }
 }

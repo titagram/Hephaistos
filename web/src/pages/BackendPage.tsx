@@ -536,6 +536,81 @@ function GovernanceQualityPanel({ status }: { status: HadesBackendStatus }) {
   );
 }
 
+function TaskWorkPanel({ status }: { status: HadesBackendStatus }) {
+  const taskWork = status.task_work;
+  const workerSetup = taskWork?.worker_setup;
+  const setupStatus = status.configured ? (workerSetup?.status || "unknown") : "not configured";
+  const setupTone = !status.configured ? "outline" : statusTone(setupStatus);
+  const queued = Number(taskWork?.queued || 0);
+  const claimed = Number(taskWork?.claimed || 0);
+  const failed = Number(taskWork?.failed || 0);
+  const missingMemory = Number(taskWork?.missing_shared_memory_context || 0);
+  const coverage = Number(taskWork?.shared_memory_context_coverage ?? 1);
+  const nextStep = !status.configured
+    ? "Run hades backend bootstrap"
+    : taskWork?.next_step || workerSetup?.next_step || "Run hades backend tasks list";
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+            <Play className="h-4 w-4" />
+            Backend task worker
+          </H2>
+          <Badge tone={setupTone}>worker {setupStatus}</Badge>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Queued</div>
+            <div className="mt-1 text-lg font-semibold">{queued}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Claimed/running</div>
+            <div className="mt-1 text-lg font-semibold">{claimed}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Failed</div>
+            <div className="mt-1 text-lg font-semibold">{failed}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Memory coverage</div>
+            <div className="mt-1 text-lg font-semibold">{Math.round(coverage * 100)}%</div>
+          </div>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-xs uppercase text-muted-foreground">Next step</div>
+            <div className="mt-1 text-sm font-medium">{nextStep}</div>
+          </div>
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="mb-2 text-xs uppercase text-muted-foreground">Cached work by status</div>
+            <CountList counts={taskWork?.by_status ?? {}} />
+          </div>
+        </div>
+
+        {missingMemory > 0 && (
+          <div className="border border-border bg-background/40 px-3 py-2">
+            <div className="text-sm font-medium">Shared memory context missing</div>
+            <div className="mt-1 text-sm text-muted-foreground">
+              {missingMemory} task work item{missingMemory === 1 ? "" : "s"} need memory refs or memory search status before their output is trusted.
+            </div>
+            {taskWork?.missing_work_item_ids?.length ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {taskWork.missing_work_item_ids.slice(0, 5).map((id) => (
+                  <Badge tone="warning" key={id}>{id}</Badge>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 type ReviewActionRunner = (
   key: string,
   action: () => Promise<HadesBackendActionResponse>,
@@ -1971,6 +2046,7 @@ export default function BackendPage() {
       </div>
 
       <AwarenessPanel status={status} />
+      <TaskWorkPanel status={status} />
       <DiagnosisQualityPanel status={status} />
       <PolicyControlsPanel
         status={status}

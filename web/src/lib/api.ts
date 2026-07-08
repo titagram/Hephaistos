@@ -1809,6 +1809,27 @@ export interface HadesBackendQualityState {
   history?: HadesBackendQualityHistory;
 }
 
+export interface HadesBackendTaskWorkStatus {
+  schema?: string;
+  project_id?: string | null;
+  total: number;
+  queued: number;
+  claimed: number;
+  failed: number;
+  by_status: Record<string, number>;
+  shared_memory_required: number;
+  shared_memory_context: number;
+  missing_shared_memory_context: number;
+  shared_memory_context_coverage: number;
+  missing_work_item_ids: string[];
+  worker_setup?: {
+    status?: string;
+    local_workspace_id_present?: boolean;
+    next_step?: string;
+  };
+  next_step?: string;
+}
+
 export interface HadesBackendStatus {
   configured: boolean;
   agent: HadesBackendAgent | null;
@@ -1816,6 +1837,7 @@ export interface HadesBackendStatus {
   awareness?: HadesBackendAwarenessSummary;
   identity?: HadesBackendIdentity;
   quality?: HadesBackendQualityState;
+  task_work?: HadesBackendTaskWorkStatus;
   job_counts: Record<string, number>;
   proposal_counts: Record<string, number>;
   inbox_counts: Record<string, number>;

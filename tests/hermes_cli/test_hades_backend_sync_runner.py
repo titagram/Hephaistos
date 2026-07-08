@@ -1509,6 +1509,9 @@ def test_backend_status_reports_cached_task_work_readiness(monkeypatch, tmp_path
     assert task_work["shared_memory_context"] == 1
     assert task_work["missing_shared_memory_context"] == 1
     assert task_work["missing_work_item_ids"] == ["awi_queued"]
+    assert task_work["worker_setup"]["status"] == "missing"
+    assert task_work["worker_setup"]["local_workspace_id_present"] is False
+    assert any("worker-setup" in action for action in payload["actions"])
     assert any("Inspect failed backend task work" in action for action in payload["actions"])
     assert any("Repair backend task work missing shared memory context" in action for action in payload["actions"])
 

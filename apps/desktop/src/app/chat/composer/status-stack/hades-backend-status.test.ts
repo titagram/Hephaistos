@@ -64,4 +64,42 @@ describe('summarizeHadesBackendStatus', () => {
       tone: 'warning'
     })
   })
+
+  it('summarizes backend task work and worker setup gaps', () => {
+    expect(
+      summarizeHadesBackendStatus({
+        configured: true,
+        degraded: false,
+        task_work: {
+          queued: 2,
+          claimed: 1,
+          failed: 0,
+          missing_shared_memory_context: 1,
+          next_step: 'Run `hades backend worker-setup` in this checkout before claiming backend task work.',
+          worker_setup: { status: 'missing' }
+        }
+      })
+    ).toEqual({
+      detail: 'Run `hades backend worker-setup` in this checkout before claiming backend task work.',
+      label: 'Hades backend',
+      tone: 'warning'
+    })
+  })
+
+  it('marks failed backend task work as danger', () => {
+    expect(
+      summarizeHadesBackendStatus({
+        configured: true,
+        degraded: true,
+        task_work: {
+          failed: 1,
+          next_step: 'Run `hades backend tasks explain <work_item_id>` on failed items.'
+        }
+      })
+    ).toEqual({
+      detail: 'Run `hades backend tasks explain <work_item_id>` on failed items.',
+      label: 'Hades backend',
+      tone: 'danger'
+    })
+  })
 })

@@ -23,7 +23,9 @@ def load_backend_status_payload() -> dict[str, Any]:
     """Return the canonical local Hades backend status payload."""
     config = load_config()
     memory_config = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    backend_config = config.get("backend") if isinstance(config.get("backend"), dict) else {}
     memory_provider = str(memory_config.get("provider") or "local").strip() or "local"
+    plugin_local_workspace_id = str(backend_config.get("plugin_local_workspace_id") or "").strip()
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         if agent:
@@ -93,6 +95,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         quality_report_history=quality_report_history,
         quality_report_history_updated_at=quality_report_history_updated_at,
         plugin_work_items=plugin_work_items,
+        plugin_local_workspace_id=plugin_local_workspace_id,
     )
 
 
@@ -204,6 +207,7 @@ def backend_status_payload(
     quality_report_history: dict[str, Any] | None = None,
     quality_report_history_updated_at: int | None = None,
     plugin_work_items: list[Any] | None = None,
+    plugin_local_workspace_id: str = "",
     now: int | None = None,
 ) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
@@ -221,7 +225,11 @@ def backend_status_payload(
     quality_missing = bool(quality_state.get("staleness", {}).get("missing"))
     quality_failed = bool(last_quality_report and last_quality_report.get("status") == "failed")
     quality_attention = bool(last_quality_report and last_quality_report.get("status") == "attention")
-    task_work = _task_work_payload(plugin_work_items or [], project_id=getattr(agent, "project_id", None))
+    task_work = _task_work_payload(
+        plugin_work_items or [],
+        project_id=getattr(agent, "project_id", None),
+        plugin_local_workspace_id=plugin_local_workspace_id,
+    )
     actions: list[str] = []
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
@@ -266,6 +274,9 @@ def backend_status_payload(
     elif quality_stale:
         actions.append("Refresh stale Hades quality report with `hades backend quality-report --record`.")
     task_work_next_step = task_work.get("next_step")
+    worker_setup = task_work.get("worker_setup") if isinstance(task_work.get("worker_setup"), dict) else {}
+    if agent is not None and worker_setup.get("status") == "missing":
+        actions.append("Run `hades backend worker-setup` in this checkout before claiming backend task work.")
     if task_work.get("failed"):
         actions.append("Inspect failed backend task work with `hades backend tasks status`.")
     if task_work.get("missing_shared_memory_context"):
@@ -304,7 +315,12 @@ def backend_status_payload(
     }
 
 
-def _task_work_payload(work_items: list[Any], *, project_id: str | None) -> dict[str, Any]:
+def _task_work_payload(
+    work_items: list[Any],
+    *,
+    project_id: str | None,
+    plugin_local_workspace_id: str = "",
+) -> dict[str, Any]:
     from hermes_cli.hades_quality_report import build_agent_work_quality_report
 
     quality = build_agent_work_quality_report(work_items)
@@ -319,6 +335,8 @@ def _task_work_payload(work_items: list[Any], *, project_id: str | None) -> dict
         next_step = "Run `hades backend tasks explain <work_item_id>` on failed items, then retry or update the kanban task."
     elif missing_shared_memory:
         next_step = "Run `hades backend quality-report --record` and repair work items missing memory_search_status."
+    elif not plugin_local_workspace_id:
+        next_step = "Run `hades backend worker-setup` in this checkout before claiming backend task work."
     elif queued:
         next_step = "Run `hades backend tasks work --once` to process queued backend work."
     elif int(quality.get("total") or 0):
@@ -337,6 +355,11 @@ def _task_work_payload(work_items: list[Any], *, project_id: str | None) -> dict
         "missing_shared_memory_context": missing_shared_memory,
         "shared_memory_context_coverage": float(quality.get("shared_memory_context_coverage") or 0.0),
         "missing_work_item_ids": quality.get("missing_work_item_ids") if isinstance(quality.get("missing_work_item_ids"), list) else [],
+        "worker_setup": {
+            "status": "linked" if plugin_local_workspace_id else "missing",
+            "local_workspace_id_present": bool(plugin_local_workspace_id),
+            "next_step": "Run `hades backend worker-setup` in this checkout." if not plugin_local_workspace_id else "Worker setup is linked for this checkout.",
+        },
         "next_step": next_step,
     }
 
