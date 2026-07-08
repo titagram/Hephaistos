@@ -1977,6 +1977,7 @@ def _append_blade_view_graph(
     known_routes = route_by_name or {}
     known_livewire = livewire_component_by_alias or {}
     referenced_livewire_aliases: set[str] = set()
+    referenced_alpine_data_keys: set[str] = set()
     if len(symbols) < max_symbols:
         symbols.append(
             {
@@ -2287,6 +2288,7 @@ def _append_blade_view_graph(
         nonlocal truncated
         line = _line_number(source, offset)
         for key_name in _alpine_data_top_level_keys(data):
+            referenced_alpine_data_keys.add(key_name)
             target = f"alpine_state:{key_name}"
             key = ("blade_alpine_data", target, line)
             if key in seen_edges:
@@ -2305,6 +2307,33 @@ def _append_blade_view_graph(
                 },
                 max_edges=max_edges,
             ) or truncated
+
+    def append_blade_alpine_model_data(model: str, offset: int) -> None:
+        nonlocal truncated
+        model = str(model or "").strip()
+        if not model or not re.fullmatch(r"\$?[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*){0,8}", model):
+            return
+        root_state = model.split(".", 1)[0]
+        if root_state not in referenced_alpine_data_keys:
+            return
+        line = _line_number(source, offset)
+        key = ("blade_alpine_model_data", root_state, model, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_alpine_model_data",
+                "from": f"alpine_state:{model}",
+                "to": f"alpine_state:{root_state}",
+                "alpine_model": model,
+                "alpine_data_key": root_state,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
 
     def append_blade_alpine_action(event: str, action: str, modifiers: str, offset: int) -> None:
         nonlocal truncated
@@ -2596,6 +2625,7 @@ def _append_blade_view_graph(
         append_blade_alpine_data(match.group("data"), match.start("data"))
     for match in BLADE_ALPINE_MODEL_RE.finditer(source):
         append_blade_alpine_model(match.group("model"), match.group("modifiers"), match.start("model"))
+        append_blade_alpine_model_data(match.group("model"), match.start("model"))
     for match in BLADE_ALPINE_ACTION_RE.finditer(source):
         append_blade_alpine_action(
             match.group("xevent") or match.group("atevent"),

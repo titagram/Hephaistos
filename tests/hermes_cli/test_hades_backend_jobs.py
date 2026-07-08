@@ -1920,6 +1920,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_alpine_data", "view:orders.show", "alpine_state:filters") in edges
     assert ("blade_alpine_data", "view:orders.show", "alpine_state:open") in edges
     assert ("blade_alpine_model", "view:orders.show", "alpine_state:filters.status") in edges
+    assert ("blade_alpine_model_data", "alpine_state:filters.status", "alpine_state:filters") in edges
     assert ("blade_alpine_action", "view:orders.show", "alpine_action:applyFilters") in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
     assert ("blade_wire_action_method", "livewire_action:saveOrder", "OrdersStatus@saveOrder") in edges
@@ -2122,6 +2123,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "to": "alpine_state:filters.status",
         "alpine_model": "filters.status",
         "alpine_modifiers": ["debounce"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 24,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_alpine_model_data",
+        "from": "alpine_state:filters.status",
+        "to": "alpine_state:filters",
+        "alpine_model": "filters.status",
+        "alpine_data_key": "filters",
         "path": "resources/views/orders/show.blade.php",
         "line": 24,
     } in artifact["edges"]
