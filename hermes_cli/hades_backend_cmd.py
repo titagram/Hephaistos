@@ -341,6 +341,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  Next identity step: {login_recovery['recommended_next_action']}")
     if payload["job_counts"]:
         print(f"  Jobs:    {payload['job_counts']}")
+    task_work = payload.get("task_work") if isinstance(payload.get("task_work"), dict) else {}
+    if task_work.get("total"):
+        print(
+            "  Task work: "
+            f"{task_work.get('total', 0)} cached "
+            f"(queued {task_work.get('queued', 0)}, failed {task_work.get('failed', 0)}, "
+            f"memory {task_work.get('shared_memory_context', 0)}/{task_work.get('shared_memory_required', 0)})"
+        )
     if payload["proposal_counts"]:
         print(f"  Memory proposals: {payload['proposal_counts']}")
     if payload["inbox_counts"].get("total"):

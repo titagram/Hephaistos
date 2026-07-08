@@ -44,6 +44,11 @@ def load_backend_status_payload() -> dict[str, Any]:
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report = db.get_sync_state(conn, "last_quality_report")
             quality_report_history = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY)
+            plugin_work_items = [
+                item
+                for item in db.list_plugin_work_items(conn)
+                if item.project_id == agent.project_id
+            ]
             last_summary_updated_at = db.get_sync_state_updated_at(conn, "last_sync_summary")
             last_error_updated_at = db.get_sync_state_updated_at(conn, "last_sync_error")
             background_sync_updated_at = db.get_sync_state_updated_at(conn, BACKGROUND_SYNC_STATE_KEY)
@@ -60,16 +65,19 @@ def load_backend_status_payload() -> dict[str, Any]:
             background_sync = None
             last_quality_report = None
             quality_report_history = None
+            plugin_work_items = []
             last_summary_updated_at = None
             last_error_updated_at = None
             background_sync_updated_at = None
             last_quality_report_updated_at = None
             quality_report_history_updated_at = None
 
+    remote_awarenesses = _load_remote_awarenesses(agent, bindings)
     return backend_status_payload(
         agent=agent,
         bindings=bindings,
         memory_caches=memory_caches,
+        remote_awarenesses=remote_awarenesses,
         job_counts=job_counts,
         proposal_counts=proposal_counts,
         inbox_counts=inbox_counts,
@@ -84,6 +92,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         last_quality_report_updated_at=last_quality_report_updated_at,
         quality_report_history=quality_report_history,
         quality_report_history_updated_at=quality_report_history_updated_at,
+        plugin_work_items=plugin_work_items,
     )
 
 
@@ -113,6 +122,7 @@ def support_report_payload(status: dict[str, Any] | None = None) -> dict[str, An
         "job_counts": payload.get("job_counts") if isinstance(payload.get("job_counts"), dict) else {},
         "proposal_counts": payload.get("proposal_counts") if isinstance(payload.get("proposal_counts"), dict) else {},
         "inbox_counts": payload.get("inbox_counts") if isinstance(payload.get("inbox_counts"), dict) else {},
+        "task_work": payload.get("task_work") if isinstance(payload.get("task_work"), dict) else {},
         "sync": {
             "last_summary": _numeric_summary(sync.get("last_summary")),
             "last_summary_updated_at": sync.get("last_summary_updated_at"),
@@ -183,6 +193,7 @@ def backend_status_payload(
     last_summary: dict[str, Any] | None,
     last_error: dict[str, Any] | None,
     memory_caches: dict[str, Any] | None = None,
+    remote_awarenesses: dict[str, dict[str, Any]] | None = None,
     memory_provider: str = "local",
     background_sync: dict[str, Any] | None = None,
     last_summary_updated_at: int | None = None,
@@ -192,6 +203,7 @@ def backend_status_payload(
     last_quality_report_updated_at: int | None = None,
     quality_report_history: dict[str, Any] | None = None,
     quality_report_history_updated_at: int | None = None,
+    plugin_work_items: list[Any] | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
@@ -209,6 +221,7 @@ def backend_status_payload(
     quality_missing = bool(quality_state.get("staleness", {}).get("missing"))
     quality_failed = bool(last_quality_report and last_quality_report.get("status") == "failed")
     quality_attention = bool(last_quality_report and last_quality_report.get("status") == "attention")
+    task_work = _task_work_payload(plugin_work_items or [], project_id=getattr(agent, "project_id", None))
     actions: list[str] = []
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
@@ -223,6 +236,7 @@ def backend_status_payload(
         _binding_payload(
             binding,
             memory_cache=(memory_caches or {}).get(str(_binding_value(binding, "backend_workspace_binding_id"))),
+            remote_awareness=(remote_awarenesses or {}).get(str(_binding_value(binding, "backend_workspace_binding_id"))),
             last_summary=last_summary,
             last_error=last_error,
             last_summary_updated_at=last_summary_updated_at,
@@ -251,6 +265,15 @@ def backend_status_payload(
         actions.append("Run `hades backend quality-report --record` to establish a governance baseline.")
     elif quality_stale:
         actions.append("Refresh stale Hades quality report with `hades backend quality-report --record`.")
+    task_work_next_step = task_work.get("next_step")
+    if task_work.get("failed"):
+        actions.append("Inspect failed backend task work with `hades backend tasks status`.")
+    if task_work.get("missing_shared_memory_context"):
+        actions.append("Repair backend task work missing shared memory context before relying on agent output.")
+    elif task_work.get("queued"):
+        actions.append("Process queued backend task work with `hades backend tasks work --once`.")
+    elif task_work_next_step and task_work.get("total"):
+        actions.append(str(task_work_next_step))
     return {
         "configured": agent is not None,
         "agent": None if agent is None else {
@@ -265,6 +288,7 @@ def backend_status_payload(
         "identity": identity,
         "quality": quality_state,
         "job_counts": job_counts,
+        "task_work": task_work,
         "proposal_counts": proposal_counts,
         "inbox_counts": inbox_counts,
         "sync": {
@@ -275,8 +299,45 @@ def backend_status_payload(
             "background": background_sync,
             "background_updated_at": background_sync_updated_at,
         },
-        "degraded": bool(waiting or refused or last_error or background_failed or quality_failed),
+        "degraded": bool(waiting or refused or last_error or background_failed or quality_failed or task_work.get("failed")),
         "actions": actions,
+    }
+
+
+def _task_work_payload(work_items: list[Any], *, project_id: str | None) -> dict[str, Any]:
+    from hermes_cli.hades_quality_report import build_agent_work_quality_report
+
+    quality = build_agent_work_quality_report(work_items)
+    by_status = quality.get("by_status") if isinstance(quality.get("by_status"), dict) else {}
+    queued = _nonnegative_int(by_status.get("queued"))
+    claimed = _nonnegative_int(by_status.get("claimed")) + _nonnegative_int(by_status.get("running")) + _nonnegative_int(by_status.get("in_progress"))
+    failed = _nonnegative_int(by_status.get("failed"))
+    missing_shared_memory = _nonnegative_int(quality.get("missing_shared_memory_context_count"))
+
+    next_step = "Run `hades backend tasks list` to refresh available backend work."
+    if failed:
+        next_step = "Run `hades backend tasks explain <work_item_id>` on failed items, then retry or update the kanban task."
+    elif missing_shared_memory:
+        next_step = "Run `hades backend quality-report --record` and repair work items missing memory_search_status."
+    elif queued:
+        next_step = "Run `hades backend tasks work --once` to process queued backend work."
+    elif int(quality.get("total") or 0):
+        next_step = "Use `hades backend tasks explain <work_item_id>` for cached task details."
+
+    return {
+        "schema": "hades.backend_task_work_status.v1",
+        "project_id": project_id,
+        "total": int(quality.get("total") or 0),
+        "queued": queued,
+        "claimed": claimed,
+        "failed": failed,
+        "by_status": by_status,
+        "shared_memory_required": int(quality.get("shared_memory_required_count") or 0),
+        "shared_memory_context": int(quality.get("shared_memory_context_count") or 0),
+        "missing_shared_memory_context": missing_shared_memory,
+        "shared_memory_context_coverage": float(quality.get("shared_memory_context_coverage") or 0.0),
+        "missing_work_item_ids": quality.get("missing_work_item_ids") if isinstance(quality.get("missing_work_item_ids"), list) else [],
+        "next_step": next_step,
     }
 
 
@@ -437,6 +498,39 @@ def _identity_payload(
     }
 
 
+def _load_remote_awarenesses(agent: Any, bindings: list[Any]) -> dict[str, dict[str, Any]]:
+    if agent is None or not bindings:
+        return {}
+    try:
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config(timeout=5.0)
+    except Exception:
+        return {}
+
+    awarenesses: dict[str, dict[str, Any]] = {}
+    try:
+        for binding in bindings:
+            workspace_binding_id = str(_binding_value(binding, "backend_workspace_binding_id") or "")
+            project_id = str(_binding_value(binding, "project_id") or "")
+            if not workspace_binding_id or not project_id:
+                continue
+            try:
+                payload = client.project_awareness_status(
+                    project_id=project_id,
+                    workspace_binding_id=workspace_binding_id,
+                )
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                awarenesses[workspace_binding_id] = payload
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    return awarenesses
+
+
 def _current_binding_payload(bindings: list[dict[str, Any]]) -> dict[str, Any] | None:
     cwd = Path.cwd().resolve()
     matches: list[tuple[int, dict[str, Any]]] = []
@@ -486,6 +580,7 @@ def _binding_payload(
     binding: Any,
     *,
     memory_cache: Any | None = None,
+    remote_awareness: dict[str, Any] | None = None,
     last_summary: dict[str, Any] | None = None,
     last_error: dict[str, Any] | None = None,
     last_summary_updated_at: int | None = None,
@@ -503,6 +598,7 @@ def _binding_payload(
     payload["awareness"] = _binding_awareness_payload(
         binding=payload,
         memory_cache=memory_cache,
+        remote_awareness=remote_awareness,
         last_summary=last_summary,
         last_error=last_error,
         last_summary_updated_at=last_summary_updated_at,
@@ -515,11 +611,20 @@ def _binding_awareness_payload(
     *,
     binding: dict[str, Any],
     memory_cache: Any | None,
+    remote_awareness: dict[str, Any] | None,
     last_summary: dict[str, Any] | None,
     last_error: dict[str, Any] | None,
     last_summary_updated_at: int | None,
     summary_scope: str,
 ) -> dict[str, Any]:
+    if isinstance(remote_awareness, dict):
+        return _remote_binding_awareness_payload(
+            remote_awareness,
+            memory_cache=memory_cache,
+            last_error=last_error,
+            last_summary_updated_at=last_summary_updated_at,
+        )
+
     memory_items = len(getattr(memory_cache, "items", []) or [])
     artifacts_uploaded = _count(last_summary, "artifacts_uploaded")
     artifacts_skipped = _count(last_summary, "artifacts_skipped")
@@ -624,6 +729,145 @@ def _binding_awareness_payload(
             "last_sync_summary_updated_at": last_summary_updated_at,
         },
     }
+
+
+def _remote_binding_awareness_payload(
+    remote_awareness: dict[str, Any],
+    *,
+    memory_cache: Any | None,
+    last_error: dict[str, Any] | None,
+    last_summary_updated_at: int | None,
+) -> dict[str, Any]:
+    coverage = remote_awareness.get("coverage") if isinstance(remote_awareness.get("coverage"), dict) else {}
+    memory = coverage.get("memory") if isinstance(coverage.get("memory"), dict) else {}
+    artifacts = coverage.get("artifacts") if isinstance(coverage.get("artifacts"), dict) else {}
+    source_slices = coverage.get("source_slices") if isinstance(coverage.get("source_slices"), dict) else {}
+    source_slice_candidates = (
+        coverage.get("source_slice_candidates") if isinstance(coverage.get("source_slice_candidates"), dict) else {}
+    )
+    bug_evidence = coverage.get("bug_evidence") if isinstance(coverage.get("bug_evidence"), dict) else {}
+    causal_packs = coverage.get("causal_packs") if isinstance(coverage.get("causal_packs"), dict) else {}
+    code_graph = coverage.get("code_graph") if isinstance(coverage.get("code_graph"), dict) else {}
+
+    memory_count = _remote_count(memory, "count", fallback=len(getattr(memory_cache, "items", []) or []))
+    artifact_count = _remote_count(artifacts, "count")
+    source_slice_count = _remote_count(source_slices, "count")
+    bug_evidence_count = _remote_count(bug_evidence, "count")
+    waiting_jobs = _remote_count(source_slice_candidates, "waiting_jobs")
+    candidate_count = _remote_count(source_slice_candidates, "count")
+    causal_packs_valid = _remote_count(causal_packs, "valid")
+    causal_packs_invalid = _remote_count(causal_packs, "invalid")
+    causal_packs_missing = _remote_count(causal_packs, "missing_for_open_bugs")
+
+    missing: list[str] = []
+    if memory_count == 0:
+        missing.append("shared_memory_cache")
+    if _remote_status(artifacts) not in {"present", "current"}:
+        missing.append("project_artifact_index")
+    if _remote_status(source_slices) != "current":
+        missing.append("source_slice_index")
+    if _remote_status(bug_evidence) != "current":
+        missing.append("bug_evidence")
+    if _remote_status(code_graph) != "current":
+        missing.append("code_graph")
+
+    has_errors = bool(last_error)
+    diagnosable_without_source = bool(remote_awareness.get("diagnosable_without_source")) and not has_errors
+    quality_actions: list[str] = []
+    if waiting_jobs:
+        quality_actions.append("approve_source_slice_jobs")
+    elif "source_slice_index" in missing:
+        quality_actions.append("sync_source_slices")
+    if causal_packs_missing:
+        quality_actions.append("create_causal_pack")
+
+    status = str(remote_awareness.get("overall_status") or "").strip()
+    if has_errors:
+        status = "degraded"
+    elif diagnosable_without_source:
+        status = "ready"
+    elif status in {"missing_index", "stale"}:
+        status = "partial"
+    elif status not in {"ready", "partial", "degraded", "unlinked"}:
+        status = "partial"
+
+    return {
+        "status": status,
+        "diagnosable_without_source": diagnosable_without_source,
+        "coverage": {
+            "memory_cache": {
+                "status": "present" if memory_count else "missing",
+                "items": memory_count,
+                "version": getattr(memory_cache, "version", None),
+                "updated_at": memory.get("updated_at") or getattr(memory_cache, "updated_at", None),
+            },
+            "project_artifacts": {
+                "status": _remote_status(artifacts),
+                "count": artifact_count,
+                "schemas": artifacts.get("schemas") if isinstance(artifacts.get("schemas"), dict) else {},
+                "latest_schema": artifacts.get("latest_schema"),
+                "updated_at": artifacts.get("updated_at"),
+                "errors_last_sync": 0,
+            },
+            "source_slices": {
+                "status": _remote_status(source_slices),
+                "count": source_slice_count,
+                "updated_at": source_slices.get("updated_at"),
+                "errors_last_sync": 0,
+            },
+            "source_slice_candidates": {
+                "status": str(source_slice_candidates.get("status") or "none"),
+                "count": candidate_count,
+                "waiting_jobs": waiting_jobs,
+            },
+            "bug_evidence": {
+                "status": _remote_status(bug_evidence, missing_status="unknown"),
+                "count": bug_evidence_count,
+                "items_last_sync": bug_evidence_count,
+            },
+            "causal_packs": {
+                "status": str(causal_packs.get("status") or "none"),
+                "valid": causal_packs_valid,
+                "invalid": causal_packs_invalid,
+                "missing_for_open_bugs": causal_packs_missing,
+            },
+            "code_graph": {
+                "status": _remote_status(code_graph),
+                "count": _remote_count(code_graph, "count"),
+                "schema": code_graph.get("schema"),
+                "coverage_type": code_graph.get("coverage_type"),
+            },
+        },
+        "quality": {
+            "confidence": "ready" if diagnosable_without_source else ("blocked" if has_errors else "incomplete"),
+            "missing": missing,
+            "actions": quality_actions,
+            "summary_scope": "backend",
+            "last_sync_summary_updated_at": last_summary_updated_at,
+            "backend_actions": [
+                action for action in remote_awareness.get("actions", []) if isinstance(action, str)
+            ][:10],
+        },
+    }
+
+
+def _remote_status(payload: dict[str, Any], *, missing_status: str = "missing") -> str:
+    status = str(payload.get("status") or "").strip()
+    if status == "current":
+        return "current"
+    if status in {"present", "pending", "partial", "stale", "unknown", "ready", "none"}:
+        return status
+    if status == "missing":
+        return missing_status
+    return missing_status
+
+
+def _remote_count(payload: dict[str, Any], key: str, *, fallback: int = 0) -> int:
+    try:
+        parsed = int(payload.get(key, fallback) or 0)
+    except (TypeError, ValueError):
+        return max(0, fallback)
+    return max(0, parsed)
 
 
 def _coverage_status(count: int, summary_scope: str, *, missing_status: str = "missing") -> str:

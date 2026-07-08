@@ -1141,6 +1141,45 @@ def test_backend_status_text_prints_identity_next_step(monkeypatch, tmp_path, ca
     assert "before source-free diagnosis" in output
 
 
+def test_backend_status_text_prints_task_work_summary(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+
+    with hdb.connect_closing() as conn:
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_queued",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="queued",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "memory_search_status": {"status": "ready", "refs": ["memory:bug:1"]},
+            },
+        )
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_failed",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="failed",
+            payload={"schema": "hades.kanban_task_work.v1", "memory_required": True},
+        )
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="status", json=False))
+    output = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Task work: 2 cached (queued 1, failed 1, memory 1/2)" in output
+    assert "Inspect failed backend task work with `hades backend tasks status`." in output
+    assert "Repair backend task work missing shared memory context before relying on agent output." in output
+
+
 def test_backend_status_json_surfaces_causal_pack_awareness_action(monkeypatch, tmp_path, capsys):
     _seed_current_backend_workspace(monkeypatch, tmp_path)
 

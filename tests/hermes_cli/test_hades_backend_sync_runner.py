@@ -1429,6 +1429,207 @@ def test_backend_status_reports_pending_source_slice_candidates(monkeypatch, tmp
     assert binding_awareness["quality"]["actions"] == ["approve_source_slice_jobs"]
 
 
+def test_backend_status_reports_cached_task_work_readiness(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_queued",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="queued",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "title": "Fix checkout regression",
+            },
+        )
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_failed",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="failed",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "memory_search_status": {"status": "ready", "refs": ["memory:bug:1"]},
+            },
+        )
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_other_project",
+            project_id="proj_other",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="queued",
+            payload={"schema": "hades.kanban_task_work.v1", "memory_required": True},
+        )
+
+    monkeypatch.chdir(workspace)
+    payload = load_backend_status_payload()
+    task_work = payload["task_work"]
+
+    assert task_work["project_id"] == "proj_1"
+    assert task_work["total"] == 2
+    assert task_work["queued"] == 1
+    assert task_work["failed"] == 1
+    assert task_work["shared_memory_required"] == 2
+    assert task_work["shared_memory_context"] == 1
+    assert task_work["missing_shared_memory_context"] == 1
+    assert task_work["missing_work_item_ids"] == ["awi_queued"]
+    assert any("Inspect failed backend task work" in action for action in payload["actions"])
+    assert any("Repair backend task work missing shared memory context" in action for action in payload["actions"])
+
+
+def test_backend_status_prefers_remote_awareness_over_last_sync_summary(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli.hades_backend_status import load_backend_status_payload
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True, "memory": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="abc123",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.replace_memory_cache(
+            conn,
+            project_id="proj_1",
+            workspace_binding_id="wb_1",
+            version="mem_v1",
+            items=[{"kind": "resolved_bug", "summary": "Known login regression"}],
+        )
+        hdb.record_sync_state(
+            conn,
+            "last_sync_summary",
+            {
+                "memory_snapshots": 1,
+                "artifacts_uploaded": 0,
+                "artifacts_skipped": 0,
+                "artifact_errors": 0,
+                "source_slices_uploaded": 0,
+                "source_slice_errors": 0,
+                "source_slice_candidates": 0,
+                "source_slice_jobs_waiting": 15,
+                "bug_evidence_items": 0,
+                "proposal_errors": 0,
+            },
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def project_awareness_status(self, **payload):
+            self.calls.append(payload)
+            return {
+                "overall_status": "partial",
+                "diagnosable_without_source": False,
+                "coverage": {
+                    "memory": {"status": "current", "count": 1743},
+                    "artifacts": {
+                        "status": "current",
+                        "count": 1,
+                        "schemas": {"hades.php_graph.v1": 1},
+                        "latest_schema": "hades.php_graph.v1",
+                    },
+                    "code_graph": {
+                        "status": "current",
+                        "count": 1,
+                        "schema": "hades.php_graph.v1",
+                        "coverage_type": "code_graph",
+                    },
+                    "source_slices": {"status": "current", "count": 10},
+                    "source_slice_candidates": {"status": "pending", "count": 200, "waiting_jobs": 190},
+                    "bug_evidence": {"status": "missing", "count": 0},
+                    "causal_packs": {
+                        "status": "none",
+                        "valid": 0,
+                        "invalid": 0,
+                        "missing_for_open_bugs": 0,
+                    },
+                },
+                "actions": ["Capture stack traces, failing tests, logs, or reproduction steps as typed bug evidence."],
+            }
+
+        def close(self):
+            self.closed = True
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda **kwargs: fake_client)
+    monkeypatch.chdir(workspace)
+    payload = load_backend_status_payload()
+    binding_awareness = payload["bindings"][0]["awareness"]
+
+    assert fake_client.calls == [{"project_id": "proj_1", "workspace_binding_id": "wb_1"}]
+    assert fake_client.closed is True
+    assert binding_awareness["coverage"]["memory_cache"]["items"] == 1743
+    assert binding_awareness["coverage"]["project_artifacts"]["status"] == "current"
+    assert binding_awareness["coverage"]["project_artifacts"]["count"] == 1
+    assert binding_awareness["coverage"]["code_graph"]["status"] == "current"
+    assert binding_awareness["coverage"]["source_slices"]["status"] == "current"
+    assert binding_awareness["coverage"]["source_slices"]["count"] == 10
+    assert binding_awareness["coverage"]["source_slice_candidates"]["waiting_jobs"] == 190
+    assert binding_awareness["quality"]["missing"] == ["bug_evidence"]
+    assert binding_awareness["quality"]["summary_scope"] == "backend"
+    assert binding_awareness["quality"]["actions"] == ["approve_source_slice_jobs"]
+
+
 def test_backend_status_explains_new_device_without_current_workspace_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
