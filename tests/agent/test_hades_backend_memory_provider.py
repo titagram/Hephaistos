@@ -4285,6 +4285,16 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
                 "path": "resources/views/orders/show.blade.php",
                 "line": 24,
             },
+            {
+                "kind": "blade_alpine_action",
+                "from": "view:orders.show",
+                "to": "alpine_action:applyFilters",
+                "alpine_action": "applyFilters",
+                "alpine_event": "click",
+                "alpine_modifiers": ["prevent"],
+                "path": "resources/views/orders/show.blade.php",
+                "line": 25,
+            },
         ]
     )
     provider = _create_linked_provider(
@@ -4312,7 +4322,7 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view livewire wire model order.status status property validation alpine filters.status", "limit": 20},
+            {"query": "orders view livewire wire model order.status status property validation alpine filters.status applyFilters", "limit": 20},
         )
     )
 
@@ -4402,6 +4412,16 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_alpine_action"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "alpine_action:applyFilters"
+        and ref["provenance"]["alpine_action"] == "applyFilters"
+        and ref["provenance"]["alpine_event"] == "click"
+        and ref["provenance"]["alpine_modifiers"] == ["prevent"]
+        for ref in graph_refs
+    )
+    assert any(
         "wire_model=status" in item["summary"] and "wire_modifiers=['defer']" in item["summary"]
         for item in result["items"]
     )
@@ -4421,6 +4441,11 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
     assert any(
         "alpine_model=filters.status" in item["summary"]
         and "alpine_modifiers=['debounce']" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "alpine_action=applyFilters" in item["summary"]
+        and "alpine_event=click" in item["summary"]
         for item in result["items"]
     )
 
