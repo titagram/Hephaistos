@@ -37,7 +37,7 @@ def plugin_work_items_token(agent: db.BackendAgent) -> str:
     env_key = str(cfg.get("plugin_token_env_key") or "").strip()
     if env_key:
         return get_secret(env_key, "") or ""
-    return get_secret("HADES_BACKEND_PLUGIN_TOKEN", "") or agent_token(agent)
+    return get_secret("HADES_BACKEND_PLUGIN_TOKEN", "")
 
 
 def client_from_config(*, timeout: float = 15.0) -> HadesBackendClient:
@@ -58,7 +58,7 @@ def plugin_work_items_client_from_config() -> HadesPluginWorkItemsClient:
     if not token:
         raise RuntimeError(
             "Hades plugin API token is missing; set backend.plugin_token_env_key "
-            "or HADES_BACKEND_PLUGIN_TOKEN, or rerun backend setup if the backend accepts agent tokens"
+            "or HADES_BACKEND_PLUGIN_TOKEN. Do not use the Hades agent token for plugin work."
         )
     return HadesPluginWorkItemsClient(agent.base_url, token)
 
