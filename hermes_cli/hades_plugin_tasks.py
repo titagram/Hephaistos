@@ -174,6 +174,78 @@ def list_plugin_tasks(
     }
 
 
+def plugin_tasks_status(*, project_id: str | None = None) -> dict[str, Any]:
+    agent = runtime.current_agent()
+    selected_project_id = str(project_id or (agent.project_id if agent is not None else "")).strip()
+    if not selected_project_id:
+        return _error(
+            "not_configured",
+            "Hades backend is not configured.",
+            "Run `hades backend setup` or pass --project-id to inspect cached task work.",
+        )
+
+    with db.connect_closing() as conn:
+        items = [
+            item
+            for item in db.list_plugin_work_items(conn)
+            if item.project_id == selected_project_id
+        ]
+    quality = _agent_work_quality(items)
+    by_status: dict[str, int] = {}
+    for item in items:
+        by_status[item.status] = by_status.get(item.status, 0) + 1
+    missing_count = int(quality.get("missing_shared_memory_context_count") or 0)
+    next_step = "Run `hades backend tasks list` to refresh available backend work."
+    if missing_count:
+        next_step = "Run `hades backend quality-report --record` and repair work items missing memory_search_status."
+    elif by_status.get("queued", 0) > 0:
+        next_step = "Run `hades backend tasks work --once` to process queued work."
+    elif items:
+        next_step = "Use `hades backend tasks explain <work_item_id>` for details."
+    return {
+        "status": "ok",
+        "project_id": selected_project_id,
+        "total": len(items),
+        "by_status": dict(sorted(by_status.items())),
+        "quality": quality,
+        "next_step": next_step,
+    }
+
+
+def explain_plugin_task(work_item_id: str) -> dict[str, Any]:
+    clean_id = str(work_item_id or "").strip()
+    if not clean_id:
+        return _error(
+            "missing_work_item_id",
+            "A backend work item id is required.",
+            "Run `hades backend tasks list --json` and pass one item work_item_id.",
+        )
+    with db.connect_closing() as conn:
+        item = db.get_plugin_work_item(conn, clean_id)
+    if item is None:
+        return _error(
+            "work_item_not_found",
+            f"Cached backend work item {clean_id!r} was not found.",
+            "Run `hades backend tasks list` to refresh the local work item cache.",
+        )
+    quality = _agent_work_quality([item])
+    return {
+        "status": "ok",
+        "item": {
+            "work_item_id": item.work_item_id,
+            "project_id": item.project_id,
+            "repository_id": item.repository_id or None,
+            "local_workspace_id": item.local_workspace_id or None,
+            "agent_key": item.agent_key,
+            "kind": item.kind,
+            "status": item.status,
+            "payload": item.payload,
+            "result": item.result,
+        },
+        "quality": quality,
+    }
+
+
 def _task_from_item(item: dict[str, Any]) -> dict[str, Any]:
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     prompt = _prompt_from_work_item_payload(payload)
@@ -213,6 +285,12 @@ def _cache_items(items: list[dict[str, Any]], *, selected_project_id: str, local
                 status=str(item.get("status") or "queued"),
                 payload=item.get("payload") if isinstance(item.get("payload"), dict) else {},
             )
+
+
+def _agent_work_quality(items: list[Any]) -> dict[str, Any]:
+    from hermes_cli.hades_quality_report import build_agent_work_quality_report
+
+    return build_agent_work_quality_report(items)
 
 
 def _response_items(response: dict[str, Any]) -> list[dict[str, Any]]:

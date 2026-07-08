@@ -177,9 +177,11 @@ def test_plugin_work_items_are_tracked_separately_from_backend_jobs(tmp_path):
         )
         counts = db.count_plugin_work_items_by_status(conn)
         loaded = db.get_plugin_work_item(conn, "awi_1")
+        listed = db.list_plugin_work_items(conn)
 
     assert first.work_item_id == second.work_item_id
     assert counts == {"completed": 1}
+    assert [item.work_item_id for item in listed] == ["awi_1"]
     assert loaded is not None
     assert loaded.status == "completed"
     assert loaded.lease_token == "lease_1"

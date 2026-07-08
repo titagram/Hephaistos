@@ -715,6 +715,96 @@ def test_backend_tasks_work_reuses_plugin_worker(monkeypatch, capsys):
     ]
 
 
+def test_backend_tasks_status_summarizes_cached_work_items(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_1",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="queued",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "memory_search_status": {"status": "empty", "refs": []},
+            },
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="status",
+            project_id=None,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["project_id"] == "proj_1"
+    assert payload["total"] == 1
+    assert payload["by_status"] == {"queued": 1}
+    assert payload["quality"]["missing_shared_memory_context_count"] == 0
+    assert payload["next_step"] == "Run `hades backend tasks work --once` to process queued work."
+
+
+def test_backend_tasks_explain_shows_cached_quality(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_missing",
+            project_id="proj_1",
+            repository_id="repo_1",
+            local_workspace_id="lw_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="completed",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "title": "Diagnose checkout bug",
+            },
+            result={"final_response": "Done."},
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="tasks",
+            tasks_action="explain",
+            work_item_id="awi_missing",
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["item"]["work_item_id"] == "awi_missing"
+    assert payload["item"]["repository_id"] == "repo_1"
+    assert payload["item"]["payload"]["title"] == "Diagnose checkout bug"
+    assert payload["quality"]["missing_shared_memory_context_count"] == 1
+    assert payload["quality"]["completed_missing_shared_memory_context_count"] == 1
+
+
 def test_backend_sync_updates_memory_cache_and_pending_proposals(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

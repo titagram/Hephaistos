@@ -133,6 +133,12 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     tasks_work.add_argument("--agent-key", default="local_agent", help="Backend agent key to poll")
     tasks_work.add_argument("--limit", type=int, default=1, help="Maximum work items to process")
     tasks_work.add_argument("--json", action="store_true", help="Emit machine-readable worker summary")
+    tasks_status = tasks_sub.add_parser("status", help="Summarize cached backend task work state")
+    tasks_status.add_argument("--project-id", default=None, help="Backend project id (default: configured project)")
+    tasks_status.add_argument("--json", action="store_true", help="Emit machine-readable task status")
+    tasks_explain = tasks_sub.add_parser("explain", help="Show cached details for one backend task work item")
+    tasks_explain.add_argument("work_item_id", help="Backend work item id")
+    tasks_explain.add_argument("--json", action="store_true", help="Emit machine-readable task detail")
     jobs = sub.add_parser("jobs", help="List local backend jobs needing review")
     jobs.add_argument("--status", action="append", default=None, help="Filter by job status; repeatable")
     jobs.add_argument("--all", action="store_true", help="Show all local backend jobs")
@@ -967,7 +973,37 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
         return 0
     if action == "work":
         return _cmd_worker(args)
-    print("usage: hades backend tasks <list|work>", file=sys.stderr)
+    if action == "status":
+        from hermes_cli.hades_plugin_tasks import plugin_tasks_status
+
+        payload = plugin_tasks_status(project_id=getattr(args, "project_id", None))
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True))
+            return 1 if "error" in payload else 0
+        if "error" in payload:
+            error = payload["error"] if isinstance(payload.get("error"), dict) else {}
+            print(f"Hades backend tasks status: {error.get('message', 'failed')}", file=sys.stderr)
+            if error.get("next_step"):
+                print(f"  Next step: {error['next_step']}", file=sys.stderr)
+            return 1
+        _print_task_status(payload)
+        return 0
+    if action == "explain":
+        from hermes_cli.hades_plugin_tasks import explain_plugin_task
+
+        payload = explain_plugin_task(str(getattr(args, "work_item_id", "") or ""))
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True))
+            return 1 if "error" in payload else 0
+        if "error" in payload:
+            error = payload["error"] if isinstance(payload.get("error"), dict) else {}
+            print(f"Hades backend tasks explain: {error.get('message', 'failed')}", file=sys.stderr)
+            if error.get("next_step"):
+                print(f"  Next step: {error['next_step']}", file=sys.stderr)
+            return 1
+        _print_task_detail(payload)
+        return 0
+    print("usage: hades backend tasks <list|work|status|explain>", file=sys.stderr)
     return 1
 
 
@@ -989,6 +1025,42 @@ def _print_task_list(payload: dict[str, Any]) -> None:
         task_id = item.get("task_id")
         suffix = f" task={task_id}" if task_id else ""
         print(f"  {work_item_id}: {status} {priority} - {title}{suffix}")
+
+
+def _print_task_status(payload: dict[str, Any]) -> None:
+    print("Hades backend task status")
+    print(f"  Project: {payload.get('project_id')}")
+    print(f"  Cached:  {payload.get('total', 0)} work item(s)")
+    by_status = payload.get("by_status") if isinstance(payload.get("by_status"), dict) else {}
+    if by_status:
+        print("  By status:")
+        for status, count in sorted(by_status.items()):
+            print(f"    {status}: {count}")
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    missing = int(quality.get("missing_shared_memory_context_count") or 0)
+    print(f"  Shared memory coverage: {quality.get('shared_memory_context_coverage', 1.0)}")
+    if missing:
+        print(f"  Action: repair shared memory context for {missing} work item(s)")
+    next_step = payload.get("next_step")
+    if next_step:
+        print(f"  Next step: {next_step}")
+
+
+def _print_task_detail(payload: dict[str, Any]) -> None:
+    item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+    print("Hades backend task detail")
+    print(f"  Work item:  {item.get('work_item_id')}")
+    print(f"  Project:    {item.get('project_id')}")
+    print(f"  Repository: {item.get('repository_id') or '-'}")
+    print(f"  Agent:      {item.get('agent_key')}")
+    print(f"  Status:     {item.get('status')}")
+    print(f"  Kind:       {item.get('kind')}")
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    print(f"  Shared memory context: {quality.get('shared_memory_context_count', 0)}/{quality.get('shared_memory_required_count', 0)}")
+    payload_data = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    title = payload_data.get("title") or payload_data.get("normalized_problem")
+    if title:
+        print(f"  Title:      {str(title).splitlines()[0][:160]}")
 
 
 def _cmd_jobs(args: argparse.Namespace) -> int:
