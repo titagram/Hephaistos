@@ -1804,6 +1804,237 @@ def test_backend_approve_job_executes_waiting_job(monkeypatch, tmp_path, capsys)
     assert fake.results[0][1]["status"] == "completed"
 
 
+def test_backend_approve_job_uses_binding_scoped_agent(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace_one = tmp_path / "repo-one"
+    workspace_two = tmp_path / "repo-two"
+    workspace_one.mkdir()
+    workspace_two.mkdir()
+    (workspace_one / "README.md").write_text("one\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_one",
+            project_id="project_one",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_ONE",
+            capabilities={"jobs": True},
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_two",
+            project_id="project_two",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TWO",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_one",
+            agent_id="agent_one",
+            local_project_id="p_local_one",
+            workspace_fingerprint="wf_one",
+            display_path="~/repo-one",
+            repo_root=str(workspace_one),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_one",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_two",
+            agent_id="agent_two",
+            local_project_id="p_local_two",
+            workspace_fingerprint="wf_two",
+            display_path="~/repo-two",
+            repo_root=str(workspace_two),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_two",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_one",
+            project_id="project_one",
+            workspace_binding_id="wb_one",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+        conn.execute("UPDATE backend_agents SET updated_at = 10 WHERE agent_id = 'agent_one'")
+        conn.execute("UPDATE backend_agents SET updated_at = 20 WHERE agent_id = 'agent_two'")
+        conn.commit()
+
+    class FakeClient:
+        def __init__(self, expected_agent_id):
+            self.expected_agent_id = expected_agent_id
+            self.statuses = []
+            self.results = []
+
+        def update_job_status(self, job_id, **payload):
+            assert payload["agent_id"] == self.expected_agent_id
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+        def submit_job_result(self, job_id, **payload):
+            assert payload["agent_id"] == self.expected_agent_id
+            self.results.append((job_id, payload))
+            return {}
+
+    default_client = FakeClient("agent_two")
+    binding_client = FakeClient("agent_one")
+    monkeypatch.setattr(runtime, "client_from_config", lambda: default_client)
+    monkeypatch.setattr(runtime, "client_for_agent", lambda agent: binding_client)
+
+    rc = cmd.hades_backend_command(SimpleNamespace(backend_action="approve-job", job_id="job_one"))
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        job = hdb.get_job(conn, "job_one")
+
+    assert rc == 0
+    assert "completed" in output
+    assert job is not None
+    assert job.status == "completed"
+    assert default_client.statuses == []
+    assert binding_client.statuses[0][2]["project_id"] == "project_one"
+    assert binding_client.results[0][1]["agent_id"] == "agent_one"
+
+
+def test_backend_approve_jobs_batches_current_project_waiting_jobs(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace_one = tmp_path / "repo-one"
+    workspace_two = tmp_path / "repo-two"
+    workspace_one.mkdir()
+    workspace_two.mkdir()
+    (workspace_two / "README.md").write_text("two\n", encoding="utf-8")
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_one",
+            project_id="project_one",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_ONE",
+            capabilities={"jobs": True},
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_two",
+            project_id="project_two",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TWO",
+            capabilities={"jobs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_one",
+            agent_id="agent_one",
+            local_project_id="p_local_one",
+            workspace_fingerprint="wf_one",
+            display_path="~/repo-one",
+            repo_root=str(workspace_one),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_one",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_two",
+            agent_id="agent_two",
+            local_project_id="p_local_two",
+            workspace_fingerprint="wf_two",
+            display_path="~/repo-two",
+            repo_root=str(workspace_two),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_two",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_other_project",
+            project_id="project_one",
+            workspace_binding_id="wb_one",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_current_project",
+            project_id="project_two",
+            workspace_binding_id="wb_two",
+            capability="read_files",
+            payload={"paths": ["README.md"]},
+            status="waiting_confirmation",
+        )
+        conn.execute("UPDATE backend_agents SET updated_at = 10 WHERE agent_id = 'agent_one'")
+        conn.execute("UPDATE backend_agents SET updated_at = 20 WHERE agent_id = 'agent_two'")
+        conn.commit()
+
+    class FakeClient:
+        def __init__(self):
+            self.statuses = []
+            self.results = []
+
+        def update_job_status(self, job_id, **payload):
+            self.statuses.append((job_id, payload["status"], payload))
+            return {}
+
+        def submit_job_result(self, job_id, **payload):
+            self.results.append((job_id, payload))
+            return {}
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="approve-jobs",
+            capability=["read_files"],
+            project_id=None,
+            workspace_binding_id=None,
+            all_projects=False,
+            limit=0,
+            dry_run=False,
+            json=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        other = hdb.get_job(conn, "job_other_project")
+        current = hdb.get_job(conn, "job_current_project")
+
+    assert rc == 0
+    assert "approved 1/1" in output
+    assert other is not None
+    assert other.status == "waiting_confirmation"
+    assert current is not None
+    assert current.status == "completed"
+    assert fake.results[0][0] == "job_current_project"
+    assert fake.results[0][1]["agent_id"] == "agent_two"
+
+
 def test_backend_approve_job_expires_stale_remote_job(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

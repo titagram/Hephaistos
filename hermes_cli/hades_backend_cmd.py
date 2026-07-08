@@ -19,6 +19,7 @@ from hermes_cli.hades_backend_client import HadesBackendClient, redact_secret, t
 from hermes_cli.hades_backend_actions import (
     acknowledge_memory_proposal,
     approve_backend_job,
+    approve_backend_jobs,
     list_backend_jobs,
     list_memory_proposals,
     promote_diagnosis_report,
@@ -155,6 +156,14 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     jobs.add_argument("--json", action="store_true", help="Emit machine-readable job JSON")
     approve_job = sub.add_parser("approve-job", help="Approve and execute a waiting backend job")
     approve_job.add_argument("job_id", help="Local/backend job id")
+    approve_jobs = sub.add_parser("approve-jobs", aliases=("approve-all",), help="Approve and execute waiting backend jobs in batch")
+    approve_jobs.add_argument("--capability", action="append", default=None, help="Only approve jobs with this capability; repeatable")
+    approve_jobs.add_argument("--project-id", default=None, help="Backend project id to approve (default: configured project)")
+    approve_jobs.add_argument("--workspace-binding-id", default=None, help="Only approve jobs for this workspace binding")
+    approve_jobs.add_argument("--all-projects", action="store_true", help="Approve matching jobs across every linked backend project")
+    approve_jobs.add_argument("--limit", type=int, default=0, help="Maximum jobs to approve; 0 means all matching jobs")
+    approve_jobs.add_argument("--dry-run", action="store_true", help="Show matching jobs without approving them")
+    approve_jobs.add_argument("--json", action="store_true", help="Emit machine-readable batch result")
     refuse_job = sub.add_parser("refuse-job", help="Refuse a waiting backend job")
     refuse_job.add_argument("job_id", help="Local/backend job id")
     refuse_job.add_argument("--reason", default="local_refused", help="Reason sent to the backend")
@@ -1197,6 +1206,41 @@ def _cmd_approve_job(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_approve_jobs(args: argparse.Namespace) -> int:
+    try:
+        result = approve_backend_jobs(
+            capabilities=getattr(args, "capability", None),
+            project_id=getattr(args, "project_id", None),
+            workspace_binding_id=getattr(args, "workspace_binding_id", None),
+            all_projects=bool(getattr(args, "all_projects", False)),
+            limit=int(getattr(args, "limit", 0) or 0),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+    except Exception as exc:
+        print(f"Hades backend approve-jobs: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    payload = result.payload
+    if getattr(args, "json", False):
+        print(json.dumps({"status": result.status, "summary": result.summary, **payload}, sort_keys=True))
+        return 0 if result.ok else 1
+
+    jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
+    if bool(payload.get("dry_run")):
+        print(f"Hades backend approve-jobs dry-run: {len(jobs)} job(s) match")
+        for item in jobs:
+            print(f"  {item['job_id']}: {item['status']} {item['capability']} ({item['workspace_binding_id']})")
+        return 0
+
+    print(f"Hades backend approve-jobs: {result.summary}")
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    for item in results:
+        print(f"  {item['job_id']}: {item['status']}")
+        if not item.get("ok"):
+            print(f"    {item.get('summary')}", file=sys.stderr)
+    return 0 if result.ok else 1
+
+
 def _cmd_refuse_job(args: argparse.Namespace) -> int:
     job_id = str(args.job_id or "").strip()
     try:
@@ -2230,6 +2274,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_jobs(args)
     if action == "approve-job":
         return _cmd_approve_job(args)
+    if action in {"approve-jobs", "approve-all"}:
+        return _cmd_approve_jobs(args)
     if action == "refuse-job":
         return _cmd_refuse_job(args)
     if action == "proposals":
@@ -2257,7 +2303,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

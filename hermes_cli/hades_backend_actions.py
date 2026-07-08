@@ -210,21 +210,27 @@ def approve_backend_job(job_id: str) -> BackendActionResult:
 
     job_id = str(job_id or "").strip()
     with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
+        default_agent = db.get_default_agent(conn)
         job = db.get_job(conn, job_id)
         binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id) if job else None
-    if agent is None:
+        agent = db.get_agent(conn, binding.agent_id) if binding else None
+    if default_agent is None:
         raise BackendActionError("backend not configured", status_code=409)
     if job is None:
         raise BackendActionError(f"job not found: {job_id}", status_code=404)
     if binding is None:
         raise BackendActionError(f"workspace binding not found: {job.workspace_binding_id}", status_code=409)
+    if agent is None:
+        raise BackendActionError(f"backend agent not found: {binding.agent_id}", status_code=409)
     if job.status != "waiting_confirmation":
         raise BackendActionError(f"job {job_id} is {job.status}, not waiting_confirmation", status_code=409)
 
     client = None
     try:
-        client = runtime.client_from_config()
+        if agent.agent_id == default_agent.agent_id and agent.project_id == default_agent.project_id:
+            client = runtime.client_from_config()
+        else:
+            client = runtime.client_for_agent(agent)
         with db.connect_closing() as conn:
             db.update_job_status(conn, job_id, "started")
         client.update_job_status(job_id, **status_payload(agent, binding, "started"))
@@ -282,6 +288,99 @@ def approve_backend_job(job_id: str) -> BackendActionResult:
             summary=result["summary"],
             payload={"job": job_payload_for_display(updated or job)},
         )
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
+def approve_backend_jobs(
+    *,
+    capabilities: Iterable[str] | None = None,
+    project_id: str | None = None,
+    workspace_binding_id: str | None = None,
+    all_projects: bool = False,
+    limit: int | None = None,
+    dry_run: bool = False,
+) -> BackendActionResult:
+    clean_capabilities = {str(value).strip() for value in capabilities or [] if str(value).strip()}
+    clean_project_id = _clean_text(project_id)
+    clean_workspace_binding_id = _clean_text(workspace_binding_id)
+    max_jobs = max(0, int(limit or 0))
+
+    with db.connect_closing() as conn:
+        default_agent = db.get_default_agent(conn)
+        jobs = db.list_jobs(conn, statuses=["waiting_confirmation"])
+    if default_agent is None:
+        raise BackendActionError("backend not configured", status_code=409)
+
+    selected_project_id = clean_project_id
+    if not all_projects and not selected_project_id:
+        selected_project_id = default_agent.project_id
+
+    selected = []
+    for job in jobs:
+        if selected_project_id and job.project_id != selected_project_id:
+            continue
+        if clean_workspace_binding_id and job.workspace_binding_id != clean_workspace_binding_id:
+            continue
+        if clean_capabilities and job.capability not in clean_capabilities:
+            continue
+        selected.append(job)
+        if max_jobs and len(selected) >= max_jobs:
+            break
+
+    selected_payload = [job_payload_for_display(job) for job in selected]
+    if dry_run:
+        return BackendActionResult(
+            ok=True,
+            status="dry_run",
+            summary=f"{len(selected)} job(s) would be approved",
+            payload={"jobs": selected_payload, "approved": 0, "failed": 0, "dry_run": True},
+        )
+
+    results = []
+    approved = failed = 0
+    for job in selected:
+        try:
+            result = approve_backend_job(job.job_id)
+        except Exception as exc:
+            failed += 1
+            results.append(
+                {
+                    "job_id": job.job_id,
+                    "status": "failed",
+                    "ok": False,
+                    "summary": redact_secret(str(exc)),
+                }
+            )
+            continue
+        if result.ok:
+            approved += 1
+        else:
+            failed += 1
+        results.append(
+            {
+                "job_id": job.job_id,
+                "status": result.status,
+                "ok": result.ok,
+                "summary": result.summary,
+            }
+        )
+
+    ok = failed == 0
+    return BackendActionResult(
+        ok=ok,
+        status="completed" if ok else "completed_with_errors",
+        summary=f"approved {approved}/{len(selected)} job(s); failed {failed}",
+        payload={
+            "jobs": selected_payload,
+            "results": results,
+            "approved": approved,
+            "failed": failed,
+            "dry_run": False,
+        },
+    )
 
 
 def refuse_backend_job(job_id: str, *, reason: str = "local_refused") -> BackendActionResult:
@@ -290,23 +389,34 @@ def refuse_backend_job(job_id: str, *, reason: str = "local_refused") -> Backend
     job_id = str(job_id or "").strip()
     reason = redact_secret(str(reason or "local_refused"))
     with db.connect_closing() as conn:
-        agent = db.get_default_agent(conn)
+        default_agent = db.get_default_agent(conn)
         job = db.get_job(conn, job_id)
         binding = db.get_binding_for_backend_id(conn, job.workspace_binding_id) if job else None
-    if agent is None:
+        agent = db.get_agent(conn, binding.agent_id) if binding else None
+    if default_agent is None:
         raise BackendActionError("backend not configured", status_code=409)
     if job is None:
         raise BackendActionError(f"job not found: {job_id}", status_code=404)
     if binding is None:
         raise BackendActionError(f"workspace binding not found: {job.workspace_binding_id}", status_code=409)
+    if agent is None:
+        raise BackendActionError(f"backend agent not found: {binding.agent_id}", status_code=409)
     if job.status != "waiting_confirmation":
         raise BackendActionError(f"job {job_id} is {job.status}, not waiting_confirmation", status_code=409)
 
+    client = None
     try:
-        client = runtime.client_from_config()
+        if agent.agent_id == default_agent.agent_id and agent.project_id == default_agent.project_id:
+            client = runtime.client_from_config()
+        else:
+            client = runtime.client_for_agent(agent)
         client.update_job_status(job_id, **status_payload(agent, binding, "cancelled", reason=reason))
     except Exception as exc:
         raise BackendActionError(redact_secret(str(exc)), status_code=502) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
     with db.connect_closing() as conn:
         updated = db.update_job_status(conn, job_id, "cancelled", result={"summary": reason})
     return BackendActionResult(
