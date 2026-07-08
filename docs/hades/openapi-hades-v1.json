@@ -1081,6 +1081,279 @@
           }
         }
       }
+    },
+    "/api/plugin/v1/agent-work-items": {
+      "get": {
+        "summary": "List agent work items claimable by a local Hades plugin worker",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "local_agent"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "queued"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin work item list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PluginAgentWorkItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/agent-work-items/{workItem}/claim": {
+      "post": {
+        "summary": "Claim one queued local-agent work item for a registered local workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workItem",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "local_workspace_id"
+                ],
+                "properties": {
+                  "local_workspace_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Work item lease token and current item payload"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/agent-work-items/{workItem}/heartbeat": {
+      "post": {
+        "summary": "Refresh an active work item lease",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Lease heartbeat accepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/agent-work-items/{workItem}/complete": {
+      "post": {
+        "summary": "Complete a claimed work item with local agent output and optional memory entry",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginWorkItemCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Work item completed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/agent-work-items/{workItem}/fail": {
+      "post": {
+        "summary": "Mark a claimed work item as failed with a bounded diagnostic message",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Work item failure recorded"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/devices/register": {
+      "post": {
+        "summary": "Register or refresh a local plugin device identity",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin device id"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/projects/{project}/repositories": {
+      "get": {
+        "summary": "List repositories available to the plugin token for one project",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repository list"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/plugin/v1/repositories/{repository}/local-workspaces": {
+      "post": {
+        "summary": "Register this checkout as a claimable local workspace for plugin task work",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-DevBoard-Device-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Local workspace linked for this plugin device"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1281,6 +1554,171 @@
                 "type": "string"
               }
             }
+          }
+        }
+      },
+      "PluginAgentWorkItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "assigned_agent_key",
+          "status",
+          "payload"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "assigned_agent_key": {
+            "type": "string",
+            "const": "local_agent"
+          },
+          "status": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/KanbanTaskWorkPayload"
+          }
+        }
+      },
+      "PluginWorkItemCompleteRequest": {
+        "type": "object",
+        "required": [
+          "lease_token"
+        ],
+        "properties": {
+          "lease_token": {
+            "type": "string"
+          },
+          "chat_message": {
+            "type": "string"
+          },
+          "memory_entry": {
+            "type": "object",
+            "description": "Optional shared-memory proposal payload derived from local agent work"
+          }
+        }
+      },
+      "KanbanTaskWorkPayload": {
+        "type": "object",
+        "required": [
+          "schema",
+          "task_id",
+          "project_id",
+          "repository_id",
+          "title",
+          "description",
+          "acceptance_criteria",
+          "priority",
+          "risk",
+          "normalized_problem",
+          "task_type",
+          "clarification_status",
+          "ready_for_agent_work",
+          "required_context",
+          "source_access_policy",
+          "project_awareness_required",
+          "memory_required",
+          "created_from"
+        ],
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "hades.kanban_task_work.v1"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "workspace_binding_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "normalized_problem": {
+            "type": "string"
+          },
+          "task_type": {
+            "type": "string",
+            "enum": [
+              "implementation",
+              "analysis",
+              "bug"
+            ]
+          },
+          "clarification_status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "needs_clarification"
+            ]
+          },
+          "ready_for_agent_work": {
+            "type": "boolean",
+            "const": true
+          },
+          "required_context": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_access_policy": {
+            "type": "object"
+          },
+          "project_awareness_required": {
+            "type": "boolean",
+            "const": true
+          },
+          "memory_required": {
+            "type": "boolean",
+            "const": true
+          },
+          "created_from": {
+            "type": "object"
+          },
+          "bug_report_id": {
+            "type": "string"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "bug_intake": {
+            "type": "object"
           }
         }
       },
