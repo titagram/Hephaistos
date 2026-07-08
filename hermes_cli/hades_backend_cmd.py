@@ -138,6 +138,24 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     promote_diagnosis.add_argument("--regression-test", action="append", default=None, help="Regression test; repeatable")
     promote_diagnosis.add_argument("--notes", default=None, help="Optional bounded promotion notes")
     promote_diagnosis.add_argument("--json", action="store_true", help="Emit machine-readable promotion result")
+    causal_pack = sub.add_parser("causal-pack", help="Create, inspect, or replay Hades causal evidence packs")
+    causal_pack_sub = causal_pack.add_subparsers(dest="causal_pack_action")
+    causal_pack_create = causal_pack_sub.add_parser("create", help="Create a causal evidence pack from JSON")
+    causal_pack_create.add_argument("--from-file", default=None, help="Path to a causal pack payload JSON")
+    causal_pack_create.add_argument("--from-diagnosis", default=None, help="Path to a diagnosis-derived causal pack JSON")
+    causal_pack_create.add_argument("--json", action="store_true", help="Emit machine-readable causal pack result")
+    causal_pack_list = causal_pack_sub.add_parser("list", help="Search causal evidence packs")
+    causal_pack_list.add_argument("--query", default=None, help="Search query")
+    causal_pack_list.add_argument("--bug-report-id", default=None, help="Filter by bug report id")
+    causal_pack_list.add_argument("--root-cause-id", default=None, help="Filter by root cause id")
+    causal_pack_list.add_argument("--limit", type=int, default=10, help="Maximum causal packs to return")
+    causal_pack_list.add_argument("--json", action="store_true", help="Emit machine-readable causal pack results")
+    causal_pack_show = causal_pack_sub.add_parser("show", help="Show one causal evidence pack")
+    causal_pack_show.add_argument("causal_pack_id", help="Backend causal pack id")
+    causal_pack_show.add_argument("--json", action="store_true", help="Emit machine-readable causal pack result")
+    causal_pack_replay = causal_pack_sub.add_parser("replay", help="Replay-check one causal evidence pack")
+    causal_pack_replay.add_argument("causal_pack_id", help="Backend causal pack id")
+    causal_pack_replay.add_argument("--json", action="store_true", help="Emit machine-readable replay result")
     ingest_test = sub.add_parser("ingest-test", help="Upload a bounded failing-test output as Hades bug evidence")
     ingest_test.add_argument("file", help="Path to a test output file")
     ingest_test.add_argument("--bug-report-id", default=None, help="Optional Hades bug report id")
@@ -965,6 +983,125 @@ def _cmd_promote_diagnosis(args: argparse.Namespace) -> int:
         memory_id = payload.get("resolved_bug_memory_id") or "created"
         print(f"Hades diagnosis promoted: {diagnosis_report_id} -> {memory_id}")
     return 0
+
+
+def _cmd_causal_pack(args: argparse.Namespace) -> int:
+    action = str(getattr(args, "causal_pack_action", "") or "").strip()
+    try:
+        _agent, binding = _current_workspace_binding()
+        from hermes_cli import hades_backend_runtime as runtime
+
+        client = runtime.client_from_config()
+        try:
+            if action == "create":
+                payload = _causal_pack_payload_from_args(args, binding)
+                response = client.create_causal_pack(**payload)
+                pack = response.get("causal_pack") if isinstance(response.get("causal_pack"), dict) else response
+                result = {
+                    "schema": "hades.causal_pack_cli_result.v1",
+                    "status": "ok",
+                    "action": "create",
+                    "created": True,
+                    "causal_pack": pack,
+                }
+            elif action == "list":
+                result = client.causal_packs(
+                    project_id=binding.project_id,
+                    workspace_binding_id=binding.backend_workspace_binding_id,
+                    query=getattr(args, "query", None) or None,
+                    bug_report_id=getattr(args, "bug_report_id", None) or None,
+                    root_cause_id=getattr(args, "root_cause_id", None) or None,
+                    limit=getattr(args, "limit", 10),
+                )
+            elif action == "show":
+                result = client.causal_pack(
+                    str(getattr(args, "causal_pack_id", "") or ""),
+                    project_id=binding.project_id,
+                    workspace_binding_id=binding.backend_workspace_binding_id,
+                )
+            elif action == "replay":
+                result = client.replay_causal_pack(
+                    str(getattr(args, "causal_pack_id", "") or ""),
+                    project_id=binding.project_id,
+                    workspace_binding_id=binding.backend_workspace_binding_id,
+                )
+            else:
+                raise ValueError("causal-pack action is required: create, list, show, or replay")
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:
+        print(f"Hades backend causal-pack: {redact_secret(str(exc))}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
+    if action == "create":
+        pack = result.get("causal_pack") if isinstance(result, dict) else {}
+        pack_id = pack.get("id") if isinstance(pack, dict) else None
+        status = pack.get("status") if isinstance(pack, dict) else None
+        print(f"Hades causal pack stored: {pack_id or 'created'} ({status or 'unknown'})")
+    elif action == "replay":
+        replay = result.get("replay") if isinstance(result, dict) else {}
+        replayable = replay.get("replayable") if isinstance(replay, dict) else None
+        print(f"Hades causal pack replay: {'replayable' if replayable else 'not replayable'}")
+    elif action == "show":
+        pack = result.get("causal_pack") if isinstance(result, dict) else {}
+        print(f"Hades causal pack: {pack.get('id') if isinstance(pack, dict) else 'unknown'}")
+    else:
+        items = result.get("items") if isinstance(result, dict) else []
+        print(f"Hades causal packs: {len(items) if isinstance(items, list) else 0}")
+    return 0
+
+
+def _causal_pack_payload_from_args(args: argparse.Namespace, binding: db.WorkspaceBinding) -> dict[str, Any]:
+    source_path = getattr(args, "from_file", None) or getattr(args, "from_diagnosis", None)
+    if not source_path:
+        raise ValueError("causal-pack create requires --from-file or --from-diagnosis")
+    raw = json.loads(Path(source_path).expanduser().read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("causal pack input must be a JSON object")
+
+    source = raw.get("causal_pack") if isinstance(raw.get("causal_pack"), dict) else raw
+    if not isinstance(source, dict):
+        raise ValueError("causal pack payload must be a JSON object")
+
+    if isinstance(source.get("diagnosis"), dict):
+        from hermes_cli.hades_causal_pack import build_causal_pack
+
+        source = build_causal_pack(source)
+
+    diagnosis = source.get("diagnosis") if isinstance(source.get("diagnosis"), dict) else {}
+    return {
+        "project_id": str(source.get("project_id") or binding.project_id),
+        "workspace_binding_id": str(source.get("workspace_binding_id") or source.get("binding_id") or binding.backend_workspace_binding_id),
+        "bug_report_id": source.get("bug_report_id") or None,
+        "bug_id": source.get("bug_id") or None,
+        "root_cause_id": str(source.get("root_cause_id") or diagnosis.get("root_cause_id") or ""),
+        "bug_class": str(source.get("bug_class") or diagnosis.get("bug_class") or ""),
+        "failure_classification": str(
+            source.get("failure_classification") or diagnosis.get("failure_classification") or ""
+        ),
+        "affected_refs": _string_list(source.get("affected_refs") or diagnosis.get("affected_refs")),
+        "freshness": source.get("freshness") if isinstance(source.get("freshness"), dict) else {},
+        "awareness": source.get("awareness") if isinstance(source.get("awareness"), dict) else {},
+        "evidence_refs": _list_value(source.get("evidence_refs")),
+        "graph_refs": _list_value(source.get("graph_refs")),
+        "source_slice_refs": _list_value(source.get("source_slice_refs")),
+    }
+
+
+def _list_value(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, list | tuple) else []
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _current_workspace_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
@@ -1819,6 +1956,8 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_ack_proposal(args)
     if action == "promote-diagnosis":
         return _cmd_promote_diagnosis(args)
+    if action == "causal-pack":
+        return _cmd_causal_pack(args)
     if action == "ingest-test":
         return _cmd_ingest_test(args)
     if action == "ingest-log":
@@ -1836,7 +1975,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|jobs|approve-job|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

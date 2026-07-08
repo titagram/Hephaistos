@@ -248,6 +248,24 @@ class HadesBackendClient:
     def evidence_packs(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "evidence-packs", params=payload)
 
+    def create_causal_pack(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "causal-packs", json_body=payload)
+
+    def causal_packs(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "causal-packs", params=payload)
+
+    def causal_pack(self, causal_pack_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(causal_pack_id or "").strip()
+        if not clean:
+            raise ValueError("causal pack id is required")
+        return self._request("GET", f"causal-packs/{clean}", params=payload)
+
+    def replay_causal_pack(self, causal_pack_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(causal_pack_id or "").strip()
+        if not clean:
+            raise ValueError("causal pack id is required")
+        return self._request("POST", f"causal-packs/{clean}/replay", json_body=payload)
+
     def privacy_export(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "privacy/export", params=payload)
 

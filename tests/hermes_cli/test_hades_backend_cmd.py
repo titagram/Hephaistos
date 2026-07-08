@@ -1708,6 +1708,119 @@ def test_backend_bug_intake_creates_report_and_evidence(monkeypatch, tmp_path, c
     assert "secretvalue12345" not in json.dumps(fake.evidence)
 
 
+def test_backend_causal_pack_create_and_replay(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    payload_path = tmp_path / "causal-pack.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "bug_id": "bug_booking_overlap",
+                "root_cause_id": "booking-overlap-validation-gap",
+                "bug_class": "validation",
+                "failure_classification": "confirmed",
+                "affected_refs": ["symbol:BookingController@store"],
+                "freshness": {"status": "current", "head_commit": "a" * 40},
+                "awareness": {"diagnosable_without_source": True},
+                "evidence_refs": [{"type": "bug_evidence", "id": "ev_1"}],
+                "graph_refs": [{"type": "artifact", "id": "artifact_1"}],
+                "source_slice_refs": [{"type": "source_slice", "id": "slice_1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_db as hdb
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-box",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={"causal_packs": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="a" * 40,
+            backend_workspace_binding_id="wb_1",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.created = []
+            self.replayed = []
+            self.closed = 0
+
+        def create_causal_pack(self, **payload):
+            self.created.append(payload)
+            return {
+                "causal_pack": {
+                    "id": "pack_1",
+                    "status": "valid",
+                    "root_cause_id": payload["root_cause_id"],
+                }
+            }
+
+        def replay_causal_pack(self, causal_pack_id, **payload):
+            self.replayed.append((causal_pack_id, payload))
+            return {"replay": {"replayable": True, "missing_refs": []}}
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(runtime, "client_from_config", lambda: fake)
+    monkeypatch.chdir(workspace)
+
+    create_rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="causal-pack",
+            causal_pack_action="create",
+            from_file=str(payload_path),
+            from_diagnosis=None,
+            json=True,
+        )
+    )
+    create_result = json.loads(capsys.readouterr().out)
+
+    replay_rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="causal-pack",
+            causal_pack_action="replay",
+            causal_pack_id="pack_1",
+            json=True,
+        )
+    )
+    replay_result = json.loads(capsys.readouterr().out)
+
+    assert create_rc == 0
+    assert replay_rc == 0
+    assert create_result["schema"] == "hades.causal_pack_cli_result.v1"
+    assert create_result["causal_pack"]["id"] == "pack_1"
+    assert replay_result["replay"]["replayable"] is True
+    assert fake.created[0]["project_id"] == "proj_1"
+    assert fake.created[0]["workspace_binding_id"] == "wb_1"
+    assert fake.created[0]["root_cause_id"] == "booking-overlap-validation-gap"
+    assert fake.created[0]["source_slice_refs"] == [{"type": "source_slice", "id": "slice_1"}]
+    assert fake.replayed == [("pack_1", {"project_id": "proj_1", "workspace_binding_id": "wb_1"})]
+    assert fake.closed == 2
+
+
 def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
