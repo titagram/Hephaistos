@@ -2961,6 +2961,8 @@ def _local_graph_edge_search_item(edge: dict[str, Any], *, score: int, match_fie
         "wire_action",
         "wire_event",
         "wire_modifiers",
+        "livewire_alias",
+        "livewire_class",
         "form_method",
         "route_method",
         "route_method_match",

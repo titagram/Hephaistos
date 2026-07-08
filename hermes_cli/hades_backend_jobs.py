@@ -1236,6 +1236,8 @@ def _php_role(path: str, class_name: str, extends: str) -> str:
     short = _php_short_name(class_name)
     if path.startswith("app/Http/Controllers/") or short.endswith("Controller"):
         return "controller"
+    if path.startswith(("app/Livewire/", "app/Http/Livewire/")) or extends.strip("\\") == "Livewire\\Component":
+        return "livewire_component"
     if path.startswith("app/Http/Requests/") or _php_short_name(extends) == "FormRequest" or short.endswith("Request"):
         return "form_request"
     if (
@@ -1835,6 +1837,7 @@ def _append_blade_view_graph(
     edges: list[dict[str, Any]],
     *,
     route_by_name: dict[str, dict[str, Any]] | None = None,
+    livewire_component_by_alias: dict[str, dict[str, Any]] | None = None,
     max_symbols: int,
     max_edges: int,
 ) -> bool:
@@ -1845,6 +1848,8 @@ def _append_blade_view_graph(
     truncated = False
     view_id = f"view:{view_name}"
     known_routes = route_by_name or {}
+    known_livewire = livewire_component_by_alias or {}
+    referenced_livewire_aliases: set[str] = set()
     if len(symbols) < max_symbols:
         symbols.append(
             {
@@ -2121,6 +2126,68 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_livewire_component_class(alias: str, offset: int) -> None:
+        nonlocal truncated
+        component = known_livewire.get(alias)
+        if not component:
+            return
+        component_class = str(component.get("class") or "")
+        if not component_class:
+            return
+        line = _line_number(source, offset)
+        target = component_class
+        key = ("livewire_component_class", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "livewire_component_class",
+                "from": f"livewire:{alias}",
+                "to": target,
+                "livewire_alias": alias,
+                "livewire_class": component_class,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
+    def append_livewire_action_methods(action: str, offset: int) -> None:
+        nonlocal truncated
+        action = str(action or "").strip()
+        if not action or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:-]{0,127}", action):
+            return
+        line = _line_number(source, offset)
+        for alias in sorted(referenced_livewire_aliases):
+            component = known_livewire.get(alias) or {}
+            methods = component.get("methods") or {}
+            if not isinstance(methods, dict):
+                continue
+            method_symbol = str(methods.get(action) or "")
+            component_class = str(component.get("class") or "")
+            if not method_symbol or not component_class:
+                continue
+            key = ("blade_wire_action_method", method_symbol, line)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            truncated = not _edge_append(
+                edges,
+                {
+                    "kind": "blade_wire_action_method",
+                    "from": f"livewire_action:{action}",
+                    "to": method_symbol,
+                    "livewire_alias": alias,
+                    "livewire_class": component_class,
+                    "wire_action": action,
+                    "path": rel,
+                    "line": line,
+                },
+                max_edges=max_edges,
+            ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2213,7 +2280,10 @@ def _append_blade_view_graph(
         append_edge("blade_component", _blade_component_target(match.group("component")), match.start())
     for match in BLADE_LIVEWIRE_RE.finditer(source):
         livewire_name = match.group("directive") or match.group("tag") or ""
+        if livewire_name:
+            referenced_livewire_aliases.add(livewire_name)
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
+        append_livewire_component_class(livewire_name, match.start())
     for match in BLADE_AUTHORIZATION_RE.finditer(source):
         append_blade_authorization(match.group("helper"), match.group("ability"), match.start())
     for match in BLADE_FORM_FIELD_RE.finditer(source):
@@ -2231,6 +2301,7 @@ def _append_blade_view_graph(
             match.group("modifiers"),
             match.start("action"),
         )
+        append_livewire_action_methods(match.group("action"), match.start("action"))
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
         route = known_routes.get(match.group("route"))
@@ -3994,6 +4065,94 @@ def _php_method_symbol_index(
             if method_name:
                 method_symbols[(fqcn, method_name)] = f"{_php_short_name(fqcn)}@{method_name}"
     return method_symbols
+
+
+def _livewire_alias_segment(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    return re.sub(r"[\s_]+", "-", _snake_name(value)).strip("-").lower()
+
+
+def _livewire_alias_from_path(rel: str, class_name: str) -> str:
+    suffix = ""
+    for prefix in ("app/Livewire/", "app/Http/Livewire/"):
+        if rel.startswith(prefix):
+            suffix = rel[len(prefix) :]
+            break
+    if suffix:
+        suffix = suffix.removesuffix(".php")
+        parts = [part for part in suffix.split("/") if part]
+    else:
+        parts = [class_name]
+    alias_parts = [_livewire_alias_segment(part) for part in parts]
+    return ".".join(part for part in alias_parts if part)
+
+
+def _php_livewire_component_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    php_method_symbols: dict[tuple[str, str], str],
+    max_file_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    components: dict[str, dict[str, Any]] = {}
+    for path in php_files:
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            continue
+        if was_truncated:
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            class_name = match.group("name")
+            extends = match.group("extends") or ""
+            fqcn = _php_fqcn(namespace, class_name)
+            extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            role = _php_role(rel, fqcn, extends_fqcn or extends)
+            classes.append(
+                {
+                    "name": fqcn,
+                    "short_name": class_name,
+                    "role": role,
+                    "offset": match.start(),
+                    "line": _line_number(source, match.start()),
+                }
+            )
+        classes.sort(key=lambda item: int(item["offset"]))
+        for class_info in classes:
+            if class_info.get("role") != "livewire_component":
+                continue
+            fqcn = str(class_info["name"])
+            methods: dict[str, str] = {}
+            for method_match in PHP_METHOD_RE.finditer(source):
+                method_class = _class_context(classes, method_match.start())
+                if not method_class or method_class.get("name") != fqcn:
+                    continue
+                if str(method_match.group("visibility") or "public") != "public":
+                    continue
+                method_name = str(method_match.group("name") or "")
+                method_symbol = php_method_symbols.get((fqcn, method_name), "")
+                if method_name and method_symbol:
+                    methods[method_name] = method_symbol
+            alias = _livewire_alias_from_path(rel, str(class_info.get("short_name") or _php_short_name(fqcn)))
+            if alias:
+                components[alias] = {
+                    "alias": alias,
+                    "class": fqcn,
+                    "methods": methods,
+                    "path": rel,
+                    "line": class_info.get("line"),
+                }
+    return components
 
 
 def _php_policy_mappings(source: str, namespace: str, uses: dict[str, str]) -> list[dict[str, Any]]:
@@ -6397,6 +6556,12 @@ def _build_php_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
+    livewire_component_by_alias = _php_livewire_component_index(
+        workspace_root,
+        php_files,
+        php_method_symbols=php_method_symbols,
+        max_file_bytes=max_file_bytes,
+    )
     container_bindings_by_abstract = _php_container_binding_index(
         workspace_root,
         php_files,
@@ -6479,6 +6644,7 @@ def _build_php_graph(
             symbols,
             edges,
             route_by_name=route_by_name,
+            livewire_component_by_alias=livewire_component_by_alias,
             max_symbols=max_symbols,
             max_edges=max_edges,
         ) or truncated
@@ -6493,7 +6659,7 @@ def _build_php_graph(
             extends = match.group("extends") or ""
             fqcn = _php_fqcn(namespace, class_name)
             extends_fqcn = _php_fqcn_resolved(namespace, extends, uses) if extends else None
-            role = _php_role(rel, fqcn, extends)
+            role = _php_role(rel, fqcn, extends_fqcn or extends)
             doctrine_meta = _php_doctrine_entity_meta(source, match.start(), class_name)
             if doctrine_meta is not None:
                 role = "doctrine_entity"

@@ -4237,17 +4237,38 @@ def test_hades_backend_graph_search_finds_local_blade_wire_model_edges(monkeypat
 
 def test_hades_backend_graph_search_finds_local_blade_wire_action_edges(monkeypatch, tmp_path):
     graph_payload = _php_graph_artifact()
-    graph_payload["edges"].append(
-        {
-            "kind": "blade_wire_action",
-            "from": "view:orders.show",
-            "to": "livewire_action:saveOrder",
-            "wire_action": "saveOrder",
-            "wire_event": "click",
-            "wire_modifiers": ["debounce"],
-            "path": "resources/views/orders/show.blade.php",
-            "line": 22,
-        }
+    graph_payload["edges"].extend(
+        [
+            {
+                "kind": "livewire_component_class",
+                "from": "livewire:orders-status",
+                "to": "App\\Livewire\\OrdersStatus",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 5,
+            },
+            {
+                "kind": "blade_wire_action",
+                "from": "view:orders.show",
+                "to": "livewire_action:saveOrder",
+                "wire_action": "saveOrder",
+                "wire_event": "click",
+                "wire_modifiers": ["debounce"],
+                "path": "resources/views/orders/show.blade.php",
+                "line": 22,
+            },
+            {
+                "kind": "blade_wire_action_method",
+                "from": "livewire_action:saveOrder",
+                "to": "OrdersStatus@saveOrder",
+                "livewire_alias": "orders-status",
+                "livewire_class": "App\\Livewire\\OrdersStatus",
+                "wire_action": "saveOrder",
+                "path": "resources/views/orders/show.blade.php",
+                "line": 22,
+            },
+        ]
     )
     provider = _create_linked_provider(
         monkeypatch,
@@ -4293,9 +4314,30 @@ def test_hades_backend_graph_search_finds_local_blade_wire_action_edges(monkeypa
         for ref in graph_refs
     )
     assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "livewire_component_class"
+        and ref["from"] == "livewire:orders-status"
+        and ref["to"] == "App\\Livewire\\OrdersStatus"
+        and ref["provenance"]["livewire_alias"] == "orders-status"
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_wire_action_method"
+        and ref["from"] == "livewire_action:saveOrder"
+        and ref["to"] == "OrdersStatus@saveOrder"
+        and ref["provenance"]["livewire_class"] == "App\\Livewire\\OrdersStatus"
+        for ref in graph_refs
+    )
+    assert any(
         "wire_action=saveOrder" in item["summary"]
         and "wire_event=click" in item["summary"]
         and "wire_modifiers=['debounce']" in item["summary"]
+        for item in result["items"]
+    )
+    assert any(
+        "livewire_alias=orders-status" in item["summary"]
+        and "livewire_class=App\\Livewire\\OrdersStatus" in item["summary"]
         for item in result["items"]
     )
 

@@ -568,6 +568,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     (workspace / "app" / "Mail").mkdir(parents=True)
     (workspace / "app" / "Notifications").mkdir(parents=True)
     (workspace / "app" / "Console" / "Commands").mkdir(parents=True)
+    (workspace / "app" / "Livewire").mkdir(parents=True)
     (workspace / "app" / "Models").mkdir(parents=True)
     (workspace / "app" / "Http" / "Resources").mkdir(parents=True)
     (workspace / "app" / "Policies").mkdir(parents=True)
@@ -735,6 +736,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "    public function prepareForValidation(): void {\n"
         "        $this->merge(['status' => strtolower($this->input('status')), 'customer_id' => (int) $this->customer_id]);\n"
         "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "app" / "Livewire" / "OrdersStatus.php").write_text(
+        "<?php\n"
+        "namespace App\\Livewire;\n"
+        "use Livewire\\Component;\n"
+        "class OrdersStatus extends Component {\n"
+        "    public function saveOrder() {}\n"
+        "    public function render() {}\n"
         "}\n",
         encoding="utf-8",
     )
@@ -1028,6 +1039,8 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_view", "view:layouts.app") in symbols
     assert ("blade_component", "component:alert") in symbols
     assert ("blade_component", "component:orders.card") in symbols
+    assert ("class", "App\\Livewire\\OrdersStatus") in symbols
+    assert ("method", "OrdersStatus@saveOrder") in symbols
     assert ("table", "table:orders") in symbols
     assert ("method", "OrderController@__construct") in symbols
     assert ("method", "OrderController@show") in symbols
@@ -1870,6 +1883,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_component", "view:orders.show", "component:alert") in edges
     assert ("blade_component", "view:orders.partials.summary", "component:orders.card") in edges
     assert ("livewire_component", "view:orders.show", "livewire:orders-status") in edges
+    assert ("livewire_component_class", "livewire:orders-status", "App\\Livewire\\OrdersStatus") in edges
     assert ("blade_route_ref", "view:orders.show", "route:invoices.update") in edges
     assert ("blade_csrf_token", "view:orders.show", "csrf:present") in edges
     assert ("blade_form_method", "view:orders.show", "http_method:PUT") in edges
@@ -1883,6 +1897,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_validation_error", "view:orders.show", "validation:customer_id") in edges
     assert ("blade_wire_model", "view:orders.show", "livewire_property:status") in edges
     assert ("blade_wire_action", "view:orders.show", "livewire_action:saveOrder") in edges
+    assert ("blade_wire_action_method", "livewire_action:saveOrder", "OrdersStatus@saveOrder") in edges
+    assert {
+        "kind": "livewire_component_class",
+        "from": "livewire:orders-status",
+        "to": "App\\Livewire\\OrdersStatus",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 5,
+    } in artifact["edges"]
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1967,6 +1991,16 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "wire_action": "saveOrder",
         "wire_event": "click",
         "wire_modifiers": ["debounce"],
+        "path": "resources/views/orders/show.blade.php",
+        "line": 22,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_wire_action_method",
+        "from": "livewire_action:saveOrder",
+        "to": "OrdersStatus@saveOrder",
+        "livewire_alias": "orders-status",
+        "livewire_class": "App\\Livewire\\OrdersStatus",
+        "wire_action": "saveOrder",
         "path": "resources/views/orders/show.blade.php",
         "line": 22,
     } in artifact["edges"]
