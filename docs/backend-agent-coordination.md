@@ -6536,3 +6536,38 @@ Verifiche eseguite:
 - Locale lint/compile:
   `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
   passato; `py_compile` sugli stessi file passato; `git diff --check` passato.
+
+## Esecuzione Laravel Blade native form method graph Hades - 2026-07-08
+
+Stato: completata una tranche locale P0-4 per correlazione Blade form route
+method anche su metodi HTML nativi metadata-only.
+
+Integrazione locale:
+
+- `hades.php_graph.v1` estende `blade_form_route_method` ai form Blade che
+  contengono `route('name')` e un attributo HTML `method="GET|POST"`.
+- Se e' presente `@method(...)`, il metodo spoofato resta il metodo effettivo;
+  se manca `@method`, viene usato il metodo HTML; se manca anche `method`,
+  viene usato il default HTML `GET` per la sola correlazione route-method.
+- L'edge salva route name, metodo form effettivo, metodo route,
+  `route_method_match`, path e line; non conserva action completa, parametri
+  route, form body o source raw.
+- Il fallback locale di `hades_backend_graph_search` espone gia' questi campi
+  da cache artifact anche a backend offline.
+
+Resta fuori da questa tranche:
+
+- Parsing HTML completo per form malformati, metodi non standard e route action
+  generate dinamicamente; la tranche resta limitata ai pattern Blade standard.
+
+Verifiche eseguite:
+
+- Locale mirato graph + provider:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py::test_populate_backend_ast_extracts_laravel_php_graph_without_source tests/agent/test_hades_backend_memory_provider.py::test_hades_backend_graph_search_finds_local_blade_form_route_method_edges`
+  passato: `2 passed`.
+- Locale graph/provider/docs:
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py tests/test_docs_hades_mvp.py`
+  passato: `113 passed`.
+- Locale lint/compile:
+  `.venv/bin/ruff check hermes_cli/hades_backend_jobs.py plugins/memory/hades_backend/__init__.py tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`
+  passato; `py_compile` sugli stessi file passato; `git diff --check` passato.

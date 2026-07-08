@@ -4022,6 +4022,19 @@ def test_hades_backend_graph_search_finds_local_blade_form_route_method_edges(mo
             "line": 8,
         }
     )
+    graph_payload["edges"].append(
+        {
+            "kind": "blade_form_route_method",
+            "from": "view:orders.show",
+            "to": "route:invoices.store",
+            "route_name": "invoices.store",
+            "form_method": "POST",
+            "route_method": "POST",
+            "route_method_match": True,
+            "path": "resources/views/orders/show.blade.php",
+            "line": 10,
+        }
+    )
     provider = _create_linked_provider(
         monkeypatch,
         tmp_path,
@@ -4047,7 +4060,7 @@ def test_hades_backend_graph_search_finds_local_blade_form_route_method_edges(mo
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_search",
-            {"query": "orders view invoices.update PUT route method match", "limit": 10},
+            {"query": "orders view invoices POST PUT route method match", "limit": 10},
         )
     )
 
@@ -4061,6 +4074,15 @@ def test_hades_backend_graph_search_finds_local_blade_form_route_method_edges(mo
         and ref["from"] == "view:orders.show"
         and ref["to"] == "route:invoices.update"
         and ref["provenance"]["route_method_match"] is True
+        for ref in graph_refs
+    )
+    assert any(
+        ref["type"] == "edge"
+        and ref["kind"] == "blade_form_route_method"
+        and ref["from"] == "view:orders.show"
+        and ref["to"] == "route:invoices.store"
+        and ref["provenance"]["form_method"] == "POST"
+        and ref["provenance"]["route_method"] == "POST"
         for ref in graph_refs
     )
     assert any(

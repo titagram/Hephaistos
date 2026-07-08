@@ -926,6 +926,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@csrf\n"
         "@method('PUT')\n"
         "</form>\n"
+        "<form action=\"{{ route('invoices.store') }}\" method=\"POST\">\n"
+        "@csrf\n"
+        "</form>\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1861,6 +1864,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_csrf_token", "view:orders.show", "csrf:present") in edges
     assert ("blade_form_method", "view:orders.show", "http_method:PUT") in edges
     assert ("blade_form_route_method", "view:orders.show", "route:invoices.update") in edges
+    assert ("blade_form_route_method", "view:orders.show", "route:invoices.store") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1895,6 +1899,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_method_match": True,
         "path": "resources/views/orders/show.blade.php",
         "line": 8,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_form_route_method",
+        "from": "view:orders.show",
+        "to": "route:invoices.store",
+        "route_name": "invoices.store",
+        "form_method": "POST",
+        "route_method": "POST",
+        "route_method_match": True,
+        "path": "resources/views/orders/show.blade.php",
+        "line": 10,
     } in artifact["edges"]
     assert ("model_table", "App\\Models\\Order", "table:orders") in edges
     assert ("model_fillable", "App\\Models\\Order", "table:orders.customer_id") in edges

@@ -518,7 +518,8 @@ BLADE_LIVEWIRE_RE = re.compile(
 BLADE_ROUTE_FUNCTION_RE = re.compile(r"\broute\s*\(\s*['\"](?P<route>[^'\"]+)['\"]", re.MULTILINE)
 BLADE_FORM_METHOD_RE = re.compile(r"@method\s*\(\s*['\"](?P<method>GET|POST|PUT|PATCH|DELETE)['\"]\s*\)", re.IGNORECASE | re.MULTILINE)
 BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
-BLADE_FORM_BLOCK_RE = re.compile(r"<form\b[^>]*>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
+BLADE_FORM_BLOCK_RE = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
+BLADE_FORM_HTML_METHOD_RE = re.compile(r"\bmethod\s*=\s*['\"](?P<method>GET|POST)['\"]", re.IGNORECASE)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1980,15 +1981,27 @@ def _append_blade_view_graph(
     for match in BLADE_CSRF_RE.finditer(source):
         append_csrf(match.start())
     for form_match in BLADE_FORM_BLOCK_RE.finditer(source):
+        form_attrs = form_match.group("attrs") or ""
         form_body = form_match.group("body") or ""
         route_match = BLADE_ROUTE_FUNCTION_RE.search(form_match.group(0) or "")
-        method_match = BLADE_FORM_METHOD_RE.search(form_body)
-        if route_match and method_match:
+        spoof_method_match = BLADE_FORM_METHOD_RE.search(form_body)
+        html_method_match = BLADE_FORM_HTML_METHOD_RE.search(form_attrs)
+        if not route_match:
+            continue
+        if spoof_method_match:
             append_form_route_method(
                 route_match.group("route"),
-                method_match.group("method"),
-                form_match.start("body") + method_match.start("method"),
+                spoof_method_match.group("method"),
+                form_match.start("body") + spoof_method_match.start("method"),
             )
+        elif html_method_match:
+            append_form_route_method(
+                route_match.group("route"),
+                html_method_match.group("method"),
+                form_match.start("attrs") + html_method_match.start("method"),
+            )
+        else:
+            append_form_route_method(route_match.group("route"), "GET", form_match.start())
 
     return truncated
 
