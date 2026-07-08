@@ -930,6 +930,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "@csrf\n"
         "</form>\n"
         "<a href=\"{{ route('orders.show') }}\">Broken order link</a>\n"
+        "@can('view', $order)\n"
+        "<span>Allowed</span>\n"
+        "@endcan\n"
         "@endsection\n",
         encoding="utf-8",
     )
@@ -1868,6 +1871,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
     assert ("blade_form_route_method", "view:orders.show", "route:invoices.store") in edges
     assert ("blade_route_param", "view:orders.show", "route_param:invoices.update.invoice") in edges
     assert ("blade_route_param", "view:orders.show", "route_param:orders.show.order") in edges
+    assert ("blade_authorization", "view:orders.show", "ability:view") in edges
     assert {
         "kind": "blade_route_ref",
         "from": "view:orders.show",
@@ -1899,6 +1903,15 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "route_param_match": False,
         "path": "resources/views/orders/show.blade.php",
         "line": 13,
+    } in artifact["edges"]
+    assert {
+        "kind": "blade_authorization",
+        "from": "view:orders.show",
+        "to": "ability:view",
+        "ability": "view",
+        "authorization_helper": "can",
+        "path": "resources/views/orders/show.blade.php",
+        "line": 14,
     } in artifact["edges"]
     assert {
         "kind": "blade_csrf_token",

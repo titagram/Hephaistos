@@ -525,6 +525,10 @@ BLADE_FORM_METHOD_RE = re.compile(r"@method\s*\(\s*['\"](?P<method>GET|POST|PUT|
 BLADE_CSRF_RE = re.compile(r"(?:@csrf\b|csrf_field\s*\(\s*\))", re.MULTILINE)
 BLADE_FORM_BLOCK_RE = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
 BLADE_FORM_HTML_METHOD_RE = re.compile(r"\bmethod\s*=\s*['\"](?P<method>GET|POST)['\"]", re.IGNORECASE)
+BLADE_AUTHORIZATION_RE = re.compile(
+    r"@(?P<helper>can|cannot|elsecan|elsecannot)\s*\(\s*['\"](?P<ability>[A-Za-z0-9_.:-]{1,128})['\"]",
+    re.MULTILINE,
+)
 PHP_ELOQUENT_QUERY_METHODS = {
     "all",
     "count",
@@ -1936,6 +1940,32 @@ def _append_blade_view_graph(
             max_edges=max_edges,
         ) or truncated
 
+    def append_blade_authorization(helper: str, ability: str, offset: int) -> None:
+        nonlocal truncated
+        ability = str(ability or "").strip()
+        if not ability or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", ability):
+            return
+        normalized_helper = str(helper or "").lower()
+        line = _line_number(source, offset)
+        target = f"ability:{ability}"
+        key = ("blade_authorization", target, line)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        truncated = not _edge_append(
+            edges,
+            {
+                "kind": "blade_authorization",
+                "from": view_id,
+                "to": target,
+                "ability": ability,
+                "authorization_helper": normalized_helper,
+                "path": rel,
+                "line": line,
+            },
+            max_edges=max_edges,
+        ) or truncated
+
     def append_form_method(method: str, offset: int) -> None:
         nonlocal truncated
         normalized = str(method or "").upper()
@@ -2029,6 +2059,8 @@ def _append_blade_view_graph(
     for match in BLADE_LIVEWIRE_RE.finditer(source):
         livewire_name = match.group("directive") or match.group("tag") or ""
         append_edge("livewire_component", f"livewire:{livewire_name}", match.start())
+    for match in BLADE_AUTHORIZATION_RE.finditer(source):
+        append_blade_authorization(match.group("helper"), match.group("ability"), match.start())
     for match in BLADE_ROUTE_FUNCTION_RE.finditer(source):
         append_route_ref(match.group("route"), match.start())
         route = known_routes.get(match.group("route"))
