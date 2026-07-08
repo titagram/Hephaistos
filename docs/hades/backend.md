@@ -111,6 +111,14 @@ cause, call-path, owner-method, or line-level claims without source access.
 `hades backend sync` uploads artifacts with the linked workspace HEAD commit so
 the backend can distinguish current indexes from stale ones.
 
+Graph artifacts may include metadata-only `source_slice_candidates`. These are
+not raw source content. The backend deduplicates them by candidate key, exposes
+their pending/approved coverage in project awareness, and can create
+confirmation-gated `read_source_slice` jobs for the local checkout. Pending
+candidates are an explicit awareness action: the agent should approve the
+bounded slice job from a source-owning device, or keep the diagnosis
+insufficient when exact source evidence is required.
+
 ## Resolved Bug Memory
 
 Final high/medium confidence diagnosis reports can be promoted through
@@ -124,6 +132,13 @@ affected symbols, fix/regression-test metadata, and a validity window. Memory
 search boosts `resolved_bug` entries for similar bug queries and marks them
 `stale` when the linked workspace HEAD no longer matches the commit captured by
 the diagnosis.
+
+Diagnosis reports can also carry a structured taxonomy:
+`root_cause_id`, `bug_class`, `failure_classification`, and `affected_refs`.
+These fields are persisted in the diagnosis payload, carried into promoted
+resolved-bug memory, and indexed for later no-codebase searches. Prefer stable,
+project-local `root_cause_id` values so recurring failures can be matched
+without relying on brittle prose similarity.
 
 ## Graph Traversal
 
@@ -236,6 +251,12 @@ they are not auto-created as project memory.
 proposals. Pending or submitted candidates keep the report in `attention` until
 review closes; refused or conflicted proposals and missing evidence refs are
 also surfaced in the action queue.
+
+Quality reports can also load a suite manifest with `--suite`. A suite groups
+one or more no-codebase evaluation fixtures and records aggregate gates such as
+root-cause accuracy, forbidden source-access violations, persistence coverage,
+tool-order coverage, and taxonomy coverage. Use suites for regression checks
+before claiming that a project is ready for source-free diagnosis.
 
 `proposals` defaults to refused or conflicted memory proposals. `ack-proposal`
 marks one of those local proposals as acknowledged so status surfaces stop

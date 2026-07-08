@@ -50,6 +50,13 @@ Use `refuse-job` instead of approving a broad or unclear job:
 hades backend refuse-job <job_id> --reason "too broad"
 ```
 
+For source-free diagnosis, pay special attention to pending
+`read_source_slice` jobs created from graph artifact candidates. They represent
+bounded, metadata-derived requests for exact source windows. Approving one from
+a source-owning device uploads only the selected redacted line window and links
+it back to the candidate key; refusing it keeps the missing slice visible as an
+awareness gap.
+
 Do not treat old raw notes or raw chunks as authoritative project memory. Use
 the note backfill preview and backend proposal review flow:
 
@@ -126,6 +133,17 @@ refreshes live project-awareness status and uses that response for the final
 gate; the model's supplied freshness/awareness fields are not enough to bypass
 stale or incomplete backend coverage.
 
+Saved diagnosis reports should include the structured taxonomy fields when the
+evidence supports them:
+
+- `root_cause_id`: stable project-local identifier for the failure cause;
+- `bug_class`: concise category such as validation, authorization, persistence,
+  routing, concurrency, or integration;
+- `failure_classification`: whether the failure is confirmed, insufficient, or
+  blocked by missing evidence;
+- `affected_refs`: route, file, symbol, table, test, or evidence references
+  touched by the diagnosis.
+
 If any gate is missing, the correct result is an insufficient diagnosis with
 the missing gate and next action. Do not promote a precise root cause from stale
 artifacts or unverified notes.
@@ -153,6 +171,14 @@ hades backend schedule-quality \
   --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json
 ```
 
+For multi-fixture or project-awareness regression work, use a suite manifest:
+
+```bash
+hades backend quality-report \
+  --no-codebase-eval tests/fixtures/hades/no_codebase_bug_cases.json \
+  --suite tests/fixtures/hades/no_codebase_quality_suite.json
+```
+
 The eval JSON can include normalized `runs`, explicit `trajectory_runs`, or
 discovery entries via `trajectory_globs` / `trajectory_dirs` that point to saved
 `.json`/`.jsonl` trajectories. Trajectory fixture ids are read from the entry,
@@ -160,6 +186,11 @@ metadata, or filename. Trajectory runs are parsed for ShareGPT `<tool_call>`
 blocks, OpenAI-style tool calls, final diagnosis JSON, forbidden
 source/file/shell tool use, evidence refs, freshness, awareness, and diagnosis
 persistence.
+
+The quality report also scores diagnosis taxonomy coverage. A passing
+no-codebase result should not only produce a plausible explanation; it should
+persist searchable root-cause identifiers and affected references so future
+agents can diagnose related bugs from shared memory.
 
 The quality report records blocker/warning actions locally. A failed report
 should block claims that the project is ready for source-free diagnosis.

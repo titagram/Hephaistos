@@ -238,6 +238,31 @@ Verifiche remote:
 
 Follow-up emersi da M1:
 
+## Hades Awareness Hardening - 2026-07-08
+
+Stato: implementata la hardening slice per source-slice candidates, awareness
+readiness, diagnosis taxonomy, operational evidence packs e quality suite.
+
+Checkpoint backend remoto su `fase-2`:
+
+- `23b5f71 feat: queue Hades source slice candidates from artifacts`
+- `b7b0d77 feat: expose Hades source slice candidate awareness`
+- `efdf3b3 feat: persist Hades diagnosis taxonomy`
+- `38bd860 test: validate operational Hades evidence packs`
+
+Risultato operativo:
+
+- Gli artifact graph possono proporre candidati source-slice metadata-only.
+- Il backend deduplica i candidati e crea job `read_source_slice` con conferma.
+- Lo status di awareness espone candidati pendenti e blocca claim precisi finche'
+  source slice, graph, bug evidence e freshness non sono correnti.
+- I diagnosis report possono portare `root_cause_id`, `bug_class`,
+  `failure_classification` e `affected_refs` nel payload versionato.
+- Gli evidence pack preservano campi operativi bounded e la policy rifiuta
+  segreti non redatti nel payload annidato.
+- La quality suite no-codebase locale passa sugli 8 run reali Rocket Club gia'
+  salvati, con `taxonomy_coverage=1.0` e zero source-access violations.
+
 - [ ] Aggiungere provisioning/revoca bootstrap token da dashboard o comando
   setup, evitando inserimenti DB manuali.
 - [ ] Implementare M2 workspace binding server-side e non accettare binding id
