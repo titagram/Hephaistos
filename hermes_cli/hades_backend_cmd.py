@@ -32,7 +32,11 @@ from hermes_cli.hades_backend_status import (
     support_report_payload,
 )
 from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
-from hermes_cli.hades_quality_report import build_hades_quality_report, build_note_backfill_quality_report
+from hermes_cli.hades_quality_report import (
+    build_agent_work_quality_report,
+    build_hades_quality_report,
+    build_note_backfill_quality_report,
+)
 from hermes_cli import hades_backend_db as db
 
 
@@ -400,11 +404,13 @@ def _cmd_quality_report(args: argparse.Namespace) -> int:
         suite_report = run_quality_suite(load_quality_suite(args.suite))
     with db.connect_closing() as conn:
         note_backfill_report = build_note_backfill_quality_report(db.list_memory_proposals(conn))
+        agent_work_report = build_agent_work_quality_report(db.list_plugin_work_items(conn))
     report = build_hades_quality_report(
         no_codebase_report=no_codebase_report,
         suite_report=suite_report,
         support_report=None if getattr(args, "skip_local_status", False) else support_report_payload(),
         note_backfill_report=note_backfill_report,
+        agent_work_report=agent_work_report,
     )
     if getattr(args, "record", False):
         with db.connect_closing() as conn:

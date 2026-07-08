@@ -13,6 +13,7 @@ def build_hades_quality_report(
     suite_report: dict[str, Any] | None = None,
     support_report: dict[str, Any] | None = None,
     note_backfill_report: dict[str, Any] | None = None,
+    agent_work_report: dict[str, Any] | None = None,
     generated_at: int | None = None,
 ) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
@@ -59,6 +60,10 @@ def build_hades_quality_report(
         metrics["note_backfill"] = note_backfill_report
         actions.extend(_note_backfill_actions(note_backfill_report))
 
+    if agent_work_report is not None:
+        metrics["agent_work"] = agent_work_report
+        actions.extend(_agent_work_actions(agent_work_report))
+
     blocker_count = sum(1 for action in actions if action["severity"] == "blocker")
     warning_count = sum(1 for action in actions if action["severity"] == "warning")
     status = "failed" if blocker_count else ("attention" if warning_count else "passed")
@@ -92,6 +97,29 @@ def build_note_backfill_quality_report(proposals: Iterable[Any]) -> dict[str, An
         "rejected_count": rejected_count,
         "evidence_ref_coverage": (evidence_ready_count / len(note_proposals)) if note_proposals else 1.0,
         "missing_evidence_ref_count": missing_evidence_count,
+    }
+
+
+def build_agent_work_quality_report(work_items: Iterable[Any]) -> dict[str, Any]:
+    items = [_work_item_projection(item) for item in work_items]
+    by_status = Counter(item["status"] for item in items)
+    required = [item for item in items if item["shared_memory_required"]]
+    missing = [item for item in required if not item["has_shared_memory_context"]]
+    completed_missing = [
+        item
+        for item in missing
+        if item["status"] in {"completed", "completed_with_incomplete_memory"}
+    ]
+    return {
+        "schema": "hades.agent_work_quality.v1",
+        "total": len(items),
+        "by_status": dict(sorted(by_status.items())),
+        "shared_memory_required_count": len(required),
+        "shared_memory_context_count": len(required) - len(missing),
+        "missing_shared_memory_context_count": len(missing),
+        "completed_missing_shared_memory_context_count": len(completed_missing),
+        "shared_memory_context_coverage": ((len(required) - len(missing)) / len(required)) if required else 1.0,
+        "missing_work_item_ids": [item["work_item_id"] for item in missing[:20]],
     }
 
 
@@ -197,6 +225,22 @@ def _note_backfill_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     return actions
 
 
+def _agent_work_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
+    missing_count = int(report.get("missing_shared_memory_context_count") or 0)
+    if missing_count <= 0:
+        return []
+    severity = "blocker" if int(report.get("completed_missing_shared_memory_context_count") or 0) > 0 else "warning"
+    return [
+        _action(
+            "repair_agent_work_shared_memory",
+            severity,
+            "Agent work items that require shared memory must record memory refs or memory_search_status.",
+            count=missing_count,
+            coverage=float(report.get("shared_memory_context_coverage") or 0.0),
+        )
+    ]
+
+
 def _support_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if not report.get("configured"):
@@ -245,6 +289,65 @@ def _has_backfill_evidence_ref(proposal: dict[str, Any]) -> bool:
     if not isinstance(evidence_ref, dict):
         return False
     return bool(evidence_ref.get("schema") and evidence_ref.get("sha256"))
+
+
+def _work_item_projection(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        result = item.get("result") if isinstance(item.get("result"), dict) else None
+        work_item_id = str(item.get("work_item_id") or item.get("id") or "")
+        status = str(item.get("status") or "unknown")
+        kind = str(item.get("kind") or payload.get("schema") or "")
+    else:
+        payload = getattr(item, "payload", {}) if isinstance(getattr(item, "payload", {}), dict) else {}
+        result = getattr(item, "result", None) if isinstance(getattr(item, "result", None), dict) else None
+        work_item_id = str(getattr(item, "work_item_id", "") or "")
+        status = str(getattr(item, "status", "") or "unknown")
+        kind = str(getattr(item, "kind", "") or payload.get("schema") or "")
+
+    return {
+        "work_item_id": work_item_id,
+        "status": status,
+        "kind": kind,
+        "shared_memory_required": _shared_memory_required(payload, kind),
+        "has_shared_memory_context": _has_shared_memory_context(payload, result),
+    }
+
+
+def _shared_memory_required(payload: dict[str, Any], kind: str) -> bool:
+    return bool(
+        payload.get("memory_required")
+        or payload.get("project_awareness_required")
+        or kind == "hades.kanban_task_work.v1"
+        or payload.get("schema") == "hades.kanban_task_work.v1"
+    )
+
+
+def _has_shared_memory_context(payload: dict[str, Any], result: dict[str, Any] | None) -> bool:
+    for container in (payload, result or {}):
+        if _has_memory_refs(container):
+            return True
+        status = container.get("memory_search_status")
+        if isinstance(status, dict) and str(status.get("status") or "").strip():
+            return True
+        memory_entry = container.get("memory_entry")
+        if isinstance(memory_entry, dict) and _has_memory_refs(memory_entry):
+            return True
+        memory_payload = memory_entry.get("payload") if isinstance(memory_entry, dict) else None
+        if isinstance(memory_payload, dict) and _has_memory_refs(memory_payload):
+            return True
+    return False
+
+
+def _has_memory_refs(container: dict[str, Any]) -> bool:
+    refs = container.get("memory_refs")
+    if isinstance(refs, list) and refs:
+        return True
+    status = container.get("memory_search_status")
+    if isinstance(status, dict):
+        refs = status.get("refs")
+        return isinstance(refs, list) and bool(refs)
+    return False
 
 
 def _action(action_id: str, severity: str, message: str, **extra: Any) -> dict[str, Any]:

@@ -599,6 +599,19 @@ def get_plugin_work_item(conn: sqlite3.Connection, work_item_id: str) -> PluginW
     return _plugin_work_item_from_row(row) if row is not None else None
 
 
+def list_plugin_work_items(conn: sqlite3.Connection, *, statuses: Iterable[str] | None = None) -> list[PluginWorkItem]:
+    if statuses:
+        values = list(statuses)
+        placeholders = ",".join("?" for _ in values)
+        rows = conn.execute(
+            f"SELECT * FROM plugin_work_items WHERE status IN ({placeholders}) ORDER BY updated_at DESC",
+            values,
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM plugin_work_items ORDER BY updated_at DESC").fetchall()
+    return [_plugin_work_item_from_row(row) for row in rows]
+
+
 def update_plugin_work_item_status(
     conn: sqlite3.Connection,
     work_item_id: str,

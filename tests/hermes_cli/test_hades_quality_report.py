@@ -9,6 +9,29 @@ FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "hades" / "no_
 SUITE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "hades" / "no_codebase_quality_suite.json"
 
 
+def _passing_no_codebase_report() -> dict[str, object]:
+    return {
+        "status": "passed",
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "accuracy": 1.0,
+        "root_cause_accuracy": 1.0,
+        "insufficient_accuracy": 1.0,
+        "evidence_ref_coverage": 1.0,
+        "freshness_coverage": 1.0,
+        "awareness_coverage": 1.0,
+        "tool_coverage": 1.0,
+        "tool_order_coverage": 1.0,
+        "persistence_coverage": 1.0,
+        "taxonomy_coverage": 1.0,
+        "causal_pack_coverage": 1.0,
+        "causal_chain_coverage": 1.0,
+        "counterfactual_refusal_coverage": 1.0,
+        "no_codebase_violations": [],
+    }
+
+
 def test_quality_report_passes_clean_no_codebase_eval_and_ready_awareness():
     from hermes_cli.hades_no_codebase_eval import evaluate_no_codebase_diagnoses, load_no_codebase_eval_fixture
     from hermes_cli.hades_quality_report import build_hades_quality_report
@@ -159,6 +182,71 @@ def test_note_backfill_quality_report_flags_rejected_or_incomplete_candidates():
     assert note_backfill["evidence_ref_coverage"] == 0.0
     assert actions["acknowledge_rejected_note_backfill"]["count"] == 1
     assert actions["repair_note_backfill_evidence_refs"]["count"] == 1
+
+
+def test_agent_work_quality_report_flags_required_work_without_memory_context():
+    from hermes_cli.hades_quality_report import build_agent_work_quality_report, build_hades_quality_report
+
+    agent_work = build_agent_work_quality_report(
+        [
+            {
+                "work_item_id": "awi_missing",
+                "kind": "hades.kanban_task_work.v1",
+                "status": "completed",
+                "payload": {
+                    "schema": "hades.kanban_task_work.v1",
+                    "memory_required": True,
+                },
+                "result": {"final_response": "done"},
+            },
+            {
+                "work_item_id": "awi_ready",
+                "kind": "hades.kanban_task_work.v1",
+                "status": "queued",
+                "payload": {
+                    "schema": "hades.kanban_task_work.v1",
+                    "memory_required": True,
+                    "memory_search_status": {"status": "empty", "refs": []},
+                },
+            },
+        ]
+    )
+    report = build_hades_quality_report(agent_work_report=agent_work, no_codebase_report=_passing_no_codebase_report())
+    actions = {action["id"]: action for action in report["action_queue"]}
+
+    assert agent_work["shared_memory_required_count"] == 2
+    assert agent_work["shared_memory_context_count"] == 1
+    assert agent_work["missing_shared_memory_context_count"] == 1
+    assert agent_work["completed_missing_shared_memory_context_count"] == 1
+    assert agent_work["missing_work_item_ids"] == ["awi_missing"]
+    assert report["status"] == "failed"
+    assert actions["repair_agent_work_shared_memory"]["severity"] == "blocker"
+    assert actions["repair_agent_work_shared_memory"]["count"] == 1
+
+
+def test_agent_work_quality_report_passes_when_memory_refs_are_recorded():
+    from hermes_cli.hades_quality_report import build_agent_work_quality_report, build_hades_quality_report
+
+    agent_work = build_agent_work_quality_report(
+        [
+            {
+                "work_item_id": "awi_1",
+                "kind": "hades.kanban_task_work.v1",
+                "status": "completed",
+                "payload": {"schema": "hades.kanban_task_work.v1", "memory_required": True},
+                "result": {
+                    "memory_refs": [{"type": "project_memory", "id": "mem_1"}],
+                    "final_response": "done",
+                },
+            }
+        ]
+    )
+    report = build_hades_quality_report(agent_work_report=agent_work, no_codebase_report=_passing_no_codebase_report())
+
+    assert agent_work["shared_memory_context_coverage"] == 1.0
+    assert agent_work["missing_shared_memory_context_count"] == 0
+    assert report["action_queue"] == []
+    assert report["status"] == "passed"
 
 
 def test_quality_report_blocks_forbidden_source_access_regressions():
@@ -391,6 +479,47 @@ def test_backend_quality_report_includes_pending_note_backfill_proposals(monkeyp
     assert payload["metrics"]["note_backfill"]["pending_review_count"] == 1
     assert payload["metrics"]["note_backfill"]["evidence_ref_coverage"] == 1.0
     assert actions["review_note_backfill_candidates"]["severity"] == "warning"
+
+
+def test_backend_quality_report_flags_cached_agent_work_without_memory_context(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    import hermes_cli.hades_backend_cmd as cmd
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing() as conn:
+        db.upsert_plugin_work_item(
+            conn,
+            work_item_id="awi_missing_memory",
+            project_id="proj_1",
+            agent_key="local_agent",
+            kind="hades.kanban_task_work.v1",
+            status="completed",
+            payload={
+                "schema": "hades.kanban_task_work.v1",
+                "memory_required": True,
+                "title": "Diagnose checkout bug",
+            },
+            result={"final_response": "Done without memory refs."},
+        )
+
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="quality-report",
+            no_codebase_eval=str(FIXTURE_PATH),
+            skip_local_status=True,
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    actions = {action["id"]: action for action in payload["action_queue"]}
+
+    assert rc == 1
+    assert payload["status"] == "failed"
+    assert payload["metrics"]["agent_work"]["total"] == 1
+    assert payload["metrics"]["agent_work"]["missing_shared_memory_context_count"] == 1
+    assert payload["metrics"]["agent_work"]["missing_work_item_ids"] == ["awi_missing_memory"]
+    assert actions["repair_agent_work_shared_memory"]["severity"] == "blocker"
 
 
 def test_backend_quality_report_command_accepts_trajectory_runs(monkeypatch, tmp_path, capsys):
