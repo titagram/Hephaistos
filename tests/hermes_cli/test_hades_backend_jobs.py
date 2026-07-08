@@ -179,6 +179,38 @@ def test_project_inspection_is_metadata_tree_alias_without_raw_source(tmp_path):
     assert "secret-token-123" not in str(result)
 
 
+def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    controller = tmp_path / "app" / "Http" / "Controllers" / "BookingController.php"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "<?php\nclass BookingController {\n public function store() { return Booking::create([]); }\n}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "app" / "Models" / "Booking.php"
+    model.parent.mkdir(parents=True)
+    model.write_text("<?php\nclass Booking extends Model {}\n", encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_ast",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 50, "max_symbols": 100, "head_commit": "abc123"},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    assert result["status"] == "completed"
+    assert artifact["schema"] == "hades.php_graph.v1"
+    assert artifact["source_slice_candidates"]
+    assert {item["reason"] for item in artifact["source_slice_candidates"]} >= {"laravel_controller", "eloquent_model"}
+    assert "source_slice_candidates:" in result["summary"]
+    assert "return Booking::create" not in str(artifact["source_slice_candidates"])
+
+
 def test_sync_git_tree_omits_symlink_file_and_directory_escapes(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

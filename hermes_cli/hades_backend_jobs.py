@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from hermes_cli.hades_backend_client import redact_secret
+from hermes_cli.hades_source_slice_policy import plan_source_slice_candidates
 
 
 SKIP_DIRS = {
@@ -11494,6 +11495,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             max_edges=max_edges,
             max_file_bytes=max_file_bytes,
         )
+        _attach_source_slice_candidates(workspace_root, graph, payload)
         return {
             "status": "completed",
             "summary": graph["summary"],
@@ -11510,6 +11512,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             max_edges=max_edges,
             max_file_bytes=max_file_bytes,
         )
+        _attach_source_slice_candidates(workspace_root, graph, payload)
         return {
             "status": "completed",
             "summary": graph["summary"],
@@ -11526,6 +11529,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             max_edges=max_edges,
             max_file_bytes=max_file_bytes,
         )
+        _attach_source_slice_candidates(workspace_root, graph, payload)
         return {
             "status": "completed",
             "summary": graph["summary"],
@@ -11542,11 +11546,25 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         max_edges=max_edges,
         max_file_bytes=max_file_bytes,
     )
+    _attach_source_slice_candidates(workspace_root, artifact, payload)
     return {
         "status": "completed",
         "summary": artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).",
         "artifact": artifact,
     }
+
+
+def _attach_source_slice_candidates(workspace_root: Path, artifact: dict[str, Any], payload: dict[str, Any]) -> None:
+    head_commit = str(payload.get("head_commit") or payload.get("workspace_head_commit") or "")
+    source_slice_candidates = plan_source_slice_candidates(
+        workspace_root,
+        artifact,
+        head_commit=head_commit,
+        max_candidates=int(payload.get("max_source_slice_candidates") or 200),
+    )
+    artifact["source_slice_candidates"] = source_slice_candidates
+    summary = str(artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).")
+    artifact["summary"] = f"{summary}; source_slice_candidates:{len(source_slice_candidates)}"
 
 
 def execute_job(job: dict[str, Any], *, workspace_root: str | Path) -> dict[str, Any]:
