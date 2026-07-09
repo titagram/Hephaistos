@@ -6,11 +6,13 @@ import logging
 import threading
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")  # Generic return type for claim_and_run runner
 
 
 _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
@@ -248,3 +250,84 @@ class HadesCoordination:
 
             # Wait for next heartbeat or stop signal
             self._stop_event.wait(timeout=self.heartbeat_interval)
+
+    def claim_and_run(
+        self,
+        runner: Callable[[], T],
+        refs: list[dict[str, str]],
+        scope: str = "edit",
+    ) -> dict[str, Any]:
+        """Claim code, run a task, and release the claim.
+
+        Automatically creates a code claim before running the task and releases it
+        in a finally block to ensure release even if the runner raises an exception.
+
+        This is the core coordination primitive for multi-agent conflict avoidance.
+        The backend enforces exclusivity rules based on scope and path/symbol overlap.
+
+        Args:
+            runner: Callable that performs the work. Return value is captured.
+            refs: List of refs to claim, e.g. [{"type": "path", "value": "app/Foo.php"}]
+            scope: Claim scope ('read'|'edit'|'refactor'|'verify', default 'edit').
+                  'read' scope never conflicts. 'edit'/'refactor' conflict with each other
+                  and higher scopes on same path/symbol. 'verify' is for validation.
+
+        Returns:
+            dict with keys:
+            - "success": bool, True if runner completed, False if exception
+            - "runner_result": the return value from runner (if success=True)
+            - "claim": full claim response dict from backend
+            - "conflicts": list of conflict dicts from claim response, if any
+
+        Raises:
+            HadesBackendError: if claim creation fails (release not attempted)
+            Any exception raised by runner is re-raised after release occurs.
+
+        Example:
+            >>> result = coordination.claim_and_run(
+            ...     runner=lambda: some_work(),
+            ...     refs=[{"type": "path", "value": "app/Models/User.php"}],
+            ...     scope="edit"
+            ... )
+            >>> if result["conflicts"]:
+            ...     logger.warning(f"Soft-lock conflict: {result['conflicts']}")
+            >>> if result["success"]:
+            ...     print(f"Work completed: {result['runner_result']}")
+        """
+        claim_response: dict[str, Any] | None = None
+        claim_id: str | None = None
+
+        try:
+            # Create claim on backend
+            claim_response = self.backend_client.code_claim_create(
+                project_id=self.project_id,
+                workspace_binding_id=self.workspace_binding_id,
+                agent_id=self.agent_id,
+                refs=refs,
+                scope=scope,
+            )
+            claim_id = claim_response.get("id")
+
+            # Run the task
+            runner_result = runner()
+
+            return {
+                "success": True,
+                "runner_result": runner_result,
+                "claim": claim_response,
+                "conflicts": claim_response.get("conflicts", []),
+            }
+        finally:
+            # CRITICAL: Release claim in finally to ensure it always happens,
+            # even if runner raised an exception. This is essential for correctness
+            # so we don't leave stale soft-locks on the backend.
+            if claim_id:
+                try:
+                    self.backend_client.code_claim_release(claim_id)
+                except HadesBackendError as exc:
+                    # Log release failure but don't suppress original exception
+                    logger.error(
+                        "Failed to release claim %s: %s",
+                        claim_id,
+                        str(exc),
+                    )
