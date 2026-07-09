@@ -11948,74 +11948,15 @@ def _build_python_artifact(
 
 
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    from hermes_cli.hades_index import build_graph_for_workspace
+
     payload = job.get("payload") or {}
     max_files = int(payload.get("max_files") or 1_000)
-    max_symbols = int(payload.get("max_symbols") or 5_000)
-    max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
     candidates, omitted, truncated = _iter_workspace_files(workspace_root, max_files=max_files)
-    if any(path.suffix.lower() == ".php" for path in candidates):
-        max_edges = int(payload.get("max_edges") or max_symbols * 2)
-        graph = _build_php_graph(
-            workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
-            max_symbols=max_symbols,
-            max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
-        )
-        _attach_source_slice_candidates(workspace_root, graph, payload)
-        return {
-            "status": "completed",
-            "summary": graph["summary"],
-            "artifact": graph,
-        }
-    if any(path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"} for path in candidates):
-        max_edges = int(payload.get("max_edges") or max_symbols * 2)
-        graph = _build_ts_graph(
-            workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
-            max_symbols=max_symbols,
-            max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
-        )
-        _attach_source_slice_candidates(workspace_root, graph, payload)
-        return {
-            "status": "completed",
-            "summary": graph["summary"],
-            "artifact": graph,
-        }
-    if any(path.suffix.lower() == ".sql" for path in candidates):
-        max_edges = int(payload.get("max_edges") or max_symbols * 2)
-        graph = _build_sql_graph(
-            workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
-            max_symbols=max_symbols,
-            max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
-        )
-        _attach_source_slice_candidates(workspace_root, graph, payload)
-        return {
-            "status": "completed",
-            "summary": graph["summary"],
-            "artifact": graph,
-        }
 
-    max_edges = int(payload.get("max_edges") or max_symbols * 2)
-    artifact = _build_python_artifact(
-        workspace_root,
-        candidates,
-        omitted,
-        truncated=truncated,
-        max_symbols=max_symbols,
-        max_edges=max_edges,
-        max_file_bytes=max_file_bytes,
-    )
-    _attach_source_slice_candidates(workspace_root, artifact, payload)
+    # Dispatch to pluggable indexer (currently a seam over existing functions)
+    artifact = build_graph_for_workspace(workspace_root, candidates, omitted, payload)
+
     return {
         "status": "completed",
         "summary": artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).",
