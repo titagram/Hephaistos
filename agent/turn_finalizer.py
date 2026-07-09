@@ -27,6 +27,21 @@ import os
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 
 
+def _assistant_tool_call_name(tool_call) -> str:
+    """Return a tool name from known assistant tool-call shapes."""
+    if not isinstance(tool_call, dict):
+        return ""
+    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    for value in (
+        function.get("name"),
+        tool_call.get("name"),
+        tool_call.get("tool_name"),
+    ):
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def finalize_turn(
     agent,
     *,
@@ -359,6 +374,48 @@ def finalize_turn(
             )
         except Exception as exc:
             logger.warning("post_llm_call hook failed: %s", exc)
+
+    # Hades backend project-awareness refresh.
+    #
+    # Hades stores source-free project state as structured artifacts. If the
+    # agent edited files through file tools, or ran terminal/code execution that
+    # may have generated/rewritten files, kick a scoped background sync for the
+    # current workspace. Artifact hashing/delta upload makes unchanged turns
+    # cheap, and all failures stay out of the user response path.
+    try:
+        changed_paths = sorted(getattr(agent, "_turn_file_mutation_paths", None) or [])
+        workspace_tool_used = False
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls") or []
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                if _assistant_tool_call_name(tool_call) in {"terminal", "execute_code"}:
+                    workspace_tool_used = True
+                    break
+            if workspace_tool_used:
+                break
+        if changed_paths or workspace_tool_used:
+            from agent.runtime_cwd import resolve_agent_cwd
+            from hermes_cli.hades_backend_sync import maybe_run_backend_sync_for_workspace
+
+            decision = maybe_run_backend_sync_for_workspace(
+                cwd=resolve_agent_cwd(),
+                changed_paths=changed_paths,
+                force=True,
+                min_interval_seconds=0,
+            )
+            logger.debug(
+                "Hades backend post-turn sync decision: status=%s reason=%s changed_paths=%d workspace_tool=%s",
+                decision.status,
+                decision.reason,
+                len(changed_paths),
+                workspace_tool_used,
+            )
+    except Exception:
+        logger.debug("Hades backend post-turn sync skipped after unexpected error", exc_info=True)
 
     # Extract reasoning from the CURRENT turn only.  Walk backwards
     # but stop at the user message that started this turn — anything

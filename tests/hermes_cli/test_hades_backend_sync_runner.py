@@ -1397,6 +1397,97 @@ def test_background_sync_runs_once_and_records_success(monkeypatch, tmp_path):
     assert state["next_attempt_at"] == 1300
 
 
+def test_sync_runner_scopes_to_workspace_binding_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace_1 = tmp_path / "repo-1"
+    workspace_2 = tmp_path / "repo-2"
+    workspace_1.mkdir()
+    workspace_2.mkdir()
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev-1",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST_1",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_2",
+            project_id="proj_2",
+            base_url="https://backend.example",
+            label="dev-2",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST_2",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local_1",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo-1",
+            repo_root=str(workspace_1),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_2",
+            agent_id="agent_2",
+            local_project_id="p_local_2",
+            workspace_fingerprint="wf_2",
+            display_path="~/repo-2",
+            repo_root=str(workspace_2),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_2",
+        )
+        hdb.upsert_job(
+            conn,
+            job_id="job_expired_other_workspace",
+            project_id="proj_2",
+            workspace_binding_id="wb_2",
+            capability="read_files",
+            payload={"deadline_at": 10},
+            status="waiting_confirmation",
+        )
+
+    class FakeClient:
+        def __init__(self):
+            self.pulls = []
+
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def pull_jobs(self, **payload):
+            self.pulls.append(payload)
+            return {"jobs": []}
+
+    fake = FakeClient()
+
+    result = run_backend_sync(
+        client_factory=lambda: fake,
+        now=100,
+        workspace_binding_ids=["wb_1"],
+    )
+
+    assert result.exit_code == 0
+    assert [call["workspace_binding_id"] for call in fake.pulls] == ["wb_1"]
+    with hdb.connect_closing() as conn:
+        assert hdb.get_job(conn, "job_expired_other_workspace").status == "waiting_confirmation"
+
+
 def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

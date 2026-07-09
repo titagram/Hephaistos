@@ -651,10 +651,26 @@ def count_plugin_work_items_by_status(conn: sqlite3.Connection) -> dict[str, int
     return {str(row["status"]): int(row["count"]) for row in rows}
 
 
-def expire_waiting_jobs(conn: sqlite3.Connection, *, now: int | None = None) -> list[BackendJob]:
+def expire_waiting_jobs(
+    conn: sqlite3.Connection,
+    *,
+    now: int | None = None,
+    project_id: str | None = None,
+    workspace_binding_ids: Iterable[str] | None = None,
+) -> list[BackendJob]:
     current = int(now if now is not None else _now())
+    clean_project_id = str(project_id or "").strip()
+    clean_binding_ids = {
+        str(binding_id).strip()
+        for binding_id in (workspace_binding_ids or [])
+        if str(binding_id or "").strip()
+    }
     expired: list[str] = []
     for job in list_jobs(conn, statuses=["waiting_confirmation"]):
+        if clean_project_id and job.project_id != clean_project_id:
+            continue
+        if clean_binding_ids and job.workspace_binding_id not in clean_binding_ids:
+            continue
         deadline = job.payload.get("deadline_at") or job.payload.get("deadline")
         try:
             deadline_value = int(deadline)

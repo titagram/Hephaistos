@@ -71,14 +71,14 @@ def test_backend_bootstrap_awareness_orchestrates_current_workspace(monkeypatch,
             self.closed = True
 
     fake_client = FakeClient()
-    sync_phases = []
+    sync_calls = []
 
     monkeypatch.setattr(runtime, "client_for_agent", lambda agent, timeout=15.0: fake_client)
     monkeypatch.setattr(sync, "_sync_baseline_artifacts", lambda *args, **kwargs: (2, 0, 1, 25))
     monkeypatch.setattr(
         sync,
         "run_backend_sync",
-        lambda quiet=False: (sync_phases.append(quiet) or SyncResult({"pulled": 0, "completed": 0}, 0)),
+        lambda **kwargs: (sync_calls.append(kwargs) or SyncResult({"pulled": 0, "completed": 0}, 0)),
     )
     monkeypatch.setattr(
         cmd,
@@ -116,7 +116,12 @@ def test_backend_bootstrap_awareness_orchestrates_current_workspace(monkeypatch,
             "reason": "CLI bootstrap-awareness",
         }
     ]
-    assert sync_phases == [True, True, True, True]
+    assert sync_calls == [
+        {"quiet": True, "workspace_binding_ids": ["wb_1"]},
+        {"quiet": True, "workspace_binding_ids": ["wb_1"]},
+        {"quiet": True, "workspace_binding_ids": ["wb_1"]},
+        {"quiet": True, "workspace_binding_ids": ["wb_1"]},
+    ]
     assert fake_client.closed is True
 
 

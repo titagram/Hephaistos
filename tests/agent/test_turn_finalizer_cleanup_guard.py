@@ -9,6 +9,8 @@ traceback and lost the whole turn.
 """
 
 import pytest
+from pathlib import Path
+from types import SimpleNamespace
 
 from agent.turn_finalizer import finalize_turn
 
@@ -106,8 +108,9 @@ def _run(
     final_response=None,
     api_call_count=3,
     turn_exit_reason="unknown",
+    messages=None,
 ):
-    messages = [
+    messages = messages or [
         {"role": "user", "content": "do a thing"},
         {
             "role": "assistant",
@@ -182,3 +185,78 @@ def test_text_response_on_last_allowed_call_is_completed():
     )
     assert result["final_response"] == "final report"
     assert result["completed"] is True
+
+
+def test_hades_backend_sync_runs_after_file_mutation(monkeypatch):
+    calls = []
+
+    import agent.runtime_cwd as runtime_cwd
+    import hermes_cli.hades_backend_sync as hades_sync
+
+    monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: Path("/tmp/project"))
+
+    def fake_sync_for_workspace(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status="started", reason="due")
+
+    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fake_sync_for_workspace)
+
+    agent = _StubAgent(raise_in=())
+    agent._turn_file_mutation_paths = {"/tmp/project/app.py"}
+
+    result = _run(
+        agent,
+        final_response="done",
+        api_call_count=1,
+        turn_exit_reason="text_response(finish_reason=stop)",
+    )
+
+    assert result["final_response"] == "done"
+    assert calls == [
+        {
+            "cwd": Path("/tmp/project"),
+            "changed_paths": ["/tmp/project/app.py"],
+            "force": True,
+            "min_interval_seconds": 0,
+        }
+    ]
+
+
+def test_hades_backend_sync_runs_after_terminal_tool_use(monkeypatch):
+    calls = []
+
+    import agent.runtime_cwd as runtime_cwd
+    import hermes_cli.hades_backend_sync as hades_sync
+
+    monkeypatch.setattr(runtime_cwd, "resolve_agent_cwd", lambda: Path("/tmp/project"))
+
+    def fake_sync_for_workspace(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status="started", reason="due")
+
+    monkeypatch.setattr(hades_sync, "maybe_run_backend_sync_for_workspace", fake_sync_for_workspace)
+
+    agent = _StubAgent(raise_in=())
+    agent._turn_file_mutation_paths = set()
+
+    result = _run(
+        agent,
+        final_response="done",
+        api_call_count=1,
+        turn_exit_reason="text_response(finish_reason=stop)",
+        messages=[
+            {"role": "user", "content": "generate files"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "name": "terminal"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ],
+    )
+
+    assert result["final_response"] == "done"
+    assert calls == [
+        {
+            "cwd": Path("/tmp/project"),
+            "changed_paths": [],
+            "force": True,
+            "min_interval_seconds": 0,
+        }
+    ]

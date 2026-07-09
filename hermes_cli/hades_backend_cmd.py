@@ -829,7 +829,9 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
         if failed:
             raise RuntimeError(f"baseline artifact upload failed for {failed} artifact(s)")
 
-        first_sync = run_backend_sync(quiet=True)
+        sync_scope = {"workspace_binding_ids": [binding.backend_workspace_binding_id]}
+
+        first_sync = run_backend_sync(quiet=True, **sync_scope)
         result["syncs"].append({"phase": "after_baseline", **first_sync.summary, "exit_code": first_sync.exit_code})
 
         if approve_slices:
@@ -843,7 +845,7 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
                 "summary": approval.summary,
                 **approval.payload,
             }
-            slice_sync = run_backend_sync(quiet=True)
+            slice_sync = run_backend_sync(quiet=True, **sync_scope)
             result["syncs"].append({"phase": "after_source_slices", **slice_sync.summary, "exit_code": slice_sync.exit_code})
         else:
             result["source_slice_approval"] = {
@@ -868,10 +870,10 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
                     }
                 else:
                     raise
-            wiki_sync = run_backend_sync(quiet=True)
+            wiki_sync = run_backend_sync(quiet=True, **sync_scope)
             result["syncs"].append({"phase": "after_wiki", **wiki_sync.summary, "exit_code": wiki_sync.exit_code})
 
-        final_sync = run_backend_sync(quiet=True)
+        final_sync = run_backend_sync(quiet=True, **sync_scope)
         result["syncs"].append({"phase": "final", **final_sync.summary, "exit_code": final_sync.exit_code})
         try:
             result["awareness"] = client.project_awareness_status(

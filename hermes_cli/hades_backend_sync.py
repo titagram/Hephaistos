@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 import logging
+from pathlib import Path
 import threading
 import time
 from typing import Callable
@@ -42,6 +43,8 @@ def run_backend_sync(
     client_factory: Callable[[], object] | None = None,
     now: int | None = None,
     quiet: bool = False,
+    project_id: str | None = None,
+    workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
 ) -> SyncResult:
     from hermes_cli import hades_backend_runtime as runtime
     from hermes_cli.hades_backend_cmd import (
@@ -62,12 +65,22 @@ def run_backend_sync(
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
+        bindings = _filter_sync_bindings(
+            bindings,
+            project_id=project_id,
+            workspace_binding_ids=workspace_binding_ids,
+        )
         agents = {
             binding.agent_id: loaded
             for binding in bindings
             if (loaded := db.get_agent(conn, binding.agent_id)) is not None
         }
-        expired_jobs = db.expire_waiting_jobs(conn, now=now) if agent else []
+        expired_jobs = db.expire_waiting_jobs(
+            conn,
+            now=now,
+            project_id=project_id,
+            workspace_binding_ids=[binding.backend_workspace_binding_id for binding in bindings],
+        ) if agent and bindings else []
 
     if agent is None:
         logger.info(
@@ -426,6 +439,8 @@ def maybe_run_backend_sync(
     run_inline: bool = False,
     client_factory: Callable[[], object] | None = None,
     sync_runner: Callable[..., SyncResult] = run_backend_sync,
+    project_id: str | None = None,
+    workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
 ) -> BackgroundSyncDecision:
     """Start a bounded piggyback sync if the profile is linked and due."""
     current = int(now if now is not None else time.time())
@@ -435,6 +450,11 @@ def maybe_run_backend_sync(
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
+        bindings = _filter_sync_bindings(
+            bindings,
+            project_id=project_id,
+            workspace_binding_ids=workspace_binding_ids,
+        )
         state = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY) or {}
     if agent is None or not bindings:
         return BackgroundSyncDecision("skipped", "not_configured")
@@ -471,6 +491,8 @@ def maybe_run_backend_sync(
             max_backoff_seconds=max_backoff_seconds,
             client_factory=client_factory,
             sync_runner=sync_runner,
+            project_id=project_id,
+            workspace_binding_ids=workspace_binding_ids,
         )
 
     thread = threading.Thread(
@@ -483,6 +505,8 @@ def maybe_run_backend_sync(
             "max_backoff_seconds": max_backoff_seconds,
             "client_factory": client_factory,
             "sync_runner": sync_runner,
+            "project_id": project_id,
+            "workspace_binding_ids": workspace_binding_ids,
         },
         name="hades-backend-sync",
         daemon=True,
@@ -500,12 +524,18 @@ def _run_background_sync_once(
     max_backoff_seconds: int,
     client_factory: Callable[[], object] | None,
     sync_runner: Callable[..., SyncResult],
+    project_id: str | None = None,
+    workspace_binding_ids: list[str] | tuple[str, ...] | None = None,
 ) -> BackgroundSyncDecision:
     global _BACKGROUND_SYNC_RUNNING
     try:
         kwargs: dict[str, object] = {"quiet": True}
         if client_factory is not None:
             kwargs["client_factory"] = client_factory
+        if project_id is not None:
+            kwargs["project_id"] = project_id
+        if workspace_binding_ids is not None:
+            kwargs["workspace_binding_ids"] = list(workspace_binding_ids)
         result = sync_runner(**kwargs)
         finished_at = started_at
         if result.exit_code == 0:
@@ -545,6 +575,88 @@ def _run_background_sync_once(
 def _record_background_sync_state(value: dict) -> None:
     with db.connect_closing() as conn:
         db.record_sync_state(conn, BACKGROUND_SYNC_STATE_KEY, value)
+
+
+def _filter_sync_bindings(
+    bindings: list[db.WorkspaceBinding],
+    *,
+    project_id: str | None,
+    workspace_binding_ids: list[str] | tuple[str, ...] | None,
+) -> list[db.WorkspaceBinding]:
+    clean_project_id = str(project_id or "").strip()
+    clean_binding_ids = {
+        str(binding_id).strip()
+        for binding_id in (workspace_binding_ids or [])
+        if str(binding_id or "").strip()
+    }
+    filtered: list[db.WorkspaceBinding] = []
+    for binding in bindings:
+        if clean_project_id and binding.project_id != clean_project_id:
+            continue
+        if clean_binding_ids and binding.backend_workspace_binding_id not in clean_binding_ids:
+            continue
+        filtered.append(binding)
+    return filtered
+
+
+def _binding_contains_path(binding: db.WorkspaceBinding, path: str | Path) -> bool:
+    try:
+        candidate = Path(path).expanduser().resolve()
+        root = Path(binding.repo_root).expanduser().resolve()
+        candidate.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
+def _matching_workspace_binding_ids(
+    *,
+    cwd: str | Path | None = None,
+    changed_paths: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[str]:
+    if not db.hades_backend_db_path().exists():
+        return []
+    probes: list[str | Path] = []
+    if cwd:
+        probes.append(cwd)
+    probes.extend(str(path) for path in (changed_paths or []) if str(path or "").strip())
+    if not probes:
+        return []
+    with db.connect_closing() as conn:
+        bindings = db.list_workspace_bindings(conn, status="linked")
+    matches: list[db.WorkspaceBinding] = []
+    seen: set[str] = set()
+    for binding in bindings:
+        if any(_binding_contains_path(binding, probe) for probe in probes):
+            binding_id = binding.backend_workspace_binding_id
+            if binding_id in seen:
+                continue
+            seen.add(binding_id)
+            matches.append(binding)
+    matches.sort(key=lambda binding: len(str(Path(binding.repo_root))), reverse=True)
+    return [binding.backend_workspace_binding_id for binding in matches]
+
+
+def maybe_run_backend_sync_for_workspace(
+    *,
+    cwd: str | Path | None = None,
+    changed_paths: list[str] | tuple[str, ...] | set[str] | None = None,
+    force: bool = True,
+    run_inline: bool = False,
+    min_interval_seconds: int = 0,
+    sync_runner: Callable[..., SyncResult] = run_backend_sync,
+) -> BackgroundSyncDecision:
+    """Start a scoped sync for the workspace touched by an agent turn."""
+    binding_ids = _matching_workspace_binding_ids(cwd=cwd, changed_paths=changed_paths)
+    if not binding_ids:
+        return BackgroundSyncDecision("skipped", "no_matching_workspace")
+    return maybe_run_backend_sync(
+        force=force,
+        run_inline=run_inline,
+        min_interval_seconds=min_interval_seconds,
+        workspace_binding_ids=binding_ids,
+        sync_runner=sync_runner,
+    )
 
 
 def _as_int(value: object) -> int:

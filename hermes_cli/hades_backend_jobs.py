@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 from typing import Any
 from urllib.parse import urlsplit
@@ -890,6 +891,84 @@ def _dependency_manifests(root: Path, files: list[dict[str, Any]]) -> list[dict[
             packages = []
         manifests.append({"manager": manager, "path": rel, "packages": packages[:200]})
     return sorted(manifests, key=lambda item: (item["manager"], item["path"]))
+
+
+def _workspace_content_fingerprint(files: list[dict[str, Any]]) -> str:
+    payload = [
+        {
+            "path": str(item.get("path") or ""),
+            "bytes": int(item.get("bytes") or 0),
+            "sha256": str(item.get("sha256") or ""),
+        }
+        for item in sorted(files, key=lambda file_item: str(file_item.get("path") or ""))
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_status_porcelain(root: Path, *, max_entries: int = 200) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+    except Exception:
+        return {"available": False, "dirty": False, "changed_count": 0, "changed_paths": [], "truncated": False}
+    if completed.returncode != 0:
+        return {"available": False, "dirty": False, "changed_count": 0, "changed_paths": [], "truncated": False}
+
+    raw_entries = [entry for entry in completed.stdout.decode("utf-8", errors="replace").split("\0") if entry]
+    changed_paths: list[str] = []
+    counts = {"modified": 0, "deleted": 0, "renamed": 0, "untracked": 0, "other": 0}
+    index = 0
+    while index < len(raw_entries):
+        entry = raw_entries[index]
+        status = entry[:2]
+        rel = entry[3:] if len(entry) > 3 else ""
+        if status.startswith(("R", "C")) and index + 1 < len(raw_entries):
+            index += 1
+        index += 1
+        clean_rel = _safe_relpath(rel)
+        if not clean_rel:
+            continue
+        if _skip_file_reason(root / clean_rel, clean_rel) is not None:
+            continue
+        if status == "??":
+            counts["untracked"] += 1
+        elif "D" in status:
+            counts["deleted"] += 1
+        elif "R" in status or "C" in status:
+            counts["renamed"] += 1
+        elif "M" in status or "A" in status:
+            counts["modified"] += 1
+        else:
+            counts["other"] += 1
+        changed_paths.append(clean_rel)
+
+    return {
+        "available": True,
+        "dirty": bool(changed_paths),
+        "changed_count": len(changed_paths),
+        "changed_paths": sorted(changed_paths)[:max_entries],
+        "truncated": len(changed_paths) > max_entries,
+        **counts,
+    }
+
+
+def _workspace_state_summary(workspace_root: Path, files: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
+    head_commit = str(payload.get("head_commit") or payload.get("workspace_head_commit") or "").strip()
+    git_status = _git_status_porcelain(workspace_root)
+    return {
+        "schema": "hades.workspace_state.v1",
+        "head_commit": head_commit or None,
+        "workspace_head_commit": head_commit or None,
+        "content_fingerprint": _workspace_content_fingerprint(files),
+        "file_count": len(files),
+        "git_status": git_status,
+    }
 
 
 def _is_test_path(rel: str) -> bool:
@@ -3625,6 +3704,7 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
             }
         )
     project_index = _build_project_index(workspace_root, files)
+    workspace_state = _workspace_state_summary(workspace_root, files, payload)
     return {
         "status": "completed",
         "summary": (
@@ -3636,6 +3716,8 @@ def _execute_sync_git_tree(job: dict[str, Any], workspace_root: Path) -> dict[st
             "schema": "hades.git_tree.v1",
             "root": workspace_root.name,
             "files": files,
+            "workspace_state": workspace_state,
+            "workspace_fingerprint": workspace_state["content_fingerprint"],
             "project_index": project_index,
             "summary": project_index["summary"],
             "omitted": omitted,

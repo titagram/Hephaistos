@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 
@@ -146,9 +148,46 @@ def test_sync_git_tree_returns_bounded_manifest(tmp_path):
 
     assert result["status"] == "completed"
     assert result["artifact"]["schema"] == "hades.git_tree.v1"
+    assert result["artifact"]["workspace_state"]["schema"] == "hades.workspace_state.v1"
+    assert len(result["artifact"]["workspace_state"]["content_fingerprint"]) == 64
+    assert result["artifact"]["workspace_state"]["file_count"] == len(result["artifact"]["files"])
     assert "pyproject.toml" in paths
     assert "src/app.py" in paths
     assert all(not path.startswith(".git") for path in paths)
+
+
+def test_sync_git_tree_includes_dirty_worktree_metadata_without_sensitive_paths(tmp_path):
+    try:
+        subprocess.run(["git", "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        pytest.skip(f"git unavailable: {exc}")
+
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def run():\n    return 'raw source'\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": "job_dirty_tree",
+            "capability": "sync_git_tree",
+            "payload": {"max_files": 10, "max_bytes": 20_000, "head_commit": "abc123"},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    state = artifact["workspace_state"]
+
+    assert result["status"] == "completed"
+    assert state["head_commit"] == "abc123"
+    assert state["git_status"]["available"] is True
+    assert state["git_status"]["dirty"] is True
+    assert "src/app.py" in state["git_status"]["changed_paths"]
+    assert ".env" not in state["git_status"]["changed_paths"]
+    assert "raw source" not in str(artifact)
 
 
 def test_workspace_file_iteration_prioritizes_source_dirs_before_assets(tmp_path):
