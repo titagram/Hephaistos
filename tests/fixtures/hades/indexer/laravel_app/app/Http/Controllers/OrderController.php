@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\OrderService;
+
 class OrderController extends Controller
 {
     public function show($id)
@@ -10,9 +12,9 @@ class OrderController extends Controller
         return $this->sendResponse($order);
     }
 
-    public function store(Request $request)
+    public function store(Request $request, OrderService $orders)
     {
-        $order = Order::create($request->all());
+        $order = $orders->create($request->all());
         return $this->sendResponse($order);
     }
 

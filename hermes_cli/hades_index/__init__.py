@@ -1,4 +1,4 @@
-"""Entry point for pluggable code graph indexing — currently proxies to hades_backend_jobs."""
+"""Entry point for pluggable code graph indexing — dispatches to per-language indexer modules."""
 
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ def build_graph_for_workspace(
     """
     Build a code graph for the workspace.
 
-    Currently this is a minimal seam that proxies to existing indexer functions
-    in hades_backend_jobs. In future phases, this will dispatch to pluggable
-    language-specific indexers.
+    Dispatches to the per-language indexer module (php, typescript, sql, python)
+    based on the detected file types in `candidates`.
 
     Args:
         workspace_root: Root path of the workspace
@@ -29,13 +28,11 @@ def build_graph_for_workspace(
         dict with 'schema', 'summary', and other artifact fields
     """
     # Import here to avoid circular dependencies and allow future refactoring
-    from hermes_cli.hades_backend_jobs import (
-        _build_python_artifact,
-        _build_php_graph,
-        _build_ts_graph,
-        _build_sql_graph,
-        _attach_source_slice_candidates,
-    )
+    from hermes_cli.hades_backend_jobs import _attach_source_slice_candidates
+    from hermes_cli.hades_index import php as php_indexer
+    from hermes_cli.hades_index import python as python_indexer
+    from hermes_cli.hades_index import sql as sql_indexer
+    from hermes_cli.hades_index import typescript as typescript_indexer
 
     workspace_root = Path(workspace_root)
     max_symbols = int(payload.get("max_symbols") or 5_000)
@@ -50,7 +47,7 @@ def build_graph_for_workspace(
     has_python = any(path.suffix.lower() == ".py" for path in candidates)
 
     if has_php:
-        graph = _build_php_graph(
+        graph = php_indexer.build_graph(
             workspace_root,
             candidates,
             omitted,
@@ -60,7 +57,7 @@ def build_graph_for_workspace(
             max_file_bytes=max_file_bytes,
         )
     elif has_ts:
-        graph = _build_ts_graph(
+        graph = typescript_indexer.build_graph(
             workspace_root,
             candidates,
             omitted,
@@ -70,7 +67,7 @@ def build_graph_for_workspace(
             max_file_bytes=max_file_bytes,
         )
     elif has_sql:
-        graph = _build_sql_graph(
+        graph = sql_indexer.build_graph(
             workspace_root,
             candidates,
             omitted,
@@ -81,7 +78,7 @@ def build_graph_for_workspace(
         )
     else:
         # Default to Python
-        graph = _build_python_artifact(
+        graph = python_indexer.build_graph(
             workspace_root,
             candidates,
             omitted,
@@ -90,6 +87,15 @@ def build_graph_for_workspace(
             max_edges=max_edges,
             max_file_bytes=max_file_bytes,
         )
+
+    # Optional parsers and analyzers only enrich the proven legacy graph. Any
+    # failure here must leave that baseline usable.
+    try:
+        from hermes_cli.hades_index.resolution import enrich_graph_for_workspace
+
+        enrich_graph_for_workspace(workspace_root, candidates, graph, payload)
+    except Exception:
+        graph.setdefault("analysis", {})["enrichment"] = {"status": "degraded"}
 
     # Attach source slice candidates (applies to all graph types)
     _attach_source_slice_candidates(workspace_root, graph, payload)

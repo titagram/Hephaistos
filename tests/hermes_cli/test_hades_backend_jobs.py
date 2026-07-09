@@ -13,7 +13,7 @@ def _symlink_or_skip(link, target, *, target_is_directory=False):
 
 
 def test_php_validation_database_rule_refs_keep_only_sanitized_identifiers():
-    from hermes_cli.hades_backend_jobs import _php_validation_database_rule_refs
+    from hermes_cli.hades_index.php import _php_validation_database_rule_refs
 
     refs = _php_validation_database_rule_refs(
         "'required|unique:orders,status|exists:tenant.customers,id|exists:customers,id,deleted_at,NULL', "
@@ -29,7 +29,7 @@ def test_php_validation_database_rule_refs_keep_only_sanitized_identifiers():
 
 
 def test_php_top_level_array_field_keys_ignores_nested_keys():
-    from hermes_cli.hades_backend_jobs import _php_top_level_array_field_keys
+    from hermes_cli.hades_index.php import _php_top_level_array_field_keys
 
     source = "$this->merge(['filters' => ['status' => 'paid'], 'status' => 'paid']);"
     args_start = source.index("(") + 1
