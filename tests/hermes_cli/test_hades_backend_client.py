@@ -616,6 +616,14 @@ INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {
     ): "SSE fallback for realtime inbox reads; the local sync client uses the polling inbox route.",
 }
 
+INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
+    "presence_heartbeat",
+    "presence_list",
+    "code_claim_create",
+    "code_claim_release",
+    "code_claim_detect_conflicts",
+}
+
 
 def _openapi_routes() -> dict[tuple[str, str], dict]:
     spec = json.loads(OPENAPI_FIXTURE.read_text(encoding="utf-8"))
@@ -690,7 +698,7 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
         if route[1].startswith("/api/hades/v1/")
     }
 
-    assert public_client_methods == covered_client_methods
+    assert public_client_methods == covered_client_methods | INTENTIONALLY_UNMAPPED_CLIENT_METHODS
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
 
 
@@ -870,3 +878,190 @@ def test_client_posts_doctor_reports_and_persephone_messages():
             {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
         ),
     ]
+
+
+def test_client_presence_heartbeat():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append((request.method, request.url.path, payload))
+        return httpx.Response(200, json={"id": "pres_1", "agent_id": "agent_1", "observed_at": "2026-07-09T00:00:00Z"})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.presence_heartbeat(
+        project_id="proj_1",
+        workspace_binding_id="wb_1",
+        agent_id="agent_1",
+        current_branch="main",
+        last_head_sha="abc123",
+        dirty_status=False,
+        ttl_seconds=300,
+    )
+
+    assert response["id"] == "pres_1"
+    assert response["agent_id"] == "agent_1"
+    assert seen == [
+        (
+            "POST",
+            "/api/hades/v1/presence/heartbeat",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "agent_id": "agent_1",
+                "current_branch": "main",
+                "last_head_sha": "abc123",
+                "dirty_status": False,
+                "ttl_seconds": 300,
+            },
+        )
+    ]
+
+
+def test_client_presence_list():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/api/hades/v1/presence"
+        assert request.url.params["project_id"] == "proj_1"
+        assert request.url.params["workspace_binding_id"] == "wb_1"
+        return httpx.Response(200, json=[
+            {
+                "id": "pres_1",
+                "agent_id": "agent_1",
+                "current_branch": "main",
+                "dirty_status": False,
+                "observed_at": "2026-07-09T00:00:00Z",
+                "ttl_seconds": 300,
+            }
+        ])
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.presence_list(
+        project_id="proj_1",
+        workspace_binding_id="wb_1",
+    )
+
+    assert len(response) == 1
+    assert response[0]["agent_id"] == "agent_1"
+    assert seen
+
+
+def test_client_code_claim_create():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append((request.method, request.url.path, payload))
+        return httpx.Response(201, json={"id": "claim_1", "agent_id": "agent_1"})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.code_claim_create(
+        project_id="proj_1",
+        workspace_binding_id="wb_1",
+        agent_id="agent_1",
+        refs=[{"type": "path", "value": "app/Foo.php"}],
+        scope="edit",
+        branch="main",
+        head_sha="abc123",
+        ttl_seconds=600,
+    )
+
+    assert response["id"] == "claim_1"
+    assert seen == [
+        (
+            "POST",
+            "/api/hades/v1/code-claims",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "agent_id": "agent_1",
+                "refs": [{"type": "path", "value": "app/Foo.php"}],
+                "scope": "edit",
+                "branch": "main",
+                "head_sha": "abc123",
+                "ttl_seconds": 600,
+            },
+        )
+    ]
+
+
+def test_client_code_claim_release():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"ok": True})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.code_claim_release(claim_id="claim_1")
+
+    assert response == {"ok": True}
+    assert seen == [("POST", "/api/hades/v1/code-claims/claim_1/release")]
+
+
+def test_client_code_claim_detect_conflicts():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/api/hades/v1/code-claims/conflicts"
+        assert request.url.params["project_id"] == "proj_1"
+        assert request.url.params["scope"] == "edit"
+        return httpx.Response(200, json=[
+            {
+                "claim_id": "claim_1",
+                "agent_id": "agent_1",
+                "ref": "app/Foo.php",
+                "reason": "Overlap on app/Foo.php (scope edit)",
+            }
+        ])
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.code_claim_detect_conflicts(
+        project_id="proj_1",
+        refs=[{"type": "path", "value": "app/Foo.php"}],
+        scope="edit",
+    )
+
+    assert len(response) == 1
+    assert response[0]["agent_id"] == "agent_1"
+    assert seen

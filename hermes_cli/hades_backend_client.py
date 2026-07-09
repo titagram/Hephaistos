@@ -128,7 +128,7 @@ class HadesBackendClient:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         try:
             response = self._client.request(
                 method,
@@ -165,8 +165,8 @@ class HadesBackendClient:
             data = response.json()
         except ValueError as exc:
             raise HadesBackendError(f"invalid JSON response from backend: {redact_secret(response.text)}") from exc
-        if not isinstance(data, dict):
-            raise HadesBackendError("backend response must be a JSON object")
+        if not isinstance(data, (dict, list)):
+            raise HadesBackendError("backend response must be a JSON object or array")
         return data
 
     def health(self) -> dict[str, Any]:
@@ -317,3 +317,36 @@ class HadesBackendClient:
 
     def create_inbox_message(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "persephone/messages", json_body=payload)
+
+    def presence_heartbeat(self, **payload: Any) -> dict[str, Any]:
+        result = self._request("POST", "presence/heartbeat", json_body=payload)
+        if not isinstance(result, dict):
+            raise HadesBackendError("presence heartbeat response must be a JSON object")
+        return result
+
+    def presence_list(self, **payload: Any) -> list[Any]:
+        result = self._request("GET", "presence", params=payload)
+        if not isinstance(result, list):
+            raise HadesBackendError("presence list response must be a JSON array")
+        return result
+
+    def code_claim_create(self, **payload: Any) -> dict[str, Any]:
+        result = self._request("POST", "code-claims", json_body=payload)
+        if not isinstance(result, dict):
+            raise HadesBackendError("code claim create response must be a JSON object")
+        return result
+
+    def code_claim_release(self, claim_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(claim_id or "").strip()
+        if not clean:
+            raise ValueError("claim id is required")
+        result = self._request("POST", f"code-claims/{clean}/release", json_body=payload)
+        if not isinstance(result, dict):
+            raise HadesBackendError("code claim release response must be a JSON object")
+        return result
+
+    def code_claim_detect_conflicts(self, **payload: Any) -> list[Any]:
+        result = self._request("GET", "code-claims/conflicts", params=payload)
+        if not isinstance(result, list):
+            raise HadesBackendError("code claim detect conflicts response must be a JSON array")
+        return result
