@@ -294,6 +294,14 @@ CLIENT_ROUTE_CASES = [
         "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
     },
     {
+        "method_name": "bootstrap_project_awareness",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/project-awareness/bootstrap",
+        "wire_path": "/api/hades/v1/project-awareness/bootstrap",
+        "kwargs": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+        "json_body": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+    },
+    {
         "method_name": "pull_jobs",
         "http_method": "GET",
         "openapi_path": "/api/hades/v1/agent/jobs",

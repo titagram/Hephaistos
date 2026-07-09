@@ -227,6 +227,36 @@
         }
       }
     },
+    "/api/hades/v1/project-awareness/bootstrap": {
+      "post": {
+        "summary": "Bootstrap project awareness for a workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project awareness bootstrap initiated"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
     "/api/hades/v1/agent/jobs": {
       "get": {
         "security": [

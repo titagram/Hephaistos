@@ -35,8 +35,8 @@ non vede abbastanza in profondità, e gli agent non si parlano davvero.*
 
 | # | Soffitto | Impatto | Pilastro |
 |---|----------|---------|----------|
-| 1 | **Retrieval 100% lessicale**: nessun embedding, nessun vettoriale, nessun FTS sul progetto. Recall = substring + token-set + BM25 fatto a mano. | Un agent che "chiede al backend" trova solo ciò che è già nominato con le parole esatte. Sinonimi, parafrasi, match cross-file/cross-lingua vengono persi. | A + B |
-| 2 | **Indicizzazione euristica**: solo Python usa AST reale; PHP/TS/SQL sono decine di regex. Nessun tree-sitter, nessun call-graph/data-flow interprocedurale, forte bias Laravel. | Fragile su codice reale (dispatch dinamico, façade, query costruite a stringa). Fedeltà insufficiente per un fix affidabile. | B |
+| 1 | **Retrieval quasi tutto lessicale**: nessun embedding/vettoriale specifico Hades; la cache locale è un blob JSON senza indice; il graph search locale usa substring/token/BM25 fatto a mano. | Un agent che "chiede al backend" trova soprattutto ciò che è già nominato con parole vicine. Sinonimi, parafrasi, match cross-file/cross-lingua vengono persi o dipendono da coincidenze lessicali. | A + B |
+| 2 | **Indicizzazione euristica**: Python usa AST e produce alcuni edge `calls`; PHP produce molti edge utili ma via regex; TS/SQL sono ancora più regex-driven. Nessun tree-sitter, nessun data-flow interprocedurale robusto, forte bias Laravel. | Fragile su codice reale (dispatch dinamico, façade, query costruite a stringa). Fedeltà insufficiente per un fix affidabile senza sorgente. | B |
 | 3 | **Coordinamento grossolano**: l'unica esclusione è un *lease per work-item*. Nessuna presence, nessun lock su file/simboli, nessun conflict detection tra agent, nessun feed di attività, nessun canale agent↔agent. | La promessa "non pestarsi i piedi" **non è realizzata**: due agent possono modificare gli stessi file senza saperlo. | A |
 
 Il resto del documento parte dallo stato attuale (§2), enumera i gap con
@@ -78,8 +78,12 @@ Entry point `execute_job()` in `hermes_cli/hades_backend_jobs.py:12039`.
 - **Source slice** on-demand (`_execute_read_source_slice`, `:3547`): unico
   percorso che carica codice vero, redatto, `max_lines=120`, `max_slice_bytes=64KB`.
 
-**Metodo di estrazione**: Python via `ast` stdlib (`:11686`); PHP/TS/SQL via
-regex pure (`_build_php_graph:8470`, `_build_ts_graph:11424`, `_build_sql_graph:11274`).
+**Metodo di estrazione**: Python via `ast` stdlib (`:11686`) con edge `calls`
+euristici (`_append_python_call_edges`, `:10498`); PHP/TS/SQL principalmente via
+regex (`_build_php_graph:8470`, `_build_ts_graph:11424`, `_build_sql_graph:11274`).
+PHP ha molti edge specializzati (`calls_method`, `static_call`, DB/query,
+Laravel/Blade/Livewire), ma restano pattern statici, non un grafo semantico
+risolto da parser+type system.
 `hades_backend_jobs.py` è un **monolite di ~12.058 righe**.
 
 ### 2.3 Memoria condivisa
@@ -136,22 +140,28 @@ DB, **nessun** motore di ricerca dedicato (no Meilisearch/Scout/pgvector),
 
 Ordinati per impatto sul valore di prodotto.
 
-### G1 — Nessun retrieval semantico *(blocca A e B, priorità massima)*
-Confermato via grep: nessun embedding/vector/FTS nell'intera pipeline di
-progetto (unico hit "embed" è una stringa wiki in `hades_backend_jobs.py:3966`).
-La memoria è un blob senza indice; il grafo è cercato con BM25 e overlap di
-token fatti a mano (`__init__.py:2974`). **Conseguenza diretta**: il sogno
-"chiedi al backend e risolvi il bug" è limitato dal fatto che il retrieval trova
-solo ciò che è già stato nominato con le parole giuste. Questo è il singolo
-cambiamento a più alto ritorno.
+### G1 — Retrieval semantico assente *(blocca A e B, priorità massima)*
+Confermato via grep sui moduli Hades: non c'è un indice embedding/vector per
+memoria, bug evidence, source slice o graph nodes. La cache memoria locale è un
+blob JSON per workspace (`hades_backend_db.py:116`); il ranking locale è
+substring/token-set (`plugins/memory/hades_backend/__init__.py:2166`); il graph
+search locale aggiunge BM25 manuale (`__init__.py:2974`) sopra documenti costruiti
+da node/edge JSON. **Conseguenza diretta**: il sogno "chiedi al backend e risolvi
+il bug" è limitato dal fatto che il retrieval trova soprattutto ciò che è già
+stato nominato con parole giuste o molto vicine. Questo è il singolo cambiamento
+a più alto ritorno.
 
-### G2 — Indicizzazione euristica e mono-linguaggio *(blocca B)*
-Solo Python ha AST; PHP/TS/SQL sono regex. Nessun tree-sitter, ctags, jedi, LSP
-usato per l'indicizzazione. Gli edge sono **dichiarativi** (import, route→handler,
-model→table, test→symbol): **non c'è un call graph né data-flow interprocedurale**,
-né edge cross-lingua. Le regex falliscono su dispatch dinamico, façade Laravel,
-query a stringa. Cap silenziosi (`max_symbols=5000`) tagliano coverage su repo
-grandi (`hades_backend_jobs.py:11929`). È il soffitto di *fedeltà*.
+### G2 — Indicizzazione euristica e non abbastanza semantica *(blocca B)*
+Python ha AST e alcuni edge `calls`; PHP ha un set ricco di edge specializzati
+(`calls_method`, `static_call`, route/model/table/query/session/cache/etc.) ma
+sono quasi tutti prodotti da regex e pattern Laravel; TS/SQL sono ancora più
+pattern-driven. Nessun tree-sitter, ctags, PHPStan/Psalm/TypeScript compiler API,
+Jedi, o LSP è usato nel path di indicizzazione Hades. Manca un data-flow
+interprocedurale affidabile e gli edge cross-lingua sono limitati. Le regex
+falliscono su dispatch dinamico, façade, container binding non banali, metodi
+generati e query costruite a stringa. Cap silenziosi (`max_symbols=5000`) tagliano
+coverage su repo grandi (`hades_backend_jobs.py:11929`). È il soffitto di
+*fedeltà*.
 
 ### G3 — Coordinamento assente al livello che conta *(blocca A)*
 Nessun locking file/regione, nessuna presence, nessun conflict detection tra
@@ -179,9 +189,16 @@ counterfactual. Per "risolvere un bug senza sorgente" in modo credibile, la
 *patch proposta* deve essere buildata e testata da qualche parte.
 
 ### G6 — Governance del contratto e manutenibilità
-- **Drift client/OpenAPI**: `project-awareness/bootstrap` e la "graph search"
-  sono chiamati dal client ma **assenti dalla spec** (`hades_backend_client.py:172`).
-  Il contratto non è autoritativo.
+- **Drift client/OpenAPI**: `project-awareness/bootstrap` è chiamato dal client
+  (`hades_backend_client.py:255`) ma è assente dalla spec. La "graph search"
+  invece oggi non è un endpoint dedicato: il provider implementa
+  `hades_backend_graph_search` chiamando `memory/search` con `domain=artifacts`
+  (`plugins/memory/hades_backend/__init__.py:1334`). Se si vuole un vero
+  `GET /graph/search`, va introdotto esplicitamente in Fase 1, non trattato come
+  endpoint già esistente.
+- **Contratto non ancora autoritativo**: esiste `tests/hermes_cli/test_hades_backend_client.py`,
+  ma copre casi enumerati manualmente. Serve un controllo che derivi i metodi dal
+  client o almeno impedisca nuovi metodi non mappati nella spec.
 - **Monolite** `hades_backend_jobs.py` (12k righe) → estrazione per-linguaggio
   non pluggabile, difficile da testare ed estendere.
 - Nessun broker di coda / DAG di dipendenze tra job → niente fan-out/fan-in,
@@ -195,10 +212,11 @@ counterfactual. Per "risolvere un bug senza sorgente" in modo credibile, la
                          ┌─────────────────────────────────────────────────────┐
                          │                 BACKEND (Laravel)                    │
    Indexer pluggabile    │  ┌───────────────┐   ┌──────────────────────────┐   │
-   (tree-sitter + LSP)   │  │ Vector store   │   │ Graph store              │   │
-   ─────────────────►    │  │ (pgvector)     │   │ (adjacency + CTE / graph)│   │
-   symbols, call-graph,  │  │ code+memory+   │   │ call/data-flow, blast    │   │
-   data-flow, slices     │  │ evidence embed │   │ radius, path queries     │   │
+   (tree-sitter + static │  │ Vector store   │   │ Graph store              │   │
+   analysis, then LSP)   │  │ (pgvector se   │   │ (adjacency + CTE / graph)│   │
+   ─────────────────►    │  │ DB=Postgres;   │   │ call/data-flow, blast    │   │
+   symbols, call-graph,  │  │ altrimenti     │   │ radius, path queries     │   │
+   data-flow, slices     │  │ adapter)       │   │                          │   │
                          │  └───────┬────────┘   └───────────┬──────────────┘   │
                          │          └─── Hybrid retrieval (BM25 + ANN + rerank) │
                          │  ┌──────────────────┐  ┌───────────────────────────┐│
@@ -234,130 +252,284 @@ Convenzione: "locale" = repo Python `/Users/gabriele/Dev/Hephaistos`;
 "backend" = Laravel (`app/Services/Hades/…`, `routes/api.php`, migrazioni).
 Approccio: **TDD** e commit per task atomico, come già in uso nel repo.
 
+### Regole di esecuzione per una sessione separata
+
+Questa sezione è scritta per essere eseguita anche da un modello più leggero.
+Non saltare passi e non accorpare task non correlati.
+
+1. **Prima leggere i file citati dal task corrente**, non tutto il repo.
+2. **Prima scrivere o aggiornare il test**, poi implementare.
+3. **Non introdurre nuovi model-tool Hermes core.** Tutto resta in Hades:
+   backend Laravel, CLI Hades, provider memoria, job, skill/docs.
+4. **Non inviare contenuto sorgente non redatto al backend.** Gli embedding
+   devono essere calcolati solo su contenuti già permessi: memoria, evidence,
+   artifact metadata, source slice redatte e bounded.
+5. **Non fare il refactor da 12k righe prima di avere golden test.**
+   Estrarre codice senza harness rende impossibile capire se è cambiato il
+   grafo prodotto.
+6. **Non aggiungere `GET /graph/search` per inerzia.** Oggi il graph search
+   live passa da `memory/search?domain=artifacts`; introdurre endpoint dedicato
+   solo nel task che modifica anche backend, OpenAPI, client e provider.
+7. **Ogni task termina con test mirati e commit atomico.** Se un test di
+   regressione fallisce in modo non correlato, annotarlo nel commit message o
+   nella risposta finale; non correggere aree estranee.
+8. **Stop condition:** se il backend Laravel reale non è disponibile nella
+   sessione, implementare solo i test/local client/docs e lasciare il task
+   backend con stato esplicito "blocked: backend checkout missing".
+
 ---
 
-### FASE 0 — Fondamenta: contratto autoritativo + modularità
+### FASE 0 — Fondamenta leggere: contratto + safety harness
 
-**0.1 Rendere l'OpenAPI la sorgente di verità**
-- **Cosa**: test di contratto che verifica che ogni endpoint chiamato dal client
-  esista nella spec, e che colma il drift (`project-awareness/bootstrap`,
-  `graph/search`).
-- **Dove**: nuovo `tests/hermes_cli/test_hades_openapi_contract.py`; correzione di
-  `docs/hades/openapi-hades-v1.json`; enumerare le chiamate in
-  `hades_backend_client.py:172-320`.
-- **Perché**: senza contratto autoritativo, ogni fase successiva costruisce su
-  API non garantite; il drift già esiste.
-- **Verifica**: il test fallisce sugli endpoint mancanti, poi passa dopo il
-  fix della spec.
+**0.1 OpenAPI contract: coprire `project-awareness/bootstrap`**
+- **Cosa**: aggiornare il contratto per l'endpoint già chiamato dal client:
+  `HadesBackendClient.bootstrap_project_awareness()` → `POST
+  /api/hades/v1/project-awareness/bootstrap`.
+- **Dove**:
+  - `docs/hades/openapi-hades-v1.json`: aggiungere il path.
+  - `tests/hermes_cli/test_hades_backend_client.py`: aggiungere un caso
+    `CLIENT_ROUTE_CASES` per `bootstrap_project_awareness`.
+- **Non fare**: non aggiungere `graph/search` in questo task.
+- **Perché**: oggi il client chiama un endpoint non presente nella spec; questo
+  è drift reale e già verificabile.
+- **Verifica**:
+  - Prima del fix: aggiungere il test e vedere fallire su route mancante.
+  - Dopo il fix: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_client.py`.
+  - `python3 -m json.tool docs/hades/openapi-hades-v1.json >/dev/null`.
 
-**0.2 Registry di schemi versionati `hades.*.vN`**
-- **Cosa**: un modulo che centralizza i nomi/versioni di schema
-  (`hades.code_graph.v1`, `hades.kanban_task_work.v1`, `hades.causal_pack.v1`, …)
-  con validazione e test di round-trip.
-- **Dove**: nuovo `hermes_cli/hades_schemas.py`; riferimenti sparsi oggi in
-  `hades_backend_sync.py:795`, `hades_kanban_task_contract.py`, `hades_causal_pack.py`.
-- **Perché**: le fasi 1–5 introducono `.v2` (grafo con call-edge, memoria
-  tipizzata). Serve migrazione ordinata e retro-compatibilità.
-- **Verifica**: test che ogni artefatto prodotto valida contro lo schema
-  dichiarato.
+**0.2 Contract guard: nessun nuovo client method senza mapping**
+- **Cosa**: rendere esplicito il set dei metodi client che devono essere
+  coperti da OpenAPI. Il test può partire da una whitelist manuale, ma deve
+  fallire se si aggiunge un metodo pubblico a `HadesBackendClient` senza un caso
+  in `CLIENT_ROUTE_CASES` o senza dichiararlo intenzionalmente unmapped.
+- **Dove**: `tests/hermes_cli/test_hades_backend_client.py`.
+- **Interfaccia attesa**:
+  - Metodi esclusi: `close` e helper privati (`_request`, `_url`, ecc.).
+  - Ogni altro metodo pubblico deve comparire in `CLIENT_ROUTE_CASES`.
+- **Perché**: il test attuale copre la spec contro casi enumerati; manca il
+  guard opposto che impedisce nuovi metodi non documentati.
+- **Verifica**:
+  - Aggiungere temporaneamente un metodo pubblico finto al client e verificare
+    che il test fallisca; rimuoverlo.
+  - Run finale: stesso pytest di 0.1.
 
-**0.3 Spezzare il monolite dell'indexer**
-- **Cosa**: estrarre gli estrattori per-linguaggio in un package con
-  interfaccia comune `LanguageIndexer.build_graph(root, files) -> GraphArtifact`.
-- **Dove**: nuovo package `hermes_cli/hades_index/` (`python.py`, `php.py`,
-  `typescript.py`, `sql.py`, `base.py`), spostando `_build_php_graph`
-  (`hades_backend_jobs.py:8470`), `_build_ts_graph:11424`, `_build_sql_graph:11274`,
-  e il ramo Python `:11660-11940`.
-- **Perché**: 12k righe in un file rendono G2 non aggredibile; una registry di
-  indexer pluggabili è il prerequisito per tree-sitter (Fase 2) e per nuovi
-  linguaggi.
-- **Verifica**: gli artefatti prodotti sono byte-identici prima/dopo il refactor
-  (test di golden-artifact su un repo fixture).
+**0.3 Golden harness per l'indexer prima di ogni refactor**
+- **Cosa**: creare fixture piccole che coprano i quattro path principali:
+  Python/FastAPI o Django, PHP/Laravel, TS/Next o Express, SQL/schema. Il test
+  deve chiamare `execute_job({"capability": "populate_backend_ast", ...})` e
+  verificare proprietà stabili dell'artefatto prodotto.
+- **Dove**:
+  - Fixture: `tests/fixtures/hades/indexer/{python_app,laravel_app,ts_app,sql_app}/`.
+  - Test: `tests/hermes_cli/test_hades_backend_indexer_golden.py`.
+- **Assert minimi**:
+  - `artifact["schema"]` è `hades.code_graph.v1` o `hades.php_graph.v1`.
+  - `raw_source_included` è `False`.
+  - Almeno un symbol, una route o una table attesa è presente.
+  - Edge noti: Python `calls`, PHP `calls_method` o `static_call`, TS `imports`,
+    SQL `foreign_key` quando applicabile.
+  - `source_slice_candidates` esiste dopo `_attach_source_slice_candidates`.
+- **Perché**: il refactor dell'indexer è utile, ma solo se possiamo dimostrare
+  che non cambia accidentalmente il grafo.
+- **Verifica**:
+  - `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_indexer_golden.py`.
+
+**0.4 Solo dopo 0.3: seam minimo per indexer pluggabile**
+- **Cosa**: introdurre un piccolo punto di dispatch senza spostare subito
+  migliaia di righe:
+  `hermes_cli/hades_index/__init__.py` con funzione
+  `build_graph_for_workspace(workspace_root, candidates, omitted, payload)`.
+  All'inizio questa funzione può chiamare le funzioni esistenti in
+  `hades_backend_jobs.py`; il move fisico dei parser avviene in Fase 2.
+- **Dove**:
+  - Creare `hermes_cli/hades_index/__init__.py`.
+  - Modificare solo `_execute_populate_backend_ast` in
+    `hermes_cli/hades_backend_jobs.py`.
+- **Perché**: serve un seam per Fase 2, ma non deve bloccare Fase 1 con un
+  refactor enorme.
+- **Verifica**:
+  - Golden test 0.3 invariato.
+  - `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_indexer_golden.py`.
 
 ---
 
 ### FASE 1 — Retrieval semantico ibrido  ⭐ *(massimo ROI)*
 
-**1.1 Vector store sul backend**
-- **Cosa**: aggiungere `pgvector` (Postgres) e tabelle di embedding per tre
-  corpora: memoria, bug-evidence, nodi/slice del code-graph. Colonne
-  `embedding vector(N)`, `model`, `dim`, `content_sha256`.
-- **Dove**: backend — migrazioni `create_hades_embeddings_table`, servizio
-  `app/Services/Hades/HadesEmbeddingService.php`; l'indexer di ricerca esistente
-  `HadesSearchDocumentIndexer` diventa il punto in cui si calcola/aggiorna
-  l'embedding (oggi chiamato da `DiagnosisReportController.php:320`).
-- **Perché**: G1. È l'abilitatore di "chiedi al backend qualunque cosa".
-- **Verifica**: feature test Laravel che inserisce due memorie parafrasate e
-  verifica che la query semantica le trovi entrambe (recall che il BM25 non dà).
+**1.1 Backend: astrarre lo storage di ricerca prima del vector store**
+- **Cosa**: introdurre un servizio backend unico per retrieval, senza ancora
+  obbligare pgvector. Il servizio deve avere due modalità:
+  - lexical: usa il meccanismo esistente su `hades_search_documents`;
+  - semantic: disattivata se non esiste tabella/vector adapter.
+- **Dove**:
+  - Backend: `app/Services/Hades/HadesSearchService.php`.
+  - Backend: controller esistente di `memory/search` e `bug-evidence/search`.
+  - Test backend: feature test per `memory/search` che conferma parità con il
+    comportamento attuale quando semantic è disattivato.
+- **Interfaccia attesa**:
+  - Input: `project_id`, `workspace_binding_id`, `query`, `domain`, `limit`,
+    `include_raw_chunks`.
+  - Output item: `id`, `domain`, `summary`, `score`, `match_type`,
+    `provenance`, `raw_chunk`.
+  - `match_type` iniziale ammesso: `lexical`.
+- **Perché**: evita di legare subito il piano a Postgres/pgvector e crea il
+  punto in cui aggiungere ANN/RRF senza toccare ogni controller.
+- **Verifica**:
+  - Test Laravel: query lessicale su memoria/evidence continua a trovare gli
+    stessi item.
+  - Nessuna migrazione vector in questo task.
 
-**1.2 Servizio di embedding (privacy-first)**
-- **Cosa**: generare embedding con un **modello di code-embedding eseguibile
-  localmente/self-hosted** (es. un modello di embedding servito via il proxy
-  provider già presente), non un servizio esterno. Solo contenuto già redatto
-  viene embeddato.
-- **Dove**: riuso di `hermes_cli/proxy/` (già astrae i provider); nuovo
-  `hermes_cli/hades_embeddings.py` per il lato locale (embedding delle slice
-  prima dell'upload, opzionale) e chiamata backend per i corpora server-side.
-- **Perché**: privacy (§6) + nessun lock-in provider (coerente con il pitch
-  "use any model you want" del README).
-- **Verifica**: test che nessun contenuto non-redatto entri nel path di
-  embedding (riuso di `redact_secret`, `hades_backend_client.py:61`).
+**1.2 Backend: embedding table dietro adapter**
+- **Cosa**: aggiungere storage embedding tenant-scoped dietro adapter. Se il DB
+  è Postgres, implementare pgvector; altrimenti lasciare adapter `null` con
+  capability `semantic_search=false`.
+- **Dove**:
+  - Backend migrazione: `hades_embeddings` con campi minimi
+    `id`, `project_id`, `workspace_binding_id`, `domain`, `source_table`,
+    `source_id`, `content_sha256`, `model`, `dim`, `embedding`, timestamps.
+  - Backend service: `HadesEmbeddingStore`.
+  - Backend capability/status: esporre se semantic search è disponibile.
+- **Non fare**: non chiamare provider esterni da Laravel in questo task.
+- **Perché**: separa schema/storage da generazione embedding e permette deploy
+  anche su ambienti senza pgvector.
+- **Verifica**:
+  - Migration test: insert/upsert per stesso `(project_id, domain, source_id,
+    content_sha256)` non duplica.
+  - Test multi-tenant: query per `project_id=A` non legge embedding di
+    `project_id=B`.
 
-**1.3 Ricerca ibrida + reranking**
-- **Cosa**: endpoint `GET /memory/search` e `GET /graph/search` che combinano
-  BM25 (lessicale) + ANN (vettoriale) con fusione RRF e un rerank finale;
-  restituiscono `score`, `match_type`, `provenance`.
-- **Dove**: backend `HadesSearchService`; `routes/api.php`; client
-  `hades_backend_client.py` (`memory_search:216`, e nuovo `graph_search` oggi
-  mancante); provider `plugins/memory/hades_backend/__init__.py` — sostituire il
-  ranking lessicale di `_score_item` (`:2166`) e il BM25 locale (`:2974`) con la
-  chiamata ibrida quando il backend è raggiungibile, mantenendo il fallback
-  lessicale offline.
-- **Perché**: G1. Recall robusto su sinonimi/parafrasi/cross-file.
-- **Verifica**: gate di qualità nuovo `recall@k` su un set di query/gold; deve
-  battere il baseline lessicale su un dataset di regressione.
+**1.3 Embedding generation privacy-first**
+- **Cosa**: generare embedding solo da contenuti già ammessi alla ricerca:
+  memory entries, bug evidence, evidence packs, source slice redatte, graph
+  artifact summaries/nodes/edges; mai file raw.
+- **Dove**:
+  - Locale: nuovo `hermes_cli/hades_embeddings.py` se la generazione parte dal
+    client.
+  - Backend: `HadesSearchDocumentIndexer` se la generazione parte da documenti
+    già indicizzati.
+  - Redaction invariant: riusare `redact_secret` lato locale e il redactor
+    backend già presente, se esiste.
+- **Provider**: usare modello self-hosted/configurabile. Se manca provider,
+  saltare semantic indexing e loggare `semantic_index_skipped`.
+- **Perché**: l'embedding è una copia numerica del contenuto; deve rispettare
+  la stessa policy delle source slice.
+- **Verifica**:
+  - Test che un contenuto con token/API key venga redatto prima dell'embedding.
+  - Test che un file raw non possa entrare nel job di embedding.
 
-**1.4 Indice semantico anche in cache locale**
-- **Cosa**: cache locale con FTS5 + (opzionale) indice vettoriale su SQLite
-  (`sqlite-vec`), per-item invece del blob unico.
-- **Dove**: `hades_backend_db.py:116` (`memory_cache`) → tabella per-item con
-  colonne indicizzabili; `replace_memory_cache:1020` diventa upsert per-item con
-  delta.
-- **Perché**: G1 + G4.7 (delta sync). Recall decente anche in modalità degradata
-  offline.
-- **Verifica**: test che una ricerca offline post-sync trovi un item per
-  sinonimo, e che un secondo sync applichi solo il delta.
+**1.4 Hybrid retrieval: RRF tra lessicale e vettoriale**
+- **Cosa**: combinare risultati lexical e semantic con Reciprocal Rank Fusion
+  (RRF). Formula consigliata: `rrf_score += 1 / (60 + rank)` per ogni lista.
+  Il campo `score` resta numerico e ordinabile; aggiungere `match_type`:
+  `lexical`, `semantic`, `hybrid`.
+- **Dove**:
+  - Backend: `HadesSearchService`.
+  - Endpoint esistenti: `GET /memory/search`, `GET /bug-evidence/search`.
+  - Provider locale: nessun cambio necessario se il response shape resta
+    compatibile.
+- **Non fare**: non rimuovere il fallback locale in
+  `plugins/memory/hades_backend/__init__.py`; serve quando il backend è
+  irraggiungibile.
+- **Perché**: migliora recall senza sacrificare precisione sui match esatti.
+- **Verifica**:
+  - Test 1: query esatta continua a mettere il match lessicale in alto.
+  - Test 2: query parafrasata trova item semanticamente vicino che il lessicale
+    puro non trova.
+  - Test 3: se semantic adapter è off, l'endpoint ritorna solo `match_type=lexical`
+    e non fallisce.
+
+**1.5 Solo dopo 1.4: decidere se introdurre `GET /graph/search`**
+- **Cosa**: scegliere tra due opzioni e implementarne una sola:
+  - Opzione A, conservativa: mantenere `hades_backend_graph_search` sopra
+    `memory/search?domain=artifacts`, ma indicizzare meglio graph nodes/edges
+    come documenti di ricerca.
+  - Opzione B, esplicita: aggiungere `GET /graph/search` con controller,
+    OpenAPI, `HadesBackendClient.graph_search()`, e provider aggiornato.
+- **Scelta consigliata**: Opzione A per primo rilascio. Opzione B solo se serve
+  un payload graph-specific non rappresentabile bene come search document.
+- **Dove se Opzione B**:
+  - `docs/hades/openapi-hades-v1.json`.
+  - `hermes_cli/hades_backend_client.py`.
+  - `tests/hermes_cli/test_hades_backend_client.py`.
+  - `plugins/memory/hades_backend/__init__.py`, `_handle_graph_search`.
+- **Verifica**:
+  - Opzione A: test esistente `test_hades_backend_graph_search_tool_queries_artifacts_live`.
+  - Opzione B: stesso test deve verificare che venga chiamato `client.graph_search`,
+    non `client.memory_search`.
+
+**1.6 Cache locale per-item con FTS5, vector locale opzionale**
+- **Cosa**: trasformare `memory_cache` da blob unico a cache per-item indicizzata.
+  Mantenere lettura legacy del blob per migrazione.
+- **Dove**:
+  - `hermes_cli/hades_backend_db.py`: nuove tabelle
+    `memory_cache_items` e, se disponibile, `memory_cache_items_fts`.
+  - `replace_memory_cache`: upsert item per item e aggiorna versione snapshot.
+  - `plugins/memory/hades_backend/__init__.py`: ricerca offline usa FTS5 quando
+    presente, altrimenti fallback al blob/lista attuale.
+- **Non fare**: non rendere `sqlite-vec` dipendenza obbligatoria.
+- **Verifica**:
+  - Test migrazione: cache legacy letta ancora correttamente.
+  - Test delta: secondo sync con un item modificato non riscrive tutti gli item.
+  - Test offline: query lessicale trova item dalla FTS locale.
 
 ---
 
 ### FASE 2 — Indicizzazione ad alta fedeltà
 
-**2.1 Tree-sitter come parser universale**
-- **Cosa**: sostituire le regex PHP/TS/SQL con grammatiche tree-sitter (40+
-  linguaggi), estraendo simboli, import, definizioni con posizioni precise.
-- **Dove**: `hermes_cli/hades_index/*` (Fase 0.3); dipendenza opzionale
-  lazy-installata via `tools/lazy_deps.py` (coerente con la policy delle extra
-  in `pyproject.toml`).
-- **Perché**: G2. Elimina la fragilità delle regex e il bias Laravel; abilita
-  nuovi linguaggi senza scrivere nuovi parser.
-- **Verifica**: golden-artifact su fixture multi-linguaggio; parità o
-  superiorità di copertura simboli vs. l'estrattore regex attuale.
+**2.1 Estrarre davvero gli indexer solo dopo golden harness**
+- **Prerequisito**: Fase 0.3 verde.
+- **Cosa**: spostare un linguaggio per commit, iniziando da TS o SQL (meno
+  intrecciati), poi Python, infine PHP/Laravel.
+- **Dove**:
+  - `hermes_cli/hades_index/base.py`: protocollo `LanguageIndexer`.
+  - `hermes_cli/hades_index/typescript.py`, `sql.py`, `python.py`, `php.py`.
+  - `hermes_cli/hades_backend_jobs.py`: lasciare solo orchestration, file walk,
+    policy/redaction, job routing.
+- **Ordine obbligatorio**:
+  1. Estrarre TS/SQL, run golden.
+  2. Estrarre Python, run golden.
+  3. Estrarre PHP, run golden e test esistenti del provider graph search.
+- **Perché**: riduce blast radius. PHP è il più rischioso e va lasciato per
+  ultimo.
+- **Verifica**:
+  - Golden test di Fase 0.3 passa dopo ogni estrazione.
+  - `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/agent/test_hades_backend_memory_provider.py`.
 
-**2.2 Call graph e data-flow via LSP**
-- **Cosa**: costruire edge `calls`, `references`, `implements`, `data_flow`
-  interprocedurali sfruttando i language server. Il modulo `agent/lsp` esiste
-  già (oggi solo per editing live): riusarlo in modalità batch di indicizzazione.
-- **Dove**: nuovo `hades_index/lsp_resolver.py`; estende gli edge in
-  `hades.code_graph.v2`; backend: modello grafo reale (tabelle di adiacenza +
-  query CTE ricorsive per path-finding/blast-radius, o graph DB dedicato) al
-  posto del walk su JSON.
-- **Perché**: G2. Localizzazione precisa del bug e analisi d'impatto
-  ("cosa rompe questo fix") richiedono un vero grafo di chiamate.
-- **Verifica**: test di path-finding (dato route→…→tabella) e di blast-radius su
-  fixture; il causal pack può ora citare una *catena* verificabile, non refs
-  isolati.
+**2.2 Tree-sitter come parser strutturale, non come sostituzione big-bang**
+- **Cosa**: aggiungere tree-sitter dietro feature flag/config interna per
+  linguaggio. Primo target consigliato: TypeScript/JavaScript, poi PHP. Il
+  parser tree-sitter deve arricchire symbol/range/import; non deve rimuovere
+  subito gli edge Laravel già coperti dalle regex.
+- **Dove**:
+  - `hermes_cli/hades_index/tree_sitter_adapter.py`.
+  - Indexer per linguaggio estratti in 2.1.
+  - Dipendenza opzionale/lazy, non import globale che rompe install minime.
+- **Perché**: elimina fragilità sintattica senza buttare via edge domain-specific
+  che oggi hanno valore.
+- **Verifica**:
+  - Fixture con sintassi che rompe la regex ma è parseable da tree-sitter.
+  - Parità o aumento di symbol coverage rispetto al baseline golden.
+  - Se tree-sitter non è installato, il sistema usa fallback e i test esistenti
+    restano verdi.
 
-**2.3 Indicizzazione incrementale + graph diff per commit**
+**2.3 Call graph: static analyzers prima, LSP dopo**
+- **Cosa**: costruire edge più affidabili con gli strumenti nativi dei linguaggi,
+  evitando di partire subito da LSP batch se è instabile:
+  - PHP: Composer autoload + PHPStan/Psalm metadata dove disponibile.
+  - TS: TypeScript compiler API per references/calls quando `tsconfig` esiste.
+  - Python: mantenere AST, poi valutare Jedi/pyright solo per progetti che lo
+    configurano.
+  - LSP: secondo step, dietro timeout e fallback, per `references`/`definition`.
+- **Dove**:
+  - `hermes_cli/hades_index/resolution.py`.
+  - Nuovo schema `hades.code_graph.v2` solo quando gli edge arricchiti sono
+    presenti; continuare a produrre `.v1` finché il backend non consuma `.v2`.
+- **Perché**: i language server sono utili ma costosi/fragili in batch. Gli
+  analyzer statici danno più controllo e testabilità.
+- **Verifica**:
+  - Test path route -> handler -> service -> table su fixture.
+  - Test timeout: analyzer lento non blocca il job; produce artifact degradato
+    con `truncated`/`omitted` esplicito.
+
+**2.4 Indicizzazione incrementale + graph diff per commit**
 - **Cosa**: indicizzare solo i file cambiati (`git diff` tra HEAD indicizzato e
   nuovo), mantenendo delta di grafo per commit; freshness diventa più fine di una
   semplice uguaglianza HEAD.
@@ -373,44 +545,97 @@ Approccio: **TDD** e commit per task atomico, come già in uso nel repo.
 
 ### FASE 3 — Coordinamento multi-agente in tempo reale  ⭐ *(cuore del Pilastro A)*
 
-**3.1 Presence + activity feed**
-- **Cosa**: heartbeat continuo dello stato agent (branch, file dirty, focus
-  corrente, task attivo) e promozione di Persephone a servizio di presence +
-  feed attività, non semplice inbox.
-- **Dove**: `hades_plugin_tasks.py:360` (`_git_state` da snapshot una-tantum a
-  heartbeat periodico); `hades_backend_sync.py:990` (Persephone); backend: nuovi
-  `POST /presence/heartbeat`, `GET /presence`, canale `GET /persephone/events`
-  esteso con eventi di presence.
-- **Perché**: G3. "Chi sta lavorando su cosa, ora" è il prerequisito di tutto il
-  resto della coordinazione.
-- **Verifica**: due binding simulati; l'uno vede l'altro attivo entro l'intervallo
-  di heartbeat.
+**3.1 Backend presence minimale**
+- **Cosa**: aggiungere presence senza locking: ultimo heartbeat per agent/binding.
+- **Dove**:
+  - Backend migration: `hades_agent_presence`.
+  - Backend endpoint: `POST /api/hades/v1/presence/heartbeat`.
+  - Backend endpoint: `GET /api/hades/v1/presence`.
+  - OpenAPI + `HadesBackendClient` + test client.
+- **Payload heartbeat minimo**:
+  - `project_id`, `workspace_binding_id`, `agent_id`.
+  - `current_branch`, `last_head_sha`, `dirty_status`.
+  - `active_work_item_id` opzionale.
+  - `observed_at`, `ttl_seconds`.
+- **Privacy**: `display_path` opzionale e redatto; non inviare file content.
+- **Perché**: prima bisogna sapere chi è online e su quale branch/HEAD.
+- **Verifica**:
+  - Due binding nello stesso project vedono presenza reciproca.
+  - Presenza scaduta oltre TTL non appare come active.
+  - Project A non vede presence di Project B.
 
-**3.2 Code-claims (soft lock su file/simboli) + conflict detection**
-- **Cosa**: quando un agent inizia a lavorare su un insieme di file/simboli,
-  pubblica un *claim* di intenzione; altri agent con claim/branch sovrapposti
-  ricevono un avviso di conflitto **prima** di iniziare.
-- **Dove**: backend: tabella `hades_code_claims` (project, binding, refs,
-  scope, ttl, stato) + endpoint `claim`/`release`/`GET conflicts`; locale:
-  estendere il contratto di claim (oggi solo `work_item_id`+`local_workspace_id`,
-  `hades_plugin_work_items_client.py:178`) con scope path/symbol; superficie nel
-  contesto agent (skill `hades-coordination` in `hades_coordination.py`).
-- **Perché**: G3. È la traduzione letterale di "non pestarsi i piedi": non
-  esiste oggi alcun lock a grana file/regione.
-- **Verifica**: test in cui due agent claimano refs sovrapposte → il secondo
-  riceve `conflict` con il riferimento all'agent e al task in corso.
+**3.2 Locale: pubblicare heartbeat periodico**
+- **Cosa**: riusare `_git_state` ma inviarlo periodicamente mentre il worker
+  lavora e durante `hades backend sync`/poll, con backoff se backend non risponde.
+- **Dove**:
+  - `hermes_cli/hades_plugin_worker.py`: dentro heartbeat loop del work item.
+  - `hermes_cli/hades_backend_sync.py`: piggyback leggero a intervallo, non a
+    ogni tool call.
+  - `hermes_cli/hades_plugin_tasks.py`: estrarre `_git_state` in helper
+    riusabile se necessario.
+- **Non fare**: non bloccare il worker se presence heartbeat fallisce.
+- **Verifica**:
+  - Test con fake client: `heartbeat_presence` chiamato almeno una volta durante
+    work item lungo.
+  - Test errore: exception nel presence heartbeat non interrompe `runner`.
 
-**3.3 Canale di messaggistica agent↔agent**
-- **Cosa**: hand-off e negoziazione dirette tra agent (es. "sto rifattorizzando
-  BookingController, aspetta prima di toccarlo") via messaggi Persephone tipizzati.
-- **Dove**: backend `POST /persephone/messages` (già presente) esteso con
-  tipi `handoff`, `conflict_warning`, `question`; locale: consumo nel loop di
-  sync e superficie nel contesto.
-- **Perché**: G3. Trasforma coordinazione implicita (coda) in negoziazione
-  esplicita.
-- **Verifica**: test round-trip di un messaggio tipizzato tra due binding.
+**3.3 Backend code-claims advisory**
+- **Cosa**: soft lock su path/symbol. Non impedisce tecnicamente il lavoro, ma
+  ritorna conflitti visibili.
+- **Dove**:
+  - Backend migration: `hades_code_claims`.
+  - Backend endpoints:
+    - `POST /api/hades/v1/code-claims`
+    - `POST /api/hades/v1/code-claims/{claim}/release`
+    - `GET /api/hades/v1/code-claims/conflicts`
+  - OpenAPI + client locale.
+- **Schema claim minimo**:
+  - `project_id`, `workspace_binding_id`, `agent_id`.
+  - `work_item_id` opzionale.
+  - `refs`: lista di oggetti `{type: "path"|"symbol", value: "..."}`
+  - `scope`: `read`, `edit`, `refactor`, `verify`.
+  - `branch`, `head_sha`, `ttl_seconds`, `status`.
+- **Conflict rule minima**:
+  - stesso `project_id`;
+  - claim active non scaduto;
+  - workspace/agent diverso;
+  - almeno un ref uguale oppure path prefix overlap (`app/Foo` vs
+    `app/Foo/Bar.php`);
+  - `scope` conflict se uno dei due è `edit` o `refactor`.
+- **Verifica**:
+  - Due claim su stesso file: secondo response include `conflicts`.
+  - Claim scaduto: non produce conflitto.
+  - Project diverso: non produce conflitto.
 
-**3.4 Distribuzione lavoro con dipendenze**
+**3.4 Locale: claim automatico per work item**
+- **Cosa**: quando il payload del work item contiene path/symbol/repository
+  scope, creare code-claim prima di lanciare l'agent runner. Rilasciarlo in
+  `finally`.
+- **Dove**:
+  - `hermes_cli/hades_plugin_worker.py`.
+  - `hermes_cli/hades_plugin_work_items_client.py`.
+  - Eventuale helper in `hermes_cli/hades_coordination.py`.
+- **Comportamento**:
+  - Se claim ritorna conflitto, includere warning nel prompt/contesto del runner
+    e nel risultato; non fallire automaticamente.
+  - Se release fallisce, log warning e lascia scadere TTL.
+- **Verifica**:
+  - Fake client: claim chiamato prima di runner, release dopo runner.
+  - Runner che solleva exception: release comunque chiamato.
+  - Conflict response viene propagata nel prompt o nel metadata risultato.
+
+**3.5 Messaggistica agent-agent tipizzata**
+- **Cosa**: estendere Persephone con tipi minimi `conflict_warning`, `handoff`,
+  `question`, `answer`; non costruire chat completa.
+- **Dove**:
+  - Backend: validazione payload di `POST /persephone/messages`.
+  - Locale: consumo in `hades_backend_sync.py` e rendering sintetico nello stato.
+- **Perché**: utile dopo i claim; prima dei claim diventerebbe solo inbox generica.
+- **Verifica**:
+  - Round-trip tra due binding con `conflict_warning`.
+  - Messaggio per Project A non visibile a Project B.
+
+**3.6 Distribuzione lavoro con dipendenze**
 - **Cosa**: DAG di dipendenze tra work item + broker di coda (Redis/Horizon) al
   posto del pull piatto.
 - **Dove**: backend coda; `hades_plugin_worker.py:35` (loop worker).
@@ -526,8 +751,8 @@ Approccio: **TDD** e commit per task atomico, come già in uso nel repo.
   (`redact_secret`); nessun file intero lascia la macchina (invariante attuale
   da preservare). Il vector/graph store è tenant-scoped. La postura supply-chain
   (pin esatti in `pyproject.toml`) è già eccellente — mantenere le nuove
-  dipendenze (tree-sitter, pgvector client, sqlite-vec) come **extra
-  lazy-installate**, non nel core.
+  dipendenze (tree-sitter, pgvector client, sqlite-vec, analyzer SDK) come
+  **extra lazy-installate**, non nel core.
 - **Migrazione & retro-compatibilità**: introdurre `.v2` accanto a `.v1`
   (registry 0.2); il backend serve entrambi finché tutti i binding non sono
   ri-sincronizzati; nessun big-bang.
@@ -540,23 +765,63 @@ Approccio: **TDD** e commit per task atomico, come già in uso nel repo.
 
 ## 7. Roadmap prioritizzata
 
-**Quick wins (settimane, alto valore, basso rischio)**
-1. **Fase 0.1 + 0.3** — contratto autoritativo + spezzare il monolite. Sblocca
-   tutto il resto.
-2. **Fase 1.1–1.3** — retrieval semantico ibrido. **Singolo cambiamento a più
-   alto ROI**: moltiplica il valore di ogni conoscenza già nel backend.
+Questa è la sequenza consigliata per lanciare esecuzione in un'altra sessione.
+Se il modello è leggero, dargli **un blocco alla volta**.
 
-**Medio termine (i due pilastri)**
-3. **Fase 3.1–3.2** — presence + code-claims + conflict detection. Realizza la
-   promessa "non pestarsi i piedi" (Pilastro A), che oggi è solo aspirazione.
-4. **Fase 2.1–2.2** — tree-sitter + call graph. Alza il soffitto di fedeltà
-   (Pilastro B).
+**Blocco A — Contratto e guardrail (prima di tutto)**
+1. Fare **0.1**: aggiungere OpenAPI path per `project-awareness/bootstrap` e
+   relativo caso in `CLIENT_ROUTE_CASES`.
+2. Fare **0.2**: test che ogni metodo pubblico di `HadesBackendClient` sia
+   coperto o esplicitamente escluso.
+3. Fermarsi e committare.
+4. Test obbligatori:
+   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_client.py`
+   e `python3 -m json.tool docs/hades/openapi-hades-v1.json >/dev/null`.
 
-**Lungo termine (differenziazione "non plus ultra")**
-5. **Fase 4** — memoria tipizzata, intelligente, con knowledge graph.
-6. **Fase 5** — verifica del fix in sandbox: chiude il cerchio del Pilastro B ed
-   è ciò che distingue "diagnosi plausibile" da "fix affidabile senza sorgente".
-7. **Fase 6** — scala e osservabilità.
+**Blocco B — Safety harness indexer, senza refactor grande**
+1. Fare **0.3**: fixture golden multi-linguaggio e test dell'artefatto.
+2. Fare **0.4** solo se 0.3 è verde: seam minimo `hades_index`, nessun move
+   massivo di PHP/Python.
+3. Fermarsi e committare.
+4. Test obbligatori:
+   `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/hermes_cli/test_hades_backend_jobs.py tests/hermes_cli/test_hades_backend_indexer_golden.py`.
+
+**Blocco C — Retrieval backend, valore massimo**
+1. Fare **1.1**: `HadesSearchService` lexical con shape stabile.
+2. Fare **1.2**: embedding store adapter, semantic off se backend non supporta
+   vector.
+3. Fare **1.3**: generazione embedding privacy-first, senza provider esterno
+   obbligatorio.
+4. Fare **1.4**: RRF hybrid retrieval.
+5. Decidere **1.5**: default consigliato Opzione A, niente nuovo
+   `/graph/search` finché non serve.
+6. Fermarsi e committare.
+7. Test obbligatori: feature test Laravel per memory/evidence search, test
+   multi-tenant embedding, test semantic-off fallback.
+
+**Blocco D — Coordinamento, promessa "non pestarsi i piedi"**
+1. Fare **3.1**: presence backend minima.
+2. Fare **3.2**: heartbeat locale non bloccante.
+3. Fare **3.3**: code-claims advisory e conflict detection.
+4. Fare **3.4**: claim/release automatici nel worker.
+5. Fare **3.5**: messaggi tipizzati solo dopo i claim.
+6. Fermarsi e committare.
+7. Test obbligatori: due binding simulati, TTL scaduto, project isolation,
+   release in `finally` anche se il runner fallisce.
+
+**Blocco E — Refactor/indexing avanzato**
+1. Fare **2.1**: estrarre indexer un linguaggio alla volta, PHP per ultimo.
+2. Fare **2.2**: tree-sitter dietro fallback.
+3. Fare **2.3**: analyzer statici prima di LSP batch.
+4. Fare **2.4**: incremental graph diff.
+5. Fermarsi e committare dopo ogni linguaggio.
+6. Test obbligatori: golden invariati dopo ogni estrazione.
+
+**Blocchi successivi**
+1. **Fase 4**: memoria tipizzata, dedup semantica, confidence/decay,
+   knowledge graph.
+2. **Fase 5**: verifica sandbox del fix e patch proposal source-free.
+3. **Fase 6**: osservabilità, isolamento multi-tenant, scala.
 
 **La tesi in una riga**: le Fasi 1 e 3 sono ciò che porta Hades da "scaffolding
 impressionante" a "prodotto che mantiene le sue due promesse"; le Fasi 2, 4 e 5
@@ -570,11 +835,10 @@ sono ciò che lo rende *state of the art*.
   mai promozione automatica — coerente con la disciplina già presente.
 - **Costo/latenza embedding (1.2)**: mitigato da modello self-hosted + embedding
   solo su delta (Fase 2.3 + 1.4).
-- **Complessità del grafo reale (2.2)**: iniziare con edge `calls`/`references`
-  via LSP sui linguaggi con language server maturi, poi allargare.
+- **Complessità del grafo reale (2.3)**: iniziare con analyzer statici e edge
+  verificabili; usare LSP batch solo dietro timeout/fallback.
 - **Over-fitting su Laravel**: il fixture rocket-club è utile ma il sistema è
   visibilmente tarato su PHP/Laravel (decine di `_php_*` in `hades_backend_jobs.py`).
   La Fase 2.1 (tree-sitter) e la 6.4 (eval multi-linguaggio) sono la cura.
 - **Coordinamento e privacy**: presence/feed non devono esporre path o contenuti
   sensibili tra tenant diversi; scoping rigoroso.
-```
