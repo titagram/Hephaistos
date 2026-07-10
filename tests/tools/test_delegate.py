@@ -14,7 +14,7 @@ import os
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
@@ -60,6 +60,21 @@ def _make_mock_parent(depth=0):
     return parent
 
 
+ORCHESTRATOR_CONTRACT = {
+    "objective": "Coordinate delegated implementation",
+    "deliverable": "Verified implementation summary",
+    "in_scope": ["tools/**", "tests/**"],
+    "out_of_scope": ["deployment"],
+    "workspace": ".",
+    "write_scope": ["tools/**", "tests/**"],
+    "input_evidence": ["delegated goal and repository"],
+    "dependencies": [],
+    "acceptance_criteria": ["delegated work is synthesized"],
+    "required_verification": ["focused tests pass"],
+    "return_schema": ["child_plan", "evidence", "risks", "escalations"],
+}
+
+
 class TestDelegateRequirements(unittest.TestCase):
     def test_always_available(self):
         self.assertTrue(check_delegate_requirements())
@@ -71,6 +86,18 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("task_contract", props)
+        self.assertIn(
+            "task_contract", props["tasks"]["items"]["properties"]
+        )
+        top_contract = props["task_contract"]
+        task_contract = props["tasks"]["items"]["properties"]["task_contract"]
+        self.assertEqual(
+            set(top_contract["required"]), set(ORCHESTRATOR_CONTRACT)
+        )
+        self.assertEqual(
+            set(task_contract["required"]), set(ORCHESTRATOR_CONTRACT)
+        )
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -191,6 +218,42 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    def test_invalid_orchestrator_contract_does_not_build_child(self):
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._build_child_agent", Mock()) as build:
+            result = json.loads(
+                delegate_task(
+                    goal="Plan",
+                    role="orchestrator",
+                    parent_agent=parent,
+                )
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("task_contract", result["error"])
+        build.assert_not_called()
+
+    def test_invalid_later_batch_contract_builds_no_children(self):
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._build_child_agent", Mock()) as build:
+            result = json.loads(
+                delegate_task(
+                    tasks=[
+                        {
+                            "goal": "valid first",
+                            "role": "orchestrator",
+                            "task_contract": ORCHESTRATOR_CONTRACT,
+                        },
+                        {"goal": "invalid second", "role": "orchestrator"},
+                    ],
+                    parent_agent=parent,
+                )
+            )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Task 1", result["error"])
+        build.assert_not_called()
+
     def test_no_parent_agent(self):
         result = json.loads(delegate_task(goal="test"))
         self.assertIn("error", result)
@@ -2344,6 +2407,8 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
             kwargs = {"goal": "test", "parent_agent": parent}
             if role_arg is not _SENTINEL:
                 kwargs["role"] = role_arg
+            if role_arg == "orchestrator":
+                kwargs["task_contract"] = ORCHESTRATOR_CONTRACT
             delegate_task(**kwargs)
             return mock_child
 
@@ -2463,10 +2528,18 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
-            delegate_task(goal="test", role="orchestrator", parent_agent=parent)
+            delegate_task(
+                goal="test", role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
+            )
             kwargs = MockAgent.call_args[1]
             self.assertIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "orchestrator")
+            self.assertIn("Structured Task Contract", kwargs["ephemeral_system_prompt"])
+            self.assertIn(
+                ORCHESTRATOR_CONTRACT["objective"],
+                kwargs["ephemeral_system_prompt"],
+            )
 
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_config",
@@ -2509,7 +2582,10 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
-            delegate_task(goal="test", role="orchestrator", parent_agent=parent)
+            delegate_task(
+                goal="test", role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
+            )
             kwargs = MockAgent.call_args[1]
             self.assertNotIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "leaf")
@@ -2532,7 +2608,10 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
-            delegate_task(goal="test", role="orchestrator", parent_agent=parent)
+            delegate_task(
+                goal="test", role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
+            )
             kwargs = MockAgent.call_args[1]
             self.assertNotIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "leaf")
@@ -2552,8 +2631,10 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
             with patch("run_agent.AIAgent") as MockAgent:
                 mock_child = _make_role_mock_child()
                 MockAgent.return_value = mock_child
-                delegate_task(goal="test", role="orchestrator",
-                              parent_agent=parent)
+                delegate_task(
+                    goal="test", role="orchestrator",
+                    task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
+                )
                 kwargs = MockAgent.call_args[1]
                 self.assertNotIn("delegation", kwargs["enabled_toolsets"])
                 self.assertEqual(mock_child._delegate_role, "leaf")
@@ -2625,7 +2706,11 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         with patch("run_agent.AIAgent", side_effect=_factory):
             delegate_task(
                 tasks=[
-                    {"goal": "A", "role": "orchestrator"},
+                    {
+                        "goal": "A",
+                        "role": "orchestrator",
+                        "task_contract": ORCHESTRATOR_CONTRACT,
+                    },
                     {"goal": "B", "role": "leaf"},
                     {"goal": "C"},  # no role → falls back to top_role (leaf)
                 ],
@@ -2660,8 +2745,10 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
-            delegate_task(goal="test", role="orchestrator",
-                          parent_agent=parent)
+            delegate_task(
+                goal="test", role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
+            )
             self.assertIn("delegation", MockAgent.call_args[1]["enabled_toolsets"])
 
 
@@ -2749,6 +2836,7 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
             delegate_task(
                 goal="top-level orchestration",
                 role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT,
                 parent_agent=parent,
             )
 

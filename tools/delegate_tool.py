@@ -31,6 +31,11 @@ from concurrent.futures import (
 from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
+from tools.delegation_contract import (
+    OrchestratorTaskContract,
+    contract_prompt_block,
+    parse_orchestrator_contract,
+)
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -1065,6 +1070,7 @@ def _build_child_agent(
     # 'leaf' and 'reviewer' cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    task_contract: Optional[OrchestratorTaskContract] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1174,6 +1180,8 @@ def _build_child_agent(
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
     )
+    if effective_role == "orchestrator" and task_contract is not None:
+        child_prompt = f"{child_prompt}\n\n{contract_prompt_block(task_contract)}"
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -2174,6 +2182,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    task_contract: Optional[Dict[str, Any]] = None,
     background: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
@@ -2276,7 +2285,13 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "task_contract": task_contract,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2284,7 +2299,10 @@ def delegate_task(
     if not task_list:
         return tool_error("No tasks provided.")
 
-    # Validate each task has a goal
+    # Validate and normalize the complete batch before reserving budget or
+    # constructing any child. This keeps batch dispatch all-or-nothing when a
+    # later orchestrator task has an invalid contract.
+    normalized_tasks = []
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
             return tool_error(
@@ -2292,6 +2310,22 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+        normalized = dict(task)
+        effective_role = _normalize_role(task.get("role") or top_role)
+        normalized["_normalized_role"] = effective_role
+        if effective_role == "orchestrator":
+            try:
+                normalized["_orchestrator_contract"] = (
+                    parse_orchestrator_contract(task.get("task_contract"))
+                )
+            except ValueError as exc:
+                return tool_error(
+                    f"Task {i} has invalid task_contract: {exc}", status="error"
+                )
+        else:
+            normalized["_orchestrator_contract"] = None
+        normalized_tasks.append(normalized)
+    task_list = normalized_tasks
 
     overall_start = time.monotonic()
     results = []
@@ -2329,7 +2363,7 @@ def delegate_task(
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
-            effective_role = _normalize_role(t.get("role") or top_role)
+            effective_role = t["_normalized_role"]
             try:
                 reservation = tree_budget.reserve_child(iterations=effective_max_iter)
             except BudgetExhausted as exc:
@@ -2357,6 +2391,7 @@ def delegate_task(
                         else (acp_args if acp_args is not None else creds.get("args"))
                     ),
                     role=effective_role,
+                    task_contract=t["_orchestrator_contract"],
                 )
             except Exception:
                 reservation.rollback()
@@ -3135,6 +3170,31 @@ def _build_dynamic_schema_overrides() -> dict:
     }
 
 
+_TASK_CONTRACT_PROPERTIES = {
+    "objective": {"type": "string"},
+    "deliverable": {"type": "string"},
+    "in_scope": {"type": "array", "items": {"type": "string"}},
+    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    "workspace": {"type": "string"},
+    "write_scope": {"type": "array", "items": {"type": "string"}},
+    "input_evidence": {"type": "array", "items": {"type": "string"}},
+    "dependencies": {"type": "array", "items": {"type": "string"}},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "required_verification": {"type": "array", "items": {"type": "string"}},
+    "return_schema": {"type": "array", "items": {"type": "string"}},
+}
+_TASK_CONTRACT_REQUIRED = list(_TASK_CONTRACT_PROPERTIES)
+
+
+def _task_contract_schema(description: str) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "description": description,
+        "properties": _TASK_CONTRACT_PROPERTIES,
+        "required": _TASK_CONTRACT_REQUIRED,
+    }
+
+
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
     # NOTE: description / tasks.description / role.description are placeholder
@@ -3181,6 +3241,12 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "task_contract": _task_contract_schema(
+                (
+                    "Required when role='orchestrator'. Structured scope, "
+                    "evidence, verification, and return contract for the child."
+                )
+            ),
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3214,6 +3280,12 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator", "reviewer"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "task_contract": _task_contract_schema(
+                            (
+                                "Required for this task when its role is 'orchestrator'. "
+                                "Uses the same fields as the top-level task_contract."
+                            )
+                        ),
                     },
                     "required": ["goal"],
                 },
@@ -3300,6 +3372,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        task_contract=args.get("task_contract"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),
