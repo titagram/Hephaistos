@@ -1932,6 +1932,35 @@ The delegation provider uses the same credential resolution as CLI/gateway start
 
 **Width and depth:** `max_concurrent_children` caps how many subagents run in parallel per batch (default `3`, floor of 1, no ceiling). Can also be set via the `DELEGATION_MAX_CONCURRENT_CHILDREN` env var. When the model submits a `tasks` array longer than the cap, `delegate_task` returns a tool error explaining the limit rather than silently truncating. `max_spawn_depth` controls the delegation tree depth (clamped to 1-3). At the default `1`, delegation is flat: children cannot spawn grandchildren, and passing `role="orchestrator"` silently degrades to `leaf`. Raise to `2` so orchestrator children can spawn leaf grandchildren; `3` for three-level trees. The agent opts into orchestration per call via `role="orchestrator"`; `orchestrator_enabled: false` forces every child back to leaf regardless. Cost scales multiplicatively — at `max_spawn_depth: 3` with `max_concurrent_children: 3`, the tree can reach 3×3×3 = 27 concurrent leaf agents. See [Subagent Delegation → Depth Limit and Nested Orchestration](features/delegation.md#depth-limit-and-nested-orchestration) for usage patterns.
 
+### Allow-listed role routes (P4)
+
+For a durable local policy, route only the logical roles `orchestrator`, `leaf`, and `reviewer` to named local profiles. These profiles are configuration, not model-tool arguments: a task cannot choose its own provider, model, API key, or endpoint. Do not put credentials in a route profile; normal provider credential resolution still applies.
+
+```yaml
+delegation:
+  profiles:
+    fast_leaf:
+      provider: openrouter
+      model: "openai/gpt-5-mini"
+      reasoning_effort: low       # optional
+      max_iterations: 12
+      child_timeout_seconds: 90
+    independent_review:
+      provider: openrouter
+      model: "openai/gpt-5"
+      max_iterations: 20
+      child_timeout_seconds: 180
+  role_routes:
+    leaf: fast_leaf
+    reviewer: independent_review
+```
+
+If `profiles` and `role_routes` are absent, delegation remains fully legacy-compatible: children inherit the parent credentials and existing `delegation.*` settings. A configured route must reference a defined profile; invalid roles, empty provider/model, non-positive limits, and secret-shaped fields (`api_key`, `token`, `secret`, `password`) are rejected. `reviewer` is an internal routing role and is not added to the public `delegate_task` tool schema.
+
+### Delegation tree budget
+
+The runtime attaches one process-local shared budget to a delegation tree. It atomically reserves child slots and iteration allowance before child construction, rolls a reservation back if construction fails, and passes the same budget object to descendants. Its initial limits are derived from `max_concurrent_children`, `max_spawn_depth`, and `max_iterations`; it is intentionally not persisted and does not alter a conversation's model or system prompt. Use Kanban OrgRun for work that must survive restart, needs audit history, leases, integration review, or backend synchronization.
+
 ## Clarify
 
 Configure the clarification prompt behavior:

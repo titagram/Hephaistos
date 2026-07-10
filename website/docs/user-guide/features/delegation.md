@@ -8,6 +8,14 @@ description: "Spawn isolated child agents for parallel workstreams with delegate
 
 The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
 
+## Choosing delegation vs. an OrgRun
+
+Use `delegate_task` for a short task whose state can disappear with the parent conversation. It is process-local: its routing and shared budget are not durable coordination records.
+
+Use a Hades OrgRun when work must survive restart, spans several dependent changes, needs an independent integration review, has a backend work-item lease, or requires a publishable audit trail. An OrgRun uses the local Kanban DAG; it does not auto-push, auto-merge, or upload raw source/reasoning to the backend.
+
+When named role routing is configured, the runtime resolves the child by the logical role (`leaf` or `orchestrator`; `reviewer` is internal). A task cannot select a provider or model through its arguments. If no route is configured, the child inherits legacy parent credentials.
+
 ## Single Task
 
 ```python

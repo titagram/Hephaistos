@@ -1081,6 +1081,23 @@ def _build_child_agent(
     tui_depth = max(0, child_depth - 1)  # 0 = first-level child for the UI
 
     delegation_cfg = _load_config()
+    # Optional named routing is deliberately local and allow-listed.  Once a
+    # route is configured it overrides caller-supplied model/provider choices
+    # for that logical role; legacy installs keep the existing credentials.
+    routed_profile = None
+    try:
+        from tools.delegation_routing import load_delegation_routing, resolve_role_profile
+
+        routed_profile = resolve_role_profile(
+            load_delegation_routing({"delegation": delegation_cfg}),
+            effective_role,
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid delegation role routing: {exc}") from exc
+    if routed_profile is not None:
+        model = routed_profile.model
+        max_iterations = routed_profile.max_iterations
+        override_provider = routed_profile.provider
 
     # When no explicit toolsets given, inherit from parent's enabled toolsets
     # so disabled tools (e.g. web) don't leak to subagents.
@@ -1224,7 +1241,11 @@ def _build_child_agent(
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
     child_reasoning = parent_reasoning
     try:
-        delegation_effort = str(delegation_cfg.get("reasoning_effort") or "").strip()
+        delegation_effort = (
+            routed_profile.reasoning_effort
+            if routed_profile is not None
+            else str(delegation_cfg.get("reasoning_effort") or "").strip()
+        )
         if delegation_effort:
             from hermes_constants import parse_reasoning_effort
 
@@ -1307,6 +1328,7 @@ def _build_child_agent(
     # Stash the post-degrade role for introspection (leaf if the
     # kill switch or depth bounded the caller's requested role).
     child._delegate_role = effective_role
+    child._delegation_profile = routed_profile
     # Stash subagent identity for nested-delegation event propagation and
     # for _run_single_child / interrupt_subagent to look up by id.
     child._subagent_id = subagent_id
@@ -2267,35 +2289,58 @@ def delegate_task(
     # Wrapped in try/finally so the global is always restored even if a
     # child build raises (otherwise _last_resolved_tool_names stays corrupted).
     children = []
+    # A root owns one process-local tree budget. Children receive the exact
+    # same object, so nested orchestration cannot multiply the configured
+    # width without a reservation. The default bound preserves the existing
+    # flat fan-out allowance while providing room for each enabled depth.
+    from tools.delegation_budget import BudgetExhausted, DelegationTreeBudget
+
+    tree_budget = getattr(parent_agent, "_delegation_tree_budget", None)
+    if tree_budget is None:
+        tree_budget = DelegationTreeBudget(
+            max_children=max_children * max_spawn,
+            max_iterations=effective_max_iter * max_children * max_spawn,
+        )
+        parent_agent._delegation_tree_budget = tree_budget
     try:
         for i, t in enumerate(task_list):
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
-            child = _build_child_agent(
-                task_index=i,
-                goal=t["goal"],
-                context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
-                max_iterations=effective_max_iter,
-                task_count=n_tasks,
-                parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_acp_command=t.get("acp_command")
-                or acp_command
-                or creds.get("command"),
-                override_acp_args=(
-                    task_acp_args
-                    if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
-                ),
-                role=effective_role,
-            )
+            try:
+                reservation = tree_budget.reserve_child(iterations=effective_max_iter)
+            except BudgetExhausted as exc:
+                return tool_error(str(exc))
+            try:
+                child = _build_child_agent(
+                    task_index=i,
+                    goal=t["goal"],
+                    context=t.get("context"),
+                    toolsets=t.get("toolsets") or toolsets,
+                    model=creds["model"],
+                    max_iterations=effective_max_iter,
+                    task_count=n_tasks,
+                    parent_agent=parent_agent,
+                    override_provider=creds["provider"],
+                    override_base_url=creds["base_url"],
+                    override_api_key=creds["api_key"],
+                    override_api_mode=creds["api_mode"],
+                    override_acp_command=t.get("acp_command")
+                    or acp_command
+                    or creds.get("command"),
+                    override_acp_args=(
+                        task_acp_args
+                        if task_acp_args is not None
+                        else (acp_args if acp_args is not None else creds.get("args"))
+                    ),
+                    role=effective_role,
+                )
+            except Exception:
+                reservation.rollback()
+                raise
+            reservation.commit()
+            child._delegation_tree_budget = tree_budget
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
