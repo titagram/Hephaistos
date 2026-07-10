@@ -63,6 +63,7 @@ def materialize_portfolio_file(
                         "review_id": value.review_id,
                         "integration_ready_id": value.integration_ready_id,
                         "completion_id": value.completion_id,
+                        "work_item_id": value.work_item_id,
                     }
                     for key, value in created.remote_tasks.items()
                 },

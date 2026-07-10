@@ -140,6 +140,27 @@ def claim_remote_for_local_task(
     work_item_id = key.rsplit(":", 1)[-1].strip()
     if not work_item_id:
         return False, "remote work item id missing"
+    return claim_remote_work_item(
+        conn,
+        client,
+        task_id=task.id,
+        work_item_id=work_item_id,
+        local_workspace_id=local_workspace_id,
+    )
+
+
+def claim_remote_work_item(
+    conn,
+    client: object,
+    *,
+    task_id: str,
+    work_item_id: str,
+    local_workspace_id: str,
+) -> tuple[bool, str]:
+    """Acquire and persist a lease for an explicitly mapped local task."""
+    existing = _latest_lease(conn, task_id)
+    if existing is not None and existing.lease_token != "consumed":
+        return True, "remote lease already acquired"
     try:
         response = client.claim_agent_work_item(
             work_item_id,
@@ -152,7 +173,7 @@ def claim_remote_for_local_task(
         return False, f"remote claim deferred: {exc}"
     kb.add_comment(
         conn,
-        task.id,
+        task_id,
         author=LEASE_AUTHOR,
         body=LEASE_PREFIX + json.dumps(
             {"work_item_id": work_item_id, "lease_token": lease_token},

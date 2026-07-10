@@ -391,3 +391,70 @@ def post_coordination_event(conn, *, anchor_id: str, event_type: str, summary: s
     if not clean: raise ValueError("summary is required")
     if len(clean) > 1000: raise ValueError("summary exceeds 1000 characters")
     _post_blackboard_update(conn, anchor_id, author=author, key=f"coordination:{event_type}", value={"schema": "hades.coordination-event.v1", "type": event_type, "summary": clean, "related_task_ids": [str(value).strip() for value in related_task_ids if str(value).strip()], "required_action": str(required_action or "").strip() or None, "evidence_refs": [str(value).strip() for value in evidence_refs if str(value).strip()]})
+
+
+def publish_org_run_completion(
+    conn,
+    *,
+    client: object,
+    org_run_id: str,
+    topology: _OrgRunCreated,
+    remote_task_id: str,
+    message: str,
+) -> tuple[bool, str]:
+    """Publish one remote result only after the global integration gate.
+
+    The per-item completion card must also be done.  This keeps a manual or
+    future automated caller from bypassing the DAG's integration and review
+    nodes when it has access to a backend client.
+    """
+    if _org_status(conn, topology.integration_id) != "done" or _org_status(conn, topology.review_id) != "done":
+        return False, "integration gate is not complete"
+    remote = topology.remote_tasks.get(remote_task_id)
+    if remote is None:
+        return False, "unknown remote task"
+    if _org_status(conn, remote.completion_id) != "done":
+        return False, "local completion evidence is not complete"
+    from hermes_cli.hades_kanban_sync import publish_remote_result
+
+    published = publish_remote_result(
+        conn,
+        client,
+        remote.execution_id,
+        success=True,
+        message=message,
+    )
+    if not published:
+        return False, "remote lease is unavailable or already consumed"
+    post_coordination_event(
+        conn,
+        anchor_id=topology.anchor_id,
+        event_type="integration_notice",
+        summary=f"Published verified result for {remote_task_id}.",
+        related_task_ids=[remote.execution_id, remote.completion_id],
+        evidence_refs=[f"org_run:{org_run_id}"],
+    )
+    return True, "published"
+
+
+def claim_org_run_remote_task(
+    conn,
+    *,
+    client: object,
+    topology: _OrgRunCreated,
+    remote_task_id: str,
+    local_workspace_id: str,
+) -> tuple[bool, str]:
+    """Acquire the remote lease for an OrgRun execution node."""
+    remote = topology.remote_tasks.get(remote_task_id)
+    if remote is None or not remote.work_item_id:
+        return False, "remote work item mapping is missing"
+    from hermes_cli.hades_kanban_sync import claim_remote_work_item
+
+    return claim_remote_work_item(
+        conn,
+        client,
+        task_id=remote.execution_id,
+        work_item_id=remote.work_item_id,
+        local_workspace_id=local_workspace_id,
+    )

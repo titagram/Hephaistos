@@ -17,6 +17,7 @@ class RemoteTaskTopology:
     review_id: str
     integration_ready_id: str
     completion_id: str
+    work_item_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,7 @@ def create_org_run(
                 review_id=review_ids[task.remote_task_id],
                 integration_ready_id=integration_ready_ids[task.remote_task_id],
                 completion_id=completion_ids[task.remote_task_id],
+                work_item_id=task.work_item_id,
             )
             for task in plan.tasks
         },
