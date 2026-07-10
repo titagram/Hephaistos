@@ -11,6 +11,8 @@ def test_empty_config_keeps_legacy_delegation():
     routing = load_delegation_routing({})
     assert routing.profiles == {}
     assert resolve_role_profile(routing, "leaf") is None
+    assert routing.capacity_mode == "legacy"
+    assert routing.max_spawn_depth == 1
 
 
 def test_allow_list_routes_to_named_profile():

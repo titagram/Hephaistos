@@ -23,6 +23,10 @@ class DelegationProfile:
 class DelegationRouting:
     profiles: dict[str, DelegationProfile]
     role_routes: dict[str, str]
+    capacity_mode: str = "legacy"
+    max_spawn_depth: int = 1
+    max_concurrent_children: int = 3
+    max_async_children: int = 3
 
 
 def _text(value: Any, field: str) -> str:
@@ -78,7 +82,17 @@ def load_delegation_routing(config: Mapping[str, Any]) -> DelegationRouting:
         if target not in profiles:
             raise ValueError(f"delegation route {role_name} references unknown profile: {target}")
         routes[role_name] = target
-    return DelegationRouting(profiles=profiles, role_routes=routes)
+    capacity_mode = str(raw.get("capacity_mode") or "legacy").strip()
+    if capacity_mode not in {"legacy", "balanced"}:
+        raise ValueError("delegation.capacity_mode must be legacy or balanced")
+    return DelegationRouting(
+        profiles=profiles,
+        role_routes=routes,
+        capacity_mode=capacity_mode,
+        max_spawn_depth=_positive(raw.get("max_spawn_depth", 1), "delegation.max_spawn_depth"),
+        max_concurrent_children=_positive(raw.get("max_concurrent_children", 3), "delegation.max_concurrent_children"),
+        max_async_children=_positive(raw.get("max_async_children", 3), "delegation.max_async_children"),
+    )
 
 
 def resolve_role_profile(routing: DelegationRouting, role: str) -> DelegationProfile | None:
