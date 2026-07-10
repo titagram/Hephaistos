@@ -36,6 +36,11 @@ from tools.delegation_contract import (
     contract_prompt_block,
     parse_orchestrator_contract,
 )
+from tools.delegation_capacity import (
+    CapacityRequest,
+    decide_capacity,
+    probe_capacity,
+)
 
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
@@ -2352,7 +2357,7 @@ def delegate_task(
     from tools.delegation_budget import BudgetExhausted, DelegationTreeBudget
 
     tree_budget = getattr(parent_agent, "_delegation_tree_budget", None)
-    if tree_budget is None:
+    if not isinstance(tree_budget, DelegationTreeBudget):
         tree_budget = DelegationTreeBudget(
             max_children=max_children * max_spawn,
             max_iterations=effective_max_iter * max_children * max_spawn,
@@ -2364,6 +2369,42 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = t["_normalized_role"]
+            capacity = probe_capacity(
+                CapacityRequest(
+                    role=effective_role,
+                    requested_iterations=effective_max_iter,
+                    depth=depth + 1,
+                    max_depth=max_spawn,
+                    budget_snapshot=tree_budget.snapshot(),
+                    active_agents=len(list_active_subagents()),
+                    max_active_agents=max_children,
+                    # Credential resolution either returned a usable route or
+                    # raised above. Unknown host/provider telemetry remains
+                    # explicit rather than being guessed from secret shapes.
+                    provider_available=True,
+                )
+            )
+            capacity_decision = decide_capacity(capacity)
+            if capacity_decision.action == "queue":
+                return tool_error(
+                    f"Delegation queued: {capacity_decision.reason}. Retry when "
+                    "capacity becomes available."
+                )
+            if capacity_decision.action == "replan":
+                tree_budget.reserve_replan()
+                return tool_error(
+                    f"Delegation requires replanning: {capacity_decision.reason}."
+                )
+            effective_contract = t["_orchestrator_contract"]
+            if (
+                capacity_decision.action == "degrade_to_leaf"
+                and effective_role == "orchestrator"
+            ):
+                # Leaf routing is resolved by _build_child_agent from this
+                # updated role; an orchestrator-only contract must not leak
+                # into the degraded child.
+                effective_role = "leaf"
+                effective_contract = None
             try:
                 reservation = tree_budget.reserve_child(iterations=effective_max_iter)
             except BudgetExhausted as exc:
@@ -2391,7 +2432,7 @@ def delegate_task(
                         else (acp_args if acp_args is not None else creds.get("args"))
                     ),
                     role=effective_role,
-                    task_contract=t["_orchestrator_contract"],
+                    task_contract=effective_contract,
                 )
             except Exception:
                 reservation.rollback()

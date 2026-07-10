@@ -38,3 +38,15 @@ def test_concurrent_reservations_never_exceed_tree_limit():
     for thread in threads:
         thread.join()
     assert len(successes) == 3
+
+
+def test_committed_iterations_remain_counted_against_hard_ceiling():
+    budget = DelegationTreeBudget(max_children=3, max_iterations=5)
+    reservation = budget.reserve_child(iterations=3)
+    reservation.commit()
+
+    snapshot = budget.snapshot()
+    assert snapshot["iterations_remaining"] == 2
+    assert snapshot["children_remaining"] == 2
+    with pytest.raises(BudgetExhausted, match="iteration budget exhausted"):
+        budget.reserve_child(iterations=3)

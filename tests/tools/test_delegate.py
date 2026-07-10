@@ -2997,5 +2997,100 @@ class TestFallbackModelInheritance(unittest.TestCase):
         self.assertIsNone(kwargs["fallback_model"])
 
 
+class TestAdaptiveCapacityPreflight(unittest.TestCase):
+    def _credentials(self):
+        return {
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+            "model": None,
+        }
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool.probe_capacity")
+    @patch("tools.delegate_tool._load_config", return_value={"max_iterations": 5})
+    def test_queue_decision_returns_explicit_error_before_child_construction(
+        self, _config, probe, credentials, build_child
+    ):
+        from tools.delegation_capacity import CapacitySnapshot
+
+        credentials.return_value = self._credentials()
+        probe.return_value = CapacitySnapshot(
+            role="leaf",
+            requested_iterations=5,
+            depth=1,
+            max_depth=2,
+            iterations_remaining=15,
+            children_remaining=3,
+            provider_available=False,
+        )
+
+        result = json.loads(delegate_task(goal="work", parent_agent=_make_mock_parent()))
+
+        self.assertIn("temporarily unavailable", result["error"])
+        build_child.assert_not_called()
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool.probe_capacity")
+    @patch("tools.delegate_tool._load_config", return_value={"max_iterations": 5})
+    def test_replan_decision_returns_explicit_error_before_child_construction(
+        self, _config, probe, credentials, build_child
+    ):
+        from tools.delegation_capacity import CapacitySnapshot
+
+        credentials.return_value = self._credentials()
+        probe.return_value = CapacitySnapshot(
+            role="leaf",
+            requested_iterations=5,
+            depth=1,
+            max_depth=1,
+            iterations_remaining=0,
+            children_remaining=3,
+        )
+
+        result = json.loads(delegate_task(goal="work", parent_agent=_make_mock_parent()))
+
+        self.assertIn("budget exhausted", result["error"])
+        build_child.assert_not_called()
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool.probe_capacity")
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"max_iterations": 5, "max_spawn_depth": 2},
+    )
+    def test_depth_decision_reroutes_orchestrator_as_leaf(
+        self, _config, probe, credentials
+    ):
+        from tools.delegation_capacity import CapacitySnapshot
+
+        credentials.return_value = self._credentials()
+        probe.return_value = CapacitySnapshot(
+            role="orchestrator",
+            requested_iterations=5,
+            depth=2,
+            max_depth=2,
+            iterations_remaining=30,
+            children_remaining=6,
+        )
+        parent = _make_mock_parent(depth=1)
+
+        with patch("run_agent.AIAgent") as agent_cls:
+            child = _make_role_mock_child()
+            agent_cls.return_value = child
+            delegate_task(
+                goal="coordinate",
+                role="orchestrator",
+                task_contract=ORCHESTRATOR_CONTRACT,
+                parent_agent=parent,
+            )
+
+        self.assertEqual(child._delegate_role, "leaf")
+        self.assertNotIn("delegation", agent_cls.call_args.kwargs["enabled_toolsets"])
+
+
 if __name__ == "__main__":
     unittest.main()

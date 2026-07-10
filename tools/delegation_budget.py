@@ -18,6 +18,7 @@ class DelegationTreeBudget:
         self.max_iterations = max_iterations
         self._reserved_children = 0
         self._reserved_iterations = 0
+        self._committed_iterations = 0
         self._started_children = 0
         self._failures = 0
         self._replans = 0
@@ -29,7 +30,10 @@ class DelegationTreeBudget:
         with self._lock:
             if self._started_children + self._reserved_children >= self.max_children:
                 raise BudgetExhausted("delegation child budget exhausted")
-            if self._reserved_iterations + iterations > self.max_iterations:
+            if (
+                self._committed_iterations + self._reserved_iterations + iterations
+                > self.max_iterations
+            ):
                 raise BudgetExhausted("delegation iteration budget exhausted")
             self._reserved_children += 1
             self._reserved_iterations += iterations
@@ -41,6 +45,7 @@ class DelegationTreeBudget:
             self._reserved_iterations -= iterations
             if committed:
                 self._started_children += 1
+                self._committed_iterations += iterations
 
     def record_failure(self) -> None:
         with self._lock:
@@ -57,7 +62,20 @@ class DelegationTreeBudget:
                 "max_iterations": self.max_iterations,
                 "reserved_children": self._reserved_children,
                 "reserved_iterations": self._reserved_iterations,
+                "committed_iterations": self._committed_iterations,
                 "started_children": self._started_children,
+                "children_remaining": max(
+                    0,
+                    self.max_children
+                    - self._started_children
+                    - self._reserved_children,
+                ),
+                "iterations_remaining": max(
+                    0,
+                    self.max_iterations
+                    - self._committed_iterations
+                    - self._reserved_iterations,
+                ),
                 "failures": self._failures,
                 "replans": self._replans,
             }
