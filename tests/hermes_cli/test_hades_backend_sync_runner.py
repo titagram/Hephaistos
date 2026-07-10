@@ -1488,6 +1488,144 @@ def test_sync_runner_scopes_to_workspace_binding_id(monkeypatch, tmp_path):
         assert hdb.get_job(conn, "job_expired_other_workspace").status == "waiting_confirmation"
 
 
+def test_workspace_sync_selects_only_newest_binding_for_default_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime as runtime
+    import hermes_cli.hades_backend_sync as sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    import itertools
+
+    timestamps = itertools.count(100)
+    monkeypatch.setattr(hdb, "_now", lambda: next(timestamps))
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_historical_1",
+            project_id="project_historical_1",
+            base_url="https://backend.example",
+            label="old-1",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_OLD_1",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_historical_1",
+            agent_id="agent_historical_1",
+            local_project_id="local_old_1",
+            workspace_fingerprint="fingerprint_old_1",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="old1",
+            backend_workspace_binding_id="binding_historical_1",
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_historical_2",
+            project_id="project_historical_2",
+            base_url="https://backend.example",
+            label="old-2",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_OLD_2",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_historical_2",
+            agent_id="agent_historical_2",
+            local_project_id="local_old_2",
+            workspace_fingerprint="fingerprint_old_2",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="old2",
+            backend_workspace_binding_id="binding_historical_2",
+        )
+        hdb.save_agent(
+            conn,
+            agent_id="agent_current",
+            project_id="project_current",
+            base_url="https://backend.example",
+            label="current",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_CURRENT",
+            capabilities={"memory": True, "jobs": True, "sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_current",
+            agent_id="agent_current",
+            local_project_id="local_current_old",
+            workspace_fingerprint="fingerprint_current_old",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="current-old",
+            backend_workspace_binding_id="binding_current_old",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_current",
+            agent_id="agent_current",
+            local_project_id="local_current_new",
+            workspace_fingerprint="fingerprint_current_new",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="current-new",
+            backend_workspace_binding_id="binding_current_new",
+        )
+
+    calls = []
+    constructed_agents = []
+
+    class FakeClient:
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            return {"events": []}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+        def close(self):
+            return None
+
+    def current_client():
+        constructed_agents.append("agent_current")
+        return FakeClient()
+
+    def historical_client(agent):
+        constructed_agents.append(agent.agent_id)
+        return FakeClient()
+
+    monkeypatch.setattr(runtime, "client_from_config", current_client)
+    monkeypatch.setattr(runtime, "client_for_agent", historical_client)
+
+    def fake_sync_runner(**kwargs):
+        calls.append(kwargs)
+        return sync.run_backend_sync(**kwargs)
+
+    decision = sync.maybe_run_backend_sync_for_workspace(
+        cwd=workspace,
+        force=True,
+        run_inline=True,
+        sync_runner=fake_sync_runner,
+    )
+
+    assert decision.status == "ran"
+    assert calls == [{"quiet": True, "workspace_binding_ids": ["binding_current_new"]}]
+    assert constructed_agents == ["agent_current"]
+
+
 def test_background_sync_records_failure_backoff_and_degraded_status(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

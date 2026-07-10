@@ -496,9 +496,14 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
 
 def _maybe_piggyback_hades_backend_sync(agent) -> None:
     try:
-        from hermes_cli.hades_backend_sync import maybe_run_backend_sync
+        from agent.runtime_cwd import resolve_agent_cwd
+        from hermes_cli.hades_backend_sync import maybe_run_backend_sync_for_workspace
 
-        decision = maybe_run_backend_sync()
+        decision = maybe_run_backend_sync_for_workspace(
+            cwd=resolve_agent_cwd(),
+            force=False,
+            min_interval_seconds=300,
+        )
         if decision.status == "started":
             logger.debug(
                 "started Hades backend piggyback sync session=%s",

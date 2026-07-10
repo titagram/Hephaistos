@@ -623,7 +623,15 @@ def _matching_workspace_binding_ids(
     if not probes:
         return []
     with db.connect_closing() as conn:
-        bindings = db.list_workspace_bindings(conn, status="linked")
+        agent = db.get_default_agent(conn)
+        bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
+    if agent is None:
+        return []
+    bindings = [
+        binding
+        for binding in bindings
+        if binding.agent_id == agent.agent_id and binding.project_id == agent.project_id
+    ]
     matches: list[db.WorkspaceBinding] = []
     seen: set[str] = set()
     for binding in bindings:
@@ -633,8 +641,11 @@ def _matching_workspace_binding_ids(
                 continue
             seen.add(binding_id)
             matches.append(binding)
-    matches.sort(key=lambda binding: len(str(Path(binding.repo_root))), reverse=True)
-    return [binding.backend_workspace_binding_id for binding in matches]
+    # ``list_workspace_bindings`` returns newest first.  Python's stable sort
+    # therefore preserves that ordering for duplicate bindings with the same
+    # repository root while preferring the most specific containing root.
+    matches.sort(key=lambda binding: len(str(Path(binding.repo_root).expanduser().resolve())), reverse=True)
+    return [matches[0].backend_workspace_binding_id] if matches else []
 
 
 def maybe_run_backend_sync_for_workspace(
