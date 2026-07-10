@@ -3491,6 +3491,48 @@ def claim_task(
     return claimed
 
 
+def release_active_claim(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    target_status: str,
+    reason: str,
+) -> bool:
+    """Release a claimed task without charging the worker failure budget."""
+    if target_status not in {"ready", "blocked"}:
+        raise ValueError("target_status must be ready or blocked")
+    if not reason or not reason.strip():
+        raise ValueError("reason is required")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, current_run_id FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["status"] != "running" or row["current_run_id"] is None:
+            return False
+        run_id = int(row["current_run_id"])
+        _end_run(
+            conn,
+            task_id,
+            outcome="released",
+            status="released",
+            summary=reason.strip(),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL WHERE id = ?",
+            (target_status, task_id),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "admission_released",
+            {"target_status": target_status, "reason": reason.strip()},
+            run_id=run_id,
+        )
+    return True
+
+
 def claim_review_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5738,12 +5780,28 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    admission_deferred: list[tuple[str, str]] = field(default_factory=list)
+    admission_superseded: list[tuple[str, str]] = field(default_factory=list)
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
+
+
+@dataclass(frozen=True)
+class DispatchAdmission:
+    """Decision returned by an optional pre-spawn admission policy."""
+
+    action: str = "allow"
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.action not in {"allow", "defer", "supersede"}:
+            raise ValueError(
+                f"unknown dispatch admission action: {self.action!r}"
+            )
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -6933,6 +6991,7 @@ def dispatch_once(
     conn: sqlite3.Connection,
     *,
     spawn_fn=None,
+    admission_fn=None,
     ttl_seconds: Optional[int] = None,
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
@@ -6967,6 +7026,7 @@ def dispatch_once(
         return _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
+            admission_fn=admission_fn,
             ttl_seconds=ttl_seconds,
             dry_run=dry_run,
             max_spawn=max_spawn,
@@ -6983,6 +7043,7 @@ def dispatch_once(
         return _dispatch_once_locked(
             conn,
             spawn_fn=spawn_fn,
+            admission_fn=admission_fn,
             ttl_seconds=ttl_seconds,
             dry_run=dry_run,
             max_spawn=max_spawn,
@@ -6999,6 +7060,7 @@ def _dispatch_once_locked(
     conn: sqlite3.Connection,
     *,
     spawn_fn=None,
+    admission_fn=None,
     ttl_seconds: Optional[int] = None,
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
@@ -7255,6 +7317,40 @@ def _dispatch_once_locked(
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
             continue
+        if admission_fn is not None:
+            try:
+                decision = admission_fn(claimed)
+                if not isinstance(decision, DispatchAdmission):
+                    raise TypeError("admission_fn must return DispatchAdmission")
+            except Exception as exc:
+                reason = f"admission callback error: {exc}"
+                release_active_claim(
+                    conn,
+                    claimed.id,
+                    target_status="ready",
+                    reason=reason,
+                )
+                result.admission_deferred.append((claimed.id, reason))
+                continue
+            reason = decision.reason.strip() or "dispatch admission denied"
+            if decision.action == "defer":
+                release_active_claim(
+                    conn,
+                    claimed.id,
+                    target_status="ready",
+                    reason=reason,
+                )
+                result.admission_deferred.append((claimed.id, reason))
+                continue
+            if decision.action == "supersede":
+                release_active_claim(
+                    conn,
+                    claimed.id,
+                    target_status="blocked",
+                    reason=reason,
+                )
+                result.admission_superseded.append((claimed.id, reason))
+                continue
         try:
             resolved_branch_name = None
             if claimed.workspace_kind == "worktree":
