@@ -1,6 +1,6 @@
 ---
 name: hierarchical-development
-description: Coordinate software work across short-lived delegated agents or durable Hades OrgRuns, with bounded scope, independent review, and evidence-based completion.
+description: Use when coordinating delegated or durable Hades OrgRuns.
 ---
 
 # Hierarchical development
