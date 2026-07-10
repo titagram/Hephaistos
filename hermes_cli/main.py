@@ -4283,6 +4283,13 @@ def cmd_org(args):
     return org_command(args)
 
 
+def cmd_delegation(args):
+    """Configure Hades delegated-agent model routing."""
+    from hermes_cli.hades_delegation_cmd import delegation_command
+
+    return delegation_command(args)
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -12712,6 +12719,13 @@ def main():
     from hermes_cli.hades_org_cmd import build_parser as _build_org_parser
 
     _build_org_parser(subparsers, cmd_org=cmd_org)
+
+    # =========================================================================
+    # delegation command — role/model onboarding and reconfiguration
+    # =========================================================================
+    from hermes_cli.hades_delegation_cmd import build_parser as _build_delegation_parser
+
+    _build_delegation_parser(subparsers, cmd_delegation=cmd_delegation)
 
     # =========================================================================
     # backend command — Hades shared Laravel backend setup/status
