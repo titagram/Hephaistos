@@ -12,9 +12,10 @@ from hermes_cli.hierarchical_execution import (
     parse_execution_portfolio,
     validate_execution_portfolio,
 )
-from hermes_cli.kanban_portfolio import create_org_run
+from hermes_cli.kanban_portfolio import OrgRunCreated, RemoteTaskTopology, create_org_run
 from hermes_cli.hades_kanban_sync import SYNC_MODES, sync_remote_kanban
 from hermes_cli.kanban_swarm import latest_blackboard
+from hermes_cli.hades_coordination import snapshot_org_run
 
 
 def _read_json(path: str) -> dict[str, Any]:
@@ -97,9 +98,30 @@ def show_org_run(
             topology = latest_blackboard(conn, row["id"]).get("topology")
             if not isinstance(topology, dict):
                 return _error("org_run_topology_missing", ValueError(org_run_id)), 1
+            # Keep the CLI output useful without creating a second scheduler:
+            # phase is derived from durable Kanban task state only.
+            created = OrgRunCreated(
+                anchor_id=str(topology["anchor_id"]),
+                remote_tasks={
+                    key: RemoteTaskTopology(**value)
+                    for key, value in topology["remote_tasks"].items()
+                },
+                integration_id=str(topology["integration_id"]),
+                review_id=str(topology["review_id"]),
+                synthesis_id=str(topology["synthesis_id"]),
+            )
+            snapshot = snapshot_org_run(conn, org_run_id, created)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         return _error("org_run_show_failed", exc), 1
-    return {"status": "ok", "org_run_id": org_run_id, "topology": topology}, 0
+    return {
+        "status": "ok",
+        "org_run_id": org_run_id,
+        "topology": topology,
+        "phase": snapshot.phase,
+        "complete": snapshot.complete,
+        "blocked": snapshot.blocked,
+        "dispatchable": list(snapshot.dispatchable),
+    }, 0
 
 
 def sync_kanban(*, board: str | None, mode: str, project_id: str | None = None) -> tuple[dict[str, Any], int]:

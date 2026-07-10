@@ -331,3 +331,63 @@ class HadesCoordination:
                         claim_id,
                         str(exc),
                     )
+
+
+# Deterministic OrgRun snapshots and typed notices.
+from dataclasses import dataclass as _dataclass
+from typing import Iterable as _Iterable
+from hermes_cli import kanban_db as _kb
+from hermes_cli.kanban_portfolio import OrgRunCreated as _OrgRunCreated
+from hermes_cli.kanban_swarm import post_blackboard_update as _post_blackboard_update
+
+COORDINATION_EVENT_TYPES = {"fyi", "handoff", "blocker", "decision_proposal", "decision_resolution", "interface_change", "review_request", "integration_notice"}
+
+@_dataclass(frozen=True)
+class OrgRunSnapshot:
+    org_run_id: str
+    phase: str
+    complete: bool
+    blocked: bool
+    execution: dict[str, str]
+    reviews: dict[str, str]
+    integration_ready: dict[str, str]
+    completion: dict[str, str]
+    integration: str
+    org_review: str
+    synthesis: str
+    dispatchable: tuple[str, ...]
+
+def _org_status(conn, task_id: str) -> str:
+    task = _kb.get_task(conn, task_id)
+    return task.status if task is not None else "missing"
+
+def snapshot_org_run(conn, org_run_id: str, topology: _OrgRunCreated) -> OrgRunSnapshot:
+    execution = {key: _org_status(conn, item.execution_id) for key, item in topology.remote_tasks.items()}
+    reviews = {key: _org_status(conn, item.review_id) for key, item in topology.remote_tasks.items()}
+    integration_ready = {key: _org_status(conn, item.integration_ready_id) for key, item in topology.remote_tasks.items()}
+    completion = {key: _org_status(conn, item.completion_id) for key, item in topology.remote_tasks.items()}
+    integration = _org_status(conn, topology.integration_id)
+    org_review = _org_status(conn, topology.review_id)
+    synthesis = _org_status(conn, topology.synthesis_id)
+    statuses = [*execution.values(), *reviews.values(), *integration_ready.values(), *completion.values(), integration, org_review, synthesis]
+    blocked = any(value == "blocked" for value in statuses)
+    complete = synthesis == "done"
+    if complete: phase = "complete"
+    elif blocked: phase = "blocked"
+    elif any(value != "done" for value in execution.values()): phase = "execution"
+    elif any(value != "done" for value in [*reviews.values(), *integration_ready.values()]): phase = "review"
+    elif integration != "done": phase = "integration"
+    elif org_review != "done": phase = "org_review"
+    elif any(value != "done" for value in completion.values()): phase = "publish"
+    else: phase = "synthesis"
+    candidates = [topology.integration_id, topology.review_id, topology.synthesis_id, *[item.execution_id for item in topology.remote_tasks.values()]]
+    dispatchable = tuple(task_id for task_id in candidates if _org_status(conn, task_id) == "ready")
+    return OrgRunSnapshot(org_run_id, phase, complete, blocked, execution, reviews, integration_ready, completion, integration, org_review, synthesis, dispatchable)
+
+def post_coordination_event(conn, *, anchor_id: str, event_type: str, summary: str, related_task_ids: _Iterable[str] = (), required_action: str | None = None, evidence_refs: _Iterable[str] = (), author: str = "org-coordinator") -> None:
+    if event_type not in COORDINATION_EVENT_TYPES:
+        raise ValueError(f"unknown coordination event type: {event_type!r}")
+    clean = str(summary or "").strip()
+    if not clean: raise ValueError("summary is required")
+    if len(clean) > 1000: raise ValueError("summary exceeds 1000 characters")
+    _post_blackboard_update(conn, anchor_id, author=author, key=f"coordination:{event_type}", value={"schema": "hades.coordination-event.v1", "type": event_type, "summary": clean, "related_task_ids": [str(value).strip() for value in related_task_ids if str(value).strip()], "required_action": str(required_action or "").strip() or None, "evidence_refs": [str(value).strip() for value in evidence_refs if str(value).strip()]})
