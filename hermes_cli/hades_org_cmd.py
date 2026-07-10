@@ -13,6 +13,7 @@ from hermes_cli.hierarchical_execution import (
     validate_execution_portfolio,
 )
 from hermes_cli.kanban_portfolio import create_org_run
+from hermes_cli.hades_kanban_sync import SYNC_MODES, sync_remote_kanban
 from hermes_cli.kanban_swarm import latest_blackboard
 
 
@@ -101,6 +102,45 @@ def show_org_run(
     return {"status": "ok", "org_run_id": org_run_id, "topology": topology}, 0
 
 
+def sync_kanban(*, board: str | None, mode: str, project_id: str | None = None) -> tuple[dict[str, Any], int]:
+    """Synchronize remote work items into the selected local board."""
+    if mode not in SYNC_MODES:
+        return _error("invalid_sync_mode", ValueError(mode)), 2
+    if mode == "off":
+        return {"status": "ok", "mode": mode, "pulled": 0}, 0
+    try:
+        from hermes_cli import hades_backend_runtime as runtime
+
+        agent = runtime.current_agent()
+        if agent is None:
+            return _error("not_configured", ValueError("Hades backend is not configured")), 1
+        selected_project = str(project_id or agent.project_id).strip()
+        client = runtime.plugin_work_items_client_from_config()
+        try:
+            with kb.connect(board=board) as conn:
+                result = sync_remote_kanban(
+                    conn,
+                    client,
+                    project_id=selected_project,
+                    mode=mode,
+                )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:  # pragma: no cover - CLI boundary
+        return _error("kanban_sync_failed", exc), 1
+    return {
+        "status": "ok",
+        "mode": result.mode,
+        "project_id": selected_project,
+        "pulled": result.pulled,
+        "created": result.created,
+        "existing": result.existing,
+        "skipped": result.skipped,
+    }, 0
+
+
 def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) -> None:
     parser = subparsers.add_parser(
         "org",
@@ -124,6 +164,13 @@ def build_parser(subparsers, *, cmd_org: Callable[[argparse.Namespace], int]) ->
     show.add_argument("--json", action="store_true")
     show.set_defaults(func=cmd_org)
 
+    sync = sub.add_parser("sync", help="Optionally pull backend work items into local Kanban")
+    sync.add_argument("--mode", choices=sorted(SYNC_MODES), default="off")
+    sync.add_argument("--project-id", default=None)
+    sync.add_argument("--board", default=None)
+    sync.add_argument("--json", action="store_true")
+    sync.set_defaults(func=cmd_org)
+
 
 def org_command(args: argparse.Namespace) -> int:
     action = getattr(args, "org_action", None)
@@ -133,6 +180,12 @@ def org_command(args: argparse.Namespace) -> int:
         result, code = materialize_portfolio_file(args.portfolio, board=args.board)
     elif action == "show":
         result, code = show_org_run(args.org_run_id, board=args.board)
+    elif action == "sync":
+        result, code = sync_kanban(
+            board=args.board,
+            mode=args.mode,
+            project_id=args.project_id,
+        )
     else:
         print("usage: hermes org <validate|materialize|show>")
         return 2

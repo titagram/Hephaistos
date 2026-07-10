@@ -3,6 +3,7 @@ import json
 from hermes_cli.hades_org_cmd import (
     materialize_portfolio_file,
     show_org_run,
+    sync_kanban,
     validate_portfolio_file,
 )
 
@@ -59,3 +60,9 @@ def test_validate_returns_exit_two_for_invalid_json(tmp_path):
     assert code == 2
     assert result["status"] == "error"
     assert result["code"] == "invalid_portfolio"
+
+
+def test_sync_defaults_to_safe_off_mode():
+    result, code = sync_kanban(board=None, mode="off")
+    assert code == 0
+    assert result == {"status": "ok", "mode": "off", "pulled": 0}
