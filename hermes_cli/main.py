@@ -4276,6 +4276,13 @@ def cmd_backend(args):
     return hades_backend_command(args)
 
 
+def cmd_org(args):
+    """Validate and materialize local Hades OrgRuns."""
+    from hermes_cli.hades_org_cmd import org_command
+
+    return org_command(args)
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -12698,6 +12705,13 @@ def main():
 
     project_parser = _build_project_parser(subparsers)
     project_parser.set_defaults(func=cmd_project)
+
+    # =========================================================================
+    # org command — local Hades OrgRun validation/materialization
+    # =========================================================================
+    from hermes_cli.hades_org_cmd import build_parser as _build_org_parser
+
+    _build_org_parser(subparsers, cmd_org=cmd_org)
 
     # =========================================================================
     # backend command — Hades shared Laravel backend setup/status
