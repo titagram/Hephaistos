@@ -29,6 +29,7 @@ from tools.delegate_tool import (
     _build_child_progress_callback,
     _build_child_system_prompt,
     _extract_output_tail,
+    _normalize_role,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -2365,14 +2366,29 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         self.assertEqual(child._delegate_role, "leaf")
         self.assertTrue(any("coercing" in m.lower() for m in cm.output))
 
+    def test_reviewer_role_is_preserved_but_cannot_delegate(self):
+        self.assertEqual(_normalize_role("reviewer"), "reviewer")
+        prompt = _build_child_system_prompt(
+            "Review evidence",
+            role="reviewer",
+            max_spawn_depth=3,
+            child_depth=1,
+        )
+        self.assertIn("independent review", prompt.lower())
+        self.assertNotIn("delegate_task", prompt)
+
     def test_schema_has_role_top_level_and_per_task(self):
         from tools.delegate_tool import DELEGATE_TASK_SCHEMA
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
         self.assertIn("role", props)
-        self.assertEqual(props["role"]["enum"], ["leaf", "orchestrator"])
+        self.assertEqual(
+            props["role"]["enum"], ["leaf", "orchestrator", "reviewer"]
+        )
         task_props = props["tasks"]["items"]["properties"]
         self.assertIn("role", task_props)
-        self.assertEqual(task_props["role"]["enum"], ["leaf", "orchestrator"])
+        self.assertEqual(
+            task_props["role"]["enum"], ["leaf", "orchestrator", "reviewer"]
+        )
 
     def test_acp_command_description_has_do_not_set_guidance(self):
         # acp_command/acp_args descriptions must NOT bias the model toward
@@ -2451,6 +2467,30 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
             kwargs = MockAgent.call_args[1]
             self.assertIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "orchestrator")
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config",
+           return_value={"max_spawn_depth": 3})
+    def test_reviewer_role_stays_distinct_without_delegation(
+        self, mock_cfg, mock_creds
+    ):
+        mock_creds.return_value = {
+            "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None, "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file", "delegation"]
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_role_mock_child()
+            MockAgent.return_value = mock_child
+            delegate_task(goal="review", role="reviewer", parent_agent=parent)
+            kwargs = MockAgent.call_args[1]
+            self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+            self.assertEqual(mock_child._delegate_role, "reviewer")
+            self.assertIn(
+                "independent review",
+                kwargs["ephemeral_system_prompt"].lower(),
+            )
 
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_config",

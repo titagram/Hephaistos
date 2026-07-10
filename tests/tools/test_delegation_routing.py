@@ -33,6 +33,27 @@ def test_allow_list_routes_to_named_profile():
     )
 
 
+def test_reviewer_routes_to_named_profile():
+    routing = load_delegation_routing({
+        "delegation": {
+            "profiles": {
+                "careful_review": {
+                    "provider": "openrouter",
+                    "model": "review-model",
+                    "reasoning_effort": "high",
+                    "max_iterations": 20,
+                    "child_timeout_seconds": 120,
+                },
+            },
+            "role_routes": {"reviewer": "careful_review"},
+        },
+    })
+    assert resolve_role_profile(routing, "reviewer") == DelegationProfile(
+        provider="openrouter", model="review-model", reasoning_effort="high",
+        max_iterations=20, child_timeout_seconds=120,
+    )
+
+
 @pytest.mark.parametrize("config", [
     {"delegation": {"role_routes": {"admin": "x"}}},
     {"delegation": {"profiles": {"x": {"provider": "", "model": "m", "max_iterations": 1, "child_timeout_seconds": 1}}, "role_routes": {"leaf": "x"}}},

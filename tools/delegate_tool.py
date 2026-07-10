@@ -349,18 +349,19 @@ def _looks_like_error_output(content: Any) -> bool:
     )
 
 
+DELEGATION_ROLES = frozenset({"leaf", "orchestrator", "reviewer"})
+
+
 def _normalize_role(r: Optional[str]) -> str:
-    """Normalise a caller-provided role to 'leaf' or 'orchestrator'.
+    """Normalise a caller-provided role to a supported delegation role.
 
     None/empty -> 'leaf'.  Unknown strings coerce to 'leaf' with a
     warning log (matches the silent-degrade pattern of
     _get_orchestrator_enabled).  _build_child_agent adds a second
     degrade layer for depth/kill-switch bounds.
     """
-    if r is None or not r:
-        return "leaf"
-    r_norm = str(r).strip().lower()
-    if r_norm in {"leaf", "orchestrator"}:
+    r_norm = str(r or "leaf").strip().lower()
+    if r_norm in DELEGATION_ROLES:
         return r_norm
     logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
     return "leaf"
@@ -679,6 +680,7 @@ def _build_child_system_prompt(
     inspiration/openclaw/src/agents/subagent-system-prompt.ts:63-95).
     The depth note is literal truth (grounded in the passed config) so
     the LLM doesn't confabulate nesting capabilities that don't exist.
+    Reviewers instead receive a non-delegating independent-review contract.
     """
     parts = [
         "You are a focused subagent working on a specific delegated task.",
@@ -735,6 +737,22 @@ def _build_child_system_prompt(
             "final summary, not your workers.\n\n"
             f"NOTE: You are at depth {child_depth}. The delegation tree "
             f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
+        )
+    elif role == "reviewer":
+        parts.append(
+            "\n## Independent Review (Reviewer Role)\n"
+            "Perform an independent review of the requested work. Report "
+            "findings first, ordered by severity, before any summary.\n\n"
+            "For each finding, verify:\n"
+            "- Scope: the work matches the stated requirements and does not "
+            "include unrelated changes.\n"
+            "- Evidence: claims are supported by inspected code, diffs, or "
+            "fresh test output.\n"
+            "- Regression risk: identify behavior that could break outside "
+            "the immediate happy path.\n\n"
+            "Finish with a bounded PASS or FAIL conclusion for the requested "
+            "scope. If there are no findings, say so explicitly before the "
+            "conclusion."
         )
     return "\n".join(parts)
 
@@ -1044,7 +1062,7 @@ def _build_child_agent(
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
     # Per-call role controlling whether the child can further delegate.
-    # 'leaf' (default) cannot; 'orchestrator' retains the delegation
+    # 'leaf' and 'reviewer' cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
 ):
@@ -1061,15 +1079,19 @@ def _build_child_agent(
     import uuid as _uuid
 
     # ── Role resolution ─────────────────────────────────────────────────
-    # Honor the caller's role only when BOTH the kill switch and the
-    # child's depth allow it.  This is the single point where role
-    # degrades to 'leaf' — keeps the rule predictable.  Callers pass
-    # the normalised role (_normalize_role ran in delegate_task) so
-    # we only deal with 'leaf' or 'orchestrator' here.
+    # Orchestrator is the only role bounded by the kill switch and child
+    # depth; reviewer remains distinct but non-delegating. Callers pass the
+    # normalised role (_normalize_role ran in delegate_task), so we only deal
+    # with supported roles here.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
     orchestrator_ok = _get_orchestrator_enabled() and child_depth < max_spawn
-    effective_role = role if (role == "orchestrator" and orchestrator_ok) else "leaf"
+    if role == "orchestrator" and orchestrator_ok:
+        effective_role = "orchestrator"
+    elif role == "reviewer":
+        effective_role = "reviewer"
+    else:
+        effective_role = "leaf"
 
     # ── Subagent identity (stable across events, 0-indexed for TUI) ─────
     # subagent_id is generated here so the progress callback, the
@@ -3024,6 +3046,9 @@ def _build_top_level_description() -> str:
         "back the content — before telling the user the operation succeeded.\n"
         "- Leaf subagents (role='leaf', the default) CANNOT call: "
         "delegate_task, clarify, memory, send_message, execute_code.\n"
+        "- Reviewer subagents (role='reviewer') perform an independent, "
+        "findings-first review and have the same non-delegating tool limits "
+        "as leaf subagents.\n"
         "- Orchestrator subagents (role='orchestrator') retain "
         "delegate_task so they can spawn their own workers, but still "
         "cannot use clarify, memory, send_message, or execute_code. "
@@ -3082,7 +3107,8 @@ def _build_role_param_description() -> str:
 
     return (
         "Role of the child agent. 'leaf' (default) = focused "
-        "worker, cannot delegate further. 'orchestrator' = can "
+        "worker, cannot delegate further. 'reviewer' = independent, "
+        "findings-first reviewer that cannot delegate. 'orchestrator' = can "
         f"use delegate_task to spawn its own workers. {nesting_note}"
     )
 
@@ -3185,7 +3211,7 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "role": {
                             "type": "string",
-                            "enum": ["leaf", "orchestrator"],
+                            "enum": ["leaf", "orchestrator", "reviewer"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
                     },
@@ -3198,7 +3224,7 @@ DELEGATE_TASK_SCHEMA = {
             },
             "role": {
                 "type": "string",
-                "enum": ["leaf", "orchestrator"],
+                "enum": ["leaf", "orchestrator", "reviewer"],
                 "description": "(rebuilt at get_definitions() time)",
             },
             "background": {
