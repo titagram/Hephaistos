@@ -50,3 +50,25 @@ def test_committed_iterations_remain_counted_against_hard_ceiling():
     assert snapshot["children_remaining"] == 2
     with pytest.raises(BudgetExhausted, match="iteration budget exhausted"):
         budget.reserve_child(iterations=3)
+
+
+def test_batch_reservation_is_all_or_nothing():
+    budget = DelegationTreeBudget(max_children=2, max_iterations=10)
+    committed = budget.reserve_child(iterations=3)
+    committed.commit()
+
+    with pytest.raises(BudgetExhausted, match="child budget exhausted"):
+        budget.reserve_children(iterations=[2, 2])
+
+    assert budget.snapshot() == {
+        "max_children": 2,
+        "max_iterations": 10,
+        "reserved_children": 0,
+        "reserved_iterations": 0,
+        "committed_iterations": 3,
+        "started_children": 1,
+        "children_remaining": 1,
+        "iterations_remaining": 7,
+        "failures": 0,
+        "replans": 0,
+    }

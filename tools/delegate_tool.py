@@ -2363,54 +2363,68 @@ def delegate_task(
             max_iterations=effective_max_iter * max_children * max_spawn,
         )
         parent_agent._delegation_tree_budget = tree_budget
-    try:
-        for i, t in enumerate(task_list):
-            task_acp_args = t.get("acp_args") if "acp_args" in t else None
-            # Per-task role beats top-level; normalise again so unknown
-            # per-task values warn and degrade to leaf uniformly.
-            effective_role = t["_normalized_role"]
-            capacity = probe_capacity(
-                CapacityRequest(
-                    role=effective_role,
-                    requested_iterations=effective_max_iter,
-                    depth=depth + 1,
-                    max_depth=max_spawn,
-                    budget_snapshot=tree_budget.snapshot(),
-                    active_agents=len(list_active_subagents()),
-                    max_active_agents=max_children,
-                    # Credential resolution either returned a usable route or
-                    # raised above. Unknown host/provider telemetry remains
-                    # explicit rather than being guessed from secret shapes.
-                    provider_available=True,
-                )
+    prepared_tasks = []
+    simulated_budget = tree_budget.snapshot()
+    for i, t in enumerate(task_list):
+        # Preflight the complete batch before constructing any child. Account
+        # for earlier entries locally so a later entry cannot discover a hard
+        # ceiling only after earlier children have emitted hooks or attached to
+        # the parent.
+        effective_role = t["_normalized_role"]
+        capacity = probe_capacity(
+            CapacityRequest(
+                role=effective_role,
+                requested_iterations=effective_max_iter,
+                depth=depth + 1,
+                max_depth=max_spawn,
+                budget_snapshot=simulated_budget,
+                # max_concurrent_children is the legacy per-call batch/thread
+                # pool limit, not a process-global active-agent ceiling.
+                active_agents=None,
+                max_active_agents=None,
+                # Credential resolution proves configuration, not provider
+                # health. Leave availability unknown absent a real signal.
+                provider_available=None,
             )
-            capacity_decision = decide_capacity(capacity)
-            if capacity_decision.action == "queue":
-                return tool_error(
-                    f"Delegation queued: {capacity_decision.reason}. Retry when "
-                    "capacity becomes available."
-                )
-            if capacity_decision.action == "replan":
-                tree_budget.reserve_replan()
-                return tool_error(
-                    f"Delegation requires replanning: {capacity_decision.reason}."
-                )
-            effective_contract = t["_orchestrator_contract"]
-            if (
-                capacity_decision.action == "degrade_to_leaf"
-                and effective_role == "orchestrator"
-            ):
-                # Leaf routing is resolved by _build_child_agent from this
-                # updated role; an orchestrator-only contract must not leak
-                # into the degraded child.
-                effective_role = "leaf"
-                effective_contract = None
-            try:
-                reservation = tree_budget.reserve_child(iterations=effective_max_iter)
-            except BudgetExhausted as exc:
-                return tool_error(str(exc))
-            try:
-                child = _build_child_agent(
+        )
+        capacity_decision = decide_capacity(capacity)
+        if capacity_decision.action == "queue":
+            return tool_error(
+                f"Delegation queued: {capacity_decision.reason}. Retry when "
+                "capacity becomes available."
+            )
+        if capacity_decision.action == "replan":
+            tree_budget.reserve_replan()
+            return tool_error(
+                f"Delegation requires replanning: {capacity_decision.reason}."
+            )
+        effective_contract = t["_orchestrator_contract"]
+        if (
+            capacity_decision.action == "degrade_to_leaf"
+            and effective_role == "orchestrator"
+        ):
+            effective_role = "leaf"
+            effective_contract = None
+        prepared_tasks.append((i, t, effective_role, effective_contract))
+        simulated_budget = dict(simulated_budget)
+        simulated_budget["children_remaining"] = max(
+            0, simulated_budget["children_remaining"] - 1
+        )
+        simulated_budget["iterations_remaining"] = max(
+            0, simulated_budget["iterations_remaining"] - effective_max_iter
+        )
+
+    try:
+        reservations = tree_budget.reserve_children(
+            iterations=[effective_max_iter] * n_tasks
+        )
+    except BudgetExhausted as exc:
+        return tool_error(str(exc))
+
+    try:
+        for i, t, effective_role, effective_contract in prepared_tasks:
+            task_acp_args = t.get("acp_args") if "acp_args" in t else None
+            child = _build_child_agent(
                     task_index=i,
                     goal=t["goal"],
                     context=t.get("context"),
@@ -2434,14 +2448,33 @@ def delegate_task(
                     role=effective_role,
                     task_contract=effective_contract,
                 )
-            except Exception:
-                reservation.rollback()
-                raise
-            reservation.commit()
             child._delegation_tree_budget = tree_budget
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
+        for reservation in reservations:
+            reservation.commit()
+    except Exception:
+        for reservation in reservations:
+            if not reservation._finished:
+                reservation.rollback()
+        for _, _, child in children:
+            if hasattr(parent_agent, "_active_children"):
+                try:
+                    lock = getattr(parent_agent, "_active_children_lock", None)
+                    if lock:
+                        with lock:
+                            parent_agent._active_children.remove(child)
+                    else:
+                        parent_agent._active_children.remove(child)
+                except (ValueError, AttributeError):
+                    pass
+            try:
+                if hasattr(child, "close"):
+                    child.close()
+            except Exception:
+                logger.debug("Failed to close unstarted child after batch build failure")
+        raise
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names

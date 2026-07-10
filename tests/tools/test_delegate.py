@@ -3091,6 +3091,107 @@ class TestAdaptiveCapacityPreflight(unittest.TestCase):
         self.assertEqual(child._delegate_role, "leaf")
         self.assertNotIn("delegation", agent_cls.call_args.kwargs["enabled_toolsets"])
 
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"max_iterations": 5, "max_concurrent_children": 2},
+    )
+    def test_later_batch_budget_failure_builds_no_children(
+        self, _config, credentials, build_child
+    ):
+        from tools.delegation_budget import DelegationTreeBudget
+
+        credentials.return_value = self._credentials()
+        parent = _make_mock_parent()
+        parent._delegation_tree_budget = DelegationTreeBudget(
+            max_children=1, max_iterations=10
+        )
+
+        result = json.loads(
+            delegate_task(
+                tasks=[{"goal": "first"}, {"goal": "second"}],
+                parent_agent=parent,
+            )
+        )
+
+        self.assertIn("replanning", result["error"])
+        build_child.assert_not_called()
+        self.assertEqual(parent._delegation_tree_budget.snapshot()["started_children"], 0)
+        self.assertEqual(parent._delegation_tree_budget.snapshot()["reserved_children"], 0)
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool.list_active_subagents", return_value=[{"depth": 1}])
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={
+            "max_iterations": 5,
+            "max_concurrent_children": 1,
+            "max_spawn_depth": 3,
+        },
+    )
+    def test_nested_worker_ignores_per_call_batch_limit_for_global_capacity(
+        self, _config, _active, credentials, build_child, run_child
+    ):
+        from tools.delegation_budget import DelegationTreeBudget
+
+        credentials.return_value = self._credentials()
+        child = _make_role_mock_child()
+        build_child.return_value = child
+        run_child.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "done",
+            "api_calls": 1,
+            "duration_seconds": 0,
+        }
+        parent = _make_mock_parent(depth=1)
+        parent._delegation_tree_budget = DelegationTreeBudget(
+            max_children=3, max_iterations=15
+        )
+
+        result = json.loads(delegate_task(goal="worker", parent_agent=parent))
+
+        self.assertNotIn("error", result)
+        build_child.assert_called_once()
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool.probe_capacity")
+    @patch("tools.delegate_tool._load_config", return_value={"max_iterations": 5})
+    def test_production_probe_does_not_invent_provider_health_or_global_agent_cap(
+        self, _config, probe, credentials, build_child
+    ):
+        from tools.delegation_capacity import CapacitySnapshot
+
+        credentials.return_value = self._credentials()
+        probe.return_value = CapacitySnapshot(
+            role="leaf",
+            requested_iterations=5,
+            depth=1,
+            max_depth=1,
+            iterations_remaining=15,
+            children_remaining=3,
+        )
+        build_child.return_value = _make_role_mock_child()
+
+        with patch("tools.delegate_tool._run_single_child") as run_child:
+            run_child.return_value = {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "done",
+                "api_calls": 1,
+                "duration_seconds": 0,
+            }
+            delegate_task(goal="work", parent_agent=_make_mock_parent())
+
+        request = probe.call_args.args[0]
+        self.assertIsNone(request.provider_available)
+        self.assertIsNone(request.active_agents)
+        self.assertIsNone(request.max_active_agents)
+
 
 if __name__ == "__main__":
     unittest.main()

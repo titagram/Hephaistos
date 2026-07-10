@@ -39,6 +39,30 @@ class DelegationTreeBudget:
             self._reserved_iterations += iterations
         return BudgetReservation(self, iterations)
 
+    def reserve_children(self, *, iterations: list[int]) -> list["BudgetReservation"]:
+        """Atomically reserve a complete batch or leave the budget unchanged."""
+
+        if not iterations or any(value <= 0 for value in iterations):
+            raise ValueError("iterations must contain positive values")
+        child_count = len(iterations)
+        iteration_count = sum(iterations)
+        with self._lock:
+            if (
+                self._started_children + self._reserved_children + child_count
+                > self.max_children
+            ):
+                raise BudgetExhausted("delegation child budget exhausted")
+            if (
+                self._committed_iterations
+                + self._reserved_iterations
+                + iteration_count
+                > self.max_iterations
+            ):
+                raise BudgetExhausted("delegation iteration budget exhausted")
+            self._reserved_children += child_count
+            self._reserved_iterations += iteration_count
+        return [BudgetReservation(self, value) for value in iterations]
+
     def _finish(self, iterations: int, *, committed: bool) -> None:
         with self._lock:
             self._reserved_children -= 1
