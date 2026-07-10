@@ -60,6 +60,7 @@ _TRAJECTORY_FIELDS = frozenset(
 class GitState:
     """Content-addressed repository state captured at a point in time."""
 
+    repository_root: str
     base_commit: str
     diff_hash: str
     file_hashes: tuple[tuple[str, str], ...]
@@ -139,6 +140,7 @@ def capture_git_state(workspace: str | None = None) -> GitState | None:
         file_hashes = tuple(sorted(files.items()))
         diff_hash = canonical_json_hash({"head": head, "files": file_hashes})
         return GitState(
+            repository_root=root,
             base_commit=head,
             diff_hash=diff_hash,
             file_hashes=file_hashes,

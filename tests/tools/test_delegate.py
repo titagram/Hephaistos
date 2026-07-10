@@ -11,6 +11,8 @@ Run with:  python -m pytest tests/test_delegate.py -v
 
 import json
 import os
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -837,6 +839,48 @@ class TestDelegateObservability(unittest.TestCase):
 
 
 class TestDelegationEvidenceIntegration(unittest.TestCase):
+    def test_nested_workspace_git_write_is_covered_from_repository_root(self):
+        from tools import file_state
+        from tools.delegate_tool import _run_single_child
+
+        with tempfile.TemporaryDirectory() as temporary_repo:
+            repo = os.path.realpath(temporary_repo)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            nested = os.path.join(repo, "packages", "demo")
+            os.makedirs(nested)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "initial"], cwd=repo, check=True)
+
+            child = MagicMock(_delegate_role="leaf", _delegate_task_contract=None, _subagent_id="nested-child")
+
+            def write_from_child(*_args, **_kwargs):
+                written = os.path.join(nested, "result.py")
+                with open(written, "w", encoding="utf-8") as handle:
+                    handle.write("result = 1\n")
+                file_state.note_write("nested-child", written)
+                return {
+                    "final_response": "done",
+                    "completed": True,
+                    "interrupted": False,
+                    "api_calls": 1,
+                    "messages": [],
+                }
+
+            child.run_conversation.side_effect = write_from_child
+            parent = _make_mock_parent()
+            parent.cwd = nested
+            file_state.get_registry().clear()
+            try:
+                entry = _run_single_child(0, "write nested result", child, parent)
+            finally:
+                file_state.get_registry().clear()
+
+        packet = entry["evidence_packet"]
+        self.assertEqual(packet["observed_files"], ["packages/demo/result.py"])
+        self.assertEqual(packet["covered_files"], ["packages/demo/result.py"])
+        self.assertEqual(packet["unattributed_files"], [])
+
     def test_child_returns_runtime_bound_evidence_without_trajectory(self):
         from types import SimpleNamespace
 

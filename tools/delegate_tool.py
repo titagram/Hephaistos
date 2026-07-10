@@ -2100,7 +2100,11 @@ def _run_single_child(
                     else None
                 )
                 observed_files = changed_files(git_state_before, git_state_after)
-                evidence_root = _evidence_workspace or os.getcwd()
+                evidence_root = getattr(
+                    git_state_after,
+                    "repository_root",
+                    _evidence_workspace or os.getcwd(),
+                )
                 absolute_observed = [os.path.abspath(os.path.join(evidence_root, path)) for path in observed_files]
                 writes_by_task = file_state.writes_since("", wall_start, absolute_observed)
                 child_written_absolute = set(writes_by_task.get(child_task_id, ()))

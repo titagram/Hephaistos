@@ -188,3 +188,38 @@ Implementation notes:
 - Packet construction and validation now require `covered_files` and
   `unattributed_files` to be disjoint and to union exactly to
   `observed_files`.
+
+### RED 6: Nested-workspace provenance root
+
+Command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegate.py -q -k nested_workspace_git_write_is_covered_from_repository_root`
+
+Observed result: one expected failure (exit 1). The Git delta correctly named
+`packages/demo/result.py` relative to the repository root, but provenance
+resolved it relative to the nested `packages/demo` workspace and classified
+the child's recorded write as unattributed.
+
+### GREEN 6: Repository-root-relative provenance
+
+Focused command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegate.py -q -k nested_workspace_git_write_is_covered_from_repository_root`
+
+Observed result: `1 passed, 161 deselected in 1.03s` (exit 0).
+
+Full evidence/delegation command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegation_evidence.py tests/tools/test_delegate.py -q`
+
+Observed result: `178 passed in 21.83s` (exit 0).
+
+Implementation notes:
+
+- `GitState` now preserves the absolute repository root returned by Git.
+- Evidence provenance resolves repository-relative observed paths against that
+  root, independent of a nested child workspace hint.
+- The regression creates a real temporary Git repository, runs the child from
+  a nested workspace, writes an actual file, records the write through the
+  file-state registry, and proves the file appears in `covered_files` rather
+  than `unattributed_files`.
