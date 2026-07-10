@@ -473,7 +473,9 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -481,7 +483,9 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -489,7 +493,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -497,7 +503,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -535,7 +543,9 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -543,7 +553,9 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -551,7 +563,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -559,7 +573,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
             }
           },
           {
@@ -1913,30 +1929,36 @@
           },
           "message_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "correlation_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "causation_id": {
             "type": [
               "string",
               "null"
             ],
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "project_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "sender_agent_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "target_agent_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "target_workspace_binding_id": {
             "type": [
@@ -1944,6 +1966,7 @@
               "null"
             ],
             "minLength": 1,
+            "pattern": ".*\\S.*",
             "description": "Required and non-null for workspace-bound capabilities"
           },
           "message_type": {
@@ -1966,21 +1989,24 @@
           },
           "capability": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "remote_task_id": {
             "type": [
               "string",
               "null"
             ],
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "remote_task_version": {
             "type": [
               "string",
               "null"
             ],
-            "minLength": 1
+            "minLength": 1,
+            "pattern": ".*\\S.*"
           },
           "expires_at": {
             "type": "integer",

@@ -40,6 +40,22 @@ def test_workspace_request_requires_target_binding():
         parse_envelope(raw)
 
 
+def test_target_binding_key_is_required_even_when_null_is_allowed():
+    raw = {**VALID, "capability": "project_memory_search"}
+    del raw["target_workspace_binding_id"]
+    with pytest.raises(ValueError, match="missing envelope fields"):
+        parse_envelope(raw)
+
+
+def test_non_workspace_capability_allows_explicit_null_target_binding():
+    raw = {
+        **VALID,
+        "capability": "project_memory_search",
+        "target_workspace_binding_id": None,
+    }
+    assert parse_envelope(raw).target_workspace_binding_id is None
+
+
 def test_cross_project_context_is_rejected():
     envelope = parse_envelope(VALID)
     with pytest.raises(ValueError, match="project"):
@@ -86,6 +102,22 @@ def test_unknown_fields_are_rejected_instead_of_becoming_authority():
         parse_envelope(raw)
     assert "admin" not in str(exc_info.value)
     assert "very-secret-token" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "hostile_field",
+    [
+        "password=correct-horse-battery-staple",
+        "authorization=Bearer secret-credential",
+        "client_secret=private-client-value",
+    ],
+)
+def test_unknown_field_error_never_echoes_untrusted_field_names(hostile_field):
+    with pytest.raises(ValueError, match=r"unknown envelope fields \(1\)") as exc_info:
+        parse_envelope({**VALID, hostile_field: True})
+    message = str(exc_info.value)
+    assert hostile_field not in message
+    assert hostile_field.split("=", 1)[0] not in message
 
 
 def test_invalid_enum_and_payload_shapes_are_rejected_without_echoing_secrets():
@@ -172,7 +204,7 @@ def test_openapi_freezes_queue_gate_envelope_and_targeted_cursors():
     spec = json.loads((root / "docs/hades/openapi-hades-v1.json").read_text())
     schema = spec["components"]["schemas"]["PersephoneMessageRequest"]
     required = set(schema["required"])
-    assert {
+    assert required == {
         "schema",
         "message_id",
         "correlation_id",
@@ -185,9 +217,26 @@ def test_openapi_freezes_queue_gate_envelope_and_targeted_cursors():
         "capability",
         "expires_at",
         "payload",
-    } <= required
+    }
     assert schema["additionalProperties"] is False
     assert schema["properties"]["payload"]["maxProperties"] > 0
+
+    identifier_fields = {
+        "message_id",
+        "correlation_id",
+        "causation_id",
+        "project_id",
+        "sender_agent_id",
+        "target_agent_id",
+        "target_workspace_binding_id",
+        "capability",
+        "remote_task_id",
+        "remote_task_version",
+    }
+    for field in identifier_fields:
+        prop = schema["properties"][field]
+        assert prop["minLength"] == 1, field
+        assert prop["pattern"] == r".*\S.*", field
 
     for route in ("inbox", "events"):
         params = {
@@ -197,6 +246,14 @@ def test_openapi_freezes_queue_gate_envelope_and_targeted_cursors():
         assert params["target_agent_id"]["required"] is True
         assert params["target_workspace_binding_id"]["required"] is False
         assert params["cursor"]["required"] is False
+        for field in (
+            "project_id",
+            "target_agent_id",
+            "target_workspace_binding_id",
+            "cursor",
+        ):
+            assert params[field]["schema"]["minLength"] == 1, (route, field)
+            assert params[field]["schema"]["pattern"] == r".*\S.*", (route, field)
 
     capabilities = spec["paths"]["/api/hades/v1/capabilities"]["get"]["responses"]["200"]
     assert "persephone_agent_queue_v1" in json.dumps(capabilities)

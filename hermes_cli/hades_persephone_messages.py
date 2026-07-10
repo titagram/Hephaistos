@@ -69,7 +69,6 @@ _FIELDS = frozenset(
 )
 _REQUIRED_FIELDS = _FIELDS - {
     "causation_id",
-    "target_workspace_binding_id",
     "remote_task_id",
     "remote_task_version",
 }
@@ -217,8 +216,7 @@ def parse_envelope(raw: Mapping[str, Any], *, now: int | None = None) -> AgentMe
         raise ValueError("agent message envelope must be an object")
     unknown = set(raw) - _FIELDS
     if unknown:
-        names = redact_secret(", ".join(sorted(map(str, unknown))))
-        raise ValueError(f"unknown envelope fields: {names}")
+        raise ValueError(f"unknown envelope fields ({len(unknown)})")
     missing = _REQUIRED_FIELDS - set(raw)
     if missing:
         raise ValueError(f"missing envelope fields: {', '.join(sorted(missing))}")
