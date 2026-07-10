@@ -493,3 +493,35 @@ headless installations continue to work.
 
 The first MVP contract is persistent inbox plus SSE or polling fallback. Hades
 stores inbox events locally and surfaces unread/degraded state in status.
+
+### Project-scoped agent queue handoff
+
+`docs/hades/openapi-hades-v1.json` is the backend handoff contract for the
+project-scoped agent queue. A client must not claim that distributed agent
+messaging works, start a receiver, or send an agent-message envelope unless the
+authenticated `/api/hades/v1/capabilities` response advertises
+`persephone_agent_queue_v1=true`. Absence and `false` both mean unsupported;
+the older generic Persephone inbox remains a separate legacy surface.
+
+The v1 envelope is `hades.persephone.agent-message.v1`. It carries immutable
+message/correlation/causation IDs, one backend `project_id`, explicit sender and
+target agent IDs, an optional target workspace binding, message/effect classes,
+capability, optional remote task/version IDs, expiry, and a JSON object payload.
+Workspace-bound capabilities require `target_workspace_binding_id`. Receivers
+must validate the authenticated project, target agent, target binding, and
+expiry before persistence or execution. Unknown top-level fields are rejected
+so they cannot smuggle role, approval, or other authority into the message.
+
+The payload limit is 64 KiB of canonical UTF-8 JSON (65,536 bytes). Payloads
+must be bounded and pass the existing backend secret-redaction boundary before
+enqueueing; validation errors must not echo payload contents. Information-only
+messages do not grant filesystem or mutation authority. Any mutating or
+uncertain effect remains subject to explicit human approval in later receiver
+stages.
+
+Inbox polling and SSE reads are scoped by `project_id` and `target_agent_id`,
+may narrow to `target_workspace_binding_id`, and advance with an opaque
+`cursor`. A response stays in the request project, reverses sender/target,
+retains `correlation_id`, and sets `causation_id` to the request `message_id`.
+The OpenAPI entry documents backend work to be implemented; it does not enable
+or prove a live receiver by itself.

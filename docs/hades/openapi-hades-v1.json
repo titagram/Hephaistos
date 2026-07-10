@@ -50,7 +50,24 @@
         ],
         "responses": {
           "200": {
-            "description": "Authenticated capability discovery"
+            "description": "Authenticated capability discovery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "persephone_agent_queue_v1": {
+                      "type": "boolean",
+                      "description": "True only when the project-scoped agent queue contract is implemented by this backend"
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "example": {
+                  "persephone_agent_queue_v1": false
+                }
+              }
+            }
           }
         }
       }
@@ -460,6 +477,30 @@
             }
           },
           {
+            "name": "target_agent_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_workspace_binding_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -493,6 +534,30 @@
             "name": "project_id",
             "in": "query",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_agent_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_workspace_binding_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1828,23 +1893,107 @@
       "PersephoneMessageRequest": {
         "type": "object",
         "required": [
+          "schema",
+          "message_id",
+          "correlation_id",
           "project_id",
-          "event_type"
+          "sender_agent_id",
+          "target_agent_id",
+          "target_workspace_binding_id",
+          "message_type",
+          "effect",
+          "capability",
+          "expires_at",
+          "payload"
         ],
         "properties": {
+          "schema": {
+            "type": "string",
+            "const": "hades.persephone.agent-message.v1"
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "correlation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "causation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
           "project_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
-          "workspace_binding_id": {
-            "type": "string"
+          "sender_agent_id": {
+            "type": "string",
+            "minLength": 1
           },
-          "event_type": {
-            "type": "string"
+          "target_agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_workspace_binding_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Required and non-null for workspace-bound capabilities"
+          },
+          "message_type": {
+            "type": "string",
+            "enum": [
+              "information_request",
+              "local_decision",
+              "information_response",
+              "status_query",
+              "status_response",
+              "cancel_request"
+            ]
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "information_read",
+              "mutating"
+            ]
+          },
+          "capability": {
+            "type": "string",
+            "minLength": 1
+          },
+          "remote_task_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "remote_task_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp after which the message must be rejected"
           },
           "payload": {
-            "type": "object"
+            "type": "object",
+            "maxProperties": 128,
+            "description": "Canonical UTF-8 JSON must not exceed 65536 bytes"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ValidationErrorResponse": {
         "type": "object",
