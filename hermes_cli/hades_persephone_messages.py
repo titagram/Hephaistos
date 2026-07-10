@@ -20,6 +20,7 @@ from hermes_cli.hades_backend_client import redact_secret
 
 AGENT_MESSAGE_SCHEMA = "hades.persephone.agent-message.v1"
 MAX_PAYLOAD_BYTES = 65_536
+MAX_PAYLOAD_PROPERTIES = 128
 BACKEND_CAPABILITY = "persephone_agent_queue_v1"
 
 
@@ -135,6 +136,8 @@ def _payload(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     value = raw.get("payload")
     if not isinstance(value, dict):
         raise ValueError("payload must be a JSON object")
+    if len(value) > MAX_PAYLOAD_PROPERTIES:
+        raise ValueError(f"payload exceeds the {MAX_PAYLOAD_PROPERTIES}-property limit")
     try:
         encoded = json.dumps(
             value,
@@ -301,6 +304,7 @@ __all__ = [
     "AGENT_MESSAGE_SCHEMA",
     "BACKEND_CAPABILITY",
     "MAX_PAYLOAD_BYTES",
+    "MAX_PAYLOAD_PROPERTIES",
     "AgentMessageEnvelope",
     "DecisionStatus",
     "EffectClass",

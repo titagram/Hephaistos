@@ -144,6 +144,25 @@ def test_payload_is_bounded_by_canonical_utf8_json_bytes():
         parse_envelope({**VALID, "payload": oversized})
 
 
+def test_payload_accepts_exactly_128_top_level_properties():
+    payload = {f"field_{index}": index for index in range(128)}
+    assert len(parse_envelope({**VALID, "payload": payload}).payload) == 128
+
+
+def test_payload_rejects_129_top_level_properties_without_echoing_values():
+    payload = {f"field_{index}": index for index in range(128)}
+    payload["password=private-payload-value"] = "private-payload-value"
+    with pytest.raises(ValueError, match="128-property limit") as exc_info:
+        parse_envelope({**VALID, "payload": payload})
+    assert "private-payload-value" not in str(exc_info.value)
+
+
+def test_payload_property_limit_applies_only_to_top_level_object():
+    payload = {"nested": {f"field_{index}": index for index in range(129)}}
+    envelope = parse_envelope({**VALID, "payload": payload})
+    assert len(envelope.payload["nested"]) == 129
+
+
 def test_envelope_and_nested_payload_are_immutable_copies():
     raw = {**VALID, "payload": {"query": "auth", "filters": ["src"]}}
     envelope = parse_envelope(raw)
