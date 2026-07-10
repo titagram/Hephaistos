@@ -1488,7 +1488,7 @@ def test_sync_runner_scopes_to_workspace_binding_id(monkeypatch, tmp_path):
         assert hdb.get_job(conn, "job_expired_other_workspace").status == "waiting_confirmation"
 
 
-def test_workspace_sync_selects_only_newest_binding_for_default_identity(monkeypatch, tmp_path):
+def test_workspace_sync_selects_latest_identity_and_binding_when_timestamps_match(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     from hermes_cli import hades_backend_db as hdb
@@ -1497,10 +1497,7 @@ def test_workspace_sync_selects_only_newest_binding_for_default_identity(monkeyp
 
     workspace = tmp_path / "repo"
     workspace.mkdir()
-    import itertools
-
-    timestamps = itertools.count(100)
-    monkeypatch.setattr(hdb, "_now", lambda: next(timestamps))
+    monkeypatch.setattr(hdb, "_now", lambda: 100)
 
     with hdb.connect_closing() as conn:
         hdb.save_agent(
@@ -1582,6 +1579,11 @@ def test_workspace_sync_selects_only_newest_binding_for_default_identity(monkeyp
             head_commit="current-new",
             backend_workspace_binding_id="binding_current_new",
         )
+        assert hdb.get_default_agent(conn).agent_id == "agent_current"
+        assert [
+            binding.backend_workspace_binding_id
+            for binding in hdb.list_workspace_bindings(conn, status="linked")[:2]
+        ] == ["binding_current_new", "binding_current_old"]
 
     calls = []
     constructed_agents = []

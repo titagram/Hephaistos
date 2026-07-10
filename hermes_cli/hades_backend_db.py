@@ -403,7 +403,11 @@ def get_agent(conn: sqlite3.Connection, agent_id: str) -> BackendAgent | None:
 
 def get_default_agent(conn: sqlite3.Connection) -> BackendAgent | None:
     return _agent_from_row(
-        conn.execute("SELECT * FROM backend_agents ORDER BY updated_at DESC LIMIT 1").fetchone()
+        conn.execute(
+            "SELECT * FROM backend_agents "
+            "ORDER BY updated_at DESC, created_at DESC, rowid DESC, agent_id DESC "
+            "LIMIT 1"
+        ).fetchone()
     )
 
 
@@ -485,13 +489,23 @@ def mark_binding_unlinked(conn: sqlite3.Connection, workspace_fingerprint: str) 
 
 
 def list_workspace_bindings(conn: sqlite3.Connection, *, status: str | None = None) -> list[WorkspaceBinding]:
+    # Automatic workspace selection consumes this order directly: newest
+    # update wins, then newest insertion when integer-second timestamps tie.
+    # The explicit ID is a final deterministic fallback for future schemas
+    # where row identity may no longer be unique or available to the caller.
+    order_by_recency = (
+        "updated_at DESC, created_at DESC, rowid DESC, "
+        "backend_workspace_binding_id DESC"
+    )
     if status:
         rows = conn.execute(
-            "SELECT * FROM workspace_bindings WHERE status = ? ORDER BY updated_at DESC",
+            f"SELECT * FROM workspace_bindings WHERE status = ? ORDER BY {order_by_recency}",
             (status,),
         ).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM workspace_bindings ORDER BY updated_at DESC").fetchall()
+        rows = conn.execute(
+            f"SELECT * FROM workspace_bindings ORDER BY {order_by_recency}"
+        ).fetchall()
     return [b for row in rows if (b := _binding_from_row(row)) is not None]
 
 
