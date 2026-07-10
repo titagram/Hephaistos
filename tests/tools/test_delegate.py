@@ -651,6 +651,7 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertIn("result_bytes", entry["tool_trace"][0])
             self.assertEqual(entry["tool_trace"][0]["status"], "ok")
 
+
     def test_tool_trace_handles_list_content_blocks(self):
         """Tool-result content blocks should not crash observability metadata."""
         parent = _make_mock_parent(depth=0)
@@ -833,6 +834,93 @@ class TestDelegateObservability(unittest.TestCase):
 
             result = json.loads(delegate_task(goal="Test max iter", parent_agent=parent))
             self.assertEqual(result["results"][0]["exit_reason"], "max_iterations")
+
+
+class TestDelegationEvidenceIntegration(unittest.TestCase):
+    def test_child_returns_runtime_bound_evidence_without_trajectory(self):
+        from types import SimpleNamespace
+
+        from tools.delegate_tool import _run_single_child
+
+        before = SimpleNamespace(
+            base_commit="a" * 40,
+            diff_hash="before-diff",
+            file_hashes=(("existing.py", "same"),),
+        )
+        after = SimpleNamespace(
+            base_commit="b" * 40,
+            diff_hash="after-diff",
+            file_hashes=(("a.py", "changed"), ("existing.py", "same")),
+        )
+        child = MagicMock()
+        child._delegate_role = "leaf"
+        child._delegate_task_contract = None
+        child.run_conversation.return_value = {
+            "final_response": "Implemented the focused change.",
+            "completed": True,
+            "interrupted": False,
+            "api_calls": 1,
+            "messages": [
+                {"role": "assistant", "reasoning": "private chain", "tool_calls": [
+                    {"id": "tc-1", "function": {"name": "terminal", "arguments": "pytest -q"}}
+                ]},
+                {"role": "tool", "tool_call_id": "tc-1", "content": "1 passed"},
+            ],
+            "evidence": {
+                "verification": [
+                    {"command": "pytest -q", "status": "passed", "tool": "terminal"}
+                ],
+                "dependency_hashes": ["dep-1"],
+                "residual_risks": ["integration suite not run"],
+            },
+        }
+
+        with patch(
+            "tools.delegate_tool.capture_git_state", side_effect=[before, after]
+        ):
+            entry = _run_single_child(
+                task_index=0,
+                goal="Implement focused change",
+                child=child,
+                parent_agent=_make_mock_parent(),
+            )
+
+        packet = entry["evidence_packet"]
+        serialized = json.dumps(packet)
+        self.assertEqual(packet["base_commit"], "a" * 40)
+        self.assertEqual(packet["result_ref"], "b" * 40)
+        self.assertEqual(packet["diff_hash"], "after-diff")
+        self.assertEqual(packet["covered_files"], ["a.py"])
+        self.assertEqual(packet["conclusion"], "Implemented the focused change.")
+        self.assertEqual(packet["verification"][0]["status"], "passed")
+        self.assertNotIn("messages", serialized)
+        self.assertNotIn("reasoning", serialized)
+        self.assertNotIn("private chain", serialized)
+
+    def test_missing_git_facts_are_reported_not_fabricated(self):
+        from tools.delegate_tool import _run_single_child
+
+        child = MagicMock()
+        child._delegate_role = "reviewer"
+        child._delegate_task_contract = None
+        child.run_conversation.return_value = {
+            "final_response": "Review complete.",
+            "completed": True,
+            "interrupted": False,
+            "api_calls": 1,
+            "messages": [],
+        }
+
+        with patch("tools.delegate_tool.capture_git_state", return_value=None):
+            entry = _run_single_child(
+                task_index=0,
+                goal="Review implementation",
+                child=child,
+                parent_agent=_make_mock_parent(),
+            )
+
+        self.assertNotIn("evidence_packet", entry)
+        self.assertIn("Git", entry["evidence_error"])
 
 
 class TestSubagentCostRollup(unittest.TestCase):

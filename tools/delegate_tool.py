@@ -19,6 +19,7 @@ never the child's intermediate tool calls or reasoning.
 import enum
 import json
 import logging
+from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 import os
@@ -40,6 +41,12 @@ from tools.delegation_capacity import (
     CapacityRequest,
     decide_capacity,
     probe_capacity,
+)
+from tools.delegation_evidence import (
+    build_evidence_packet,
+    canonical_json_hash,
+    capture_git_state,
+    changed_files,
 )
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -1363,6 +1370,7 @@ def _build_child_agent(
     # Stash the post-degrade role for introspection (leaf if the
     # kill switch or depth bounded the caller's requested role).
     child._delegate_role = effective_role
+    child._delegate_task_contract = task_contract
     child._delegation_profile = routed_profile
     # Stash subagent identity for nested-delegation event propagation and
     # for _run_single_child / interrupt_subagent to look up by id.
@@ -1734,6 +1742,12 @@ def _run_single_child(
             list(file_state.known_reads(parent_task_id)) if parent_task_id else []
         )
 
+        # Evidence must bind to facts captured around this exact child run.
+        # A missing snapshot is retained as missing and surfaced below; no
+        # synthetic commit or diff identity is substituted.
+        _evidence_workspace = _resolve_workspace_hint(parent_agent)
+        git_state_before = capture_git_state(_evidence_workspace)
+
         # Run child with an optional hard timeout (off by default —
         # result(timeout=None) blocks until the child finishes). Stuck-child
         # protection comes from the heartbeat staleness monitor instead.
@@ -1879,6 +1893,7 @@ def _run_single_child(
                 logger.debug("Progress callback flush failed: %s", e)
 
         duration = round(time.monotonic() - child_start, 2)
+        git_state_after = capture_git_state(_evidence_workspace)
 
         summary = result.get("final_response") or ""
         completed = result.get("completed", False)
@@ -1981,6 +1996,97 @@ def _run_single_child(
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
+
+        # Build compact evidence from runtime Git facts plus an optional,
+        # structured child record. The conversation messages above are used
+        # only to derive the bounded tool trace and are never copied here.
+        if git_state_before is None or git_state_after is None:
+            entry["evidence_error"] = (
+                "Git state was unavailable before or after the child run; "
+                "no evidence packet was fabricated."
+            )
+        else:
+            try:
+                raw_evidence = result.get("evidence") or {}
+                if not isinstance(raw_evidence, dict):
+                    raise ValueError("child evidence must be a structured object")
+                forbidden_evidence_keys = {
+                    "message",
+                    "messages",
+                    "reasoning",
+                    "transcript",
+                    "full_transcript",
+                    "conversation_history",
+                }
+                leaked_keys = forbidden_evidence_keys.intersection(
+                    str(key).lower() for key in raw_evidence
+                )
+                if leaked_keys:
+                    raise ValueError(
+                        "child evidence contains forbidden trajectory fields: "
+                        + ", ".join(sorted(leaked_keys))
+                    )
+
+                verification = raw_evidence.get("verification") or ()
+                if not isinstance(verification, (list, tuple)):
+                    raise ValueError("child verification must be a list")
+                corroborated_verification = []
+                for raw_record in verification:
+                    if not isinstance(raw_record, dict):
+                        raise ValueError(
+                            "child verification must contain structured records"
+                        )
+                    record = dict(raw_record)
+                    tool_name = record.get("tool")
+                    if isinstance(tool_name, str):
+                        matching_trace = next(
+                            (
+                                trace
+                                for trace in tool_trace
+                                if trace.get("tool") == tool_name
+                            ),
+                            None,
+                        )
+                        if matching_trace is not None:
+                            record["tool_trace_status"] = matching_trace.get(
+                                "status", "unknown"
+                            )
+                    corroborated_verification.append(record)
+
+                contract = getattr(child, "_delegate_task_contract", None)
+                contract_payload = (
+                    asdict(contract)
+                    if isinstance(contract, OrchestratorTaskContract)
+                    else {
+                        "goal": goal,
+                        "role": getattr(child, "_delegate_role", "leaf"),
+                    }
+                )
+                contract_hash = canonical_json_hash(
+                    {
+                        "version": "hermes.delegation.contract.v1",
+                        "contract": contract_payload,
+                    }
+                )
+                result_ref = (
+                    git_state_after.base_commit
+                    if git_state_after.base_commit != git_state_before.base_commit
+                    else None
+                )
+                packet = build_evidence_packet(
+                    contract_hash=contract_hash,
+                    base_commit=git_state_before.base_commit,
+                    result_ref=result_ref,
+                    diff_hash=git_state_after.diff_hash,
+                    covered_files=changed_files(git_state_before, git_state_after),
+                    verification=corroborated_verification,
+                    conclusion=summary,
+                    dependency_hashes=raw_evidence.get("dependency_hashes") or (),
+                    residual_risks=raw_evidence.get("residual_risks") or (),
+                )
+                entry["evidence_packet"] = packet.to_dict()
+            except (TypeError, ValueError) as exc:
+                entry["evidence_error"] = f"Evidence packet rejected: {exc}"
 
         # Cross-agent file-state reminder.  If this subagent wrote any
         # files the parent had already read, surface it so the parent
