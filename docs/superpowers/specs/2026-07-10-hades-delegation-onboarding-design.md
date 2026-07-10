@@ -44,12 +44,19 @@ The saved profiles contain only `provider`, `model`, optional
 credentials remain in normal provider configuration; secret fields are invalid
 in delegation profiles.
 
+The wizard also configures delegation capacity. `capacity_mode` defaults to
+`adaptive`; `max_spawn_depth`, `max_concurrent_children`, and
+`max_async_children` remain user-selected safety ceilings rather than a fixed
+tree shape. The wizard recommends conservative ceilings, explains expected
+token/cost multiplication, and requires explicit confirmation for high values.
+
 ## Runtime role contract
 
 The runtime supports `orchestrator`, `leaf`, and `reviewer` as real routing
-roles. `leaf` and `reviewer` cannot delegate. `reviewer` receives an
-independent-review prompt requiring scope verification, evidence checks,
-regression assessment, and a bounded conclusion.
+roles. `leaf` and `reviewer` cannot delegate. Normal review follows the chain of
+responsibility: every parent validates its direct children's evidence. The
+dedicated `reviewer` role is reserved for independent escalation when risk,
+conflict, or insufficient evidence justifies its additional cost.
 
 An `orchestrator` may be spawned only with a structured task contract. The
 contract is validated locally before spawning and requires:
@@ -68,6 +75,19 @@ tasks, and directs the agent to escalate ambiguity rather than infer missing
 requirements. This makes the delegation boundary executable and auditable;
 it does not claim to make model behavior infallible.
 
+Every spawn passes through an adaptive capacity preflight. It evaluates local
+CPU, memory and process pressure, active child counts, tree iteration/token
+budget, provider concurrency/rate state, task-contract complexity, and the
+user's configured ceilings. The decision is one of `allow`, `queue`,
+`degrade_to_leaf`, or `replan`; there is no hardware-only depth heuristic.
+
+Every child returns a versioned evidence packet containing the task-contract
+version, base commit, result commit or patch reference, diff hash, covered
+files, verification commands/results, bounded conclusions, and residual risks.
+Parents may reuse a packet instead of rereading the child's full trajectory.
+A changed contract, base commit, covered file, dependency, or verification
+input invalidates the packet and requires revalidation.
+
 `role_routes` maps all three roles. Legacy `delegation.model` and
 `delegation.provider` behavior remains available when no named route applies.
 An existing valid route is never altered by automatic onboarding. A partial,
@@ -81,7 +101,10 @@ after confirmation.
 - The Hades CLI command layer owns interactive prompts, transition to and from
   the existing model picker, confirmation, and atomic persistence.
 - Delegation routing and tool schemas accept the three runtime roles and
-  enforce the orchestrator task contract before child construction.
+  enforce the orchestrator task contract and capacity preflight before child
+  construction.
+- A focused evidence module builds, validates, and invalidates evidence packets
+  without retaining model reasoning or full transcripts.
 - The hierarchical-development skill contains only routing decisions and the
   command invocation guidance; it never embeds a model name or configuration
   fragment.
@@ -95,6 +118,10 @@ after confirmation.
 - Existing invalid routing: expose validation errors; require explicit repair.
 - Missing credentials or stale provider: do not offer that route as valid.
 - Declined confirmation or failed write: leave the old file unchanged.
+- Capacity rejection: queue, degrade, or request re-planning without creating a
+  child outside the configured ceilings.
+- Stale evidence: block parent acceptance until the affected packet is
+  revalidated.
 
 ## Verification
 
@@ -102,4 +129,7 @@ Tests cover empty and populated inventories, deterministic recommendations,
 one-model fallback, picker resume/cancellation, confirmation and atomic
 persistence, legacy config compatibility, and no secret leakage. Delegation
 tests cover actual routing for all three roles, reviewer non-delegation, and
-rejection of incomplete orchestrator contracts before child creation.
+rejection of incomplete orchestrator contracts before child creation. Capacity
+tests cover each preflight outcome and configured ceiling. Evidence tests cover
+construction, reuse, and invalidation after contract, commit, file, dependency,
+or verification changes.
