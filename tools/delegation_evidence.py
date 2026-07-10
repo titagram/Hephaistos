@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -89,7 +90,12 @@ def capture_git_state(workspace: str | None = None) -> GitState | None:
         files: dict[str, str] = {}
         changed = set(
             os.fsdecode(path)
-            for path in _git(("diff", "--name-only", "-z", "HEAD"), cwd=root).split(b"\0")
+            for path in _git(("diff", "--cached", "--name-only", "-z", "HEAD"), cwd=root).split(b"\0")
+            if path
+        )
+        changed.update(
+            os.fsdecode(path)
+            for path in _git(("diff", "--name-only", "-z"), cwd=root).split(b"\0")
             if path
         )
         changed.update(
@@ -100,18 +106,35 @@ def capture_git_state(workspace: str | None = None) -> GitState | None:
             if path
         )
         for relative in changed:
+            index_record = _git(("ls-files", "--stage", "-z", "--", relative), cwd=root)
+            if index_record:
+                metadata = index_record.split(b"\t", 1)[0].decode("ascii").split()
+                index_identity = {"mode": metadata[0], "blob": metadata[1]}
+            else:
+                index_identity = None
+
             absolute = os.path.join(root, relative)
             if os.path.islink(absolute):
                 content = os.fsencode(os.readlink(absolute))
-                files[relative] = "symlink:" + hashlib.sha256(content).hexdigest()
+                worktree_identity = {
+                    "mode": "120000",
+                    "content": hashlib.sha256(content).hexdigest(),
+                }
             elif os.path.isfile(absolute):
                 digest = hashlib.sha256()
                 with open(absolute, "rb") as handle:
                     for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                         digest.update(chunk)
-                files[relative] = "worktree:" + digest.hexdigest()
+                mode = os.lstat(absolute).st_mode
+                worktree_identity = {
+                    "mode": "100755" if mode & stat.S_IXUSR else "100644",
+                    "content": digest.hexdigest(),
+                }
             else:
-                files[relative] = "deleted"
+                worktree_identity = None
+            files[relative] = "state:" + canonical_json_hash(
+                {"index": index_identity, "worktree": worktree_identity}
+            )
 
         file_hashes = tuple(sorted(files.items()))
         diff_hash = canonical_json_hash({"head": head, "files": file_hashes})
@@ -308,10 +331,14 @@ def build_evidence_packet(
     normalized_unattributed = _text_tuple(
         unattributed_files, field="unattributed_files", sort=True
     )
-    if not set(normalized_covered).issubset(normalized_observed):
-        raise ValueError("covered_files must be a subset of observed_files")
-    if not set(normalized_unattributed).issubset(normalized_observed):
-        raise ValueError("unattributed_files must be a subset of observed_files")
+    if (
+        set(normalized_covered) & set(normalized_unattributed)
+        or set(normalized_covered) | set(normalized_unattributed)
+        != set(normalized_observed)
+    ):
+        raise ValueError(
+            "covered_files and unattributed_files must partition observed_files"
+        )
     packet = EvidencePacket(
         schema=EVIDENCE_SCHEMA,
         contract_hash=contract_hash.strip(),
@@ -381,8 +408,10 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
         raise ValueError("observed_files must be sorted and unique")
     if list(unattributed) != list(payload.get("unattributed_files")):
         raise ValueError("unattributed_files must be sorted and unique")
-    if not set(covered).issubset(observed) or not set(unattributed).issubset(observed):
-        raise ValueError("file provenance must refer only to observed_files")
+    if set(covered) & set(unattributed) or set(covered) | set(unattributed) != set(observed):
+        raise ValueError(
+            "covered_files and unattributed_files must partition observed_files"
+        )
     if list(dependencies) != list(payload.get("dependency_hashes")):
         raise ValueError("dependency_hashes must be sorted and unique")
     if list(risks) != list(payload.get("residual_risks")):

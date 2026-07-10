@@ -148,3 +148,43 @@ Observed result: `172 passed in 14.90s` (exit 0).
   authored by the child.
 - Staleness compares the packet's `result_ref` with the caller's current
   `result_ref`, including transitions between a commit ref and `None`.
+
+### RED 5: Canonical terminal identity, split Git identities, exact provenance partition
+
+Command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegation_evidence.py tests/tools/test_delegate.py -q -k 'staged_blob_change or provenance_partition or structured_terminal_args'`
+
+Observed result: four expected failures and one pass (exit 1). A documented
+terminal `command` claim did not match the equivalent runtime JSON
+`{"cmd": "..."}` arguments; staged-only index blob changes disappeared when
+the worktree still matched HEAD; and validation accepted overlapping or
+incomplete file provenance partitions. The different-command structured case
+remained unverified.
+
+### GREEN 5: Re-review findings resolved
+
+Focused command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegation_evidence.py tests/tools/test_delegate.py -q -k 'staged_blob_change or hashes_only_dirty or provenance_partition or structured_terminal_args or same_tool_different or error_result_claim'`
+
+Observed result: `8 passed, 169 deselected in 2.02s` (exit 0).
+
+Full evidence/delegation command:
+
+`.venv/bin/python -m pytest tests/tools/test_delegation_evidence.py tests/tools/test_delegate.py -q`
+
+Observed result: `177 passed in 22.44s` (exit 0).
+
+Implementation notes:
+
+- Terminal verification hashes one canonical argument mapping for both the
+  documented `command` form and runtime structured arguments. Only the hash is
+  retained; mismatched commands and error results remain explicitly
+  unverified.
+- Git snapshots remain proportional to dirty paths, but each dirty tracked
+  path now hashes its index mode/blob separately from worktree mode/content,
+  including symlinks, executable mode, untracked files, and deletion.
+- Packet construction and validation now require `covered_files` and
+  `unattributed_files` to be disjoint and to union exactly to
+  `observed_files`.

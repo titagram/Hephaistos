@@ -923,6 +923,21 @@ class TestDelegationEvidenceIntegration(unittest.TestCase):
         self.assertEqual(record["reason"], "no_matching_runtime_call")
         self.assertNotIn("command", record)
 
+    def test_structured_terminal_args_match_documented_command_claim(self):
+        record = self._evidence_entry(
+            json.dumps({"cmd": "pytest -q"}), "1 passed", "pytest -q"
+        )["evidence_packet"]["verification"][0]
+        self.assertEqual(record["verification_status"], "verified")
+
+    def test_structured_terminal_args_with_different_command_are_unverified(self):
+        record = self._evidence_entry(
+            json.dumps({"cmd": "pytest tests/unit -q"}),
+            "1 passed",
+            "pytest tests/security -q",
+        )["evidence_packet"]["verification"][0]
+        self.assertEqual(record["verification_status"], "unverified")
+        self.assertEqual(record["reason"], "no_matching_runtime_call")
+
     def test_error_result_claim_is_unverified(self):
         record = self._evidence_entry("pytest -q", "Error: failed", "pytest -q")["evidence_packet"]["verification"][0]
         self.assertEqual(record["verification_status"], "unverified")

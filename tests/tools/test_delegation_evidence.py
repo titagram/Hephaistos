@@ -78,6 +78,42 @@ def test_git_snapshot_hashes_only_dirty_paths_and_covers_all_dirty_kinds(tmp_pat
     assert changed_files(before, after) == tuple(sorted(path for path, _ in after.file_hashes))
 
 
+def test_git_snapshot_detects_staged_blob_change_with_unchanged_worktree(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    path = tmp_path / "staged.txt"
+    path.write_text("worktree")
+    subprocess.run(["git", "add", "staged.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+
+    first_blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=tmp_path, check=True,
+        input=b"first staged value", stdout=subprocess.PIPE,
+    ).stdout.decode().strip()
+    subprocess.run(
+        ["git", "update-index", "--cacheinfo", "100644", first_blob, "staged.txt"],
+        cwd=tmp_path, check=True,
+    )
+    before = capture_git_state(str(tmp_path))
+    worktree_before = path.read_bytes()
+
+    second_blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=tmp_path, check=True,
+        input=b"second staged value", stdout=subprocess.PIPE,
+    ).stdout.decode().strip()
+    subprocess.run(
+        ["git", "update-index", "--cacheinfo", "100644", second_blob, "staged.txt"],
+        cwd=tmp_path, check=True,
+    )
+    after = capture_git_state(str(tmp_path))
+
+    assert path.read_bytes() == worktree_before
+    assert before is not None and after is not None
+    assert before.file_hashes != after.file_hashes
+    assert changed_files(before, after) == ("staged.txt",)
+
+
 def test_contract_base_dependency_and_covered_file_changes_invalidate_packet():
     packet = _packet(dependency_hashes=("dep-1",), covered_files=("b.py", "a.py"))
 
@@ -161,6 +197,20 @@ def test_validation_rejects_wrong_schema_and_non_packet_fields():
     payload = _packet().to_dict()
     payload["messages"] = []
     with pytest.raises(ValueError, match="field"):
+        validate_evidence_packet(payload)
+
+
+def test_validation_rejects_overlapping_file_provenance_partition():
+    payload = _packet().to_dict()
+    payload["unattributed_files"] = ["a.py"]
+    with pytest.raises(ValueError, match="partition"):
+        validate_evidence_packet(payload)
+
+
+def test_validation_rejects_missing_file_provenance_partition():
+    payload = _packet().to_dict()
+    payload["observed_files"] = ["a.py", "missing.py"]
+    with pytest.raises(ValueError, match="partition"):
         validate_evidence_packet(payload)
 
 

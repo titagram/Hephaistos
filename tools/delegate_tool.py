@@ -1927,6 +1927,10 @@ def _run_single_child(
                             normalized_arguments = json.loads(raw_arguments)
                         except (TypeError, ValueError):
                             normalized_arguments = str(raw_arguments).strip()
+                        if fn.get("name") == "terminal" and isinstance(
+                            normalized_arguments, str
+                        ):
+                            normalized_arguments = {"cmd": normalized_arguments}
                         entry_t = {
                             "tool": fn.get("name", "unknown"),
                             "args_bytes": len(raw_arguments),
@@ -2040,7 +2044,15 @@ def _run_single_child(
                             "child verification must contain structured records"
                         )
                     tool_name = raw_record.get("tool")
-                    claimed_identity = raw_record.get("command", raw_record.get("args"))
+                    if "command" in raw_record:
+                        command = raw_record.get("command")
+                        claimed_identity = (
+                            {"cmd": command.strip()}
+                            if tool_name == "terminal" and isinstance(command, str)
+                            else command
+                        )
+                    else:
+                        claimed_identity = raw_record.get("args")
                     if isinstance(claimed_identity, str):
                         claimed_identity = claimed_identity.strip()
                     claimed_hash = canonical_json_hash(claimed_identity)
