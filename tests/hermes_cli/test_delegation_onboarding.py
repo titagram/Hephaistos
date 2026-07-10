@@ -16,13 +16,31 @@ def configured(provider: str, model: str, **kwargs) -> ConfiguredModel:
 
 def test_recommendations_use_only_authenticated_rows():
     payload = {"providers": [
-        {"slug": "openrouter", "authenticated": True, "models": ["strong", "cheap"], "capabilities": {"strong": {"reasoning": True}, "cheap": {"reasoning": False}}},
+        {
+            "slug": "openrouter",
+            "authenticated": True,
+            "models": ["strong", "cheap"],
+            "capabilities": {
+                "strong": {"reasoning": True, "reasoning_known": True},
+                "cheap": {"reasoning": False, "reasoning_known": True},
+            },
+        },
         {"slug": "other", "authenticated": False, "models": ["forbidden"]},
     ], "model": "strong", "provider": "openrouter"}
     result = recommend_role_models(normalize_inventory(payload))
     assert {x.model for x in result.values()} <= {"strong", "cheap"}
     assert result["orchestrator"].model == "strong"
     assert result["reviewer"].model == "strong"
+
+
+def test_normalize_inventory_requires_explicit_authenticated_true():
+    payload = {"providers": [
+        {"slug": "missing", "models": ["missing-auth"]},
+        {"slug": "false", "authenticated": False, "models": ["false-auth"]},
+        {"slug": "true", "authenticated": True, "models": ["true-auth"]},
+    ]}
+
+    assert normalize_inventory(payload) == [configured("true", "true-auth")]
 
 
 def test_single_model_is_explicitly_reused_for_all_roles():
@@ -56,7 +74,51 @@ def test_configured_models_uses_enriched_authenticated_inventory():
         patch("hermes_cli.delegation_onboarding.build_models_payload", return_value=payload) as build,
     ):
         assert configured_models() == [configured("p", "m")]
-    build.assert_called_once_with(build.call_args.args[0], pricing=True, capabilities=True)
+    build.assert_called_once_with(
+        build.call_args.args[0], pricing=True, capabilities=True, picker_hints=True,
+    )
+
+
+def test_missing_models_dev_metadata_remains_unknown_in_production_inventory_path():
+    from hermes_cli.inventory import ConfigContext, build_models_payload
+
+    ctx = ConfigContext("p", "m", None, {}, [])
+    rows = [{"slug": "p", "models": ["m", "z"], "source": "built-in"}]
+    with (
+        patch("hermes_cli.model_switch.list_authenticated_providers", return_value=rows),
+        patch("agent.models_dev.get_model_capabilities", return_value=None),
+        patch("hermes_cli.models.model_supports_fast_mode", return_value=False),
+    ):
+        models = normalize_inventory(build_models_payload(
+            ctx, capabilities=True, picker_hints=True,
+        ))
+
+    model = next(model for model in models if model.provider == "p")
+    assert model.reasoning is None
+    recommendation = recommend_role_models(models)["orchestrator"]
+    assert "reasoning" not in recommendation.reason
+    assert recommendation.confidence == "low"
+
+
+def test_models_dev_lookup_error_remains_unknown_in_production_inventory_path():
+    from hermes_cli.inventory import ConfigContext, build_models_payload
+
+    ctx = ConfigContext("p", "m", None, {}, [])
+    rows = [{"slug": "p", "models": ["m", "z"], "source": "built-in"}]
+    with (
+        patch("hermes_cli.model_switch.list_authenticated_providers", return_value=rows),
+        patch("agent.models_dev.get_model_capabilities", side_effect=RuntimeError("offline")),
+        patch("hermes_cli.models.model_supports_fast_mode", return_value=False),
+    ):
+        models = normalize_inventory(build_models_payload(
+            ctx, capabilities=True, picker_hints=True,
+        ))
+
+    model = next(model for model in models if model.provider == "p")
+    assert model.reasoning is None
+    recommendation = recommend_role_models(models)["reviewer"]
+    assert "reasoning" not in recommendation.reason
+    assert recommendation.confidence == "low"
 
 
 def test_patch_has_exact_shape_contains_no_credentials_and_round_trips():

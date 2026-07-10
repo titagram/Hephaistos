@@ -17,7 +17,7 @@ ROLE_ORDER = ("orchestrator", "leaf", "reviewer")
 class ConfiguredModel:
     provider: str
     model: str
-    reasoning: bool = False
+    reasoning: bool | None = None
     fast: bool = False
     context_length: int = 0
     input_cost: float | None = None
@@ -51,7 +51,7 @@ def normalize_inventory(payload: Mapping[str, Any]) -> list[ConfiguredModel]:
     result: list[ConfiguredModel] = []
     rows = payload.get("providers", []) if isinstance(payload, Mapping) else []
     for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, Mapping) or row.get("authenticated") is False:
+        if not isinstance(row, Mapping) or row.get("authenticated") is not True:
             continue
         provider = str(row.get("slug") or "").strip()
         capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), Mapping) else {}
@@ -72,7 +72,11 @@ def normalize_inventory(payload: Mapping[str, Any]) -> list[ConfiguredModel]:
             result.append(ConfiguredModel(
                 provider=provider,
                 model=model,
-                reasoning=caps.get("reasoning") is True,
+                reasoning=(
+                    caps.get("reasoning") is True
+                    if caps.get("reasoning_known") is True
+                    else None
+                ),
                 fast=caps.get("fast") is True,
                 context_length=context_length,
                 input_cost=_price(prices.get("input")),
@@ -84,7 +88,7 @@ def normalize_inventory(payload: Mapping[str, Any]) -> list[ConfiguredModel]:
 def configured_models() -> list[ConfiguredModel]:
     """Load only providers already authenticated in the user's picker context."""
     payload = build_models_payload(
-        load_picker_context(), pricing=True, capabilities=True,
+        load_picker_context(), pricing=True, capabilities=True, picker_hints=True,
     )
     return normalize_inventory(payload)
 
@@ -117,7 +121,7 @@ def recommend_role_models(
     if not models:
         return {}
     strongest = max(models, key=lambda m: (
-        m.reasoning, m.context_length,
+        m.reasoning is True, m.context_length,
         -(m.input_cost if m.input_cost is not None else inf),
         m.provider, m.model,
     ))

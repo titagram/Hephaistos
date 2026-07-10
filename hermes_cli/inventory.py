@@ -237,7 +237,9 @@ def _apply_capabilities(rows: list[dict]) -> None:
     enforces). `reasoning` comes from the models.dev catalog when known and
     defaults to True otherwise — the effort dial is broadly accepted and a
     no-op on models that ignore it, whereas hiding it from a capable-but-
-    uncatalogued model is the worse failure.
+    uncatalogued model is the worse failure. `reasoning_known` lets stricter
+    consumers preserve that fallback as unknown instead of treating it as
+    catalog evidence.
     """
     from hermes_cli.models import model_supports_fast_mode
 
@@ -252,17 +254,20 @@ def _apply_capabilities(rows: list[dict]) -> None:
 
         for model in row.get("models") or []:
             reasoning = True
+            reasoning_known = False
             if get_model_capabilities is not None and slug:
                 try:
                     meta = get_model_capabilities(slug, model)
                     if meta is not None:
                         reasoning = bool(meta.supports_reasoning)
+                        reasoning_known = True
                 except Exception:
                     reasoning = True
 
             caps[model] = {
                 "fast": bool(model_supports_fast_mode(model)),
                 "reasoning": reasoning,
+                "reasoning_known": reasoning_known,
             }
 
         row["capabilities"] = caps
