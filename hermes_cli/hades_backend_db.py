@@ -130,6 +130,49 @@ CREATE TABLE IF NOT EXISTS inbox_events (
     read_at      INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS persephone_outbox (
+    message_id      TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    target_agent_id TEXT NOT NULL,
+    envelope        TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error      TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_persephone_outbox_target_state
+    ON persephone_outbox(project_id, target_agent_id, state);
+CREATE INDEX IF NOT EXISTS idx_persephone_outbox_next_attempt
+    ON persephone_outbox(next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS persephone_inbox (
+    message_id       TEXT PRIMARY KEY,
+    project_id       TEXT NOT NULL,
+    target_agent_id  TEXT NOT NULL,
+    envelope         TEXT NOT NULL,
+    state            TEXT NOT NULL,
+    received_at      INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    human_decision   TEXT,
+    human_decided_by TEXT,
+    human_reason     TEXT,
+    human_decided_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_persephone_inbox_target_state
+    ON persephone_inbox(project_id, target_agent_id, state);
+
+CREATE TABLE IF NOT EXISTS persephone_cursors (
+    project_id      TEXT NOT NULL,
+    target_agent_id TEXT NOT NULL,
+    cursor          TEXT NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY(project_id, target_agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
