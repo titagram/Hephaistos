@@ -9,6 +9,7 @@ available.  No remote lifecycle mutation is performed by the pull path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from hermes_cli import kanban_db as kb
@@ -23,6 +24,16 @@ class KanbanSyncResult:
     created: int = 0
     existing: int = 0
     skipped: int = 0
+
+
+@dataclass(frozen=True)
+class RemoteLease:
+    work_item_id: str
+    lease_token: str
+
+
+LEASE_AUTHOR = "hades-backend-sync"
+LEASE_PREFIX = "HADES_REMOTE_LEASE "
 
 
 def _items(response: Any) -> list[dict[str, Any]]:
@@ -106,3 +117,130 @@ def sync_remote_kanban(
         existing=existing,
         skipped=skipped,
     )
+
+
+def claim_remote_for_local_task(
+    conn,
+    client: object,
+    task,
+    *,
+    local_workspace_id: str,
+) -> tuple[bool, str]:
+    """Claim the remote counterpart immediately before a local spawn.
+
+    The lease is persisted as a task comment so a later worker completion can
+    publish exactly once without changing the Kanban schema.
+    """
+    key = str(getattr(task, "idempotency_key", "") or "")
+    if not key.startswith("remote-kanban:"):
+        return True, "local-only task"
+    existing = _latest_lease(conn, task.id)
+    if existing is not None and existing.lease_token != "consumed":
+        return True, "remote lease already acquired"
+    work_item_id = key.rsplit(":", 1)[-1].strip()
+    if not work_item_id:
+        return False, "remote work item id missing"
+    try:
+        response = client.claim_agent_work_item(
+            work_item_id,
+            local_workspace_id=local_workspace_id,
+        )
+        lease_token = str(response.get("lease_token") or "").strip()
+        if not lease_token:
+            return False, "remote claim returned no lease token"
+    except Exception as exc:
+        return False, f"remote claim deferred: {exc}"
+    kb.add_comment(
+        conn,
+        task.id,
+        author=LEASE_AUTHOR,
+        body=LEASE_PREFIX + json.dumps(
+            {"work_item_id": work_item_id, "lease_token": lease_token},
+            sort_keys=True,
+        ),
+    )
+    return True, "remote lease acquired"
+
+
+def make_remote_admission(
+    conn,
+    client: object,
+    *,
+    local_workspace_id: str,
+):
+    """Build a dispatcher admission callback for ``dispatch_once``."""
+    def admission(task):
+        allowed, reason = claim_remote_for_local_task(
+            conn,
+            client,
+            task,
+            local_workspace_id=local_workspace_id,
+        )
+        return kb.DispatchAdmission(
+            action="allow" if allowed else "defer",
+            reason=reason,
+        )
+
+    return admission
+
+
+def _latest_lease(conn, task_id: str) -> RemoteLease | None:
+    rows = kb.list_comments(conn, task_id)
+    for row in reversed(rows):
+        body = str(row["body"] if isinstance(row, dict) else row.body)
+        if not body.startswith(LEASE_PREFIX):
+            continue
+        try:
+            raw = json.loads(body[len(LEASE_PREFIX):])
+            lease = RemoteLease(str(raw["work_item_id"]), str(raw["lease_token"]))
+            if lease.lease_token == "consumed":
+                return None
+            if lease.work_item_id and lease.lease_token:
+                return lease
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def heartbeat_remote_for_local_task(conn, client: object, task_id: str) -> bool:
+    lease = _latest_lease(conn, task_id)
+    if lease is None:
+        return False
+    client.heartbeat_agent_work_item(lease.work_item_id, lease_token=lease.lease_token)
+    return True
+
+
+def publish_remote_result(
+    conn,
+    client: object,
+    task_id: str,
+    *,
+    success: bool,
+    message: str,
+) -> bool:
+    """Publish a local terminal result and mark the lease as consumed."""
+    lease = _latest_lease(conn, task_id)
+    if lease is None:
+        return False
+    if success:
+        client.complete_agent_work_item(
+            lease.work_item_id,
+            lease_token=lease.lease_token,
+            chat_message=message,
+        )
+    else:
+        client.fail_agent_work_item(
+            lease.work_item_id,
+            lease_token=lease.lease_token,
+            message=message,
+        )
+    kb.add_comment(
+        conn,
+        task_id,
+        author=LEASE_AUTHOR,
+        body=LEASE_PREFIX + json.dumps(
+            {"work_item_id": lease.work_item_id, "lease_token": "consumed"},
+            sort_keys=True,
+        ),
+    )
+    return True
