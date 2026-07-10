@@ -12,6 +12,22 @@ An OrgRun is a local Kanban DAG for executing a validated Hades portfolio. The b
 
 `mirror` is opt-in. It must not be enabled until backend capability and profile routing are verified. Local-only cards are never uploaded merely because sync is enabled.
 
+## Delegation preflight
+
+Resolve local model routing before materializing or dispatching an OrgRun:
+
+| Routing state | Operator action |
+|---|---|
+| Missing or incomplete | Run `hades delegation setup`. The wizard starts model onboarding when no authenticated models are available. |
+| Valid for `orchestrator`, `leaf`, and `reviewer` | Preserve it; setup must not prompt or overwrite the existing routing. |
+| User explicitly requests different models or capacity limits | Run `hades delegation configure`, inspect the full configuration preview, then confirm the single atomic write. |
+
+Do not use `configure` as an automatic upgrade step. Both commands select only models already authenticated through Hades; routing data never contains credentials.
+
+Every orchestrator dispatch requires a structured task contract containing objective, deliverable, in/out scope, workspace, write scope, input evidence, dependencies, acceptance criteria, required verification, and return schema. Reject the dispatch before child creation when the contract is missing or invalid.
+
+Review responsibility follows the delegation tree. The parent normally checks each direct child's declared scope, evidence packet, verification records, and residual risks. Use the non-delegating `reviewer` role only for explicit independent-review requests or high-risk/disputed results; its output is findings-first with a bounded pass/fail conclusion. Evidence packets contain bounded facts and references, never transcripts or hidden reasoning.
+
 ## Gate sequence
 
 ```text
