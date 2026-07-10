@@ -853,6 +853,7 @@ class TestDelegationEvidenceIntegration(unittest.TestCase):
             file_hashes=(("a.py", "changed"), ("existing.py", "same")),
         )
         child = MagicMock()
+        child._subagent_id = "child-evidence"
         child._delegate_role = "leaf"
         child._delegate_task_contract = None
         child.run_conversation.return_value = {
@@ -877,6 +878,8 @@ class TestDelegationEvidenceIntegration(unittest.TestCase):
 
         with patch(
             "tools.delegate_tool.capture_git_state", side_effect=[before, after]
+        ), patch(
+            "tools.delegate_tool.file_state.writes_since", return_value={"child-evidence": [os.path.abspath("a.py")]}
         ):
             entry = _run_single_child(
                 task_index=0,
@@ -892,10 +895,53 @@ class TestDelegationEvidenceIntegration(unittest.TestCase):
         self.assertEqual(packet["diff_hash"], "after-diff")
         self.assertEqual(packet["covered_files"], ["a.py"])
         self.assertEqual(packet["conclusion"], "Implemented the focused change.")
-        self.assertEqual(packet["verification"][0]["status"], "passed")
+        self.assertEqual(packet["verification"][0]["claimed_status"], "passed")
+        self.assertEqual(packet["verification"][0]["verification_status"], "verified")
         self.assertNotIn("messages", serialized)
         self.assertNotIn("reasoning", serialized)
         self.assertNotIn("private chain", serialized)
+
+    def _evidence_entry(self, runtime_command, result_content, claimed_command):
+        from types import SimpleNamespace
+        from tools.delegate_tool import _run_single_child
+        state = SimpleNamespace(base_commit="a" * 40, diff_hash="d", file_hashes=())
+        child = MagicMock(_delegate_role="leaf", _delegate_task_contract=None)
+        child.run_conversation.return_value = {
+            "final_response": "done", "completed": True, "interrupted": False, "api_calls": 1,
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "tc", "function": {"name": "terminal", "arguments": runtime_command}}]},
+                {"role": "tool", "tool_call_id": "tc", "content": result_content},
+            ],
+            "evidence": {"verification": [{"tool": "terminal", "command": claimed_command, "status": "passed"}]},
+        }
+        with patch("tools.delegate_tool.capture_git_state", side_effect=[state, state]):
+            return _run_single_child(0, "test", child, _make_mock_parent())
+
+    def test_same_tool_different_command_claim_is_unverified(self):
+        record = self._evidence_entry("pytest tests/unit -q", "1 passed", "pytest tests/security -q")["evidence_packet"]["verification"][0]
+        self.assertEqual(record["verification_status"], "unverified")
+        self.assertEqual(record["reason"], "no_matching_runtime_call")
+        self.assertNotIn("command", record)
+
+    def test_error_result_claim_is_unverified(self):
+        record = self._evidence_entry("pytest -q", "Error: failed", "pytest -q")["evidence_packet"]["verification"][0]
+        self.assertEqual(record["verification_status"], "unverified")
+        self.assertEqual(record["reason"], "runtime_result_error")
+
+    def test_parallel_workspace_delta_is_not_attributed_to_child(self):
+        from types import SimpleNamespace
+        from tools.delegate_tool import _run_single_child
+        before = SimpleNamespace(base_commit="a" * 40, diff_hash="d1", file_hashes=())
+        after = SimpleNamespace(base_commit="a" * 40, diff_hash="d2", file_hashes=(("child.py", "worktree:1"), ("sibling.py", "worktree:2")))
+        child = MagicMock(_delegate_role="leaf", _delegate_task_contract=None, _subagent_id="child-1")
+        child.run_conversation.return_value = {"final_response": "done", "completed": True, "interrupted": False, "api_calls": 1, "messages": []}
+        writes = {"child-1": ["/repo/child.py"], "sibling-1": ["/repo/sibling.py"]}
+        with patch("tools.delegate_tool.capture_git_state", side_effect=[before, after]), patch("tools.delegate_tool.file_state.writes_since", return_value=writes), patch("tools.delegate_tool._resolve_workspace_hint", return_value="/repo"):
+            entry = _run_single_child(0, "test", child, _make_mock_parent())
+        packet = entry["evidence_packet"]
+        self.assertEqual(packet["covered_files"], ["child.py"])
+        self.assertEqual(packet["observed_files"], ["child.py", "sibling.py"])
+        self.assertEqual(packet["unattributed_files"], ["sibling.py"])
 
     def test_missing_git_facts_are_reported_not_fabricated(self):
         from tools.delegate_tool import _run_single_child

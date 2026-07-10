@@ -1922,9 +1922,15 @@ def _run_single_child(
                 if msg.get("role") == "assistant":
                     for tc in msg.get("tool_calls") or []:
                         fn = tc.get("function", {})
+                        raw_arguments = fn.get("arguments", "")
+                        try:
+                            normalized_arguments = json.loads(raw_arguments)
+                        except (TypeError, ValueError):
+                            normalized_arguments = str(raw_arguments).strip()
                         entry_t = {
                             "tool": fn.get("name", "unknown"),
-                            "args_bytes": len(fn.get("arguments", "")),
+                            "args_bytes": len(raw_arguments),
+                            "args_hash": canonical_json_hash(normalized_arguments),
                         }
                         tool_trace.append(entry_t)
                         tc_id = tc.get("id")
@@ -1942,9 +1948,6 @@ def _run_single_child(
                     target = trace_by_id.get(tc_id) if tc_id else None
                     if target is not None:
                         target.update(result_meta)
-                    elif tool_trace:
-                        # Fallback for messages without tool_call_id
-                        tool_trace[-1].update(result_meta)
 
         # Determine exit reason
         if interrupted:
@@ -2036,21 +2039,32 @@ def _run_single_child(
                         raise ValueError(
                             "child verification must contain structured records"
                         )
-                    record = dict(raw_record)
+                    tool_name = raw_record.get("tool")
+                    claimed_identity = raw_record.get("command", raw_record.get("args"))
+                    if isinstance(claimed_identity, str):
+                        claimed_identity = claimed_identity.strip()
+                    claimed_hash = canonical_json_hash(claimed_identity)
+                    record = {
+                        "tool": tool_name if isinstance(tool_name, str) else "unknown",
+                        "claimed_status": str(raw_record.get("status", "unknown")),
+                        "args_hash": claimed_hash,
+                    }
                     tool_name = record.get("tool")
                     if isinstance(tool_name, str):
                         matching_trace = next(
                             (
                                 trace
                                 for trace in tool_trace
-                                if trace.get("tool") == tool_name
+                                if trace.get("tool") == tool_name and trace.get("args_hash") == claimed_hash
                             ),
                             None,
                         )
-                        if matching_trace is not None:
-                            record["tool_trace_status"] = matching_trace.get(
-                                "status", "unknown"
-                            )
+                        if matching_trace is None:
+                            record.update(verification_status="unverified", reason="no_matching_runtime_call")
+                        elif matching_trace.get("status") != "ok":
+                            record.update(verification_status="unverified", reason="runtime_result_error")
+                        else:
+                            record.update(verification_status="verified", runtime_status="ok")
                     corroborated_verification.append(record)
 
                 contract = getattr(child, "_delegate_task_contract", None)
@@ -2073,12 +2087,21 @@ def _run_single_child(
                     if git_state_after.base_commit != git_state_before.base_commit
                     else None
                 )
+                observed_files = changed_files(git_state_before, git_state_after)
+                evidence_root = _evidence_workspace or os.getcwd()
+                absolute_observed = [os.path.abspath(os.path.join(evidence_root, path)) for path in observed_files]
+                writes_by_task = file_state.writes_since("", wall_start, absolute_observed)
+                child_written_absolute = set(writes_by_task.get(child_task_id, ()))
+                covered_files = tuple(path for path, absolute in zip(observed_files, absolute_observed) if absolute in child_written_absolute)
+                unattributed_files = tuple(path for path in observed_files if path not in set(covered_files))
                 packet = build_evidence_packet(
                     contract_hash=contract_hash,
                     base_commit=git_state_before.base_commit,
                     result_ref=result_ref,
                     diff_hash=git_state_after.diff_hash,
-                    covered_files=changed_files(git_state_before, git_state_after),
+                    covered_files=covered_files,
+                    observed_files=observed_files,
+                    unattributed_files=unattributed_files,
                     verification=corroborated_verification,
                     conclusion=summary,
                     dependency_hashes=raw_evidence.get("dependency_hashes") or (),

@@ -34,6 +34,8 @@ _PACKET_FIELDS = frozenset(
         "result_ref",
         "diff_hash",
         "covered_files",
+        "observed_files",
+        "unattributed_files",
         "verification",
         "conclusion",
         "dependency_hashes",
@@ -85,14 +87,6 @@ def capture_git_state(workspace: str | None = None) -> GitState | None:
         head = _git(("rev-parse", "HEAD"), cwd=root).decode().strip()
 
         files: dict[str, str] = {}
-        tree = _git(("ls-tree", "-r", "-z", "HEAD"), cwd=root)
-        for record in tree.split(b"\0"):
-            if not record:
-                continue
-            metadata, raw_path = record.split(b"\t", 1)
-            object_id = metadata.split()[2].decode("ascii")
-            files[os.fsdecode(raw_path)] = f"git:{object_id}"
-
         changed = set(
             os.fsdecode(path)
             for path in _git(("diff", "--name-only", "-z", "HEAD"), cwd=root).split(b"\0")
@@ -117,7 +111,7 @@ def capture_git_state(workspace: str | None = None) -> GitState | None:
                         digest.update(chunk)
                 files[relative] = "worktree:" + digest.hexdigest()
             else:
-                files.pop(relative, None)
+                files[relative] = "deleted"
 
         file_hashes = tuple(sorted(files.items()))
         diff_hash = canonical_json_hash({"head": head, "files": file_hashes})
@@ -243,6 +237,8 @@ class EvidencePacket:
     result_ref: str | None
     diff_hash: str
     covered_files: tuple[str, ...]
+    observed_files: tuple[str, ...]
+    unattributed_files: tuple[str, ...]
     verification: tuple[dict[str, Any], ...]
     conclusion: str
     dependency_hashes: tuple[str, ...]
@@ -256,6 +252,8 @@ class EvidencePacket:
             "result_ref": self.result_ref,
             "diff_hash": self.diff_hash,
             "covered_files": list(self.covered_files),
+            "observed_files": list(self.observed_files),
+            "unattributed_files": list(self.unattributed_files),
             "verification": copy.deepcopy(list(self.verification)),
             "conclusion": self.conclusion,
             "dependency_hashes": list(self.dependency_hashes),
@@ -276,6 +274,8 @@ def build_evidence_packet(
     diff_hash: str,
     covered_files: Sequence[str],
     verification: Sequence[Mapping[str, Any]],
+    observed_files: Sequence[str] | None = None,
+    unattributed_files: Sequence[str] = (),
     result_ref: str | None = None,
     conclusion: str = "",
     dependency_hashes: Sequence[str] = (),
@@ -300,13 +300,27 @@ def build_evidence_packet(
     if not isinstance(conclusion, str):
         raise ValueError("conclusion must be a string")
 
+    normalized_covered = _text_tuple(covered_files, field="covered_files", sort=True)
+    normalized_observed = _text_tuple(
+        observed_files if observed_files is not None else covered_files,
+        field="observed_files", sort=True,
+    )
+    normalized_unattributed = _text_tuple(
+        unattributed_files, field="unattributed_files", sort=True
+    )
+    if not set(normalized_covered).issubset(normalized_observed):
+        raise ValueError("covered_files must be a subset of observed_files")
+    if not set(normalized_unattributed).issubset(normalized_observed):
+        raise ValueError("unattributed_files must be a subset of observed_files")
     packet = EvidencePacket(
         schema=EVIDENCE_SCHEMA,
         contract_hash=contract_hash.strip(),
         base_commit=base_commit.strip(),
         result_ref=result_ref.strip() if result_ref is not None else None,
         diff_hash=diff_hash.strip(),
-        covered_files=_text_tuple(covered_files, field="covered_files", sort=True),
+        covered_files=normalized_covered,
+        observed_files=normalized_observed,
+        unattributed_files=normalized_unattributed,
         verification=_verification_tuple(verification),
         conclusion=conclusion.strip()[:MAX_CONCLUSION_CHARS],
         dependency_hashes=_text_tuple(
@@ -349,6 +363,8 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
         raise ValueError("conclusion exceeds its documented bound")
 
     covered = _text_tuple(payload.get("covered_files"), field="covered_files", sort=True)
+    observed = _text_tuple(payload.get("observed_files"), field="observed_files", sort=True)
+    unattributed = _text_tuple(payload.get("unattributed_files"), field="unattributed_files", sort=True)
     dependencies = _text_tuple(
         payload.get("dependency_hashes"), field="dependency_hashes", sort=True
     )
@@ -361,6 +377,12 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
     verification = _verification_tuple(payload.get("verification"))
     if list(covered) != list(payload.get("covered_files")):
         raise ValueError("covered_files must be sorted and unique")
+    if list(observed) != list(payload.get("observed_files")):
+        raise ValueError("observed_files must be sorted and unique")
+    if list(unattributed) != list(payload.get("unattributed_files")):
+        raise ValueError("unattributed_files must be sorted and unique")
+    if not set(covered).issubset(observed) or not set(unattributed).issubset(observed):
+        raise ValueError("file provenance must refer only to observed_files")
     if list(dependencies) != list(payload.get("dependency_hashes")):
         raise ValueError("dependency_hashes must be sorted and unique")
     if list(risks) != list(payload.get("residual_risks")):
@@ -388,6 +410,7 @@ def evidence_is_stale(
     base_commit: str,
     diff_hash: str,
     dependency_hashes: Sequence[str],
+    result_ref: str | None = None,
     covered_files: Sequence[str] | None = None,
     verification: Sequence[Mapping[str, Any]] | None = None,
 ) -> bool:
@@ -401,6 +424,7 @@ def evidence_is_stale(
         payload["contract_hash"] != contract_hash
         or payload["base_commit"] != base_commit
         or payload["diff_hash"] != diff_hash
+        or payload["result_ref"] != result_ref
         or tuple(payload["dependency_hashes"]) != current_dependencies
     ):
         return True
