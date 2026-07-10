@@ -26,7 +26,9 @@ Do not use `configure` as an automatic upgrade step. Both commands select only m
 
 Every orchestrator dispatch requires a structured task contract containing objective, deliverable, in/out scope, workspace, write scope, input evidence, dependencies, acceptance criteria, required verification, and return schema. Reject the dispatch before child creation when the contract is missing or invalid.
 
-Review responsibility follows the delegation tree. The parent normally checks each direct child's declared scope, evidence packet, verification records, and residual risks. Use the non-delegating `reviewer` role only for explicit independent-review requests or high-risk/disputed results; its output is findings-first with a bounded pass/fail conclusion. Evidence packets contain bounded facts and references, never transcripts or hidden reasoning.
+Only a leaf's direct parent may command that leaf or modify its task contract. The root/main agent may inspect or query a leaf for information, but must not command it or change its task contract unless it is that leaf's direct parent. Apply this rule recursively at every level: each orchestrator commands and revises contracts only for its direct children, and every child reports through its parent chain.
+
+Review responsibility follows the same delegation tree. The direct parent normally checks each direct child's declared scope, evidence packet, verification records, and residual risks. Use the non-delegating `reviewer` role only when independent review is explicitly requested or the result is high-risk, disputed, or escalated; its output is findings-first with a bounded pass/fail conclusion. Evidence packets contain bounded facts and references, never transcripts or hidden reasoning.
 
 ## Gate sequence
 
@@ -45,7 +47,7 @@ Remote publication is refused when integration or org review is not `done`, when
 3. Enable `pull_only` and confirm imported cards remain in `triage`.
 4. Verify assignees, backend capability, workspace binding, and lease behavior in a non-production board.
 5. Enable `mirror` only for mapped work items; monitor deferred admissions and lease failures.
-6. Require evidence, independent review, and integration tests before publication.
+6. Require evidence, parent review, and integration tests before publication.
 
 ## Rollback and incident response
 

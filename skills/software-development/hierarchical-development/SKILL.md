@@ -26,7 +26,9 @@ Use only models already authenticated by Hades. Never infer credentials or chang
 
 Before creating an `orchestrator`, provide a structured task contract with: `objective`, `deliverable`, `in_scope`, `out_of_scope`, `workspace`, `write_scope`, `input_evidence`, `dependencies`, `acceptance_criteria`, `required_verification`, and `return_schema`. Make each assignment bounded and explicit; do not replace these fields with a prose goal.
 
-The parent performs normal review of its direct child's scope, evidence packet, verification, and residual risk. Escalate to a dedicated non-delegating independent reviewer only when independent review is explicitly requested or the parent identifies a high-risk or disputed result. A reviewer reports findings first and returns a bounded pass/fail conclusion; it does not command leaves.
+Only a leaf's direct parent may command that leaf or modify its task contract. The root/main agent may inspect or query a leaf for information, but must not command it or change its task contract unless it is that leaf's direct parent. Apply this rule recursively at every level: each orchestrator commands and revises contracts only for its direct children, and every child reports through its parent chain.
+
+The direct parent performs normal review of each direct child's scope, evidence packet, verification, and residual risk. Escalate to a dedicated non-delegating independent reviewer only when independent review is explicitly requested or the result is high-risk, disputed, or escalated. A reviewer reports findings first and returns a bounded pass/fail conclusion; it does not command leaves.
 
 For durable work, require a validated execution portfolio with repository-relative write scopes, dependencies, assignees, risk, and acceptance evidence. Materialize it with `hades org validate` then `hades org materialize`; do not upload raw plans, source, transcripts, reasoning, or secrets to the backend.
 
@@ -35,7 +37,7 @@ Execution protocol:
 1. The planner decomposes bounded tasks and declares scope.
 2. The marshal checks dependency order, overlap conflicts, and open blocking decisions.
 3. Leaves implement only inside their declared scope and return evidence: changed files, test commands/results, commit or patch reference, and residual risks.
-4. The task's parent verifies the evidence and scope; use a dedicated reviewer only under the escalation rule above.
+4. The direct parent verifies the evidence and scope; use a dedicated reviewer only under the escalation rule above.
 5. The integration worker applies accepted work and runs the integration suite. Never auto-push or auto-merge.
 6. Publish a backend result only after local completion evidence, integration, and org review have all passed.
 
