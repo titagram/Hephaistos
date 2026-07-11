@@ -172,7 +172,7 @@ def test_receiver_dispatches_only_auto_accepted_information_requests(tmp_path):
     )
     receiver.refresh_bindings([_binding()])
 
-    assert receiver.ingest_event(_event()) == "accepted"
+    assert receiver.ingest_event(_event()) == "retry_pending"
     assert calls == [("msg_1", "wb_a", NOW, "response_1")]
 
     assert receiver.ingest_event(_event(message_id="mutating", capability="run_tests")) == "waiting_human_approval"
@@ -215,6 +215,106 @@ def test_receiver_worker_atomically_enqueues_information_response(tmp_path):
     assert response is not None and response.envelope.message_type.value == "information_response"
 
 
+def test_failed_worker_redelivery_retries_once_with_deterministic_response(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import (
+        get_message,
+        record_information_failure,
+    )
+
+    path = tmp_path / "retry.db"
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    calls = 0
+
+    def flaky(conn, message_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            record_information_failure(conn, message_id, now=kwargs["now"])
+            return None
+        return execute_stored_information_request(conn, message_id, **kwargs)
+
+    binding = _binding()
+    object.__setattr__(binding, "repo_root", str(tmp_path))
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=flaky,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([binding])
+    event = _event()
+
+    assert receiver.ingest_event(event) == "retry_pending"
+    assert receiver.ingest_event(event) == "accepted"
+
+    with connections() as conn:
+        request = get_message(conn, "msg_1")
+        outbox_count = conn.execute("SELECT COUNT(*) FROM persephone_outbox").fetchone()[0]
+        response_id = request.response_message_id
+    assert calls == 2
+    assert request is not None and request.state == "responded"
+    assert outbox_count == 1
+    assert response_id == receiver._response_message_id(request.envelope)
+
+
+def test_terminal_duplicate_repairs_cursor_without_reexecuting(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_cursor
+
+    path = tmp_path / "cursor-repair.db"
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    calls = 0
+
+    def execute(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return execute_stored_information_request(*args, **kwargs)
+
+    binding = _binding()
+    object.__setattr__(binding, "repo_root", str(tmp_path))
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=execute,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([binding])
+    event = _event()
+    assert receiver.ingest_event(event) == "accepted"
+    with connections() as conn:
+        conn.execute("DELETE FROM persephone_cursors")
+        conn.commit()
+
+    assert receiver.ingest_event(event) == "accepted"
+    with connections() as conn:
+        cursor = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+    assert calls == 1
+    assert cursor == "cursor_msg_1"
+
+
 def test_expired_event_is_durable_then_marked_expired(receiver):
     from hermes_cli.hades_persephone_store import get_message
 
@@ -240,8 +340,8 @@ def test_duplicate_ingestion_is_idempotent_and_keeps_cursor(receiver):
         stored = get_message(conn, "msg_1")
         cursor = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
         count = conn.execute("SELECT COUNT(*) FROM persephone_inbox").fetchone()[0]
-    assert stored is not None and stored.state == "processing"
-    assert cursor == "cursor_msg_1"
+    assert stored is not None and stored.state == "received"
+    assert cursor is None
     assert count == 1
 
 
@@ -255,7 +355,7 @@ def test_old_duplicate_cannot_rewind_a_newer_opaque_cursor(receiver):
 
     with receiver.connection_factory() as conn:
         cursor = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
-    assert cursor == "cursor_new"
+    assert cursor is None
 
 
 def test_capability_absence_disables_agent_dispatch_but_not_generic_inbox(receiver):
@@ -444,7 +544,7 @@ def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_p
             "AND message_id = ?",
             ("project_a", "agent_a", "from_a_claiming_b"),
         ).fetchone()
-    assert stored is not None and stored.state == "processing"
+    assert stored is not None and stored.state == "received"
     assert cursor_b == "newer_b_cursor"
     assert audit is not None and audit["disposition"] == "subscription_route_mismatch"
 
@@ -525,9 +625,9 @@ def test_cross_subscription_duplicate_is_still_rejected_without_rewriting_b(rece
         stored = get_message(conn, "already_b")
         cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
         cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
-    assert stored is not None and stored.state == "processing"
+    assert stored is not None and stored.state == "received"
     assert cursor_a == "cursor_already_b"
-    assert cursor_b == "cursor_already_b"
+    assert cursor_b is None
 
 
 def test_wrong_subscription_audit_survives_restart_and_replay(tmp_path):
@@ -596,9 +696,9 @@ def test_wrong_subscription_audit_survives_restart_and_replay(tmp_path):
             "WHERE message_id = ?",
             ("restart_mismatch",),
         ).fetchone()[0]
-    assert stored is not None and stored.state == "processing"
+    assert stored is not None and stored.state == "received"
     assert cursor_a == "newer_a_cursor"
-    assert cursor_b == "cursor_restart_mismatch"
+    assert cursor_b is None
     assert audit_count == 1
 
 

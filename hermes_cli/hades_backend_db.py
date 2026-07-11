@@ -160,7 +160,10 @@ CREATE TABLE IF NOT EXISTS persephone_inbox (
     human_decided_by TEXT,
     human_reason     TEXT,
     human_decided_at INTEGER,
-    response_message_id TEXT
+    response_message_id TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_persephone_inbox_target_state
@@ -239,6 +242,16 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
         "response_message_id",
         "response_message_id TEXT",
     )
+    add_column_if_missing(
+        conn, "persephone_inbox", "attempts", "attempts INTEGER NOT NULL DEFAULT 0"
+    )
+    add_column_if_missing(
+        conn,
+        "persephone_inbox",
+        "next_attempt_at",
+        "next_attempt_at INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(conn, "persephone_inbox", "last_error", "last_error TEXT")
     with write_txn(conn):
         for table, direction in (
             ("persephone_inbox", "inbox"),

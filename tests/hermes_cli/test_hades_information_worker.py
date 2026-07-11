@@ -159,6 +159,123 @@ def test_source_slice_rejects_symlink_escape(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".env",
+        ".env.local",
+        "credentials.json",
+        "secrets.yaml",
+        "id_rsa",
+        "server.pem",
+        ".git/config",
+        ".hermes/auth.json",
+        ".hades/tokens.json",
+    ],
+)
+def test_source_slice_denies_sensitive_paths_without_echoing_them(tmp_path, relative):
+    from hermes_cli.hades_information_worker import PolicyDenied, run_information_request
+
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("password=private-value", encoding="utf-8")
+
+    with pytest.raises(PolicyDenied) as exc_info:
+        run_information_request(
+            _request(tmp_path, capability="source_slice", payload={"path": relative}),
+            binding=_binding(tmp_path),
+        )
+    assert relative not in str(exc_info.value)
+    assert "private-value" not in str(exc_info.value)
+
+
+def test_source_search_prunes_sensitive_directories_and_files(tmp_path):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    for relative in (".env", "credentials.json", ".git/config", ".hermes/auth.json"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("unique_sensitive_needle", encoding="utf-8")
+    (tmp_path / "safe.py").write_text("unique_sensitive_needle = True", encoding="utf-8")
+
+    response = run_information_request(
+        _request(tmp_path, payload={"query": "unique_sensitive_needle"}),
+        binding=_binding(tmp_path),
+    )
+
+    assert [item["path"] for item in response.evidence_refs] == ["safe.py"]
+
+
+def test_source_content_semantically_redacts_common_secret_formats(tmp_path):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    secrets = [
+        "PASSWORD=env-private",
+        '"api_key": "json-private"',
+        "token: 'yaml-private'",
+        "AWS_SECRET_ACCESS_KEY=aws-private",
+        "authorization: Bearer bearer-private",
+        "cookie=session-private",
+        "-----BEGIN PRIVATE KEY-----\npem-private\n-----END PRIVATE KEY-----",
+        "AKIAABCDEFGHIJKLMNOP",
+    ]
+    (tmp_path / "example.py").write_text("\n".join(secrets), encoding="utf-8")
+
+    response = run_information_request(
+        _request(
+            tmp_path,
+            capability="source_slice",
+            payload={"path": "example.py", "start_line": 1, "end_line": 20},
+        ),
+        binding=_binding(tmp_path),
+    )
+
+    rendered = str(response.to_payload())
+    for secret in (
+        "env-private",
+        "json-private",
+        "yaml-private",
+        "aws-private",
+        "bearer-private",
+        "session-private",
+        "pem-private",
+        "AKIAABCDEFGHIJKLMNOP",
+    ):
+        assert secret not in rendered
+
+
+def test_search_uses_top_down_bounded_walk_not_whole_tree_rglob(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+
+    (tmp_path / "module.py").write_text("needle = True", encoding="utf-8")
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unbounded rglob")),
+    )
+
+    response = worker.run_information_request(
+        _request(tmp_path), binding=_binding(tmp_path)
+    )
+    assert len(response.evidence_refs) == 1
+
+
+def test_search_stops_at_file_and_aggregate_read_budget(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+
+    for index in range(10):
+        (tmp_path / f"module_{index}.py").write_text("needle = True", encoding="utf-8")
+    monkeypatch.setattr(worker, "MAX_FILES_SCANNED", 2)
+    monkeypatch.setattr(worker, "MAX_AGGREGATE_BYTES", 100)
+
+    response = worker.run_information_request(
+        _request(tmp_path), binding=_binding(tmp_path)
+    )
+
+    assert len(response.evidence_refs) <= 2
+    assert response.truncated is True
+
+
 def test_source_search_does_not_follow_symlinks_outside_workspace(tmp_path):
     from hermes_cli.hades_information_worker import run_information_request
 
@@ -254,6 +371,20 @@ def test_memory_evidence_redacts_secret_keys_and_absolute_paths(tmp_path):
     assert "/Users/alice" not in rendered
 
 
+def test_memory_redaction_handles_nested_sensitive_keys_and_cycles(tmp_path):
+    from hermes_cli import hades_information_worker as worker
+
+    cyclic = {"password": "private-password", "nested": {"Authorization": "Bearer private"}}
+    cyclic["cycle"] = cyclic
+    response = worker.InformationResponse("ok", (cyclic,), False, ())
+
+    cleaned = worker._redacted(response, tmp_path)
+    rendered = str(cleaned.to_payload())
+    assert "private-password" not in rendered
+    assert "Bearer private" not in rendered
+    assert len(rendered) < 16_000
+
+
 def test_worker_persists_bounded_response_atomically(tmp_path):
     from hermes_cli.hades_information_worker import execute_stored_information_request
     from hermes_cli.hades_persephone_store import get_message, record_inbox, transition_message
@@ -282,7 +413,7 @@ def test_worker_persists_bounded_response_atomically(tmp_path):
     assert len(str(payload)) < 16_000
 
 
-def test_operational_failure_is_redacted_and_returned_as_response(tmp_path, monkeypatch):
+def test_operational_failure_is_redacted_and_requeued(tmp_path, monkeypatch):
     from hermes_cli import hades_information_worker as worker
     from hermes_cli.hades_persephone_store import record_inbox, transition_message
 
@@ -295,7 +426,7 @@ def test_operational_failure_is_redacted_and_returned_as_response(tmp_path, monk
         raise OSError("authorization=Bearer very-secret-token")
 
     monkeypatch.setattr(worker, "_search", fail)
-    response = worker.execute_stored_information_request(
+    result = worker.execute_stored_information_request(
         conn,
         request.message_id,
         binding=_binding(tmp_path),
@@ -303,10 +434,11 @@ def test_operational_failure_is_redacted_and_returned_as_response(tmp_path, monk
         response_message_id="response_failure",
     )
 
-    payload = response.envelope.to_dict()["payload"]
-    assert payload["answer_summary"] == "Information request could not be completed."
-    assert "very-secret-token" not in str(payload)
-    assert payload["residual_uncertainty"] == ["local information handler failed"]
+    assert result is None
+    stored = worker.get_message(conn, request.message_id)
+    assert stored is not None and stored.state == "received"
+    assert stored.last_error == "information_handler_failed"
+    assert "very-secret-token" not in str(stored)
 
 
 def test_large_memory_matches_still_fit_wire_payload(tmp_path):
@@ -346,14 +478,37 @@ def test_response_construction_failure_leaves_request_retryable(tmp_path, monkey
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("cannot encode")),
     )
 
-    with pytest.raises(ValueError, match="cannot encode"):
+    result = worker.execute_stored_information_request(
+        conn,
+        request.message_id,
+        binding=_binding(tmp_path),
+        now=NOW,
+        response_message_id="response_invalid",
+    )
+
+    stored = get_message(conn, request.message_id)
+    assert result is None
+    assert stored is not None and stored.state == "received"
+
+
+def test_worker_requires_processing_state_before_read(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+    from hermes_cli.hades_persephone_store import record_inbox
+
+    conn = db.connect(tmp_path / "wrong-state.db")
+    request = _request(tmp_path)
+    record_inbox(conn, request, now=NOW)
+    monkeypatch.setattr(
+        worker,
+        "run_information_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read happened")),
+    )
+
+    with pytest.raises(worker.PolicyDenied, match="processing"):
         worker.execute_stored_information_request(
             conn,
             request.message_id,
             binding=_binding(tmp_path),
             now=NOW,
-            response_message_id="response_invalid",
+            response_message_id="response_wrong_state",
         )
-
-    stored = get_message(conn, request.message_id)
-    assert stored is not None and stored.state == "processing"

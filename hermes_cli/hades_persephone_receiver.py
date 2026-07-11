@@ -31,6 +31,7 @@ from hermes_cli.hades_persephone_store import (
     record_cursor,
     record_inbox,
     record_subscription_mismatch,
+    recover_abandoned_information_requests,
     transition_message,
 )
 from hermes_cli.hades_persephone_transport import iter_persephone_events
@@ -111,7 +112,7 @@ class PersephoneReceiver:
         self.batch_size = int(batch_size)
         self.max_projects_per_cycle = int(max_projects_per_cycle)
         self.information_executor = information_executor
-        self.response_id_factory = response_id_factory or (lambda: uuid.uuid4().hex)
+        self.response_id_factory = response_id_factory
         self._now = now or (lambda: int(time.time()))
         self._bindings: dict[str, db.WorkspaceBinding] = {}
         self._workers: dict[tuple[str, str], _ReceiverWorker] = {}
@@ -343,6 +344,13 @@ class PersephoneReceiver:
 
     def run_once(self) -> int:
         """Poll a fair bounded subset of project queues and durably ingest it."""
+        if self.information_executor is not None:
+            with self.connection_factory() as conn:
+                recover_abandoned_information_requests(
+                    conn,
+                    now=self._now(),
+                    abandoned_before=self._now() - 30,
+                )
         ingested = 0
         for worker in self._worker_batch():
             try:
@@ -436,6 +444,14 @@ class PersephoneReceiver:
             "acknowledged": "accepted",
         }.get(state, state)
 
+    def _response_message_id(self, request: AgentMessageEnvelope) -> str:
+        if self.response_id_factory is not None:
+            return self.response_id_factory()
+        return uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"hades-persephone-response:{request.project_id}:{request.message_id}",
+        ).hex
+
     def ingest_event(
         self,
         event: Mapping[str, Any],
@@ -510,7 +526,18 @@ class PersephoneReceiver:
                     return "subscription_route_mismatch"
                 if stored.state != "received":
                     # Its first delivery already advanced its own opaque
-                    # cursor. A same-subscription duplicate must not rewind it.
+                    # cursor, except for the crash gap after a terminal commit
+                    # and before cursor persistence, which is repaired here.
+                    if cursor and stored.state in {
+                        "responded", "acknowledged", "rejected", "expired"
+                    }:
+                        record_cursor(
+                            conn,
+                            project_id=cursor_project,
+                            target_agent_id=cursor_agent,
+                            cursor=cursor,
+                            now=timestamp,
+                        )
                     return self._duplicate_disposition(stored.state)
                 route_error = self._route_disposition(durable)
                 if route_error is not None:
@@ -523,15 +550,17 @@ class PersephoneReceiver:
                     disposition = route_error
                 else:
                     disposition = classify_request(durable)
-                    transition_message(
-                        conn,
-                        envelope.message_id,
-                        "processing"
-                        if disposition == "accepted"
-                        else "waiting_human_approval",
-                        now=timestamp,
-                    )
-                    if disposition == "accepted" and self.information_executor is not None:
+                    if disposition != "accepted":
+                        transition_message(
+                            conn,
+                            envelope.message_id,
+                            "waiting_human_approval",
+                            now=timestamp,
+                        )
+                    elif self.information_executor is not None:
+                        transition_message(
+                            conn, envelope.message_id, "processing", now=timestamp
+                        )
                         with self._lock:
                             binding = self._bindings.get(
                                 durable.target_workspace_binding_id or ""
@@ -550,9 +579,18 @@ class PersephoneReceiver:
                                 durable.message_id,
                                 binding=binding,
                                 now=timestamp,
-                                response_message_id=self.response_id_factory(),
+                                response_message_id=self._response_message_id(durable),
                             )
-            if cursor and disposition != "agent_queue_unsupported":
+                        completed = get_message(conn, envelope.message_id)
+                        if completed is None or completed.state not in {
+                            "responded", "rejected", "expired"
+                        }:
+                            disposition = "retry_pending"
+            should_record_cursor = not (
+                disposition in {"agent_queue_unsupported", "retry_pending"}
+                or (disposition == "accepted" and self.information_executor is None)
+            )
+            if cursor and should_record_cursor:
                 record_cursor(
                     conn,
                     project_id=cursor_project,

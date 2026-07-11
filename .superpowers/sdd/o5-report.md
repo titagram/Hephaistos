@@ -78,3 +78,47 @@ passed
   lifecycle configuration is O6.
 - Blackboard/DAG interrupts and remote Kanban projection are O7/O8.
 - No backend mutation or remote deployment was performed.
+
+## Critical review remediation
+
+Follow-up review findings were addressed with additional RED/GREEN cycles:
+
+- Sensitive paths are denied without echoing their names or contents. The
+  policy covers `.env` variants, credential/secret/token/auth/provider stores,
+  Hades/Hermes metadata, `.git` internals, SSH/private-key names, and
+  PEM/certificate/key containers. Directory pruning is top-down.
+- Evidence redaction is recursive, case-insensitive, cycle/depth/node bounded,
+  and replaces entire values for password, passphrase, secret, token, API and
+  access keys, private keys, authorization, credentials, cookies, sessions,
+  client secrets, and AWS secrets. Text detection covers ENV, JSON, YAML,
+  Bearer, PEM, AWS access-key and JWT forms.
+- Source search uses `os.walk(topdown=True, followlinks=False)` with hard
+  directory, entry, file, per-file byte, aggregate byte, result, and monotonic
+  deadline budgets before reading. It never sorts/materializes the full tree.
+  Project-memory matching and response cleaning have independent bounded
+  node/depth/string/deadline traversal and do not stringify whole objects.
+- Inbox rows now persist bounded attempts, next-attempt time, and sanitized
+  error codes. Stale auto-information workers recover selectively; unrelated
+  or human-approved work is not reset.
+- `persist_response_for_request()` now supports direct atomic
+  `processing -> responded`: global response identity, outbox row and inbox
+  link share one SQLite transaction. A trigger-induced link failure proves the
+  outbox and identity roll back while the request remains processing.
+- Worker reads require durable `processing` state. Operational/construction
+  failures return the request to `received` until the bounded attempt cap;
+  expiry is durable. Response IDs are deterministic, and redelivery produces
+  one response/outbox row without re-execution after completion.
+- A receiver without an executor leaves allowed work in durable `received`
+  and does not advance its queue cursor. Terminal duplicate delivery repairs a
+  crash-gap cursor without re-running the worker. `run_backend_sync()` now
+  supplies the safe information executor; its integration test executes a
+  real source-search request exactly once and persists the response.
+
+Focused critical-remediation verification:
+
+```text
+97 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```

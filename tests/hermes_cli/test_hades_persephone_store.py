@@ -188,6 +188,111 @@ def test_request_response_is_persisted_and_linked_atomically(tmp_db):
     assert acknowledged.state == "acknowledged"
 
 
+def test_processing_request_and_response_are_committed_in_one_transaction(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        get_message,
+        persist_response_for_request,
+        record_inbox,
+        transition_message,
+    )
+
+    request = _envelope()
+    response = _envelope(
+        message_id="atomic_response",
+        target_agent_id=request.sender_agent_id,
+        sender_agent_id=request.target_agent_id,
+        message_type=MessageType.INFORMATION_RESPONSE.value,
+        correlation_id=request.correlation_id,
+        causation_id=request.message_id,
+    )
+    record_inbox(tmp_db, request, now=100)
+    transition_message(tmp_db, request.message_id, "processing", now=101)
+
+    persist_response_for_request(tmp_db, request.message_id, response, now=102)
+
+    stored = get_message(tmp_db, request.message_id)
+    assert stored is not None and stored.state == "responded"
+    assert stored.response_message_id == "atomic_response"
+
+
+def test_information_failure_is_bounded_and_recoverable(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        record_inbox,
+        record_information_failure,
+        transition_message,
+    )
+
+    request = _envelope()
+    record_inbox(tmp_db, request, now=100)
+    for attempt in range(1, 4):
+        transition_message(tmp_db, request.message_id, "processing", now=attempt * 10)
+        stored = record_information_failure(
+            tmp_db, request.message_id, now=attempt * 10 + 1, max_attempts=3
+        )
+        assert stored.attempts == attempt
+        assert stored.last_error == "information_handler_failed"
+        assert stored.state == ("received" if attempt < 3 else "rejected")
+
+
+def test_atomic_response_rolls_back_outbox_and_identity_when_link_fails(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        get_message,
+        persist_response_for_request,
+        record_inbox,
+        transition_message,
+    )
+
+    request = _envelope()
+    response = _envelope(
+        message_id="rollback_response",
+        target_agent_id=request.sender_agent_id,
+        sender_agent_id=request.target_agent_id,
+        message_type=MessageType.INFORMATION_RESPONSE.value,
+        correlation_id=request.correlation_id,
+        causation_id=request.message_id,
+    )
+    record_inbox(tmp_db, request, now=100)
+    transition_message(tmp_db, request.message_id, "processing", now=101)
+    tmp_db.execute(
+        "CREATE TRIGGER fail_response_link BEFORE UPDATE OF state ON persephone_inbox "
+        "WHEN NEW.state = 'responded' BEGIN SELECT RAISE(ABORT, 'simulated crash'); END"
+    )
+
+    with pytest.raises(Exception, match="simulated crash"):
+        persist_response_for_request(tmp_db, request.message_id, response, now=102)
+
+    assert get_message(tmp_db, request.message_id).state == "processing"
+    assert get_message(tmp_db, response.message_id, queue="outbox") is None
+    assert tmp_db.execute(
+        "SELECT COUNT(*) FROM persephone_message_identities WHERE message_id = ?",
+        (response.message_id,),
+    ).fetchone()[0] == 0
+
+
+def test_recover_abandoned_information_requests_is_scoped_and_bounded(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        get_message,
+        record_inbox,
+        recover_abandoned_information_requests,
+        transition_message,
+    )
+
+    request = _envelope()
+    record_inbox(tmp_db, request, now=100)
+    transition_message(tmp_db, request.message_id, "processing", now=101)
+
+    assert recover_abandoned_information_requests(
+        tmp_db, now=200, abandoned_before=150, max_attempts=3
+    ) == 1
+    stored = get_message(tmp_db, request.message_id)
+    assert stored is not None and stored.state == "received"
+    assert stored.attempts == 1
+    assert stored.last_error == "information_worker_restarted"
+    assert recover_abandoned_information_requests(
+        tmp_db, now=201, abandoned_before=150, max_attempts=3
+    ) == 0
+
+
 def test_ack_refuses_a_tampered_or_missing_durable_response(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

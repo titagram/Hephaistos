@@ -61,6 +61,7 @@ def run_backend_sync(
     from hermes_cli.hades_backend_actions import status_payload as _status_payload
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_information_worker import execute_stored_information_request
     from hermes_cli.hades_persephone_messages import BACKEND_CAPABILITY
     from hermes_cli.hades_persephone_receiver import PersephoneReceiver
     from hermes_cli.hades_persephone_store import get_cursor
@@ -119,7 +120,10 @@ def run_backend_sync(
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
     polled_agent_queues: set[tuple[str, str]] = set()
-    receiver = PersephoneReceiver(now=(lambda: int(time.time()) if now is None else int(now)))
+    receiver = PersephoneReceiver(
+        information_executor=execute_stored_information_request,
+        now=(lambda: int(time.time()) if now is None else int(now)),
+    )
     receiver.refresh_bindings(bindings, agents=agents)
 
     def client_for_agent(sync_agent: db.BackendAgent) -> object:

@@ -88,6 +88,9 @@ _EXPECTED_RESPONSE_TYPE = {
     MessageType.STATUS_QUERY: MessageType.STATUS_RESPONSE,
     MessageType.CANCEL_REQUEST: MessageType.LOCAL_DECISION,
 }
+_INFORMATION_CAPABILITIES = frozenset(
+    {"source_slice", "source_search", "symbol_lookup", "git_metadata", "artifact_metadata", "project_memory_search"}
+)
 
 
 def _now(value: int | None) -> int:
@@ -126,9 +129,9 @@ def _inbox_from_row(row: sqlite3.Row) -> StoredMessage:
         target_agent_id=row["target_agent_id"],
         envelope=_parsed(row["envelope"]),
         state=row["state"],
-        attempts=0,
-        next_attempt_at=None,
-        last_error=None,
+        attempts=int(row["attempts"]),
+        next_attempt_at=int(row["next_attempt_at"]),
+        last_error=row["last_error"],
         created_at=int(row["received_at"]),
         updated_at=int(row["updated_at"]),
         human_decision=row["human_decision"],
@@ -415,17 +418,17 @@ def persist_response_for_request(
             if stored is None or _serialized(stored.envelope) != _serialized(response):
                 raise MessageConflict("request response link is not durably valid")
             return stored
-        if request.state != "processed":
+        if request.state not in {"processing", "processed"}:
             raise InvalidTransition(
-                f"request {request_message_id!r} must be processed before persisting a response"
+                f"request {request_message_id!r} must be processing before persisting a response"
             )
 
         _insert_outbox_in_txn(conn, response, timestamp=timestamp, due_at=due_at)
         cursor = conn.execute(
             "UPDATE persephone_inbox SET state = 'responded', response_message_id = ?, "
-            "updated_at = ? WHERE message_id = ? AND state = 'processed' "
+            "updated_at = ? WHERE message_id = ? AND state = ? "
             "AND response_message_id IS NULL",
-            (response.message_id, timestamp, request_message_id),
+            (response.message_id, timestamp, request_message_id, request.state),
         )
         if cursor.rowcount != 1:
             raise InvalidTransition(
@@ -436,6 +439,79 @@ def persist_response_for_request(
         ).fetchone()
         assert row is not None
         return _outbox_from_row(row)
+
+
+def record_information_failure(
+    conn: sqlite3.Connection,
+    request_message_id: str,
+    *,
+    now: int | None = None,
+    max_attempts: int = 3,
+    retry_delay: int = 0,
+) -> StoredMessage:
+    """Return a failed information read to a bounded, claimable state."""
+    timestamp = _now(now)
+    bounded_max = max(1, int(max_attempts))
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM persephone_inbox WHERE message_id = ?", (request_message_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(request_message_id)
+        current = _inbox_from_row(row)
+        if current.state != "processing":
+            raise InvalidTransition("only a processing information request may fail")
+        attempts = current.attempts + 1
+        state = "rejected" if attempts >= bounded_max else "received"
+        cursor = conn.execute(
+            "UPDATE persephone_inbox SET state = ?, attempts = ?, next_attempt_at = ?, "
+            "last_error = 'information_handler_failed', updated_at = ? "
+            "WHERE message_id = ? AND state = 'processing'",
+            (state, attempts, timestamp + max(0, int(retry_delay)), timestamp, request_message_id),
+        )
+        if cursor.rowcount != 1:
+            raise InvalidTransition("concurrent information failure transition")
+    result = get_message(conn, request_message_id)
+    assert result is not None
+    return result
+
+
+def recover_abandoned_information_requests(
+    conn: sqlite3.Connection,
+    *,
+    now: int | None = None,
+    abandoned_before: int | None = None,
+    max_attempts: int = 3,
+) -> int:
+    """Recover only stale, auto-eligible information workers after restart."""
+    timestamp = _now(now)
+    cutoff = timestamp if abandoned_before is None else int(abandoned_before)
+    bounded_max = max(1, int(max_attempts))
+    recovered = 0
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT * FROM persephone_inbox WHERE state = 'processing' AND updated_at <= ?",
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            current = _inbox_from_row(row)
+            envelope = current.envelope
+            if not (
+                envelope.message_type == MessageType.INFORMATION_REQUEST
+                and envelope.effect == EffectClass.INFORMATION_READ
+                and envelope.capability in _INFORMATION_CAPABILITIES
+            ):
+                continue
+            attempts = current.attempts + 1
+            state = "rejected" if attempts >= bounded_max else "received"
+            cursor = conn.execute(
+                "UPDATE persephone_inbox SET state = ?, attempts = ?, next_attempt_at = ?, "
+                "last_error = 'information_worker_restarted', updated_at = ? "
+                "WHERE message_id = ? AND state = 'processing' AND updated_at <= ?",
+                (state, attempts, timestamp, timestamp, current.message_id, cutoff),
+            )
+            recovered += max(0, int(cursor.rowcount))
+    return recovered
 
 
 def transition_message(
@@ -692,6 +768,8 @@ __all__ = [
     "persist_response_for_request",
     "record_cursor",
     "record_inbox",
+    "record_information_failure",
+    "recover_abandoned_information_requests",
     "record_subscription_mismatch",
     "recover_abandoned_outbox",
     "transition_message",
