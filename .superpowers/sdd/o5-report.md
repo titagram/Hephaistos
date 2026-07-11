@@ -123,6 +123,36 @@ py_compile: passed
 git diff --check: passed
 ```
 
+## Sixth adversarial re-review
+
+The sixth exact corpus began with 11 expected failures; seven existing guards
+were already green. Sensitive scalar RHS parsing now tracks balanced
+parentheses, arrays, objects, nested calls/constructors, strings, and escapes
+until a true top-level comma/semicolon/newline boundary. Tuple, `new Array`,
+and `new Set` expressions are replaced as one value. Unbalanced or exhausted
+work redacts the entire remaining RHS, sets `truncated=true`, and reports
+`lexical evidence was conservatively truncated`; no partial tail is returned.
+
+XML semantic discriminators now include `type`, and value-like attributes
+include `value`, `defaultValue`, `default`, `text`, and `content`, alongside
+element text. Input-password and property-default forms are covered.
+
+Generic `key`/`keys`, primary/foreign/sort keys are classified as metadata.
+They become sensitive only with credential qualifiers such as API/access,
+private, signing, encryption, secret, provider, password, token, or auth;
+actual `api_keys`, `private_keys`, and `access_keys` remain protected.
+
+Final sixth-review verification:
+
+```text
+Exact sixth-review corpus: 18 passed
+Focused worker/store/receiver: 220 passed
+O1-O5 + sync + DB + quality: 381 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```
+
 ## Fifth adversarial re-review
 
 The fifth exact corpus initially exposed 11 security/classification failures;

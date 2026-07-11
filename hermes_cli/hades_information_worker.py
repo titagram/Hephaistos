@@ -564,6 +564,16 @@ def _is_sensitive_key(value: Any) -> bool:
         and not any(token in session_cookie_qualifiers for token in tokens)
     ):
         return False
+    key_qualifiers = {
+        "credential", "credentials", "private", "api", "access", "signing",
+        "encryption", "secret", "provider", "password", "token", "auth",
+        "authorization",
+    }
+    if (
+        any(token in {"key", "keys"} for token in tokens)
+        and not any(token in key_qualifiers for token in tokens)
+    ):
+        return False
     sensitive_tokens = {
         "password", "passphrase", "secret", "token", "authorization",
         "credential", "credentials", "cookie", "session", "jwt", "bearer",
@@ -625,7 +635,45 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
             elif char == stack[-1]:
                 stack.pop()
             cursor += 1
+        if stack:
+            clipped = True
+            return end
         return cursor
+
+    def rhs_end(start: int, end: int) -> int:
+        """Find a true top-level RHS boundary, conservatively consuming ambiguity."""
+        nonlocal work, clipped
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        stack: list[str] = []
+        cursor = start
+        while cursor < end:
+            work += 1
+            if work > MAX_RESULT_CHARS * 4 or time.monotonic() > deadline:
+                clipped = True
+                return end
+            char = value[cursor]
+            if char in "\"'":
+                cursor = quoted_end(cursor, end)
+                continue
+            if char in pairs:
+                stack.append(pairs[char])
+                cursor += 1
+                continue
+            if char in ")]}":
+                if stack and char == stack[-1]:
+                    stack.pop()
+                    cursor += 1
+                    continue
+                if not stack:
+                    return cursor
+                clipped = True
+                return end
+            if not stack and char in ",;\r\n":
+                return cursor
+            cursor += 1
+        if stack:
+            clipped = True
+        return end
 
     def scan(start: int, end: int, *, force: bool = False, depth: int = 0) -> None:
         nonlocal work, clipped
@@ -705,9 +753,7 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
                 replacements.append((scalar_start + 1, max(scalar_start + 1, scalar_end - 1), "***"))
                 cursor = scalar_end
                 continue
-            scalar_end = scalar_start
-            while scalar_end < end and value[scalar_end] not in ",;\r\n}]<":
-                scalar_end += 1
+            scalar_end = rhs_end(scalar_start, end)
             trimmed_end = scalar_end
             while trimmed_end > scalar_start and value[trimmed_end - 1].isspace():
                 trimmed_end -= 1
@@ -725,7 +771,7 @@ def _redact_xml_elements(value: str) -> str:
     def semantic_attribute(attrs: str) -> bool:
         for attribute in _XML_ATTRIBUTE_RE.finditer(attrs):
             local_name = attribute.group("key").casefold()
-            if local_name in {"name", "key", "id"} and _is_sensitive_key(
+            if local_name in {"name", "key", "id", "type"} and _is_sensitive_key(
                 attribute.group("value")
             ):
                 return True
@@ -752,7 +798,9 @@ def _redact_xml_elements(value: str) -> str:
 
         def redact_value(attribute: re.Match[str]) -> str:
             local_name = attribute.group("key").casefold()
-            if local_name not in {"value", "text", "content"}:
+            if local_name not in {
+                "value", "defaultvalue", "default", "text", "content"
+            }:
                 return attribute.group(0)
             quote = attribute.group("quote")
             return f"{attribute.group('name')}={quote}***{quote}"
@@ -777,10 +825,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     nodes = 0
     clipped = False
     redacted = False
+    lexical_uncertain = False
     deadline = time.monotonic() + MAX_SCAN_SECONDS
 
     def redact_plain_text(value: str) -> str:
-        nonlocal clipped, redacted
+        nonlocal clipped, redacted, lexical_uncertain
         working = value
         if len(working) > MAX_RESULT_CHARS:
             clipped = True
@@ -794,6 +843,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         without_pairs, lexical_clip = _redact_key_value_pairs(without_tokens)
         if lexical_clip:
             clipped = True
+            lexical_uncertain = True
         without_xml = _redact_xml_elements(without_pairs)
         safe = redact_secret(without_xml)
         if safe != working:
@@ -906,6 +956,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     if redacted and "sensitive values were redacted" not in uncertainty:
         if len(uncertainty) < 20:
             uncertainty.append("sensitive values were redacted")
+        else:
+            clipped = True
+    if lexical_uncertain and "lexical evidence was conservatively truncated" not in uncertainty:
+        if len(uncertainty) < 20:
+            uncertainty.append("lexical evidence was conservatively truncated")
         else:
             clipped = True
     while evidence:

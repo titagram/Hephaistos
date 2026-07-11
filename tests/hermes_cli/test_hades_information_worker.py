@@ -485,6 +485,112 @@ def test_fifth_review_metadata_exemptions_require_no_sensitive_qualifier(
 
 
 @pytest.mark.parametrize(
+    ("content", "secrets"),
+    [
+        (
+            'password = ("tuple-one-private", build("tuple-two-private"))',
+            ("tuple-one-private", "tuple-two-private"),
+        ),
+        (
+            'accessToken = new Array("array-one-private", factory("array-two-private"))',
+            ("array-one-private", "array-two-private"),
+        ),
+        (
+            'apiToken = new Set(["set-one-private", make("set-two-private")])',
+            ("set-one-private", "set-two-private"),
+        ),
+    ],
+)
+def test_sixth_review_sensitive_rhs_consumes_balanced_expression(
+    tmp_path, content, secrets
+):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert all(secret not in rendered for secret in secrets)
+
+
+def test_uncertain_sensitive_rhs_redacts_remainder_and_marks_uncertainty(tmp_path):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    content = 'privateKey = new Set(["uncertain-one", factory("uncertain-two")'
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    payload = response.to_payload()
+    assert "uncertain-one" not in str(payload)
+    assert "uncertain-two" not in str(payload)
+    assert payload["truncated"] is True
+    assert "lexical evidence was conservatively truncated" in payload["residual_uncertainty"]
+
+
+@pytest.mark.parametrize(
+    ("content", "secrets"),
+    [
+        ('<input type="password" value="input-private"/>', ("input-private",)),
+        (
+            '<property name="apiToken" defaultValue="default-private"/>',
+            ("default-private",),
+        ),
+        (
+            '<field id="accessToken" default="default-secret" text="text-secret" '
+            'content="content-secret">body-secret</field>',
+            ("default-secret", "text-secret", "content-secret", "body-secret"),
+        ),
+    ],
+)
+def test_sixth_review_xml_semantic_value_family(tmp_path, content, secrets):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert all(secret not in rendered for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("key", "should_redact"),
+    [
+        ("key", False),
+        ("keys", False),
+        ("primary_keys", False),
+        ("foreign_keys", False),
+        ("sort_keys", False),
+        ("api_keys", True),
+        ("private_keys", True),
+        ("access_keys", True),
+        ("signing_keys", True),
+        ("encryption_keys", True),
+        ("provider_keys", True),
+    ],
+)
+def test_sixth_review_generic_keys_are_metadata_without_credential_qualifier(
+    tmp_path, key, should_redact
+):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    secret = "key-value-private"
+    (tmp_path / "safe_example.txt").write_text(
+        f'{key} = "{secret}"', encoding="utf-8"
+    )
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    assert (secret not in str(response.to_payload())) is should_redact
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",
