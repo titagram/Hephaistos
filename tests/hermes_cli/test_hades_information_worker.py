@@ -164,6 +164,7 @@ def test_source_slice_rejects_symlink_escape(tmp_path):
     [
         ".env",
         ".env.local",
+        ".envrc",
         "credentials.json",
         "secrets.yaml",
         "id_rsa",
@@ -171,6 +172,8 @@ def test_source_slice_rejects_symlink_escape(tmp_path):
         ".git/config",
         ".hermes/auth.json",
         ".hades/tokens.json",
+        "provider_config.yaml",
+        "auth.config.json",
     ],
 )
 def test_source_slice_denies_sensitive_paths_without_echoing_them(tmp_path, relative):
@@ -246,6 +249,24 @@ def test_source_content_semantically_redacts_common_secret_formats(tmp_path):
         "ghp_abcdefghijklmnopqrstuvwxyz123456",
     ):
         assert secret not in rendered
+
+
+def test_unterminated_private_key_block_is_redacted(tmp_path):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "example.py").write_text(
+        "-----BEGIN PRIVATE KEY-----\n" + ("private-material\n" * 1_000),
+        encoding="utf-8",
+    )
+    response = run_information_request(
+        _request(
+            tmp_path,
+            capability="source_slice",
+            payload={"path": "example.py", "start_line": 1, "end_line": 200},
+        ),
+        binding=_binding(tmp_path),
+    )
+    assert "private-material" not in str(response.to_payload())
 
 
 def test_search_uses_top_down_bounded_walk_not_whole_tree_rglob(tmp_path, monkeypatch):

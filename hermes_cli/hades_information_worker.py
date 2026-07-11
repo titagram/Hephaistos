@@ -62,7 +62,8 @@ _SECRET_ASSIGN_RE = re.compile(
     r"\b[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n,}\]]+)"
 )
 _PEM_RE = re.compile(
-    r"-----BEGIN [^-]*(?:PRIVATE KEY|CERTIFICATE)-----.*?-----END [^-]+-----",
+    r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----.*?"
+    r"(?:-----END [A-Z0-9 ]+-----|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
@@ -183,12 +184,18 @@ def _is_sensitive_name(path: Path) -> bool:
         return True
     name = parts[-1] if parts else ""
     stem = Path(name).stem.casefold()
+    stem_normalized = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")
     suffix = Path(name).suffix.casefold()
     return (
         name == ".env"
         or name.startswith(".env.")
+        or name == ".envrc"
         or name in {".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
         or stem in {"credential", "credentials", "secret", "secrets", "token", "tokens", "auth", "oauth", "providers"}
+        or (
+            any(marker in stem_normalized.split("_") for marker in ("auth", "oauth", "provider", "providers"))
+            and any(marker in stem_normalized.split("_") for marker in ("config", "store", "credential", "credentials", "token", "tokens"))
+        )
         or suffix in _SENSITIVE_EXTENSIONS
     )
 

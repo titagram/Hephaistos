@@ -127,3 +127,6 @@ Post-commit audit added two further guards: retry/recovery rejects non-informati
 `processing` rows, and project-memory cache size is checked in SQLite before JSON
 materialization. Known standalone Bearer, GitHub, OpenAI-style, Slack, AWS, JWT,
 and PEM token forms are redacted. Follow-up focused verification: `99 passed`.
+The final redaction audit also covers unterminated/truncated PEM blocks,
+`.envrc`, and compound auth/provider configuration filenames. Final focused
+verification after those guards: `103 passed`.
