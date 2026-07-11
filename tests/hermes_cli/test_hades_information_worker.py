@@ -375,6 +375,23 @@ def test_search_stops_at_file_and_aggregate_read_budget(tmp_path, monkeypatch):
     assert response.truncated is True
 
 
+def test_source_slice_file_byte_clipping_sets_truncated(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+
+    (tmp_path / "large.py").write_text("0123456789", encoding="utf-8")
+    monkeypatch.setattr(worker, "MAX_FILE_BYTES", 5)
+    response = worker.run_information_request(
+        _request(
+            tmp_path,
+            capability="source_slice",
+            payload={"path": "large.py"},
+        ),
+        binding=_binding(tmp_path),
+    )
+    assert response.evidence_refs == ()
+    assert response.truncated is True
+
+
 def test_streaming_scandir_stops_before_consuming_all_entries(tmp_path, monkeypatch):
     from hermes_cli import hades_information_worker as worker
 

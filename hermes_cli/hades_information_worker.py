@@ -89,6 +89,7 @@ class _ReadBudget:
     entries: int = 0
     files: int = 0
     bytes_read: int = 0
+    clipped: bool = False
 
     @classmethod
     def start(cls) -> "_ReadBudget":
@@ -238,11 +239,13 @@ def _safe_text(path: Path, budget: _ReadBudget | None = None) -> str | None:
                 return None
             size = int(file_stat.st_size)
             if size > MAX_FILE_BYTES or active.bytes_read + size > MAX_AGGREGATE_BYTES:
+                active.clipped = True
                 return None
             raw = handle.read(MAX_FILE_BYTES + 1)
         if time.monotonic() > active.deadline:
             return None
         if len(raw) > MAX_FILE_BYTES:
+            active.clipped = True
             return None
         active.files += 1
         active.bytes_read += len(raw)
@@ -277,10 +280,13 @@ def _source_files(root: Path, budget: _ReadBudget):
                             and len(pending) < MAX_PENDING_DIRS
                         ):
                             pending.append(Path(entry.path))
+                        elif entry.name.casefold() not in _EXCLUDED_DIRS:
+                            budget.clipped = True
                         continue
                     if entry.is_file(follow_symlinks=False):
                         yield Path(entry.path), relative.as_posix(), budget
         except OSError:
+            budget.clipped = True
             continue
 
 
@@ -292,7 +298,7 @@ def _source_slice(root: Path, payload: Mapping[str, Any]) -> InformationResponse
         return InformationResponse(
             "Source file is unavailable.",
             (),
-            not budget.available(),
+            budget.clipped or not budget.available(),
             ("file could not be read",),
         )
     lines = text.splitlines()
@@ -339,7 +345,7 @@ def _search(root: Path, payload: Mapping[str, Any], *, symbol: bool) -> Informat
             evidence.append({"path": relative, "line": number, "content": line[:500]})
         if truncated:
             break
-    truncated = truncated or not budget.available()
+    truncated = truncated or budget.clipped or not budget.available()
     noun = "symbol definition" if symbol else "matching source line"
     suffix = "s" if len(evidence) != 1 else ""
     return InformationResponse(

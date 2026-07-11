@@ -165,6 +165,9 @@ budget does not consume a fourth entry. Recovery queries use deterministic
 The redaction tracker propagates every node/depth/container/string/time/output
 clip into `InformationResponse.truncated`, including cycles and memory-search
 work budgets.
+The read budget itself carries a clipping marker, so per-file/aggregate byte
+rejection, pending-directory saturation and scan errors also propagate to the
+response truncation flag.
 
 Final verification after the exact adversarial corpus:
 
