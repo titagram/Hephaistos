@@ -541,3 +541,45 @@ def test_retry_policy_keeps_extreme_finite_values_bounded_and_deterministic():
 
     assert first == second
     assert 1 <= first <= int(policy.maximum)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, "3", 2.5, float("nan"), float("inf"), float("-inf"), 0, -1],
+)
+def test_retry_policy_requires_a_positive_integral_max_attempts(value):
+    from hermes_cli.hades_persephone_transport import RetryPolicy
+
+    with pytest.raises(ValueError, match="max_attempts must be a positive integer"):
+        RetryPolicy(max_attempts=value)
+
+
+def test_retry_exhaustion_dead_letters_exactly_at_configured_maximum(store):
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+    from hermes_cli.hades_persephone_transport import RetryPolicy, send_due_messages
+
+    calls = 0
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            nonlocal calls
+            calls += 1
+            raise HadesBackendError("temporary", status_code=503)
+
+    policy = RetryPolicy(base=1, maximum=1, jitter=0, max_attempts=2)
+    enqueue_outbox(store, _envelope(), now=100)
+
+    first = send_due_messages(store, FakeClient(), now=100, retry=policy)
+    after_first = get_message(store, "msg_1", queue="outbox")
+    second = send_due_messages(store, FakeClient(), now=101, retry=policy)
+    after_second = get_message(store, "msg_1", queue="outbox")
+
+    assert first == {"sent": 0, "retry": 1, "dead_letter": 0}
+    assert after_first is not None
+    assert after_first.state == "retry"
+    assert after_first.attempts == 1
+    assert second == {"sent": 0, "retry": 0, "dead_letter": 1}
+    assert after_second is not None
+    assert after_second.state == "dead_letter"
+    assert after_second.attempts == 2
+    assert calls == 2

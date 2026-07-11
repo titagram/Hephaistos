@@ -50,8 +50,8 @@ class RetryPolicy:
             raise ValueError("retry maximum must be at least retry base")
         if not 0 <= self.jitter <= 1:
             raise ValueError("retry jitter must be between 0 and 1")
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be positive")
+        if type(self.max_attempts) is not int or self.max_attempts < 1:
+            raise ValueError("max_attempts must be a positive integer")
 
     def delay(self, attempt: int, *, rng: random.Random) -> int:
         exponent = max(0, int(attempt) - 1)
