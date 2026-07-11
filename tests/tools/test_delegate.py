@@ -36,6 +36,7 @@ from tools.delegate_tool import (
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
     _inherit_parent_base_url,
+    _root_coordination_id,
 )
 
 
@@ -80,6 +81,13 @@ ORCHESTRATOR_CONTRACT = {
 class TestDelegateRequirements(unittest.TestCase):
     def test_always_available(self):
         self.assertTrue(check_delegate_requirements())
+
+    def test_generated_root_id_is_stable_and_within_routable_byte_cap(self):
+        parent = MagicMock(session_id="会" * 1_000)
+        first = _root_coordination_id(parent)
+        assert first == _root_coordination_id(parent)
+        assert first.startswith("root:")
+        assert len(first.encode("utf-8")) <= 64
 
     def test_schema_valid(self):
         self.assertEqual(DELEGATE_TASK_SCHEMA["name"], "delegate_task")

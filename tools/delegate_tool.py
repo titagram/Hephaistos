@@ -810,6 +810,20 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     return None
 
 
+def _root_coordination_id(parent_agent) -> str:
+    """Return a stable routable root ID for an ordinary parent session."""
+
+    parent_session_id = getattr(parent_agent, "session_id", None)
+    if not isinstance(parent_session_id, str) or not parent_session_id:
+        parent_session_id = "local"
+    root_id = f"root:{parent_session_id}"
+    if len(root_id.encode("utf-8")) > 64:
+        root_id = "root:" + hashlib.sha256(
+            parent_session_id.encode("utf-8")
+        ).hexdigest()[:58]
+    return root_id
+
+
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets that contain only blocked tools.
 
@@ -2662,10 +2676,7 @@ def delegate_task(
         if isinstance(parent_subagent_id, str) and parent_subagent_id:
             root_id = parent_subagent_id
         else:
-            parent_session_id = getattr(parent_agent, "session_id", None)
-            if not isinstance(parent_session_id, str) or not parent_session_id:
-                parent_session_id = "local"
-            root_id = f"root:{parent_session_id}"
+            root_id = _root_coordination_id(parent_agent)
         authority = getattr(parent_agent, "_hades_delegation_authority", None)
         if not isinstance(authority, DelegationAuthority):
             project_id = getattr(parent_agent, "_hades_project_id", None)

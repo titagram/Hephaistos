@@ -204,6 +204,30 @@ Final integration evidence:
 - Broad O1-O7/delegation/cache/role suite: `775 passed, 1 skipped`.
 - Ruff, `py_compile`, and `git diff --check`: passed.
 
+## Exact operational identifier remediation
+
+The final operational audit removed the last possible ambiguity between a
+routable identifier and its awareness representation:
+
+- Agent/root identifiers and dependency/interface/produced-artifact keys now
+  have explicit 64-byte UTF-8 limits. One-byte-over values fail validation;
+  `coordination_post` also rejects an overlong artifact before routing.
+- Every accepted sibling ID and rendered relevance key is emitted byte-exact.
+  The renderer never truncates operational identifiers, so two distinct valid
+  recipients or artifact keys cannot collapse to the same visible prefix.
+  Only free-form metadata slices may carry the truncation marker.
+- A maximum-size multibyte agent ID and artifact key round-trip through
+  awareness and the supported coordination posting surface without alteration.
+- Existing short generated subagent IDs remain unchanged. Exceptionally long
+  legacy session-derived root IDs are converted to a stable, namespace-prefixed
+  SHA-256 identifier within the same byte cap.
+
+Evidence:
+
+- Focused identifier/coordination/delegation suite: `211 passed`.
+- Broad O1-O7/delegation/cache/role suite: `776 passed, 1 skipped`.
+- Ruff, `py_compile`, and `git diff --check`: passed.
+
 ## Awareness parity and retry-id remediation
 
 The last audit aligned the human/model awareness view with the exact runtime

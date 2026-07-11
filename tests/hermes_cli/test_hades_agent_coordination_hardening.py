@@ -124,16 +124,20 @@ def test_manifest_and_awareness_have_hard_secret_safe_bounds(tmp_path, monkeypat
     assert "SECRET-" not in awareness
     assert "additional siblings omitted" in awareness
 
-    max_values = tuple(f"metadata-{index}-" + "x" * 240 for index in range(64))
+    max_scope_values = tuple(f"scope-{index}-" + "x" * 246 for index in range(64))
+    max_operational_values = tuple(
+        (f"op-{index}-" + "x" * 64).encode("utf-8")[:64].decode("utf-8")
+        for index in range(64)
+    )
     artifact_source = LeafManifest(
         "artifact-source", "parent", "leaf", "SOURCE-OBJECTIVE-SECRET"
     )
     artifact_target = LeafManifest(
         "artifact-target", "parent", "leaf", "TARGET-OBJECTIVE-SECRET",
-        write_scope=max_values,
-        interfaces=max_values,
-        dependencies=max_values,
-        produces=("artifact-only",) + max_values[:63],
+        write_scope=max_scope_values,
+        interfaces=max_operational_values,
+        dependencies=max_operational_values,
+        produces=("artifact-only",) + max_operational_values[:63],
     )
     artifact_awareness = format_manifest_awareness(
         artifact_source, (artifact_target,)
@@ -156,6 +160,64 @@ def test_manifest_and_awareness_have_hard_secret_safe_bounds(tmp_path, monkeypat
     assert "relevance=source_produces:source-art" in format_manifest_awareness(
         source_producer, (consumer,)
     )
+
+    max_multibyte_id = "界" * 21 + "a"  # exactly 64 UTF-8 bytes
+    max_multibyte_artifact = "資" * 21 + "b"
+    exact_source = LeafManifest(
+        "exact-source", "parent", "leaf", "private",
+        dependencies=(max_multibyte_id,),
+    )
+    exact_target = LeafManifest(
+        max_multibyte_id, "parent", "leaf", "private",
+        produces=(max_multibyte_artifact,),
+    )
+    exact_awareness = format_manifest_awareness(exact_source, (exact_target,))
+    assert f"id=`{max_multibyte_id}`" in exact_awareness
+    assert f"depends-on:{max_multibyte_id}" in exact_awareness
+    assert max_multibyte_artifact in exact_awareness
+    assert "OBJECTIVE" not in exact_awareness
+
+    with pytest.raises(ValueError, match="agent_id.*UTF-8 bytes"):
+        LeafManifest(max_multibyte_id + "x", "parent", "leaf", "private")
+    with pytest.raises(ValueError, match="produces item.*UTF-8 bytes"):
+        LeafManifest(
+            "valid-id", "parent", "leaf", "private",
+            produces=(max_multibyte_artifact + "x",),
+        )
+
+    exact_authority = DelegationAuthority(
+        "parent", db_path=tmp_path / "exact-identifiers.db"
+    )
+    exact_authority.register(actor_id="parent", manifest=exact_source)
+    exact_authority.register(actor_id="parent", manifest=exact_target)
+    exact_agent = SimpleNamespace(
+        _delegate_depth=1,
+        _delegate_role="leaf",
+        _hades_coordination_id="exact-source",
+        _hades_delegation_authority=exact_authority,
+    )
+    exact_post = __import__("json").loads(
+        delegate_task(
+            action="coordination_post",
+            recipient_id=max_multibyte_id,
+            event_type="question",
+            summary="exact identifiers",
+            artifact=max_multibyte_artifact,
+            _trusted_operation_id="exact-tool-call",
+            parent_agent=exact_agent,
+        )
+    )
+    assert exact_post["recipients"] == [max_multibyte_id]
+    overlong_post = delegate_task(
+        action="coordination_post",
+        recipient_id=max_multibyte_id,
+        event_type="question",
+        summary="reject long artifact",
+        artifact=max_multibyte_artifact + "x",
+        _trusted_operation_id="overlong-artifact-call",
+        parent_agent=exact_agent,
+    )
+    assert "artifact exceeds 64 UTF-8 bytes" in overlong_post
 
     import hermes_cli.hades_agent_coordination as coordination
 

@@ -22,6 +22,8 @@ _MAX_RECIPIENTS = 32
 _MAX_MANIFESTS_PER_NAMESPACE = 4_096
 _MAX_MANIFEST_FIELD_ITEMS = 64
 _MAX_MANIFEST_ITEM_CHARS = 256
+_MAX_ROUTABLE_ID_BYTES = 64
+_MAX_RELEVANCE_ID_BYTES = 64
 _MAX_OBJECTIVE_CHARS = 1_000
 _MAX_AWARENESS_SIBLINGS = 32
 MAX_MANIFEST_AWARENESS_BYTES = 8_192
@@ -60,8 +62,11 @@ class LeafManifest:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} is required")
             object.__setattr__(self, name, value.strip())
-        if len(self.agent_id) > 200 or len(self.parent_id) > 200:
-            raise ValueError("agent_id and parent_id are limited to 200 characters")
+        for name in ("agent_id", "parent_id"):
+            if len(getattr(self, name).encode("utf-8")) > _MAX_ROUTABLE_ID_BYTES:
+                raise ValueError(
+                    f"{name} exceeds {_MAX_ROUTABLE_ID_BYTES} UTF-8 bytes"
+                )
         if len(self.status) > 40:
             raise ValueError("status exceeds 40 characters")
         if len(self.objective) > _MAX_OBJECTIVE_CHARS:
@@ -81,11 +86,22 @@ class LeafManifest:
                 raise ValueError(
                     f"{name} item exceeds {_MAX_MANIFEST_ITEM_CHARS} characters"
                 )
+            if name in {"dependencies", "interfaces", "produces"} and any(
+                len(item.encode("utf-8")) > _MAX_RELEVANCE_ID_BYTES
+                for item in normalized
+            ):
+                raise ValueError(
+                    f"{name} item exceeds {_MAX_RELEVANCE_ID_BYTES} UTF-8 bytes"
+                )
             object.__setattr__(self, name, normalized)
         for name in ("root_id", "project_id"):
             value = getattr(self, name)
             if value:
                 object.__setattr__(self, name, _clean_text(value, name, 200))
+        if self.root_id and len(self.root_id.encode("utf-8")) > _MAX_ROUTABLE_ID_BYTES:
+            raise ValueError(
+                f"root_id exceeds {_MAX_ROUTABLE_ID_BYTES} UTF-8 bytes"
+            )
         if self.task_version < 1 or self.contract_version < 1:
             raise ValueError("manifest versions must be positive")
         if self.task_version > 2_147_483_647 or self.contract_version > 2_147_483_647:
@@ -190,6 +206,10 @@ class DelegationAuthority:
         if not isinstance(root_id, str) or not root_id.strip():
             raise ValueError("root_id is required")
         self.root_id = root_id.strip()
+        if len(self.root_id.encode("utf-8")) > _MAX_ROUTABLE_ID_BYTES:
+            raise ValueError(
+                f"root_id exceeds {_MAX_ROUTABLE_ID_BYTES} UTF-8 bytes"
+            )
         self.project_id = _clean_text(project_id, "project_id", 200)
         self.db_path = _path(db_path)
         # Force normal schema initialization through the DB migration owner.
@@ -483,6 +503,14 @@ def post_addressed_event(
     if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
         raise ValueError("ttl_seconds must be positive")
     event_id = _clean_text(event_id or str(uuid.uuid4()), "event_id", 200)
+    if artifact is not None and len(str(artifact).encode("utf-8")) > _MAX_RELEVANCE_ID_BYTES:
+        raise ValueError(
+            f"artifact exceeds {_MAX_RELEVANCE_ID_BYTES} UTF-8 bytes"
+        )
+    if blocker is not None and len(str(blocker).encode("utf-8")) > _MAX_ROUTABLE_ID_BYTES:
+        raise ValueError(
+            f"blocker exceeds {_MAX_ROUTABLE_ID_BYTES} UTF-8 bytes"
+        )
 
     canonical_request = json.dumps(
         {
@@ -892,10 +920,8 @@ def _bounded_awareness_value(value: str) -> str:
 
 def _render_awareness_entry(source: LeafManifest, target: LeafManifest) -> str:
     reasons = _relevance_reasons(source, target)
-    agent_id = _bounded_awareness_value(target.agent_id)
-    shown_reasons = tuple(
-        _bounded_awareness_value(reason) for reason in reasons[:2]
-    )
+    agent_id = target.agent_id
+    shown_reasons = reasons[:2]
     core = (
         f"  - id=`{agent_id}` role={target.role} status={target.status} "
         f"task-v={target.task_version} contract-v={target.contract_version} "
@@ -905,11 +931,7 @@ def _render_awareness_entry(source: LeafManifest, target: LeafManifest) -> str:
         return f"{core}; details hidden"
 
     fragments: list[str] = []
-    truncated = (
-        len(target.agent_id) > len(agent_id)
-        or len(reasons) > len(shown_reasons)
-        or any(reason != shown_reasons[index] for index, reason in enumerate(reasons[:2]))
-    )
+    truncated = len(reasons) > len(shown_reasons)
     for name in ("write_scope", "interfaces", "dependencies", "produces"):
         rendered, field_truncated = _awareness_values(getattr(target, name))
         fragment = f" {name}={rendered}"
