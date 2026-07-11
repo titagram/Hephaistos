@@ -147,3 +147,129 @@ def test_hades_backend_memory_provider_ignores_newer_more_specific_historical_bi
             "workspace_binding_ids": ["binding_current"],
         }
     ]
+
+
+def test_hades_backend_memory_provider_revalidates_binding_when_default_agent_changes(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    from hermes_cli import hades_backend_db as db
+    import plugins.memory.hades_backend as provider_mod
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_a",
+            project_id="project_a",
+            base_url="https://backend.example",
+            label="a",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_A",
+            capabilities={"memory": True},
+        )
+        binding_a = db.upsert_workspace_binding(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            local_project_id="local_a",
+            workspace_fingerprint="fingerprint_a",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_a",
+        )
+
+    calls = []
+    monkeypatch.setattr(provider_mod, "run_backend_sync", lambda **kwargs: calls.append(kwargs))
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+    assert provider._binding == binding_a
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_b",
+            project_id="project_b",
+            base_url="https://backend.example",
+            label="b",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_B",
+            capabilities={"memory": True},
+        )
+        binding_b = db.upsert_workspace_binding(
+            conn,
+            project_id="project_b",
+            agent_id="agent_b",
+            local_project_id="local_b",
+            workspace_fingerprint="fingerprint_b",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_b",
+        )
+
+    provider.sync_turn("user", "assistant", session_id="session_1")
+
+    assert provider._binding == binding_b
+    assert calls == [
+        {
+            "quiet": True,
+            "project_id": "project_b",
+            "workspace_binding_ids": ["binding_b"],
+        }
+    ]
+
+
+def test_hades_backend_memory_provider_skips_sync_when_cached_binding_is_unlinked(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    from hermes_cli import hades_backend_db as db
+    import plugins.memory.hades_backend as provider_mod
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_a",
+            project_id="project_a",
+            base_url="https://backend.example",
+            label="a",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_A",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            local_project_id="local_a",
+            workspace_fingerprint="fingerprint_a",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_a",
+        )
+
+    calls = []
+    monkeypatch.setattr(provider_mod, "run_backend_sync", lambda **kwargs: calls.append(kwargs))
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+
+    with db.connect_closing() as conn:
+        db.mark_binding_unlinked(conn, "fingerprint_a")
+
+    provider.sync_turn("user", "assistant", session_id="session_1")
+
+    assert provider._binding is None
+    assert calls == []

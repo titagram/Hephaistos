@@ -649,7 +649,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return bool(agent and agent.capabilities.get("memory", True))
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._binding = self._resolve_binding(Path(os.getcwd()))
+        self._binding = self._current_owned_binding(Path(os.getcwd()))
 
     def system_prompt_block(self) -> str:
         if self._binding is None:
@@ -729,6 +729,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
         session_id: str = "",
         messages: List[Dict[str, Any]] | None = None,
     ) -> None:
+        self._binding = self._current_owned_binding(Path(os.getcwd()))
         if self._binding is None:
             return None
         now = time.time()
@@ -1565,7 +1566,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 provenance=provenance,
             )
 
-    def _resolve_binding(self, cwd: Path) -> db.WorkspaceBinding | None:
+    def _current_owned_binding(self, cwd: Path) -> db.WorkspaceBinding | None:
         try:
             resolved = cwd.resolve()
         except OSError:
