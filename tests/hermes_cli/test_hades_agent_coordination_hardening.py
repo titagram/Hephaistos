@@ -14,9 +14,12 @@ from hermes_cli.hades_agent_coordination import (
     mark_coordination_recipient_completed,
     post_addressed_event,
     prepare_pending_coordination,
+    format_manifest_awareness,
+    MAX_MANIFEST_AWARENESS_BYTES,
 )
 from types import SimpleNamespace
 from hermes_cli.kanban_swarm import post_addressed_blackboard_update
+from tools.delegate_tool import DELEGATE_TASK_SCHEMA, delegate_task
 
 
 def registry(tmp_path):
@@ -88,6 +91,130 @@ def test_same_ids_are_isolated_across_roots_and_projects(tmp_path) -> None:
                 root_id="root-b", project_id="project-b",
             ),
         )
+
+
+def test_manifest_and_awareness_have_hard_secret_safe_bounds(tmp_path, monkeypatch) -> None:
+    with pytest.raises(ValueError, match="objective"):
+        LeafManifest("huge", "parent", "leaf", "s" * 1_000_000)
+    with pytest.raises(ValueError, match="entries"):
+        LeafManifest(
+            "huge-list", "parent", "leaf", "bounded",
+            interfaces=tuple(f"i-{index}" for index in range(65)),
+        )
+
+    current = LeafManifest(
+        "current", "parent", "leaf", "private-current",
+        dependencies=("relevant",), interfaces=("users-api",),
+    )
+    relevant = LeafManifest(
+        "relevant", "parent", "leaf", "DO-NOT-LEAK-RELEVANT-OBJECTIVE",
+        interfaces=("users-api",), produces=("schema.json",),
+    )
+    siblings = (relevant,) + tuple(
+        LeafManifest(
+            f"sibling-{index}", "parent", "leaf", f"SECRET-{index}",
+        )
+        for index in range(999)
+    )
+    awareness = format_manifest_awareness(current, siblings)
+    assert len(awareness.encode("utf-8")) <= MAX_MANIFEST_AWARENESS_BYTES
+    assert "relevance=depends-on:relevant,interface:users-api" in awareness
+    assert "produces=['schema.json']" in awareness
+    assert "DO-NOT-LEAK" not in awareness
+    assert "SECRET-" not in awareness
+    assert "additional siblings omitted" in awareness
+
+    import hermes_cli.hades_agent_coordination as coordination
+
+    monkeypatch.setattr(coordination, "_MAX_MANIFESTS_PER_NAMESPACE", 2)
+    limited = DelegationAuthority("limited-root", db_path=tmp_path / "limited.db")
+    for index in range(2):
+        limited.register(
+            actor_id="limited-root",
+            manifest=LeafManifest(
+                f"limited-{index}", "limited-root", "leaf", "bounded"
+            ),
+        )
+    with pytest.raises(ValueError, match="registry limit"):
+        limited.register(
+            actor_id="limited-root",
+            manifest=LeafManifest(
+                "limited-overflow", "limited-root", "leaf", "bounded"
+            ),
+        )
+
+
+def test_supported_coordination_surface_routes_two_children_safely(tmp_path) -> None:
+    authority, path = registry(tmp_path)
+    leaf_a = SimpleNamespace(
+        _delegate_depth=2,
+        _delegate_role="leaf",
+        _hades_coordination_id="leaf-a",
+        _hades_delegation_authority=authority,
+    )
+    leaf_b = SimpleNamespace(
+        _delegate_depth=2,
+        _delegate_role="leaf",
+        _hades_coordination_id="leaf-b",
+        _hades_delegation_authority=authority,
+    )
+
+    posted = delegate_task(
+        action="coordination_post",
+        recipient_id="leaf-b",
+        event_type="question",
+        summary="Which schema should I consume?",
+        artifact="schema.json",
+        parent_agent=leaf_a,
+    )
+    assert __import__("json").loads(posted)["recipients"] == ["leaf-b"]
+    assert coordination_state(
+        "leaf-b", root_id=authority.root_id, project_id=authority.project_id,
+        db_path=path,
+    ).dirty
+
+    messages = [{"role": "tool", "tool_call_id": "call-b", "content": "work"}]
+    delivery = prepare_pending_coordination(leaf_b, messages, 1)
+    assert delivery is not None
+    from agent.tool_executor import _compose_runtime_coordination
+
+    assert _compose_runtime_coordination(messages, [delivery], aggregate_budget=16_000)
+    assert "Which schema should I consume?" in messages[0]["content"]
+
+    response = delegate_task(
+        action="coordination_post",
+        recipient_id="leaf-a",
+        event_type="answer",
+        summary="Use schema.json v1",
+        artifact="schema.json",
+        parent_agent=leaf_b,
+    )
+    assert __import__("json").loads(response)["recipients"] == ["leaf-a"]
+    assert coordination_state(
+        "leaf-a", root_id=authority.root_id, project_id=authority.project_id,
+        db_path=path,
+    ).dirty
+
+    denied_inspect = delegate_task(
+        action="coordination_inspect",
+        target_agent_id="leaf-b",
+        parent_agent=leaf_a,
+    )
+    assert "error" in __import__("json").loads(denied_inspect)
+    denied_spawn = delegate_task(goal="spoof spawn", parent_agent=leaf_a)
+    assert "only an orchestrator" in denied_spawn
+    malformed_evidence = delegate_task(
+        action="coordination_post",
+        recipient_id="leaf-b",
+        event_type="question",
+        summary="bad evidence shape",
+        evidence_refs="not-an-array",
+        artifact="schema.json",
+        parent_agent=leaf_a,
+    )
+    assert "evidence_refs must be an array" in malformed_evidence
+    properties = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+    assert not {"actor_id", "root_id", "project_id"} & properties.keys()
 
 
 def test_event_id_is_namespaced_and_full_request_is_immutable(tmp_path) -> None:

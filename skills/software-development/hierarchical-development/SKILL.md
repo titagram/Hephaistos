@@ -28,6 +28,18 @@ Before creating an `orchestrator`, provide a structured task contract with: `obj
 
 Only a leaf's direct parent may command that leaf or modify its task contract. The root/main agent may inspect or query a leaf for information, but must not command it or change its task contract unless it is that leaf's direct parent. Apply this rule recursively at every level: each orchestrator commands and revises contracts only for its direct children, and every child reports through its parent chain.
 
+## Addressed coordination
+
+Inside an active delegated task, use the existing `delegate_task` surface; do not invent sender or namespace fields:
+
+- `action="coordination_post"` with `recipient_id`, `event_type`, and `summary` posts a bounded addressed event. Add `artifact`, `blocker`, or `evidence_refs` only when they prove why that recipient is relevant.
+- `action="coordination_status"` reads bounded delivery state for self, a direct child, or an otherwise authorized target.
+- `action="coordination_inspect"` reads the authorized manifest view. It never changes a contract.
+
+The runtime binds `actor_id`, delegation root, and project from the active child; never request, accept, or synthesize those identities in arguments. Leaves and reviewers cannot use this surface to spawn children. Only an orchestrator may use `action="delegate"` below the root.
+
+Questions and answers between siblings require an explicit dependency, shared interface/scope, named artifact, or blocker. If relevance is absent, address the direct parent instead. Blackboard delivery occurs only at a safe trailing tool boundary; it is information-only and does not authorize contract drift. The root may post a read-only question to a descendant but may not answer as that descendant, command it, or mutate its task. Do not poll: use status only for an actual diagnostic need, and let the dirty-generation wakeup deliver new information.
+
 The direct parent performs normal review of each direct child's scope, evidence packet, verification, and residual risk. Escalate to a dedicated non-delegating independent reviewer only when independent review is explicitly requested or the result is high-risk, disputed, or escalated. A reviewer reports findings first and returns a bounded pass/fail conclusion; it does not command leaves.
 
 For durable work, require a validated execution portfolio with repository-relative write scopes, dependencies, assignees, risk, and acceptance evidence. Materialize it with `hades org validate` then `hades org materialize`; do not upload raw plans, source, transcripts, reasoning, or secrets to the backend.

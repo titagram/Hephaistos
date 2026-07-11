@@ -19,6 +19,12 @@ _EVENT_TYPES = frozenset(
     {"question", "answer", "blocker", "interface_change", "pending_child_event"}
 )
 _MAX_RECIPIENTS = 32
+_MAX_MANIFESTS_PER_NAMESPACE = 4_096
+_MAX_MANIFEST_FIELD_ITEMS = 64
+_MAX_MANIFEST_ITEM_CHARS = 256
+_MAX_OBJECTIVE_CHARS = 1_000
+_MAX_AWARENESS_SIBLINGS = 32
+MAX_MANIFEST_AWARENESS_BYTES = 8_192
 _MAX_SUMMARY_CHARS = 2_000
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 512
@@ -51,12 +57,32 @@ class LeafManifest:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} is required")
             object.__setattr__(self, name, value.strip())
+        if len(self.agent_id) > 200 or len(self.parent_id) > 200:
+            raise ValueError("agent_id and parent_id are limited to 200 characters")
+        if len(self.status) > 40:
+            raise ValueError("status exceeds 40 characters")
+        if len(self.objective) > _MAX_OBJECTIVE_CHARS:
+            raise ValueError(
+                f"objective exceeds {_MAX_OBJECTIVE_CHARS} characters"
+            )
         if self.role not in {"leaf", "orchestrator", "reviewer"}:
             raise ValueError("role must be leaf, orchestrator, or reviewer")
         for name in ("write_scope", "dependencies", "interfaces", "produces"):
             raw = getattr(self, name)
             normalized = tuple(str(item).strip() for item in raw if str(item).strip())
+            if len(normalized) > _MAX_MANIFEST_FIELD_ITEMS:
+                raise ValueError(
+                    f"{name} exceeds {_MAX_MANIFEST_FIELD_ITEMS} entries"
+                )
+            if any(len(item) > _MAX_MANIFEST_ITEM_CHARS for item in normalized):
+                raise ValueError(
+                    f"{name} item exceeds {_MAX_MANIFEST_ITEM_CHARS} characters"
+                )
             object.__setattr__(self, name, normalized)
+        for name in ("root_id", "project_id"):
+            value = getattr(self, name)
+            if value:
+                object.__setattr__(self, name, _clean_text(value, name, 200))
         if self.task_version < 1 or self.contract_version < 1:
             raise ValueError("manifest versions must be positive")
 
@@ -200,6 +226,14 @@ class DelegationAuthority:
                    WHERE root_id=? AND project_id=? AND agent_id=?""",
                 (self.root_id, self.project_id, manifest.agent_id),
             ).fetchone()
+            count = conn.execute(
+                """SELECT COUNT(*) FROM agent_coordination_manifests
+                   WHERE root_id=? AND project_id=?""",
+                (self.root_id, self.project_id),
+            ).fetchone()[0]
+            if existing_row is None and int(count) >= _MAX_MANIFESTS_PER_NAMESPACE:
+                conn.rollback()
+                raise ValueError("delegation manifest registry limit reached")
             if existing_row is not None:
                 existing = _manifest_from_row(existing_row)
                 if existing == manifest:
@@ -373,6 +407,8 @@ def _clean_text(value: str, field: str, limit: int) -> str:
 
 
 def _validate_evidence(refs: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(refs, (str, bytes)) or not isinstance(refs, Sequence):
+        raise ValueError("evidence_refs must be an array")
     if len(refs) > _MAX_EVIDENCE_REFS:
         raise ValueError(f"evidence_refs exceeds {_MAX_EVIDENCE_REFS} entries")
     normalized = tuple(
@@ -782,14 +818,59 @@ def format_manifest_awareness(
         "  artifact, scope, or blocker relevance; otherwise ask your parent.",
         "- Known siblings:",
     ]
-    for item in siblings:
-        lines.append(
-            f"  - `{item.agent_id}` ({item.role}, {item.status}, task-v{item.task_version}, "
-            f"contract-v{item.contract_version}): {item.objective}"
-        )
+    for item in siblings[:_MAX_AWARENESS_SIBLINGS]:
+        reasons = _relevance_reasons(current, item)
+        if reasons:
+            candidate = (
+                f"  - id=`{item.agent_id}` role={item.role} status={item.status} "
+                f"task-v={item.task_version} contract-v={item.contract_version} "
+                f"relevance={','.join(reasons)} "
+                f"write_scope={list(item.write_scope)!r} "
+                f"interfaces={list(item.interfaces)!r} "
+                f"dependencies={list(item.dependencies)!r} "
+                f"produces={list(item.produces)!r}"
+            )
+        else:
+            candidate = (
+                f"  - id=`{item.agent_id}` role={item.role} status={item.status} "
+                f"task-v={item.task_version} contract-v={item.contract_version} "
+                "relevance=none; details hidden"
+            )
+        trial = "\n".join(lines + [candidate])
+        if len(trial.encode("utf-8")) > MAX_MANIFEST_AWARENESS_BYTES:
+            break
+        lines.append(candidate)
     if not siblings:
         lines.append("  - (none)")
+    elif len(siblings) > _MAX_AWARENESS_SIBLINGS:
+        omission = (
+            f"  - ({len(siblings) - _MAX_AWARENESS_SIBLINGS} "
+            "additional siblings omitted)"
+        )
+        if len("\n".join(lines + [omission]).encode("utf-8")) <= MAX_MANIFEST_AWARENESS_BYTES:
+            lines.append(omission)
     return "\n".join(lines)
+
+
+def _relevance_reasons(source: LeafManifest, target: LeafManifest) -> tuple[str, ...]:
+    """Return bounded, non-secret reasons that justify sibling awareness."""
+
+    if source.parent_id != target.parent_id:
+        return ()
+    reasons: list[str] = []
+    if source.agent_id in target.dependencies:
+        reasons.append(f"target-depends-on:{source.agent_id}")
+    if target.agent_id in source.dependencies:
+        reasons.append(f"depends-on:{target.agent_id}")
+    shared_interfaces = sorted(set(source.interfaces) & set(target.interfaces))
+    if shared_interfaces:
+        reasons.append(f"interface:{shared_interfaces[0]}")
+    if _scope_overlaps(source.write_scope, target.write_scope):
+        reasons.append("scope-overlap")
+    shared_artifacts = sorted(set(source.produces) & set(target.produces))
+    if shared_artifacts:
+        reasons.append(f"artifact:{shared_artifacts[0]}")
+    return tuple(reasons[:4])
 
 
 def render_coordination_block(events: Sequence[CoordinationEvent]) -> str:

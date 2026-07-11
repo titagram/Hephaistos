@@ -1959,7 +1959,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         self.assertEqual(
             MockAgent.call_args[1]["enabled_toolsets"],
-            ["web", "browser", "mcp-MiniMax"],
+            ["web", "browser", "mcp-MiniMax", "delegation"],
         )
 
     @patch(
@@ -1987,7 +1987,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         self.assertEqual(
             MockAgent.call_args[1]["enabled_toolsets"],
-            ["web", "browser"],
+            ["web", "browser", "delegation"],
         )
 
 
@@ -2751,7 +2751,7 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
             MockAgent.return_value = mock_child
             delegate_task(goal="review", role="reviewer", parent_agent=parent)
             kwargs = MockAgent.call_args[1]
-            self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+            self.assertIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "reviewer")
             self.assertIn(
                 "independent review",
@@ -2780,7 +2780,7 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
                 task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
             )
             kwargs = MockAgent.call_args[1]
-            self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+            self.assertIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "leaf")
 
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -2806,7 +2806,7 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
                 task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
             )
             kwargs = MockAgent.call_args[1]
-            self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+            self.assertIn("delegation", kwargs["enabled_toolsets"])
             self.assertEqual(mock_child._delegate_role, "leaf")
 
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -2829,17 +2829,18 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
                     task_contract=ORCHESTRATOR_CONTRACT, parent_agent=parent,
                 )
                 kwargs = MockAgent.call_args[1]
-                self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+                self.assertIn("delegation", kwargs["enabled_toolsets"])
                 self.assertEqual(mock_child._delegate_role, "leaf")
 
     # ── Role-aware system prompt ────────────────────────────────────────
 
-    def test_leaf_prompt_does_not_mention_delegation(self):
+    def test_leaf_prompt_exposes_coordination_but_forbids_spawning(self):
         prompt = _build_child_system_prompt(
             "Fix tests", role="leaf",
             max_spawn_depth=2, child_depth=1,
         )
-        self.assertNotIn("delegate_task", prompt)
+        self.assertIn("delegate_task", prompt)
+        self.assertIn("cannot spawn children", prompt)
         self.assertNotIn("Orchestrator Role", prompt)
 
     def test_orchestrator_prompt_mentions_delegation_capability(self):
@@ -2910,8 +2911,8 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
                 parent_agent=parent,
             )
         self.assertIn("delegation", built_toolsets[0])
-        self.assertNotIn("delegation", built_toolsets[1])
-        self.assertNotIn("delegation", built_toolsets[2])
+        self.assertIn("delegation", built_toolsets[1])
+        self.assertIn("delegation", built_toolsets[2])
 
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_config",
@@ -3039,9 +3040,9 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
         self.assertIn("delegation", built_agents[0]["enabled_toolsets"])
         self.assertTrue(built_agents[0]["is_orchestrator_prompt"])
         # Next two = leaves (grandchildren)
-        self.assertNotIn("delegation", built_agents[1]["enabled_toolsets"])
+        self.assertIn("delegation", built_agents[1]["enabled_toolsets"])
         self.assertFalse(built_agents[1]["is_orchestrator_prompt"])
-        self.assertNotIn("delegation", built_agents[2]["enabled_toolsets"])
+        self.assertIn("delegation", built_agents[2]["enabled_toolsets"])
         self.assertFalse(built_agents[2]["is_orchestrator_prompt"])
 
 
@@ -3282,7 +3283,7 @@ class TestAdaptiveCapacityPreflight(unittest.TestCase):
             )
 
         self.assertEqual(child._delegate_role, "leaf")
-        self.assertNotIn("delegation", agent_cls.call_args.kwargs["enabled_toolsets"])
+        self.assertIn("delegation", agent_cls.call_args.kwargs["enabled_toolsets"])
 
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -3431,7 +3432,8 @@ class TestDelegationManifestAwareness(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(children[0]._hades_sibling_manifests[0].agent_id, "leaf-1")
         self.assertIn(
-            "`leaf-1` (reviewer, running, task-v1, contract-v1): beta",
+            "id=`leaf-1` role=reviewer status=running task-v=1 contract-v=1 "
+            "relevance=none; details hidden",
             children[0].ephemeral_system_prompt,
         )
         self.assertIn("Only your direct parent may command", children[0].ephemeral_system_prompt)

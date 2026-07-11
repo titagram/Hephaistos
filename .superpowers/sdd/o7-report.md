@@ -171,3 +171,35 @@ Final evidence:
 - Ruff: all checks passed (the pre-existing malformed `# noqa` warning at
   `run_agent.py:107` remains non-blocking).
 - `py_compile` and `git diff --check`: passed.
+
+## Final operational surface and manifest-bound remediation
+
+The final integration audit required a supported model-facing path into the
+already durable coordination runtime. This was added as bounded actions on the
+existing `delegate_task` tool, avoiding a new unconditional core tool:
+
+- `coordination_post`, `coordination_status`, and `coordination_inspect` are
+  discoverable in the stable delegation schema. Sender, root, and project are
+  taken exclusively from the active delegated runtime context; the schema has
+  no spoofable identity or namespace fields.
+- Leaves and reviewers retain the delegation toolset for these coordination
+  actions, but runtime authorization rejects attempts to spawn children. Only
+  an orchestrator may use the normal `delegate` action below the root.
+- Addressed question/answer delivery uses the existing relevance and authority
+  checks. The E2E test proves a relevant leaf-to-leaf question, safe-boundary
+  wakeup, answer routing, unauthorized inspection denial, and leaf fan-out
+  denial.
+- The hierarchical-development skill now documents the exact operational
+  actions, runtime-bound identity rule, relevance proof, safe-boundary wakeup,
+  and root/direct-parent read-only semantics.
+- Manifest objectives, list counts, list-item sizes, identities, status, and
+  total registry size have hard limits. Awareness is limited by sibling count
+  and UTF-8 bytes, omits objectives entirely, hides irrelevant sibling details,
+  and exposes concise structured scope/interface/dependency/artifact metadata
+  plus exact relevance reasons and task/contract versions.
+
+Final integration evidence:
+
+- Focused coordination/delegation/dispatch suite: `210 passed`.
+- Broad O1-O7/delegation/cache/role suite: `775 passed, 1 skipped`.
+- Ruff, `py_compile`, and `git diff --check`: passed.

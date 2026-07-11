@@ -771,6 +771,14 @@ def _build_child_system_prompt(
             "scope. If there are no findings, say so explicitly before the "
             "conclusion."
         )
+    else:
+        parts.append(
+            "\n## Delegation coordination\n"
+            "You cannot spawn children. The visible `delegate_task` tool is "
+            "available only for `coordination_post`, `coordination_status`, "
+            "and `coordination_inspect`. Use addressed events only when the "
+            "manifest awareness proves relevance; otherwise ask your parent."
+        )
     return "\n".join(parts)
 
 
@@ -1180,7 +1188,7 @@ def _build_child_agent(
     # removed.  The re-add is unconditional on parent-toolset membership because
     # orchestrator capability is granted by role, not inherited — see the
     # test_intersection_preserves_delegation_bound test for the design rationale.
-    if effective_role == "orchestrator" and "delegation" not in child_toolsets:
+    if "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
@@ -2342,6 +2350,14 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     task_contract: Optional[Dict[str, Any]] = None,
+    action: str = "delegate",
+    recipient_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    summary: Optional[str] = None,
+    evidence_refs: Optional[List[str]] = None,
+    artifact: Optional[str] = None,
+    blocker: Optional[str] = None,
+    target_agent_id: Optional[str] = None,
     background: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
@@ -2361,6 +2377,28 @@ def delegate_task(
     """
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
+
+    clean_action = str(action or "delegate").strip().lower()
+    if clean_action != "delegate":
+        return _delegation_coordination_action(
+            clean_action,
+            parent_agent=parent_agent,
+            recipient_id=recipient_id,
+            event_type=event_type,
+            summary=summary,
+            evidence_refs=evidence_refs or [],
+            artifact=artifact,
+            blocker=blocker,
+            target_agent_id=target_agent_id,
+        )
+
+    active_role = getattr(parent_agent, "_delegate_role", None)
+    if (
+        getattr(parent_agent, "_delegate_depth", 0) > 0
+        and isinstance(active_role, str)
+        and active_role in {"leaf", "reviewer"}
+    ):
+        return tool_error("only an orchestrator may delegate new child tasks")
 
     # Operator-controlled kill switch — lets the TUI freeze new fan-out
     # when a runaway tree is detected, without interrupting already-running
@@ -3061,6 +3099,71 @@ def delegate_task(
     return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
 
 
+def _delegation_coordination_action(
+    action: str,
+    *,
+    parent_agent,
+    recipient_id: Optional[str],
+    event_type: Optional[str],
+    summary: Optional[str],
+    evidence_refs: List[str],
+    artifact: Optional[str],
+    blocker: Optional[str],
+    target_agent_id: Optional[str],
+) -> str:
+    """Perform bounded DAG coordination under the runtime-bound identity."""
+
+    from hermes_cli.hades_agent_coordination import (
+        DelegationAuthority,
+        coordination_state,
+        post_addressed_event,
+    )
+
+    authority = getattr(parent_agent, "_hades_delegation_authority", None)
+    actor_id = getattr(parent_agent, "_hades_coordination_id", None)
+    if not isinstance(authority, DelegationAuthority) or not isinstance(actor_id, str):
+        return tool_error("coordination action requires an active delegated task")
+    try:
+        if action == "coordination_post":
+            event = post_addressed_event(
+                authority=authority,
+                actor_id=actor_id,
+                recipient_id=str(recipient_id or ""),
+                event_type=str(event_type or ""),
+                summary=str(summary or ""),
+                evidence_refs=evidence_refs,
+                artifact=artifact,
+                blocker=blocker,
+            )
+            return json.dumps(
+                {
+                    "status": "posted",
+                    "event_id": event.event_id,
+                    "recipients": list(event.recipients),
+                    "sequence": event.sequence,
+                },
+                ensure_ascii=False,
+            )
+        if action == "coordination_status":
+            target = str(target_agent_id or actor_id)
+            authority.inspect(actor_id, target)
+            state = coordination_state(
+                target,
+                root_id=authority.root_id,
+                project_id=authority.project_id,
+                db_path=authority.db_path,
+            )
+            return json.dumps(asdict(state), ensure_ascii=False)
+        if action == "coordination_inspect":
+            target = str(target_agent_id or actor_id)
+            return json.dumps(
+                asdict(authority.inspect(actor_id, target)), ensure_ascii=False
+            )
+        return tool_error(f"unsupported delegate_task action: {action}")
+    except (KeyError, PermissionError, TypeError, ValueError) as exc:
+        return tool_error(str(exc))
+
+
 def _resolve_child_credential_pool(
     effective_provider: Optional[str],
     parent_agent,
@@ -3335,7 +3438,9 @@ def _build_top_level_description() -> str:
         )
 
     return (
-        "Spawn one or more subagents to work on tasks in isolated contexts. "
+        "Spawn subagents or coordinate an active delegated DAG. Use "
+        "action='delegate' for spawning; delegated agents use "
+        "coordination_post/status/inspect without changing their contract. "
         "Each subagent gets its own conversation, terminal session, and toolset. "
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
@@ -3521,6 +3626,50 @@ DELEGATE_TASK_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "delegate",
+                    "coordination_post",
+                    "coordination_status",
+                    "coordination_inspect",
+                ],
+                "description": (
+                    "Operation. Coordination actions bind sender, root, and "
+                    "project to the active delegated task; these identities "
+                    "cannot be supplied or overridden by the model."
+                ),
+            },
+            "recipient_id": {
+                "type": "string",
+                "description": "Addressed recipient for coordination_post.",
+            },
+            "event_type": {
+                "type": "string",
+                "enum": ["question", "answer", "blocker", "interface_change"],
+                "description": "Bounded event type for coordination_post.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "Bounded information-only event summary.",
+            },
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional bounded local evidence references.",
+            },
+            "artifact": {
+                "type": "string",
+                "description": "Artifact proving relevance to the recipient.",
+            },
+            "blocker": {
+                "type": "string",
+                "description": "Named blocker proving relevance to the recipient.",
+            },
+            "target_agent_id": {
+                "type": "string",
+                "description": "Target for coordination_status/inspect; defaults to self.",
+            },
             "goal": {
                 "type": "string",
                 "description": (
@@ -3681,6 +3830,14 @@ registry.register(
         acp_args=args.get("acp_args"),
         role=args.get("role"),
         task_contract=args.get("task_contract"),
+        action=args.get("action", "delegate"),
+        recipient_id=args.get("recipient_id"),
+        event_type=args.get("event_type"),
+        summary=args.get("summary"),
+        evidence_refs=args.get("evidence_refs"),
+        artifact=args.get("artifact"),
+        blocker=args.get("blocker"),
+        target_agent_id=args.get("target_agent_id"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),
