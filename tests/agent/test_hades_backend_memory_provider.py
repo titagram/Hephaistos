@@ -1064,6 +1064,55 @@ def test_hades_backend_memory_provider_prefetch_ranks_by_query(monkeypatch, tmp_
     assert context.index("Security activity routes") < context.index("Security billing jobs")
 
 
+def test_hades_backend_memory_provider_prefetch_falls_back_to_wiki_when_broad_search_only_omits_raw_chunks(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    calls = []
+
+    def search(**kwargs):
+        calls.append(kwargs)
+        if kwargs["domain"] == "all":
+            return {"items": [], "raw_chunks_omitted": 200}, None
+        return {
+            "items": [
+                {
+                    "domain": "wiki",
+                    "summary": "Entity index",
+                    "payload_excerpt": "Workers and departments",
+                }
+            ],
+            "raw_chunks_omitted": 0,
+            "version": "wiki-v1",
+        }, None
+
+    monkeypatch.setattr(provider, "_backend_memory_search", search)
+
+    context = provider.prefetch("Quali sono le entità principali?")
+
+    assert [call["domain"] for call in calls] == ["all", "wiki"]
+    assert "Entity index" in context
+
+
+def test_hades_backend_memory_provider_prefetch_does_not_query_wiki_when_broad_search_is_usable(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    calls = []
+
+    def search(**kwargs):
+        calls.append(kwargs)
+        return {
+            "items": [{"domain": "project_memory", "summary": "Compact fact"}],
+            "raw_chunks_omitted": 0,
+        }, None
+
+    monkeypatch.setattr(provider, "_backend_memory_search", search)
+
+    assert "Compact fact" in provider.prefetch("fact")
+    assert [call["domain"] for call in calls] == ["all"]
+
+
 def test_hades_backend_memory_search_tool_filters_domains_and_raw_chunks(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

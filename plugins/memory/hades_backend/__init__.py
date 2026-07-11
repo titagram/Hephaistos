@@ -680,8 +680,17 @@ class HadesBackendMemoryProvider(MemoryProvider):
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
         )
-        if backend_result is not None:
+        if backend_result is not None and _has_usable_prefetch_items(backend_result):
             return _format_backend_prefetch(backend_result)
+        wiki_result, _wiki_error = self._backend_memory_search(
+            query=query,
+            domain="wiki",
+            filters={},
+            limit=AUTO_PREFETCH_LIMIT,
+            include_raw_chunks=False,
+        )
+        if wiki_result is not None and _has_usable_prefetch_items(wiki_result):
+            return _format_backend_prefetch(wiki_result)
         cache = self._load_memory_cache()
         if cache is None or not cache.items:
             return (
@@ -2255,6 +2264,13 @@ def _backend_items(response: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _has_usable_prefetch_items(response: dict[str, Any]) -> bool:
+    return any(
+        not bool(item.get("raw_chunk") or _is_raw_chunk_item(item))
+        for item in _backend_items(response)
+    )
 
 
 def _format_backend_prefetch(response: dict[str, Any]) -> str:
