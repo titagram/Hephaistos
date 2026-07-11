@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 
 import httpx
 
@@ -210,6 +212,38 @@ def test_plugin_client_sends_configured_device_header_on_work_item_routes():
         "https://backend.example",
         "plugin-token",
         device_id="dev_1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.list_agent_work_items(project_id="proj_1") == {"items": []}
+
+
+def test_plugin_client_signs_device_bound_requests_with_the_bootstrap_secret():
+    from hermes_cli.hades_plugin_work_items_client import HadesPluginWorkItemsClient
+
+    device_secret = "bootstrap-device-secret"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timestamp = request.headers["x-devboard-timestamp"]
+        body_hash = hashlib.sha256(request.content).hexdigest()
+        canonical = "\n".join((
+            request.method,
+            request.url.raw_path.decode("utf-8"),
+            timestamp,
+            body_hash,
+        ))
+        assert request.headers["x-devboard-device-id"] == "dev_1"
+        assert request.headers["x-devboard-content-sha256"] == body_hash
+        assert request.headers["x-devboard-signature"] == "v1=" + hmac.new(
+            device_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return httpx.Response(200, json={"items": []})
+
+    client = HadesPluginWorkItemsClient(
+        "https://backend.example",
+        "plugin-token",
+        device_id="dev_1",
+        device_secret=device_secret,
         transport=httpx.MockTransport(handler),
     )
 

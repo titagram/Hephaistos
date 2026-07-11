@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -15,7 +17,14 @@ from typing import Any, Callable
 
 from hermes_cli.config import load_config, save_config, save_env_value
 from hermes_cli.hades_coordination import hades_coordination_profiles
-from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError, redact_secret, token_env_key
+from hermes_cli.hades_backend_client import (
+    HadesBackendClient,
+    HadesBackendError,
+    plugin_device_secret_env_key,
+    plugin_token_env_key,
+    redact_secret,
+    token_env_key,
+)
 from hermes_cli.hades_backend_actions import (
     acknowledge_memory_proposal,
     approve_backend_job,
@@ -318,6 +327,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         platform=platform.system().lower(),
         version=_version(),
         capabilities=_detect_default_capabilities(),
+        plugin_device=_plugin_device_payload(agent_id, label),
     )
     derived = str(registered.get("agent_token") or "").strip()
     if not derived:
@@ -327,12 +337,32 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     env_key = token_env_key(args.url, args.project_id, final_agent_id)
     save_env_value(env_key, derived)
 
+    plugin_credentials = registered.get("plugin_credentials")
+    plugin_token = ""
+    plugin_device_id = ""
+    plugin_device_secret = ""
+    if isinstance(plugin_credentials, dict):
+        plugin_token = str(plugin_credentials.get("token") or "").strip()
+        plugin_device_id = str(plugin_credentials.get("device_id") or "").strip()
+        plugin_device_secret = str(plugin_credentials.get("device_secret") or "").strip()
+        if not all((plugin_token, plugin_device_id, plugin_device_secret)):
+            print("backend: registration response included incomplete plugin_credentials", file=sys.stderr)
+            return 1
+
     config = load_config()
     backend = config.setdefault("backend", {})
     backend["enabled"] = True
     backend["base_url"] = args.url.rstrip("/")
     backend["default_project_id"] = args.project_id
     backend["agent_id"] = final_agent_id
+    if plugin_token:
+        plugin_env_key = plugin_token_env_key(args.url, args.project_id, final_agent_id)
+        plugin_secret_env_key = plugin_device_secret_env_key(args.url, args.project_id, final_agent_id)
+        save_env_value(plugin_env_key, plugin_token)
+        save_env_value(plugin_secret_env_key, plugin_device_secret)
+        backend["plugin_token_env_key"] = plugin_env_key
+        backend["plugin_device_secret_env_key"] = plugin_secret_env_key
+        backend["plugin_device_id"] = plugin_device_id
     memory = config.setdefault("memory", {})
     memory["provider"] = "hades_backend"
     memory.setdefault("orphaned_cache_retention_days", 90)
@@ -353,7 +383,21 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     print(f"  Project: {args.project_id}")
     print(f"  Agent:   {final_agent_id} ({label})")
     print("  Memory:  hades_backend")
+    if not plugin_token:
+        print("  Plugin:  unavailable (upgrade backend to provision task credentials)")
     return 0
+
+
+def _plugin_device_payload(agent_id: str, label: str) -> dict[str, str]:
+    profile = os.environ.get("HERMES_PROFILE", "default")
+    material = f"{agent_id}|{socket.gethostname()}|{profile}|{platform.system()}|{platform.machine()}"
+    return {
+        "fingerprint_hash": "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        "name": label,
+        "platform_os": platform.system().lower() or "unknown",
+        "platform_arch": platform.machine() or "unknown",
+        "plugin_version": _version(),
+    }
 
 
 def _cmd_status(args: argparse.Namespace) -> int:

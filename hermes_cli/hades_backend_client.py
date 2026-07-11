@@ -63,6 +63,16 @@ def token_env_key(base_url: str, project_id: str, agent_id: str) -> str:
     return f"HADES_BACKEND_AGENT_TOKEN_{digest}"
 
 
+def plugin_token_env_key(base_url: str, project_id: str, agent_id: str) -> str:
+    """Return the profile-secret env key for a bootstrap-derived Plugin token."""
+    return token_env_key(base_url, project_id, agent_id).replace("AGENT_TOKEN", "PLUGIN_TOKEN")
+
+
+def plugin_device_secret_env_key(base_url: str, project_id: str, agent_id: str) -> str:
+    """Return the profile-secret env key for the Plugin request-signing secret."""
+    return token_env_key(base_url, project_id, agent_id).replace("AGENT_TOKEN", "PLUGIN_DEVICE_SECRET")
+
+
 def redact_secret(text: Any) -> str:
     """Redact likely backend/API secrets from text before surfacing errors."""
     value = text if isinstance(text, str) else json.dumps(text, sort_keys=True, default=str)
@@ -249,6 +259,7 @@ class HadesBackendClient:
         platform: str,
         version: str,
         capabilities: list[str],
+        plugin_device: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -260,6 +271,7 @@ class HadesBackendClient:
                 "platform": platform,
                 "version": version,
                 "capabilities": capabilities,
+                **({"plugin_device": plugin_device} if plugin_device else {}),
             },
         )
 

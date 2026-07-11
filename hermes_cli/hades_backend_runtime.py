@@ -40,6 +40,11 @@ def plugin_work_items_token(agent: db.BackendAgent) -> str:
     return get_secret("HADES_BACKEND_PLUGIN_TOKEN", "")
 
 
+def plugin_device_secret() -> str:
+    env_key = str(backend_config().get("plugin_device_secret_env_key") or "").strip()
+    return get_secret(env_key, "") if env_key else ""
+
+
 def client_from_config(*, timeout: float = 15.0) -> HadesBackendClient:
     agent = current_agent()
     if agent is None:
@@ -65,7 +70,12 @@ def plugin_work_items_client_from_config() -> HadesPluginWorkItemsClient:
             "or HADES_BACKEND_PLUGIN_TOKEN. Do not use the Hades agent token for plugin work."
         )
     cfg = backend_config()
-    return HadesPluginWorkItemsClient(agent.base_url, token, device_id=str(cfg.get("plugin_device_id") or "").strip())
+    return HadesPluginWorkItemsClient(
+        agent.base_url,
+        token,
+        device_id=str(cfg.get("plugin_device_id") or "").strip(),
+        device_secret=plugin_device_secret(),
+    )
 
 
 def plugin_local_workspace_id() -> str:

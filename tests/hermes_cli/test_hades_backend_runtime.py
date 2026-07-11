@@ -52,11 +52,19 @@ def test_plugin_work_items_client_uses_configured_device_id(monkeypatch):
         runtime,
         "backend_config",
         lambda: {
-            "plugin_token_env_key": "HADES_BACKEND_PLUGIN_TOKEN_TEST",
-            "plugin_device_id": "dev_1",
-        },
+                "plugin_token_env_key": "HADES_BACKEND_PLUGIN_TOKEN_TEST",
+                "plugin_device_id": "dev_1",
+                "plugin_device_secret_env_key": "HADES_BACKEND_PLUGIN_DEVICE_SECRET_TEST",
+            },
+        )
+    monkeypatch.setattr(
+        runtime,
+        "get_secret",
+        lambda key, default="": {
+            "HADES_BACKEND_PLUGIN_TOKEN_TEST": "plugin-token",
+            "HADES_BACKEND_PLUGIN_DEVICE_SECRET_TEST": "device-secret",
+        }.get(key, default),
     )
-    monkeypatch.setattr(runtime, "get_secret", lambda key, default="": {"HADES_BACKEND_PLUGIN_TOKEN_TEST": "plugin-token"}.get(key, default))
     monkeypatch.setattr(runtime, "HadesPluginWorkItemsClient", FakeClient)
 
     runtime.plugin_work_items_client_from_config()
@@ -64,5 +72,5 @@ def test_plugin_work_items_client_uses_configured_device_id(monkeypatch):
     assert captured == {
         "base_url": "https://backend.example",
         "token": "plugin-token",
-        "kwargs": {"device_id": "dev_1"},
+        "kwargs": {"device_id": "dev_1", "device_secret": "device-secret"},
     }

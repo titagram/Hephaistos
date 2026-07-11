@@ -1345,9 +1345,16 @@ def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch
 
         def register_agent(self, **payload):
             assert payload["project_id"] == "backend_proj"
+            assert payload["plugin_device"]["fingerprint_hash"].startswith("sha256:")
             return {
                 "agent_id": payload["agent_id"],
                 "agent_token": "derived-token",
+                "plugin_credentials": {
+                    "project_id": "backend_proj",
+                    "token": "derived-plugin-token",
+                    "device_id": "dev_1",
+                    "device_secret": "derived-device-secret",
+                },
                 "capabilities": {"memory": True, "jobs": True},
             }
 
@@ -1401,7 +1408,12 @@ def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch
     assert project is not None
     assert project.name == "Demo Project"
     assert config["backend"]["default_project_id"] == "backend_proj"
+    assert config["backend"]["plugin_device_id"] == "dev_1"
+    assert config["backend"]["plugin_token_env_key"]
+    assert config["backend"]["plugin_device_secret_env_key"]
     assert "derived-token" in env_text
+    assert "derived-plugin-token" in env_text
+    assert "derived-device-secret" in env_text
     assert "bootstrap-token" not in env_text
     assert bindings[0].backend_workspace_binding_id == "wb_bootstrap_1"
     assert operational.bound

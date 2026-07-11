@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from typing import Any
 from urllib.parse import urljoin
 
@@ -27,6 +30,7 @@ class HadesPluginWorkItemsClient:
         token: str,
         *,
         device_id: str | None = None,
+        device_secret: str | None = None,
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -41,6 +45,7 @@ class HadesPluginWorkItemsClient:
             "User-Agent": "hades-agent/plugin-work-items-client",
         }
         clean_device_id = str(device_id or "").strip()
+        self._device_secret = str(device_secret or "").strip()
         if clean_device_id:
             default_headers["X-DevBoard-Device-Id"] = clean_device_id
         self._client = httpx.Client(
@@ -71,13 +76,15 @@ class HadesPluginWorkItemsClient:
         elif method.upper() not in {"GET", "HEAD"}:
             json_body = {"protocol_version": "v1"}
         try:
-            response = self._client.request(
+            request = self._client.build_request(
                 method,
                 self._url(path),
                 json=json_body,
                 params=_query_params(params),
                 headers=headers,
             )
+            self._sign_device_request(request)
+            response = self._client.send(request)
         except httpx.HTTPError as exc:
             raise HadesBackendError(redact_secret(str(exc))) from exc
         if response.status_code >= 400:
@@ -103,6 +110,24 @@ class HadesPluginWorkItemsClient:
         if not isinstance(data, dict):
             raise HadesBackendError("plugin API response must be a JSON object")
         return data
+
+    def _sign_device_request(self, request: httpx.Request) -> None:
+        device_id = request.headers.get("X-DevBoard-Device-Id", "").strip()
+        if not device_id or not self._device_secret:
+            return
+        timestamp = str(int(time.time()))
+        body_hash = hashlib.sha256(request.content).hexdigest()
+        canonical = "\n".join((request.method, request.url.raw_path.decode("utf-8"), timestamp, body_hash))
+        signature = hmac.new(
+            self._device_secret.encode("utf-8"),
+            canonical.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        request.headers.update({
+            "X-DevBoard-Timestamp": timestamp,
+            "X-DevBoard-Content-SHA256": body_hash,
+            "X-DevBoard-Signature": f"v1={signature}",
+        })
 
     def list_agent_work_items(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "agent-work-items", params=payload)
