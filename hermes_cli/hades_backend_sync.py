@@ -120,6 +120,7 @@ def run_backend_sync(
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
     polled_agent_queues: set[tuple[str, str]] = set()
+    route_auth: dict[tuple[str, str], dict[str, bool]] = {}
     receiver = PersephoneReceiver(
         information_executor=execute_stored_information_request,
         now=(lambda: int(time.time()) if now is None else int(now)),
@@ -174,9 +175,15 @@ def run_backend_sync(
             _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
             continue
 
+        route_key = (binding.project_id, binding_agent.agent_id)
+        auth_observation = route_auth.setdefault(
+            route_key, {"success": False, "unauthorized": False}
+        )
+
         try:
             client = client_for_agent(binding_agent)
         except Exception as exc:
+            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -186,7 +193,9 @@ def run_backend_sync(
         if binding_agent.agent_id not in queue_capabilities:
             try:
                 advertised = client.capabilities()
-            except Exception:
+                auth_observation["success"] = True
+            except Exception as exc:
+                auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
                 advertised = {}
             queue_capabilities[binding_agent.agent_id] = bool(
                 isinstance(advertised, dict)
@@ -201,11 +210,13 @@ def run_backend_sync(
 
         try:
             snapshots, synced, errors = _sync_memory(client, binding)
+            auth_observation["success"] = True
             memory_snapshots += snapshots
             proposals_synced += synced
             proposal_errors += errors
             sync_errors += errors
         except Exception as exc:
+            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -228,6 +239,7 @@ def run_backend_sync(
                     inbox_params["limit"] = receiver.batch_size
                     polled_agent_queues.add(queue_key)
                 inbox = client.list_inbox(**inbox_params)
+                auth_observation["success"] = True
                 saved = _sync_inbox(
                     inbox,
                     binding.project_id,
@@ -240,6 +252,7 @@ def run_backend_sync(
             except AttributeError:
                 pass
             except Exception as exc:
+                auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
                 sync_errors += 1
                 _record_sync_error(binding, str(exc))
                 if not quiet:
@@ -252,7 +265,9 @@ def run_backend_sync(
                 workspace_binding_id=binding.backend_workspace_binding_id,
                 capabilities=_detect_default_capabilities(),
             )
+            auth_observation["success"] = True
         except Exception as exc:
+            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -381,6 +396,26 @@ def run_backend_sync(
             ),
         )
 
+    auth_failed_routes = auth_quarantined_routes = 0
+    with db.connect_closing() as conn:
+        for (route_project_id, route_agent_id), observation in route_auth.items():
+            unauthorized_cycle = bool(
+                observation["unauthorized"] and not observation["success"]
+            )
+            if unauthorized_cycle:
+                auth_failed_routes += 1
+            elif not observation["success"]:
+                continue
+            outcome = db.record_route_auth_cycle(
+                conn,
+                project_id=route_project_id,
+                agent_id=route_agent_id,
+                unauthorized=unauthorized_cycle,
+                now=now,
+            )
+            if outcome["quarantined"]:
+                auth_quarantined_routes += 1
+
     summary = {
         "pulled": pulled,
         "completed": completed,
@@ -399,6 +434,8 @@ def run_backend_sync(
         "source_slice_candidates": source_slice_candidates,
         "source_slice_jobs_waiting": source_slice_jobs_waiting,
         "inbox_events": inbox_events,
+        "auth_failed_routes": auth_failed_routes,
+        "auth_quarantined_routes": auth_quarantined_routes,
         "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }
     with db.connect_closing() as conn:
@@ -725,6 +762,12 @@ def _as_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _is_unauthorized_error(exc: Exception) -> bool:
+    from hermes_cli.hades_backend_client import HadesBackendError
+
+    return isinstance(exc, HadesBackendError) and exc.status_code == 401
 
 
 def _record_sync_error(binding: db.WorkspaceBinding, message: str) -> None:

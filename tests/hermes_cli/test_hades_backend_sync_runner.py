@@ -2466,10 +2466,228 @@ def test_backend_status_keeps_multi_binding_aggregate_summary_partial(monkeypatc
 
     assert payload["awareness"]["status"] == "partial"
     assert payload["awareness"]["diagnosable_without_source_bindings"] == 0
-    assert {binding["awareness"]["quality"]["summary_scope"] for binding in payload["bindings"]} == {"aggregate"}
-    assert all(not binding["awareness"]["diagnosable_without_source"] for binding in payload["bindings"])
-    assert all(binding["awareness"]["coverage"]["project_artifacts"]["status"] == "aggregate" for binding in payload["bindings"])
-    assert all("project_artifact_index" in binding["awareness"]["quality"]["missing"] for binding in payload["bindings"])
+    assert {
+        binding["awareness"]["quality"]["summary_scope"]
+        for binding in payload["bindings"]
+    } == {"aggregate"}
+    assert all(
+        not binding["awareness"]["diagnosable_without_source"]
+        for binding in payload["bindings"]
+    )
+    assert all(
+        binding["awareness"]["coverage"]["project_artifacts"]["status"]
+        == "aggregate"
+        for binding in payload["bindings"]
+    )
+    assert all(
+        "project_artifact_index" in binding["awareness"]["quality"]["missing"]
+        for binding in payload["bindings"]
+    )
+
+
+def test_sync_auth_quarantine_counts_one_401_per_route_cycle(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_auth",
+            project_id="project_auth",
+            base_url="https://backend.invalid",
+            label="auth",
+            token_env_key="TOKEN_AUTH",
+            capabilities={"sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_auth",
+            agent_id="agent_auth",
+            local_project_id="local_auth",
+            workspace_fingerprint="wf_auth",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_auth",
+        )
+
+    class UnauthorizedClient:
+        @staticmethod
+        def _fail():
+            raise HadesBackendError("unauthorized", status_code=401)
+
+        def capabilities(self):
+            return self._fail()
+
+        def memory_snapshot(self, **payload):
+            return self._fail()
+
+        def list_inbox(self, **payload):
+            return self._fail()
+
+        def pull_jobs(self, **payload):
+            return self._fail()
+
+    summaries = []
+    for now in (100, 200, 300):
+        summaries.append(
+            run_backend_sync(
+                client_factory=UnauthorizedClient,
+                quiet=True,
+                now=now,
+            ).summary
+        )
+
+    with hdb.connect_closing() as conn:
+        health = hdb.get_route_auth_health(
+            conn, project_id="project_auth", agent_id="agent_auth"
+        )
+        binding = hdb.get_binding_for_fingerprint(conn, "wf_auth")
+
+    assert [summary["auth_failed_routes"] for summary in summaries] == [1, 1, 1]
+    assert [summary["auth_quarantined_routes"] for summary in summaries] == [0, 0, 1]
+    assert health is not None and health["consecutive_failures"] == 3
+    assert binding is not None and binding.status == "auth_failed"
+
+
+def test_sync_auth_quarantine_resets_on_authenticated_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_auth",
+            project_id="project_auth",
+            base_url="https://backend.invalid",
+            label="auth",
+            token_env_key="TOKEN_AUTH",
+            capabilities={"sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_auth",
+            agent_id="agent_auth",
+            local_project_id="local_auth",
+            workspace_fingerprint="wf_auth",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_auth",
+        )
+
+    class UnauthorizedClient:
+        def capabilities(self):
+            raise HadesBackendError("unauthorized", status_code=401)
+
+        memory_snapshot = capabilities
+        list_inbox = capabilities
+        pull_jobs = capabilities
+
+    class HealthyClient:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            return {"events": [], "cursor": payload.get("cursor")}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    run_backend_sync(client_factory=UnauthorizedClient, quiet=True, now=100)
+    healthy = run_backend_sync(client_factory=HealthyClient, quiet=True, now=200)
+
+    with hdb.connect_closing() as conn:
+        health = hdb.get_route_auth_health(
+            conn, project_id="project_auth", agent_id="agent_auth"
+        )
+        binding = hdb.get_binding_for_fingerprint(conn, "wf_auth")
+
+    assert healthy.summary["auth_failed_routes"] == 0
+    assert healthy.summary["auth_quarantined_routes"] == 0
+    assert health is None
+    assert binding is not None and binding.status == "linked"
+
+
+def test_sync_auth_quarantine_ignores_non_401_failures(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import HadesBackendError
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_auth",
+            project_id="project_auth",
+            base_url="https://backend.invalid",
+            label="auth",
+            token_env_key="TOKEN_AUTH",
+            capabilities={"sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_auth",
+            agent_id="agent_auth",
+            local_project_id="local_auth",
+            workspace_fingerprint="wf_auth",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_auth",
+        )
+
+    class UnauthorizedClient:
+        def capabilities(self):
+            raise HadesBackendError("unauthorized", status_code=401)
+
+        memory_snapshot = capabilities
+        list_inbox = capabilities
+        pull_jobs = capabilities
+
+    run_backend_sync(client_factory=UnauthorizedClient, quiet=True)
+
+    for status_code in (403, 404, 429, 500):
+        class OtherFailureClient:
+            def capabilities(self):
+                raise HadesBackendError("other failure", status_code=status_code)
+
+            memory_snapshot = capabilities
+            list_inbox = capabilities
+            pull_jobs = capabilities
+
+        run_backend_sync(client_factory=OtherFailureClient, quiet=True)
+
+    with hdb.connect_closing() as conn:
+        health = hdb.get_route_auth_health(
+            conn, project_id="project_auth", agent_id="agent_auth"
+        )
+        binding = hdb.get_binding_for_fingerprint(conn, "wf_auth")
+
+    assert health is not None and health["consecutive_failures"] == 1
+    assert binding is not None and binding.status == "linked"
 
 
 def test_manual_sync_success_clears_background_backoff_state(monkeypatch, tmp_path):
