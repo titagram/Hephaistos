@@ -7663,3 +7663,98 @@ Resta fuori da questa nota:
 - Nuova valutazione Rocket Club con prompt aggiornato a causal pack; va eseguita
   come regressione live separata prima di dichiarare completa la readiness
   operativa su progetto reale.
+# 2026-07-11 — Persephone agent queue v1 alignment
+
+- Local Hades is authoritative for the new wire contract documented in
+  `docs/hades/openapi-hades-v1.json` and
+  `hermes_cli/hades_persephone_messages.py`.
+- The backend's existing generic Persephone event routes are not compatible and
+  must not advertise `persephone_agent_queue_v1` until strict targeting,
+  idempotency, cursor polling, and bounded SSE are fully tested.
+- Chosen migration strategy: a dedicated v1 message table; legacy generic event
+  rows remain isolated and are never reinterpreted as trusted agent envelopes.
+- Chosen trust boundary: project and sender come from the authenticated agent;
+  targets and workspace bindings are verified in the same project; reads are
+  restricted to the authenticated target agent.
+- Execution handoff:
+  `docs/superpowers/plans/2026-07-11-hades-backend-persephone-agent-queue.md`.
+
+Esito finale backend remoto (`fase-3`, base `0e1326c3`):
+
+- `286f7744 test(hades): specify Persephone agent queue v1`
+- `2a8b7103 feat(hades): add Persephone agent queue persistence`
+- `898224a4 feat(hades): implement Persephone agent message API`
+- `d31e22dd fix(hades): harden Persephone agent queue contract`
+- `bc1d1a8d feat(hades): stream Persephone agent messages`
+- `c1211840 docs(hades): publish Persephone agent queue v1`
+
+Verifica indipendente finale:
+
+- suite Hades isolata: `113 passed, 1 skipped, 1319 assertions`;
+- regressioni plugin/auth correlate: `36 passed, 179 assertions`;
+- migration fresh SQLite e Pint sui 13 file PHP: passati;
+- migration `2026_07_11_000001_create_hades_persephone_agent_messages_table`
+  applicata sul Postgres di sviluppo e registrata batch 4;
+- tre route Persephone presenti; OpenAPI JSON valido e capability top-level
+  `persephone_agent_queue_v1: true` pubblicata;
+- sync live del progetto corrente completato senza errori e con polling inbox.
+
+Riparazione locale dei `401` ripetuti:
+
+- causa: tre binding locali storici risultavano ancora `linked`, ma i relativi
+  agenti non esistevano piu' nel backend; il sync multi-project tentava tutte
+  le route obsolete;
+- creato backup `~/.hermes/hades_backend.db.bak.20260711-persephone-auth`;
+- marcati `unlinked` solo i tre binding senza controparte backend, preservando
+  righe e token; il binding corrente resta `linked`;
+- sync successivo: `last_error: null`, stato non degraded, una sola route
+  Persephone project-scoped e nessun nuovo `401`.
+
+Nota infrastrutturale non bloccante per questa feature: due migration
+preesistenti sugli embedding restano pending nel database di sviluppo perche'
+l'estensione PostgreSQL `vector` non e' installata. La migration Persephone e'
+indipendente ed e' `Ran`.
+
+# 2026-07-11 — Reset pgvector e quarantena automatica dei binding obsoleti
+
+Intervento backend remoto:
+
+- eliminato esclusivamente il volume PostgreSQL di sviluppo, come autorizzato;
+- ricreato PostgreSQL dall'immagine pinning
+  `pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb`;
+- verificata l'estensione `vector` versione `0.8.5`;
+- applicate tutte le migration, incluse
+  `2026_07_09_000007_add_embeddings_to_memory_search`,
+  `2026_07_10_000003_add_embedding_metadata_to_hades_search_documents` e
+  `2026_07_11_000001_create_hades_persephone_agent_messages_table`;
+- verificati `embedding vector(1536)` e indice
+  `hades_search_documents_embedding_hnsw_idx`;
+- eseguiti, nell'ordine, `DevBoardSeeder` e `DemoUsersSeeder`; presenti i cinque
+  utenti attesi (`admin@example.com`, `admin@devboard.local`,
+  `pm@devboard.local`, `dev@devboard.local`, `sysadmin@devboard.local`);
+- suite remota Hades piu' plugin auth: `127 passed, 1 skipped`, 1359 assertion.
+
+Intervento Hades locale per prevenire futuri binding obsoleti:
+
+- stato di autenticazione persistito per route esatta `(project_id, agent_id)`;
+- un ciclo interamente `401` incrementa il contatore una sola volta, anche se
+  falliscono memoria, inbox e job pull;
+- un successo autenticato azzera il contatore; errori diversi da `401` non lo
+  incrementano e non lo azzerano;
+- al terzo ciclo `401` i binding della route diventano `auth_failed`, senza
+  cancellare binding, cache o token, e sono esclusi dai sync successivi;
+- `hades backend status` espone route/binding in quarantena e indica
+  `hades backend bootstrap` come recovery esplicita;
+- il bootstrap ripristina il nuovo binding `linked` e pulisce lo stato della
+  route autenticata.
+
+Smoke live dopo il reset:
+
+- creato il nuovo progetto backend `Hephaistos` e rilanciato il bootstrap dal
+  checkout locale;
+- la vecchia route ha raggiunto tre cicli `401` ed e' passata automaticamente
+  ad `auth_failed`;
+- il nuovo binding resta `linked` e il ciclo seguente ha completato memoria,
+  artefatti, inbox e job pull senza errori o `401`;
+- l'app pubblica e' stata ricreata sulla rete `traefik_default` con il router
+  dedicato `/api/hades/v1`; lo smoke health pubblico restituisce HTTP 200.
