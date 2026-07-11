@@ -7773,3 +7773,17 @@ Correzione immediata del routing Traefik:
 - smoke finale: root senza credenziali `401` BasicAuth, root con le credenziali
   preesistenti `200` e titolo `DevBoard — Operational Console`, health Hades
   `200`, sync Hades completato senza errori.
+
+Follow-up login dashboard:
+
+- riprodotto il `405 Not Allowed` nginx su `POST /api/dashboard/login`;
+- causa radice nel compose corrente: il router Laravel `devboard-web` era stato
+  allargato al solo `Host(...)` con priorita' `1`, entrando in conflitto con il
+  router nginx frontend avente stessa regola e priorita';
+- ripristinata la regola specifica
+  `PathPrefix(/api) || PathPrefix(/sanctum) || PathPrefix(/storage)` con
+  priorita' `100`, lasciando il frontend catch-all a priorita' `1`;
+- deploy remoto commit `09c45cbf fix(traefik): route dashboard auth to Laravel`;
+- verifica end-to-end: root autenticata `200`, CSRF cookie `204`, login senza
+  CSRF `419` JSON Laravel e login con CSRF/credenziali volutamente errate `422`
+  JSON dal controller, non piu' HTML nginx; health Hades `200`.
