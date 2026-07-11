@@ -153,6 +153,9 @@ CREATE TABLE IF NOT EXISTS persephone_inbox (
     project_id       TEXT NOT NULL,
     target_agent_id  TEXT NOT NULL,
     envelope         TEXT NOT NULL,
+    message_type     TEXT NOT NULL,
+    effect           TEXT NOT NULL,
+    capability       TEXT NOT NULL,
     state            TEXT NOT NULL,
     received_at      INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
@@ -238,6 +241,26 @@ def _canonical_envelope_json(value: str, *, message_id: str) -> str:
 
 def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
     """Backfill the global ID registry from O2 databases, rejecting ambiguity."""
+    from hermes_cli.hades_persephone_messages import parse_envelope
+
+    add_column_if_missing(
+        conn,
+        "persephone_inbox",
+        "message_type",
+        "message_type TEXT NOT NULL DEFAULT ''",
+    )
+    add_column_if_missing(
+        conn,
+        "persephone_inbox",
+        "effect",
+        "effect TEXT NOT NULL DEFAULT ''",
+    )
+    add_column_if_missing(
+        conn,
+        "persephone_inbox",
+        "capability",
+        "capability TEXT NOT NULL DEFAULT ''",
+    )
     add_column_if_missing(
         conn,
         "persephone_inbox",
@@ -290,6 +313,29 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
                         f"UPDATE {table} SET envelope = ? WHERE message_id = ?",
                         (envelope, message_id),
                     )
+                if table == "persephone_inbox":
+                    decoded = json.loads(envelope)
+                    try:
+                        validated = parse_envelope(decoded, now=0)
+                    except (TypeError, ValueError) as exc:
+                        raise PersephoneIdentityMigrationConflict(
+                            f"invalid recovery authority for message_id {message_id!r}: {exc}"
+                        ) from None
+                    authority = (
+                        validated.message_type.value,
+                        validated.effect.value,
+                        validated.capability,
+                    )
+                    conn.execute(
+                        "UPDATE persephone_inbox SET message_type = ?, effect = ?, "
+                        "capability = ? WHERE message_id = ?",
+                        (*authority, message_id),
+                    )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_persephone_inbox_recovery_covering "
+            "ON persephone_inbox(state, message_type, effect, capability, "
+            "updated_at, message_id)"
+        )
 
 
 def _now() -> int:

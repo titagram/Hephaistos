@@ -381,6 +381,85 @@ def test_recovery_filters_ineligible_rows_before_limit(tmp_db):
     assert "idx_persephone_inbox_recovery" in " ".join(str(row["detail"]) for row in plan)
 
 
+def test_inbox_denormalizes_validated_recovery_authority(tmp_db):
+    from hermes_cli.hades_persephone_store import record_inbox
+
+    request = _envelope(message_id="denormalized")
+    record_inbox(tmp_db, request, now=100)
+    row = tmp_db.execute(
+        "SELECT message_type, effect, capability FROM persephone_inbox "
+        "WHERE message_id = 'denormalized'"
+    ).fetchone()
+    assert tuple(row) == (
+        MessageType.INFORMATION_REQUEST.value,
+        EffectClass.INFORMATION_READ.value,
+        "project_memory_search",
+    )
+
+
+def test_recovery_covering_plan_has_no_temp_sort(tmp_db):
+    plan = tmp_db.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM persephone_inbox "
+        "WHERE state IN ('processing', 'processed') AND message_type = ? "
+        "AND effect = ? AND capability IN (?, ?, ?, ?, ?, ?) "
+        "AND updated_at <= ? "
+        "ORDER BY state, message_type, effect, capability, updated_at, message_id LIMIT ?",
+        (
+            MessageType.INFORMATION_REQUEST.value,
+            EffectClass.INFORMATION_READ.value,
+            "artifact_metadata",
+            "git_metadata",
+            "project_memory_search",
+            "source_search",
+            "source_slice",
+            "symbol_lookup",
+            150,
+            2,
+        ),
+    ).fetchall()
+    detail = " ".join(str(row["detail"]) for row in plan)
+    assert "idx_persephone_inbox_recovery_covering" in detail
+    assert "TEMP B-TREE" not in detail.upper()
+
+
+def test_legacy_inbox_authority_is_validated_and_backfilled(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "legacy.db"
+    request = _envelope(message_id="legacy_authority")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE persephone_inbox ("
+        "message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+        "target_agent_id TEXT NOT NULL, envelope TEXT NOT NULL, state TEXT NOT NULL, "
+        "received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+        "human_decision TEXT, human_decided_by TEXT, human_reason TEXT, "
+        "human_decided_at INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO persephone_inbox VALUES (?, ?, ?, ?, 'received', 100, 100, "
+        "NULL, NULL, NULL, NULL)",
+        (
+            request.message_id,
+            request.project_id,
+            request.target_agent_id,
+            json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    with db.connect_closing(path) as migrated:
+        row = migrated.execute(
+            "SELECT message_type, effect, capability FROM persephone_inbox"
+        ).fetchone()
+    assert tuple(row) == (
+        MessageType.INFORMATION_REQUEST.value,
+        EffectClass.INFORMATION_READ.value,
+        "project_memory_search",
+    )
+
+
 def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

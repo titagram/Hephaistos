@@ -123,6 +123,40 @@ py_compile: passed
 git diff --check: passed
 ```
 
+## Fourth adversarial re-review
+
+The fourth corpus began with 14 expected functional RED failures; six existing
+guards were already green. The previous consuming assignment matcher was
+removed. A bounded lexical scanner now advances past a non-sensitive key's
+separator without consuming its object/array value, recursively scans nested
+JS/Python objects, `module.exports`, and arrays, and force-redacts scalar leaves
+inside a sensitive container. Work, depth, deadline, and source-length budgets
+remain enforced.
+
+XML redaction recognizes namespace local names in elements and attributes and
+preserves CDATA framing while replacing its content. Semantic key splitting
+handles camelCase and acronym boundaries, with explicit metadata exemptions
+for token counts/usage/budgets/tokenizers and password policies/rules while
+retaining `apiToken`, `accessToken`, and `databasePassword` as credentials.
+
+Inbox rows now denormalize parser-validated `message_type`, `effect`, and
+`capability` authority. Legacy rows are backfilled through the immutable O1
+parser. Recovery filters those columns before `LIMIT` and uses the covering
+`(state, message_type, effect, capability, updated_at, message_id)` index with
+matching order; `EXPLAIN QUERY PLAN` confirms the covering index and no temp
+B-tree. An older large mutating population cannot starve eligible reads.
+
+Final fourth-review verification:
+
+```text
+Exact fourth-review corpus/backfill/query plan: 22 passed
+Focused worker/store/receiver: 181 passed
+O1-O5 + sync + DB + quality: 342 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```
+
 ## Third adversarial re-review
 
 The third corpus began with 16 expected functional RED failures. Semantic key

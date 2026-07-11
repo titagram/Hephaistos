@@ -350,6 +350,73 @@ def test_third_review_inline_camelcase_and_xml_corpus(tmp_path, content, secret)
 
 
 @pytest.mark.parametrize(
+    ("content", "secret"),
+    [
+        ('config = {databasePassword: "object-private"}', "object-private"),
+        ('module.exports = {auth: {accessToken: "module-private"}};', "module-private"),
+        ("settings = {'safe': [{'apiToken': 'array-nested-private'}]}", "array-nested-private"),
+        ('const x = [{safe: true}, {databasePassword: "js-array-private"}]', "js-array-private"),
+        ("<ns:databasePassword>xml-ns-private</ns:databasePassword>", "xml-ns-private"),
+        (
+            "<ns:accessToken><![CDATA[xml-cdata-private]]></ns:accessToken>",
+            "xml-cdata-private",
+        ),
+        ('<config ns:apiToken="xml-ns-attribute-private"/>', "xml-ns-attribute-private"),
+    ],
+)
+def test_fourth_review_container_and_namespaced_xml_corpus(tmp_path, content, secret):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    assert secret not in str(response.to_payload())
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "token_count",
+        "tokenUsage",
+        "usage_tokens",
+        "token_budget",
+        "tokenizer",
+        "password_policy",
+        "passwordRules",
+        "password_requirements",
+    ],
+)
+def test_semantic_metadata_keys_are_not_redacted(tmp_path, key):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    content = f"{key} = 42"
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert content in rendered
+    assert "sensitive values were redacted" not in rendered
+
+
+@pytest.mark.parametrize("key", ["apiToken", "accessToken", "databasePassword"])
+def test_semantic_credential_keys_remain_sensitive(tmp_path, key):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(
+        f'{key} = "credential-private"', encoding="utf-8"
+    )
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    assert "credential-private" not in str(response.to_payload())
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",

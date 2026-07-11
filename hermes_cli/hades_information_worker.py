@@ -58,20 +58,17 @@ MAX_PENDING_DIRS = 128
 _LOCAL_PATH_RE = re.compile(
     r"(?<![\w])/(?:Users|home|private|tmp|var/folders)/[^\s,'\"}]+"
 )
-_ASSIGNMENT_LINE_RE = re.compile(
-    r"^(?P<prefix>\s*(?:(?:export|-)[ \t]+)?)(?P<quote>[\"']?)"
-    r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
-    r"(?P<separator>[:=])(?P<value>.*)$"
-)
-_KEY_VALUE_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(?P<prefix>(?:(?:const|let|var|export|set)\s+)?"
-    r"(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
-    r"(?P<separator>[:=])\s*)(?P<value>\"[^\"]*\"|'[^']*'|[^,;\r\n}\]]+)"
-)
 _XML_ELEMENT_RE = re.compile(
-    r"<(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P<attrs>\s[^>]*)?>"
-    r"(?P<value>[^<]*)</(?P=key)>",
-    re.IGNORECASE,
+    r"<(?P<tag>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*))(?P<attrs>\s[^>]*)?>"
+    r"(?P<value>.*?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XML_ATTRIBUTE_RE = re.compile(
+    r"(?P<name>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*))\s*=\s*"
+    r"(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
 )
 _PEM_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----.*?"
@@ -521,6 +518,28 @@ def _is_sensitive_key(value: Any) -> bool:
     normalized = separated.casefold()
     tokens = tuple(token for token in re.split(r"[^a-z0-9]+", normalized) if token)
     compact = "".join(tokens)
+    token_metadata = {
+        "count", "counts", "usage", "used", "budget", "budgets", "limit",
+        "limits", "total", "remaining", "estimate", "estimated", "cost",
+    }
+    password_metadata = {
+        "policy", "policies", "rule", "rules", "requirement", "requirements",
+        "validation", "validator", "length", "minimum", "maximum", "min", "max",
+    }
+    credential_qualifiers = {
+        "api", "access", "refresh", "auth", "authorization", "provider", "client",
+        "private", "secret", "bearer",
+    }
+    if compact.startswith("tokenizer"):
+        return False
+    if (
+        "token" in tokens
+        and any(token in token_metadata for token in tokens)
+        and not any(token in credential_qualifiers for token in tokens)
+    ):
+        return False
+    if "password" in tokens and any(token in password_metadata for token in tokens):
+        return False
     sensitive_tokens = {
         "password", "passphrase", "secret", "token", "authorization",
         "credential", "credentials", "cookie", "session", "jwt", "bearer",
@@ -535,36 +554,126 @@ def _is_sensitive_key(value: Any) -> bool:
     )
 
 
-def _redact_assignment_lines(value: str) -> str:
-    cleaned: list[str] = []
-    for line in value.splitlines(keepends=True):
-        ending = "\n" if line.endswith("\n") else ""
-        body = line[:-1] if ending else line
-        match = _ASSIGNMENT_LINE_RE.match(body)
-        if match is None or not _is_sensitive_key(match.group("key")):
-            cleaned.append(line)
-            continue
-        trailing = "," if match.group("value").rstrip().endswith(",") else ""
-        cleaned.append(
-            f"{match.group('prefix')}{match.group('quote')}{match.group('key')}"
-            f"{match.group('quote')}{match.group('separator')} ***{trailing}{ending}"
-        )
-    return "".join(cleaned)
+def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
+    """Lexically redact bounded object/assignment text without skipping containers."""
+    replacements: list[tuple[int, int, str]] = []
+    deadline = time.monotonic() + MAX_SCAN_SECONDS
+    work = 0
+    clipped = False
 
+    def quoted_end(start: int, end: int) -> int:
+        nonlocal work, clipped
+        quote = value[start]
+        cursor = start + 1
+        escaped = False
+        while cursor < end:
+            work += 1
+            if work > MAX_RESULT_CHARS * 4 or time.monotonic() > deadline:
+                clipped = True
+                return end
+            char = value[cursor]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                return cursor + 1
+            cursor += 1
+        return end
 
-def _redact_key_value_pairs(value: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        if not _is_sensitive_key(match.group("key")):
-            return match.group(0)
-        scalar = match.group("value")
-        replacement = (
-            f"{scalar[0]}***{scalar[-1]}"
-            if len(scalar) >= 2 and scalar[0] == scalar[-1] and scalar[0] in "\"'"
-            else "***"
-        )
-        return f"{match.group('prefix')}{replacement}"
+    def container_end(start: int, end: int) -> int:
+        nonlocal work, clipped
+        pairs = {"{": "}", "[": "]"}
+        stack = [pairs[value[start]]]
+        cursor = start + 1
+        while cursor < end and stack:
+            work += 1
+            if work > MAX_RESULT_CHARS * 4 or time.monotonic() > deadline:
+                clipped = True
+                return end
+            char = value[cursor]
+            if char in "\"'":
+                cursor = quoted_end(cursor, end)
+                continue
+            if char in pairs:
+                stack.append(pairs[char])
+            elif char == stack[-1]:
+                stack.pop()
+            cursor += 1
+        return cursor
 
-    return _KEY_VALUE_RE.sub(replace, value)
+    def scan(start: int, end: int, *, force: bool = False, depth: int = 0) -> None:
+        nonlocal work, clipped
+        if depth > MAX_MEMORY_DEPTH:
+            replacements.append((start, end, "[TRUNCATED]"))
+            clipped = True
+            return
+        cursor = start
+        while cursor < end:
+            work += 1
+            if work > MAX_RESULT_CHARS * 4 or time.monotonic() > deadline:
+                replacements.append((cursor, end, "[TRUNCATED]"))
+                clipped = True
+                return
+            char = value[cursor]
+            if char in "\"'":
+                key_end = quoted_end(cursor, end)
+                key = value[cursor + 1 : max(cursor + 1, key_end - 1)]
+                after = key_end
+            elif char.isalpha() or char == "_":
+                key_end = cursor + 1
+                while key_end < end and (
+                    value[key_end].isalnum() or value[key_end] in "_.-"
+                ):
+                    key_end += 1
+                key = value[cursor:key_end]
+                after = key_end
+            else:
+                cursor += 1
+                continue
+            while after < end and value[after].isspace():
+                after += 1
+            if after >= end or value[after] not in ":=":
+                cursor = key_end
+                continue
+            scalar_start = after + 1
+            while scalar_start < end and value[scalar_start].isspace():
+                scalar_start += 1
+            sensitive = force or _is_sensitive_key(key)
+            if scalar_start >= end:
+                return
+            if value[scalar_start] in "[{":
+                close = container_end(scalar_start, end)
+                scan(
+                    scalar_start + 1,
+                    max(scalar_start + 1, close - 1),
+                    force=sensitive,
+                    depth=depth + 1,
+                )
+                cursor = close
+                continue
+            if not sensitive:
+                cursor = scalar_start
+                continue
+            if value[scalar_start] in "\"'":
+                scalar_end = quoted_end(scalar_start, end)
+                replacements.append((scalar_start + 1, max(scalar_start + 1, scalar_end - 1), "***"))
+                cursor = scalar_end
+                continue
+            scalar_end = scalar_start
+            while scalar_end < end and value[scalar_end] not in ",;\r\n}]<":
+                scalar_end += 1
+            trimmed_end = scalar_end
+            while trimmed_end > scalar_start and value[trimmed_end - 1].isspace():
+                trimmed_end -= 1
+            replacements.append((scalar_start, trimmed_end, "***"))
+            cursor = scalar_end
+
+    scan(0, len(value))
+    rendered = value
+    for start, end, replacement in sorted(replacements, reverse=True):
+        rendered = rendered[:start] + replacement + rendered[end:]
+    return rendered, clipped
 
 
 def _redact_xml_elements(value: str) -> str:
@@ -572,10 +681,20 @@ def _redact_xml_elements(value: str) -> str:
         if not _is_sensitive_key(match.group("key")):
             return match.group(0)
         attrs = match.group("attrs") or ""
-        key = match.group("key")
-        return f"<{key}{attrs}>***</{key}>"
+        tag = match.group("tag")
+        content = match.group("value")
+        replacement = "<![CDATA[***]]>" if content.startswith("<![CDATA[") else "***"
+        return f"<{tag}{attrs}>{replacement}</{tag}>"
 
-    return _XML_ELEMENT_RE.sub(replace, value)
+    elements = _XML_ELEMENT_RE.sub(replace, value)
+
+    def replace_attribute(match: re.Match[str]) -> str:
+        if not _is_sensitive_key(match.group("key")):
+            return match.group(0)
+        quote = match.group("quote")
+        return f"{match.group('name')}={quote}***{quote}"
+
+    return _XML_ATTRIBUTE_RE.sub(replace_attribute, elements)
 
 
 def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
@@ -598,8 +717,9 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         without_keys = _AWS_KEY_RE.sub("[REDACTED ACCESS KEY]", without_pem)
         without_jwt = _JWT_RE.sub("[REDACTED TOKEN]", without_keys)
         without_tokens = _KNOWN_TOKEN_RE.sub("[REDACTED TOKEN]", without_jwt)
-        without_assignments = _redact_assignment_lines(without_tokens)
-        without_pairs = _redact_key_value_pairs(without_assignments)
+        without_pairs, lexical_clip = _redact_key_value_pairs(without_tokens)
+        if lexical_clip:
+            clipped = True
         without_xml = _redact_xml_elements(without_pairs)
         safe = redact_secret(without_xml)
         if safe != working:

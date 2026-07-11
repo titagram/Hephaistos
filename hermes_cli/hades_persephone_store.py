@@ -313,13 +313,17 @@ def record_inbox(
             raise MessageConflict(f"inbox message_id {envelope.message_id!r} already has other data")
         conn.execute(
             "INSERT OR IGNORE INTO persephone_inbox "
-            "(message_id, project_id, target_agent_id, envelope, state, received_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'received', ?, ?)",
+            "(message_id, project_id, target_agent_id, envelope, message_type, effect, "
+            "capability, state, received_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)",
             (
                 envelope.message_id,
                 envelope.project_id,
                 envelope.target_agent_id,
                 encoded,
+                envelope.message_type.value,
+                envelope.effect.value,
+                envelope.capability,
                 timestamp,
                 timestamp,
             ),
@@ -503,10 +507,10 @@ def recover_abandoned_information_requests(
         rows = conn.execute(
             "SELECT * FROM persephone_inbox WHERE state IN ('processing', 'processed') "
             "AND updated_at <= ? "
-            "AND json_extract(envelope, '$.message_type') = ? "
-            "AND json_extract(envelope, '$.effect') = ? "
-            "AND json_extract(envelope, '$.capability') IN (?, ?, ?, ?, ?, ?) "
-            "ORDER BY updated_at ASC, message_id ASC LIMIT ?",
+            "AND message_type = ? AND effect = ? "
+            "AND capability IN (?, ?, ?, ?, ?, ?) "
+            "ORDER BY state, message_type, effect, capability, updated_at, message_id "
+            "LIMIT ?",
             (
                 cutoff,
                 MessageType.INFORMATION_REQUEST.value,
