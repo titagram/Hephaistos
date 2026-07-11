@@ -67,6 +67,11 @@ _PEM_RE = re.compile(
 )
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+_KNOWN_TOKEN_RE = re.compile(
+    r"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"Bearer\s+[A-Za-z0-9._~+/-]{10,})\b"
+)
 _SENSITIVE_KEYS = frozenset(
     {
         "password", "passphrase", "secret", "token", "api_key", "apikey",
@@ -364,6 +369,18 @@ def _memory_search(
         raise PolicyDenied("a bounded non-blank memory query is required")
     if conn is None:
         return InformationResponse("Project memory is unavailable.", (), False, ("no local memory store was supplied",))
+    size_row = conn.execute(
+        "SELECT project_id, length(CAST(items AS BLOB)) AS byte_length "
+        "FROM memory_cache WHERE workspace_binding_id = ?",
+        (request.binding.backend_workspace_binding_id,),
+    ).fetchone()
+    if size_row is not None and int(size_row["byte_length"] or 0) > MAX_AGGREGATE_BYTES:
+        return InformationResponse(
+            "Project memory is too large for a bounded peer query.",
+            (),
+            True,
+            ("local cache exceeds the information-read budget",),
+        )
     cache = db.get_memory_cache(conn, request.binding.backend_workspace_binding_id)
     if cache is None or cache.project_id != request.envelope.project_id:
         return InformationResponse("Project memory has no cached matches.", (), False, ("local cache may be incomplete",))
@@ -430,12 +447,15 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         without_pem = _PEM_RE.sub("[REDACTED PRIVATE MATERIAL]", without_paths)
         without_keys = _AWS_KEY_RE.sub("[REDACTED ACCESS KEY]", without_pem)
         without_jwt = _JWT_RE.sub("[REDACTED TOKEN]", without_keys)
-        without_assignments = _SECRET_ASSIGN_RE.sub(r"\1***", without_jwt)
+        without_tokens = _KNOWN_TOKEN_RE.sub("[REDACTED TOKEN]", without_jwt)
+        without_assignments = _SECRET_ASSIGN_RE.sub(r"\1***", without_tokens)
         return redact_secret(without_assignments)[:2_000]
 
     def sensitive_key(value: Any) -> bool:
         normalized = str(value).strip(" \"'").casefold().replace("-", "_")
-        return normalized in _SENSITIVE_KEYS or any(
+        compact = re.sub(r"[^a-z0-9]", "", normalized)
+        sensitive_compact = {re.sub(r"[^a-z0-9]", "", key) for key in _SENSITIVE_KEYS}
+        return compact in sensitive_compact or normalized in _SENSITIVE_KEYS or any(
             normalized.endswith(f"_{key}") for key in _SENSITIVE_KEYS
         )
 

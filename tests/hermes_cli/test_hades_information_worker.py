@@ -218,6 +218,8 @@ def test_source_content_semantically_redacts_common_secret_formats(tmp_path):
         "cookie=session-private",
         "-----BEGIN PRIVATE KEY-----\npem-private\n-----END PRIVATE KEY-----",
         "AKIAABCDEFGHIJKLMNOP",
+        "const header = 'Bearer abcdefghijklmnopqrstuvwxyz'",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
     ]
     (tmp_path / "example.py").write_text("\n".join(secrets), encoding="utf-8")
 
@@ -240,6 +242,8 @@ def test_source_content_semantically_redacts_common_secret_formats(tmp_path):
         "session-private",
         "pem-private",
         "AKIAABCDEFGHIJKLMNOP",
+        "abcdefghijklmnopqrstuvwxyz",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
     ):
         assert secret not in rendered
 
@@ -460,6 +464,38 @@ def test_large_memory_matches_still_fit_wire_payload(tmp_path):
     )
 
     assert len(str(response.to_payload()).encode()) < 16_000
+    assert response.truncated is True
+
+
+def test_oversized_memory_blob_is_rejected_before_json_materialization(
+    tmp_path, monkeypatch
+):
+    from hermes_cli import hades_information_worker as worker
+
+    conn = db.connect(tmp_path / "oversized-memory.db")
+    db.replace_memory_cache(
+        conn,
+        project_id="project_1",
+        workspace_binding_id="binding_1",
+        version="1",
+        items=[{"summary": "needle " + ("x" * 200)}],
+    )
+    monkeypatch.setattr(worker, "MAX_AGGREGATE_BYTES", 100)
+    monkeypatch.setattr(
+        worker.db,
+        "get_memory_cache",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("oversized JSON was materialized")
+        ),
+    )
+
+    response = worker.run_information_request(
+        _request(tmp_path, capability="project_memory_search", payload={"query": "needle"}),
+        binding=_binding(tmp_path),
+        connection=conn,
+    )
+
+    assert response.evidence_refs == ()
     assert response.truncated is True
 
 

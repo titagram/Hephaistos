@@ -22,6 +22,7 @@ def _envelope(
     target_agent_id: str = "agent_target",
     message_type: str = MessageType.INFORMATION_REQUEST.value,
     effect: str = EffectClass.INFORMATION_READ.value,
+    capability: str = "project_memory_search",
     correlation_id: str = "correlation_1",
     causation_id: str | None = None,
     sender_agent_id: str = "agent_sender",
@@ -38,7 +39,7 @@ def _envelope(
             "target_workspace_binding_id": None,
             "message_type": message_type,
             "effect": effect,
-            "capability": "project_memory_search",
+            "capability": capability,
             "remote_task_id": None,
             "remote_task_version": None,
             "expires_at": 9_999_999_999,
@@ -291,6 +292,25 @@ def test_recover_abandoned_information_requests_is_scoped_and_bounded(tmp_db):
     assert recover_abandoned_information_requests(
         tmp_db, now=201, abandoned_before=150, max_attempts=3
     ) == 0
+
+
+def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        InvalidTransition,
+        record_inbox,
+        record_information_failure,
+    )
+
+    mutating = _envelope(effect=EffectClass.MUTATING.value, capability="run_tests")
+    record_inbox(tmp_db, mutating, now=100)
+    tmp_db.execute(
+        "UPDATE persephone_inbox SET state = 'processing' WHERE message_id = ?",
+        (mutating.message_id,),
+    )
+    tmp_db.commit()
+
+    with pytest.raises(InvalidTransition, match="information"):
+        record_information_failure(tmp_db, mutating.message_id, now=101)
 
 
 def test_ack_refuses_a_tampered_or_missing_durable_response(tmp_db):

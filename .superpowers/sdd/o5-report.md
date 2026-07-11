@@ -122,3 +122,8 @@ Ruff: All checks passed!
 py_compile: passed
 git diff --check: passed
 ```
+
+Post-commit audit added two further guards: retry/recovery rejects non-information
+`processing` rows, and project-memory cache size is checked in SQLite before JSON
+materialization. Known standalone Bearer, GitHub, OpenAI-style, Slack, AWS, JWT,
+and PEM token forms are redacted. Follow-up focused verification: `99 passed`.

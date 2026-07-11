@@ -461,6 +461,13 @@ def record_information_failure(
         current = _inbox_from_row(row)
         if current.state != "processing":
             raise InvalidTransition("only a processing information request may fail")
+        envelope = current.envelope
+        if not (
+            envelope.message_type == MessageType.INFORMATION_REQUEST
+            and envelope.effect == EffectClass.INFORMATION_READ
+            and envelope.capability in _INFORMATION_CAPABILITIES
+        ):
+            raise InvalidTransition("failure recovery is limited to information requests")
         attempts = current.attempts + 1
         state = "rejected" if attempts >= bounded_max else "received"
         cursor = conn.execute(
