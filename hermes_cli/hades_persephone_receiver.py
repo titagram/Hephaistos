@@ -26,6 +26,7 @@ from hermes_cli.hades_persephone_messages import (
     parse_envelope,
 )
 from hermes_cli.hades_persephone_store import (
+    claim_information_request,
     get_cursor,
     get_message,
     record_cursor,
@@ -81,6 +82,7 @@ class _ReceiverWorker:
     descriptor: tuple[Any, ...] = ()
     failure_count: int = 0
     next_retry_at: int | None = None
+    capability_next_probe_at: int | None = None
 
 
 ConnectionFactory = Callable[[], ContextManager[sqlite3.Connection]]
@@ -127,7 +129,10 @@ class PersephoneReceiver:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self._flush_thread: threading.Thread | None = None
         self._fatal_error = False
+        self._draining = False
+        self._stopped = False
 
     @property
     def workers(self) -> tuple[tuple[str, str], ...]:
@@ -206,6 +211,9 @@ class PersephoneReceiver:
                     descriptor=descriptor,
                     failure_count=(old.failure_count if reusable else 0),
                     next_retry_at=(old.next_retry_at if reusable else None),
+                    capability_next_probe_at=(
+                        old.capability_next_probe_at if reusable else None
+                    ),
                 )
                 if old is not None and not reusable and old.client is not None:
                     clients_to_close.append(old.client)
@@ -241,6 +249,8 @@ class PersephoneReceiver:
                 self.refresh_bindings()
             self._stop_event.clear()
             self._fatal_error = False
+            self._draining = False
+            self._stopped = False
             thread = threading.Thread(
                 target=self._run_loop,
                 name="hades-persephone-receiver",
@@ -258,23 +268,75 @@ class PersephoneReceiver:
             if worker is not None:
                 worker.queue_supported = supported is True
 
-    def stop(self, *, timeout: float | None = 5.0) -> None:
+    def stop(self, *, timeout: float | None = 5.0) -> bool:
         """Stop polling and close every client owned by this receiver."""
         with self._lock:
+            self._draining = True
             thread = self.thread
             self._stop_event.set()
-            clients = self._detach_worker_clients_locked()
-        # Closing the active httpx client tears down a blocked streaming read.
-        # This occurs outside the receiver lock so reader cleanup cannot
-        # deadlock against lifecycle state.
-        self._close_detached_clients(clients)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=timeout)
+            flush_workers = tuple(self._workers.values())
+            flush_thread = self._flush_thread
+            if flush_thread is None or not flush_thread.is_alive():
+                flush_thread = threading.Thread(
+                    target=self._flush_owned_outbox,
+                    args=(flush_workers,),
+                    name="hades-persephone-outbox-flush",
+                    daemon=True,
+                )
+                self._flush_thread = flush_thread
+                flush_thread.start()
+        total_timeout = 5.0 if timeout is None else max(0.0, float(timeout))
+        flush_thread.join(timeout=min(1.0, total_timeout / 2))
         with self._lock:
-            if thread is None or not thread.is_alive():
+            clients = self._detach_worker_clients_locked()
+        # Closing active clients interrupts both a stream and an overdue flush.
+        self._close_detached_clients(clients)
+        remaining_timeout = max(0.0, total_timeout - min(1.0, total_timeout / 2))
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=remaining_timeout)
+        flush_thread.join(timeout=0.1)
+        with self._lock:
+            joined = thread is None or not thread.is_alive()
+            flushed = not flush_thread.is_alive()
+            if joined and flushed:
                 self.thread = None
+                self._flush_thread = None
+                self._draining = False
+                self._stopped = True
                 for worker in self._workers.values():
                     worker.client = None
+                return True
+            return False
+
+    def _flush_owned_outbox(self, flush_workers: tuple[_ReceiverWorker, ...]) -> None:
+        """Attempt a bounded sender-scoped flush after intake is quiesced."""
+        remaining = self.batch_size
+        flushed_scopes: set[tuple[str, str]] = set()
+        for worker in flush_workers:
+            scope = (worker.project_id, worker.agent_id)
+            if remaining <= 0 or scope in flushed_scopes or worker.client is None:
+                continue
+            flushed_scopes.add(scope)
+            try:
+                with self.connection_factory() as conn:
+                    counts = send_due_messages(
+                        conn,
+                        worker.client,
+                        now=self._now(),
+                        limit=remaining,
+                        project_id=worker.project_id,
+                        sender_agent_id=worker.agent_id,
+                    )
+                remaining -= sum(int(value) for value in counts.values())
+            except Exception:
+                logger.exception(
+                    "hades_persephone.receiver_shutdown_flush_failed",
+                    extra={
+                        "hades_event": "persephone.receiver_shutdown_flush_failed",
+                        "hades_project_id": worker.project_id,
+                        "hades_agent_id": worker.agent_id,
+                    },
+                )
 
     @staticmethod
     def _unique_clients(clients: Iterable[object]) -> list[object]:
@@ -325,6 +387,13 @@ class PersephoneReceiver:
                         extra={"hades_event": "persephone.receiver_cycle_failed"},
                     )
                 self._stop_event.wait(self.poll_interval)
+        except BaseException:
+            with self._lock:
+                self._fatal_error = True
+            logger.exception(
+                "hades_persephone.receiver_crashed",
+                extra={"hades_event": "persephone.receiver_crashed"},
+            )
         finally:
             self._release_worker_clients()
             with self._lock:
@@ -347,6 +416,10 @@ class PersephoneReceiver:
         ]
         if fatal or (thread is not None and not thread.is_alive()):
             state = "failed"
+        elif self._draining:
+            state = "draining"
+        elif self._stopped:
+            state = "stopped"
         elif not queue_capability or not workers or all(
             worker.queue_supported is False for worker in workers
         ):
@@ -359,7 +432,11 @@ class PersephoneReceiver:
             state = "polling"
         return {
             "state": state,
-            "active": bool(thread is not None and thread.is_alive()),
+            "active": bool(
+                thread is not None
+                and thread.is_alive()
+                and state in {"polling", "connected", "backoff", "draining"}
+            ),
             "projects": projects,
             "failure_count": failure_count,
             "next_retry_at": min(retry_values) if retry_values else None,
@@ -387,6 +464,12 @@ class PersephoneReceiver:
                 worker.client = self.client_factory(worker.agent)
             client = worker.client
             known_supported = worker.queue_supported is True
+            if (
+                worker.queue_supported is False
+                and worker.capability_next_probe_at is not None
+                and worker.capability_next_probe_at > self._now()
+            ):
+                return None
         if not known_supported:
             response = client.capabilities()
             supported = bool(
@@ -396,9 +479,39 @@ class PersephoneReceiver:
                 if self._workers.get(key) is not worker or worker.client is not client:
                     return None
                 worker.queue_supported = supported
+                worker.capability_next_probe_at = (
+                    None if supported else int(self._now()) + 300
+                )
             if not supported:
                 return None
         return client
+
+    def probe_capabilities(self) -> int:
+        """Probe every configured identity once without opening an inbox stream."""
+        supported = 0
+        with self._lock:
+            workers = tuple(self._workers[key] for key in sorted(self._workers))
+        for worker in workers:
+            try:
+                if self._prepare_worker(worker) is not None:
+                    supported += 1
+            except Exception:
+                self._record_worker_failure(worker)
+                logger.exception(
+                    "hades_persephone.receiver_capability_probe_failed",
+                    extra={
+                        "hades_event": "persephone.receiver_capability_probe_failed",
+                        "hades_project_id": worker.project_id,
+                        "hades_agent_id": worker.agent_id,
+                    },
+                )
+        return supported
+
+    def _record_worker_failure(self, worker: _ReceiverWorker) -> None:
+        with self._lock:
+            worker.failure_count += 1
+            delay = min(300, 2 ** min(worker.failure_count, 8))
+            worker.next_retry_at = int(self._now()) + delay
 
     def run_once(self) -> int:
         """Poll a fair bounded subset of project queues and durably ingest it."""
@@ -437,6 +550,7 @@ class PersephoneReceiver:
                             now=timestamp,
                             limit=self.batch_size,
                             project_id=worker.project_id,
+                            sender_agent_id=worker.agent_id,
                         )
                         delivered_projects.add(worker.project_id)
                     cursor = get_cursor(
@@ -474,10 +588,7 @@ class PersephoneReceiver:
                         "hades_agent_id": worker.agent_id,
                     },
                 )
-                with self._lock:
-                    worker.failure_count += 1
-                    delay = min(300, 2 ** min(worker.failure_count, 8))
-                    worker.next_retry_at = int(self._now()) + delay
+                self._record_worker_failure(worker)
         return ingested
 
     @staticmethod
@@ -581,7 +692,7 @@ class PersephoneReceiver:
             try:
                 durable = parse_envelope(stored.envelope.to_dict(), now=timestamp)
             except ValueError as exc:
-                if stored.state != "received":
+                if stored.state not in {"received", "retry"}:
                     return self._duplicate_disposition(stored.state)
                 if "expired" in str(exc):
                     transition_message(conn, envelope.message_id, "expired", now=timestamp)
@@ -646,9 +757,16 @@ class PersephoneReceiver:
                             now=timestamp,
                         )
                     elif self.information_executor is not None:
-                        transition_message(
-                            conn, envelope.message_id, "processing", now=timestamp
-                        )
+                        if not claim_information_request(
+                            conn,
+                            envelope.message_id,
+                            expected_states=(stored.state,),
+                            now=timestamp,
+                        ):
+                            claimed = get_message(conn, envelope.message_id)
+                            return self._duplicate_disposition(
+                                claimed.state if claimed is not None else "retry_pending"
+                            )
                         with self._lock:
                             binding = self._bindings.get(
                                 durable.target_workspace_binding_id or ""

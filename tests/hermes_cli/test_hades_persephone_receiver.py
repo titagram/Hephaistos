@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import threading
 import time
 
 import pytest
@@ -537,6 +538,250 @@ def test_receiver_health_enters_bounded_backoff_and_recovers(tmp_path):
     clock[0] += 2
     receiver.run_once()
     assert receiver.health_snapshot()["state"] == "connected"
+
+
+def test_capability_absence_is_inactive_and_probe_is_backed_off(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    path = tmp_path / "capability.db"
+    clock = [NOW]
+    probes = [0]
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            probes[0] += 1
+            return {"persephone_agent_queue_v1": False}
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: Client(),
+        event_reader=lambda *args, **kwargs: pytest.fail("must not poll"),
+        now=lambda: clock[0],
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+
+    receiver.run_once()
+    receiver.run_once()
+    health = receiver.health_snapshot()
+
+    assert probes[0] == 1
+    assert health["state"] == "disabled_capability"
+    assert health["active"] is False
+
+
+def test_stop_timeout_retains_draining_thread_until_later_cleanup(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    path = tmp_path / "blocked.db"
+    entered = threading.Event()
+    release = threading.Event()
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def close(self):
+            pass
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        release.wait(2)
+        return []
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: Client(),
+        event_reader=blocked,
+        poll_interval=0,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+    receiver.start()
+    assert entered.wait(1)
+
+    assert receiver.stop(timeout=0.01) is False
+    assert receiver.health_snapshot()["state"] == "draining"
+    release.set()
+    assert receiver.stop(timeout=1) is True
+    assert receiver.health_snapshot()["state"] == "stopped"
+
+
+def test_concurrent_receivers_execute_information_request_only_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    path = tmp_path / "claim-race.db"
+    barrier = threading.Barrier(2)
+    executions = []
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def execute(conn, message_id, **kwargs):
+        executions.append(message_id)
+        time.sleep(0.05)
+
+    binding = _binding()
+    receivers = [
+        PersephoneReceiver(
+            connection_factory=connections,
+            information_executor=execute,
+            now=lambda: NOW,
+        )
+        for _ in range(2)
+    ]
+    for item in receivers:
+        item.refresh_bindings([binding])
+
+    def ingest(item):
+        barrier.wait()
+        return item.ingest_event(_event(message_id="claim_once"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(ingest, receivers))
+
+    assert len(executions) == 1
+    assert set(results) <= {"accepted", "retry_pending"}
+
+
+def test_fatal_receiver_thread_exit_is_reported_as_failed(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    class FatalWorkerExit(BaseException):
+        pass
+
+    path = tmp_path / "fatal.db"
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def close(self):
+            pass
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: Client(),
+        event_reader=lambda *args, **kwargs: (_ for _ in ()).throw(FatalWorkerExit()),
+        poll_interval=0,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+    receiver.start()
+    assert receiver.thread is not None
+    receiver.thread.join(timeout=1)
+
+    assert receiver.health_snapshot()["state"] == "failed"
+
+
+def test_shutdown_flushes_only_owned_sender_outbox(tmp_path):
+    from hermes_cli.hades_persephone_messages import parse_envelope
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+
+    path = tmp_path / "shutdown-outbox.db"
+    sent = []
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def create_inbox_message(self, **payload):
+            sent.append(payload["message_id"])
+
+        def close(self):
+            pass
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: Client(),
+        event_reader=lambda *args, **kwargs: [],
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+    worker = receiver._worker_batch()[0]
+    receiver._prepare_worker(worker)
+    envelope = parse_envelope(
+        {
+            **_envelope(
+                message_id="shutdown_response",
+                project="project_a",
+                agent="remote_agent",
+                binding=None,
+                message_type="information_response",
+                capability="project_memory_search",
+            ),
+            "sender_agent_id": "agent_a",
+        },
+        now=NOW,
+    )
+    foreign = parse_envelope(
+        {
+            **_envelope(
+                message_id="foreign_response",
+                project="project_a",
+                agent="remote_agent",
+                binding=None,
+                message_type="information_response",
+                capability="project_memory_search",
+            ),
+            "sender_agent_id": "other_local_agent",
+        },
+        now=NOW,
+    )
+    with connections() as conn:
+        enqueue_outbox(conn, envelope, now=NOW)
+        enqueue_outbox(conn, foreign, now=NOW)
+
+    assert receiver.stop(timeout=1) is True
+
+    with connections() as conn:
+        owned = get_message(conn, "shutdown_response", queue="outbox")
+        untouched = get_message(conn, "foreign_response", queue="outbox")
+    assert sent == ["shutdown_response"]
+    assert owned is not None and owned.state == "sent"
+    assert untouched is not None and untouched.state == "outbox_pending"
 
 
 def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_path):

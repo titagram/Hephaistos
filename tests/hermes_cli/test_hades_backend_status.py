@@ -111,3 +111,61 @@ def test_local_queue_health_counts_only_states_not_payloads(tmp_path) -> None:
         "failure_count": 2,
         "next_retry_at": 123,
     }
+
+
+def test_support_report_strips_arbitrary_persephone_fields() -> None:
+    from hermes_cli.hades_backend_status import support_report_payload
+
+    report = support_report_payload(
+        {
+            "persephone": {
+                "state": "connected",
+                "projects": 1,
+                "payload": {"token": "super-secret"},
+                "last_error": "Bearer super-secret",
+                "unexpected": "leak",
+            }
+        }
+    )
+
+    rendered = str(report)
+    assert "super-secret" not in rendered
+    assert "payload" not in report["persephone"]
+    assert "last_error" not in report["persephone"]
+    assert set(report["persephone"]) == {
+        "state", "active", "projects", "unread", "pending_approval",
+        "retry", "dead_letters", "failure_count", "next_retry_at",
+    }
+
+
+def test_queue_counts_are_scoped_to_current_project_and_agent(tmp_path) -> None:
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import _load_persephone_status
+
+    with db.connect_closing(tmp_path / "scope.db") as conn:
+        agent = db.save_agent(
+            conn, agent_id="current", project_id="project_current",
+            base_url="https://example.invalid", label="current",
+            token_env_key="TOKEN", capabilities={},
+        )
+        binding = db.upsert_workspace_binding(
+            conn, project_id="project_current", agent_id="current",
+            local_project_id="local", workspace_fingerprint="fp",
+            display_path="~/repo", repo_root=str(tmp_path),
+            git_remote_display="", git_remote_hash="", head_commit="",
+            backend_workspace_binding_id="wb",
+        )
+        for message_id, project, target in (
+            ("owned", "project_current", "current"),
+            ("foreign_project", "other", "current"),
+            ("foreign_agent", "project_current", "other"),
+        ):
+            conn.execute(
+                "INSERT INTO persephone_inbox "
+                "(message_id, project_id, target_agent_id, envelope, message_type, effect, capability, state, received_at, updated_at) "
+                "VALUES (?, ?, ?, '{}', 'information_request', 'mutating', 'unknown', 'waiting_human_approval', 1, 1)",
+                (message_id, project, target),
+            )
+        health = _load_persephone_status(conn, agent=agent, bindings=[binding])
+
+    assert health["pending_approval"] == 1

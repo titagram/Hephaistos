@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from unittest.mock import Mock
+import asyncio
+import threading
 
 import pytest
 
@@ -60,3 +62,130 @@ async def test_gateway_capability_gate_does_not_start_receiver() -> None:
 
     assert runner._hades_persephone_receiver is None
     assert recorded == [("disabled_capability", None)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_create_exactly_one_receiver() -> None:
+    receiver = Mock(spec=["start", "stop"])
+    calls = 0
+
+    def factory():
+        nonlocal calls
+        calls += 1
+        return receiver
+
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = None
+    runner._hades_persephone_receiver_factory = factory
+
+    await asyncio.gather(
+        runner._start_hades_persephone_receiver(),
+        runner._start_hades_persephone_receiver(),
+    )
+
+    assert calls == 1
+    receiver.start.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_factory_prevents_late_receiver_publish() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    receiver = Mock(spec=["start", "stop"])
+
+    def factory():
+        entered.set()
+        assert release.wait(2)
+        return receiver
+
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = None
+    runner._hades_persephone_receiver_factory = factory
+    start_task = asyncio.create_task(runner._start_hades_persephone_receiver())
+    assert await asyncio.to_thread(entered.wait, 2)
+    stop_task = asyncio.create_task(runner._stop_hades_persephone_receiver())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(start_task, stop_task)
+
+    receiver.start.assert_not_called()
+    receiver.stop.assert_called_once()
+    assert runner._hades_persephone_receiver is None
+
+
+@pytest.mark.asyncio
+async def test_incomplete_stop_retains_receiver_ownership() -> None:
+    receiver = Mock(spec=["start", "stop", "health_snapshot"])
+    receiver.stop.return_value = False
+    receiver.health_snapshot.return_value = {
+        "state": "draining",
+        "active": True,
+        "failure_count": 0,
+    }
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = receiver
+    recorded = []
+    runner._record_hades_persephone_health = recorded.append
+
+    await runner._stop_hades_persephone_receiver()
+
+    assert runner._hades_persephone_receiver is receiver
+    assert recorded[-1]["state"] in {"draining", "failed"}
+
+
+def test_receiver_factory_is_inert_when_backend_disabled(monkeypatch) -> None:
+    import hermes_cli.config as config_module
+
+    monkeypatch.setattr(config_module, "load_config", lambda: {"backend": {"enabled": False}})
+    runner = object.__new__(GatewayRunner)
+
+    assert runner._create_hades_persephone_receiver() is None
+
+
+@pytest.mark.asyncio
+async def test_fatal_receiver_is_restarted_once_with_generation_guard() -> None:
+    failed = Mock(spec=["health_snapshot", "stop"])
+    failed.health_snapshot.return_value = {
+        "state": "failed", "active": False, "failure_count": 1,
+    }
+    failed.stop.return_value = True
+    replacement = Mock(spec=["start", "stop"])
+    runner = _runner(replacement)
+    runner._hades_persephone_receiver = failed
+    runner._hades_persephone_generation = 4
+    runner._hades_persephone_draining = False
+    runner._hades_persephone_restart_base_seconds = 0
+    runner._hades_persephone_receiver_factory = lambda: replacement
+    runner._record_hades_persephone_health = lambda snapshot: None
+    runner._record_hades_persephone_lifecycle = lambda state, error=None: None
+    runner._hades_persephone_runtime_revision = lambda: (True, "default", ())
+
+    await runner._monitor_hades_persephone_receiver(failed, generation=4)
+
+    failed.stop.assert_called_once()
+    replacement.start.assert_called_once()
+    assert runner._hades_persephone_receiver is replacement
+    assert runner._hades_persephone_generation == 5
+
+
+@pytest.mark.asyncio
+async def test_revision_change_refreshes_routes_without_duplicate_receiver() -> None:
+    receiver = Mock(spec=["health_snapshot", "refresh_bindings"])
+    receiver.health_snapshot.return_value = {
+        "state": "connected", "active": True, "failure_count": 0,
+    }
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = receiver
+    runner._hades_persephone_generation = 1
+    runner._hades_persephone_draining = False
+    runner._hades_persephone_revision = (True, "old", ())
+    runner._hades_persephone_monitor_interval_seconds = 0
+    runner._record_hades_persephone_health = lambda snapshot: None
+    runner._hades_persephone_runtime_revision = lambda: (True, "new", ())
+    receiver.refresh_bindings.side_effect = lambda **kwargs: setattr(
+        runner, "_hades_persephone_receiver", None
+    )
+
+    await runner._monitor_hades_persephone_receiver(receiver, generation=1)
+
+    receiver.refresh_bindings.assert_called_once_with(queue_capability=True)

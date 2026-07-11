@@ -19,7 +19,10 @@ QUALITY_REPORT_HISTORY_KEY = "quality_report_history"
 QUALITY_REPORT_HISTORY_LIMIT = 10
 PERSEPHONE_STATUS_KEY = "persephone_receiver_status"
 PERSEPHONE_STATES = frozenset(
-    {"disabled_capability", "polling", "connected", "backoff", "failed"}
+    {
+        "disabled_capability", "polling", "connected", "backoff", "failed",
+        "draining", "stopped",
+    }
 )
 
 
@@ -133,7 +136,11 @@ def support_report_payload(status: dict[str, Any] | None = None) -> dict[str, An
         "proposal_counts": payload.get("proposal_counts") if isinstance(payload.get("proposal_counts"), dict) else {},
         "inbox_counts": payload.get("inbox_counts") if isinstance(payload.get("inbox_counts"), dict) else {},
         "task_work": payload.get("task_work") if isinstance(payload.get("task_work"), dict) else {},
-        "persephone": payload.get("persephone") if isinstance(payload.get("persephone"), dict) else {},
+        "persephone": _persephone_payload(
+            payload.get("persephone")
+            if isinstance(payload.get("persephone"), dict)
+            else None
+        ),
         "sync": {
             "last_summary": _numeric_summary(sync.get("last_summary")),
             "last_summary_updated_at": sync.get("last_summary_updated_at"),
@@ -327,7 +334,7 @@ def backend_status_payload(
             or background_failed
             or quality_failed
             or task_work.get("failed")
-            or persephone_state["state"] in {"backoff", "failed"}
+            or persephone_state["state"] in {"backoff", "failed", "draining"}
         ),
         "actions": actions,
     }
@@ -344,14 +351,17 @@ def _load_persephone_status(
     else:
         state = str(recorded.get("state") or "disabled_capability")
         active = bool(recorded.get("active"))
+    project_id = str(getattr(agent, "project_id", "") or "")
+    agent_id = str(getattr(agent, "agent_id", "") or "")
     counts = conn.execute(
         "SELECT "
-        "(SELECT COUNT(*) FROM persephone_inbox WHERE state = 'received') AS unread, "
-        "(SELECT COUNT(*) FROM persephone_inbox WHERE state = 'waiting_human_approval') AS pending_approval, "
-        "((SELECT COUNT(*) FROM persephone_inbox WHERE state = 'retry') + "
-        " (SELECT COUNT(*) FROM persephone_outbox WHERE state = 'retry')) AS retry, "
-        "((SELECT COUNT(*) FROM persephone_inbox WHERE state = 'dead_letter') + "
-        " (SELECT COUNT(*) FROM persephone_outbox WHERE state = 'dead_letter')) AS dead_letters"
+        "(SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'received') AS unread, "
+        "(SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'waiting_human_approval') AS pending_approval, "
+        "((SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'retry') + "
+        " (SELECT COUNT(*) FROM persephone_outbox WHERE project_id = ? AND sender_agent_id = ? AND state = 'retry')) AS retry, "
+        "((SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'dead_letter') + "
+        " (SELECT COUNT(*) FROM persephone_outbox WHERE project_id = ? AND sender_agent_id = ? AND state = 'dead_letter')) AS dead_letters",
+        (project_id, agent_id) * 6,
     ).fetchone()
     linked_projects = {
         str(_binding_value(binding, "project_id"))
@@ -376,10 +386,10 @@ def _persephone_payload(value: dict[str, Any] | None) -> dict[str, Any]:
     state = str(raw.get("state") or "disabled_capability")
     if state not in PERSEPHONE_STATES:
         state = "failed"
-    active_default = state in {"polling", "connected", "backoff"}
+    active_default = state in {"polling", "connected", "backoff", "draining"}
     return {
         "state": state,
-        "active": bool(raw.get("active", active_default)),
+        "active": bool(active_default and raw.get("active", True)),
         "projects": _nonnegative_int(raw.get("projects")),
         "unread": _nonnegative_int(raw.get("unread")),
         "pending_approval": _nonnegative_int(raw.get("pending_approval")),
@@ -388,7 +398,7 @@ def _persephone_payload(value: dict[str, Any] | None) -> dict[str, Any]:
         "failure_count": _nonnegative_int(raw.get("failure_count")),
         "next_retry_at": (
             _nonnegative_int(raw.get("next_retry_at"))
-            if raw.get("next_retry_at") is not None
+            if state == "backoff" and raw.get("next_retry_at") is not None
             else None
         ),
     }
