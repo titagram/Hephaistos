@@ -153,6 +153,33 @@ py_compile: passed
 git diff --check: passed
 ```
 
+## Final XML critical remediation
+
+The final adversarial check reproduced a container-first XML failure: the old
+regular expression matched an outer non-sensitive element and consumed the
+markup containing its sensitive child. XML element redaction is now
+leaf/innermost-first and explicitly excludes child markup, while still
+recognizing namespaced tags and CDATA leaves. A bounded token stack separately
+redacts sensitive containers whose content contains child elements.
+
+XML processing has explicit pass, token, and nesting-depth limits. If a
+structural limit is exhausted or sensitive XML remains structurally unresolved,
+the uninspected suffix is conservatively replaced, `truncated` is set, and the
+response records `XML evidence was conservatively truncated`. Replacements do
+not increase evidence length; existing self-closing semantic attributes and
+namespaced sensitive attributes remain covered.
+
+Final critical verification:
+
+```text
+Exact nested/CDATA/depth corpus: 5 passed
+Focused worker/store/receiver: 225 passed
+O1-O5 + sync + DB + quality: 386 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```
+
 ## Fifth adversarial re-review
 
 The fifth exact corpus initially exposed 11 security/classification failures;

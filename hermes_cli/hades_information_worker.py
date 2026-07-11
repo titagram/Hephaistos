@@ -55,13 +55,16 @@ MAX_MEMORY_NODES = 2_000
 MAX_MEMORY_DEPTH = 8
 MAX_MEMORY_STRING = 4_096
 MAX_PENDING_DIRS = 128
+MAX_XML_PASSES = 8
+MAX_XML_DEPTH = 32
+MAX_XML_TOKENS = 512
 _LOCAL_PATH_RE = re.compile(
     r"(?<![\w])/(?:Users|home|private|tmp|var/folders)/[^\s,'\"}]+"
 )
-_XML_ELEMENT_RE = re.compile(
+_XML_LEAF_ELEMENT_RE = re.compile(
     r"<(?P<tag>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
     r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*))(?P<attrs>\s[^>]*)?>"
-    r"(?P<value>.*?)</(?P=tag)>",
+    r"(?P<value>(?:<!\[CDATA\[.*?\]\]>|[^<])*)</(?P=tag)>",
     re.IGNORECASE | re.DOTALL,
 )
 _XML_ATTRIBUTE_RE = re.compile(
@@ -73,6 +76,12 @@ _XML_ATTRIBUTE_RE = re.compile(
 _XML_TAG_RE = re.compile(
     r"<(?P<tag>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?P<attrs>\s[^<>]*?)(?P<close>/?)>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XML_TOKEN_RE = re.compile(
+    r"<(?P<closing>/)?"
+    r"(?P<tag>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?[A-Za-z_][A-Za-z0-9_.-]*)"
+    r"(?P<attrs>\s[^<>]*?)?(?P<self_close>/)?>",
     re.IGNORECASE | re.DOTALL,
 )
 _PEM_RE = re.compile(
@@ -767,7 +776,9 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
     return rendered, clipped
 
 
-def _redact_xml_elements(value: str) -> str:
+def _redact_xml_elements(value: str) -> tuple[str, bool]:
+    """Redact XML without allowing outer containers to hide sensitive leaves."""
+
     def semantic_attribute(attrs: str) -> bool:
         for attribute in _XML_ATTRIBUTE_RE.finditer(attrs):
             local_name = attribute.group("key").casefold()
@@ -786,10 +797,78 @@ def _redact_xml_elements(value: str) -> str:
             return match.group(0)
         tag = match.group("tag")
         content = match.group("value")
-        replacement = "<![CDATA[***]]>" if content.startswith("<![CDATA[") else "***"
+        replacement = "***"
         return f"<{tag}{attrs}>{replacement}</{tag}>"
 
-    elements = _XML_ELEMENT_RE.sub(replace, value)
+    elements = value
+    pass_exhausted = True
+    for _ in range(MAX_XML_PASSES):
+        updated = _XML_LEAF_ELEMENT_RE.sub(replace, elements)
+        if updated == elements:
+            pass_exhausted = False
+            break
+        elements = updated
+
+    clipped = pass_exhausted
+
+    # A sensitive container may contain otherwise innocuous child elements.  A
+    # bounded token stack finds its content interval after leaf redaction.  If
+    # the structural budget is exhausted, discarding the uninspected suffix is
+    # safer than returning XML whose sensitivity we could not establish.
+    stack: list[tuple[str, int, bool]] = []
+    intervals: list[tuple[int, int]] = []
+    truncate_from: int | None = None
+    token_count = 0
+    for token in _XML_TOKEN_RE.finditer(elements):
+        token_count += 1
+        if token_count > MAX_XML_TOKENS:
+            clipped = True
+            truncate_from = token.start()
+            break
+        tag = token.group("tag")
+        if token.group("closing"):
+            if not stack or stack[-1][0].casefold() != tag.casefold():
+                clipped = True
+                if any(entry[2] for entry in stack):
+                    truncate_from = min(
+                        entry[1] for entry in stack if entry[2]
+                    )
+                    break
+                continue
+            _, content_start, sensitive = stack.pop()
+            if sensitive:
+                intervals.append((content_start, token.start()))
+            continue
+        if token.group("self_close"):
+            continue
+        attrs = token.group("attrs") or ""
+        local_name = tag.rsplit(":", 1)[-1]
+        sensitive = _is_sensitive_key(local_name) or semantic_attribute(attrs)
+        if len(stack) >= MAX_XML_DEPTH:
+            clipped = True
+            truncate_from = token.start()
+            break
+        stack.append((tag, token.end(), sensitive))
+
+    if truncate_from is None and stack:
+        sensitive_starts = [entry[1] for entry in stack if entry[2]]
+        if sensitive_starts:
+            clipped = True
+            truncate_from = min(sensitive_starts)
+
+    if intervals:
+        # Sort outer intervals first, then omit intervals already covered by a
+        # sensitive ancestor.  Reverse application keeps offsets stable.
+        selected: list[tuple[int, int]] = []
+        for start, end in sorted(intervals, key=lambda item: (item[0], -item[1])):
+            if selected and start >= selected[-1][0] and end <= selected[-1][1]:
+                continue
+            selected.append((start, end))
+        for start, end in reversed(selected):
+            elements = elements[:start] + "***" + elements[end:]
+
+    if truncate_from is not None:
+        elements = elements[:truncate_from] + "[TRUNCATED XML]"
 
     def replace_semantic_tag(match: re.Match[str]) -> str:
         attrs = match.group("attrs") or ""
@@ -816,7 +895,10 @@ def _redact_xml_elements(value: str) -> str:
         quote = match.group("quote")
         return f"{match.group('name')}={quote}***{quote}"
 
-    return _XML_ATTRIBUTE_RE.sub(replace_attribute, elements)
+    elements = _XML_ATTRIBUTE_RE.sub(replace_attribute, elements)
+    if len(elements) > len(value):
+        return "[TRUNCATED XML]", True
+    return elements, clipped
 
 
 def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
@@ -826,10 +908,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     clipped = False
     redacted = False
     lexical_uncertain = False
+    xml_uncertain = False
     deadline = time.monotonic() + MAX_SCAN_SECONDS
 
     def redact_plain_text(value: str) -> str:
-        nonlocal clipped, redacted, lexical_uncertain
+        nonlocal clipped, redacted, lexical_uncertain, xml_uncertain
         working = value
         if len(working) > MAX_RESULT_CHARS:
             clipped = True
@@ -844,7 +927,10 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         if lexical_clip:
             clipped = True
             lexical_uncertain = True
-        without_xml = _redact_xml_elements(without_pairs)
+        without_xml, xml_clip = _redact_xml_elements(without_pairs)
+        if xml_clip:
+            clipped = True
+            xml_uncertain = True
         safe = redact_secret(without_xml)
         if safe != working:
             redacted = True
@@ -961,6 +1047,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     if lexical_uncertain and "lexical evidence was conservatively truncated" not in uncertainty:
         if len(uncertainty) < 20:
             uncertainty.append("lexical evidence was conservatively truncated")
+        else:
+            clipped = True
+    if xml_uncertain and "XML evidence was conservatively truncated" not in uncertainty:
+        if len(uncertainty) < 20:
+            uncertainty.append("XML evidence was conservatively truncated")
         else:
             clipped = True
     while evidence:

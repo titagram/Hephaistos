@@ -591,6 +591,52 @@ def test_sixth_review_generic_keys_are_metadata_without_credential_qualifier(
 
 
 @pytest.mark.parametrize(
+    ("content", "secret"),
+    [
+        ("<config><password>nested-private</password></config>", "nested-private"),
+        (
+            "<config><ns:accessToken><![CDATA[cdata-private]]>"
+            "</ns:accessToken></config>",
+            "cdata-private",
+        ),
+        ("<a><b><password>deep-private</password></b></a>", "deep-private"),
+        (
+            "<password><value>container-private</value></password>",
+            "container-private",
+        ),
+    ],
+)
+def test_final_review_xml_leaf_first_never_hides_sensitive_child(
+    tmp_path, content, secret
+):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.xml").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.xml"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert secret not in rendered
+    assert len(response.evidence_refs[0]["content"]) <= len(content)
+
+
+def test_xml_depth_budget_marks_uncertainty_and_redacts_sensitive_leaf(tmp_path):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    content = ("<a>" * 80) + "<password>depth-budget-private</password>" + ("</a>" * 80)
+    (tmp_path / "safe_example.xml").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.xml"}),
+        binding=_binding(tmp_path),
+    )
+    payload = response.to_payload()
+    assert "depth-budget-private" not in str(payload)
+    assert payload["truncated"] is True
+    assert "XML evidence was conservatively truncated" in payload["residual_uncertainty"]
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",
