@@ -36,6 +36,12 @@ loss.
   render an empty state despite available graph data.
 - Neo4j rebuild and dashboard graph code still primarily use the legacy
   snapshot model, while Hades traversal reads Hades graph artifacts directly.
+- The inspected project had a current Hades graph artifact but no legacy
+  repositories, local workspaces, Genesis imports, or graph snapshots. Its
+  overview therefore reported lifecycle states from a pipeline it did not use.
+- Backlog Triage is implemented, but the inspected project had no tasks or
+  previous suggestion. The UI did not distinguish an empty backlog from a
+  never-run, unconfigured, running, failed, or stale analysis.
 
 ## 3. Architectural principles
 
@@ -166,9 +172,80 @@ Users compare two canonical graph versions, normally commits. The view shows:
 Comparisons across incompatible schemas or inventory quality tiers must be
 labelled partial rather than presented as complete.
 
-## 6. Memory, wiki, and graph information architecture
+## 6. Project overview and unified lifecycle
 
-### 6.1 Memory
+The project overview describes user outcomes instead of internal pipeline
+names. It answers four questions:
+
+```text
+Sources     Where does current project data come from?
+Knowledge   Are curated memory and wiki current and usable?
+Code model  Are indexing and graph capabilities usable?
+Work        Are tasks present and has the backlog been analyzed?
+```
+
+Detailed pipeline terminology remains under Engineering, Runs, and Artifacts.
+
+### 6.1 Code indexing instead of Genesis
+
+`Genesis` is removed from the primary overview and replaced by `Code indexing`
+with states `not_configured`, `indexing`, `ready`, `partial`, `stale`, and
+`failed`. Details show source mechanism, repository/workspace, commit,
+extractor, coverage, and last update.
+
+`Genesis Import` remains a technical term in Runs/Artifacts for a full legacy
+plugin import, where it can be contrasted with Delta Sync.
+
+### 6.2 Code graph instead of Graph import
+
+`Graph import` becomes `Code graph` and is derived from the canonical graph
+service rather than the legacy `artifacts` table alone. Its states are
+`unavailable`, `available`, `projecting`, `ready`, `degraded`, `stale`, and
+`failed`.
+
+A valid Hades graph artifact must never be reported as `not started` merely
+because the project has no legacy graph snapshot.
+
+### 6.3 Connected sources instead of Local workspace link
+
+`Local workspace link` becomes `Connected sources`. A source is connected when
+the project has at least one authorized current Hades workspace binding or a
+legacy plugin local workspace. The summary shows source type, workspace or
+repository, agent/device, branch, commit, last sync, and freshness.
+
+Kickstart accepts both onboarding paths and must not block a Hades project on
+the absence of legacy `local_workspaces` rows.
+
+### 6.4 Backlog analysis
+
+`Backlog Triage` becomes `Backlog analysis`. Its explicit states are
+`no_tasks`, `ready`, `running`, `suggestion_available`, `stale`,
+`configuration_required`, and `failed`.
+
+Backlog analysis is project-aware by contract. Before recommending priorities
+or grouping work, it builds a bounded evidence pack from:
+
+- current tasks, statuses, owners, priorities, risks, and dependencies;
+- curated project memory and relevant prior decisions;
+- human and structured wiki sections;
+- current graph architecture, symbol relationships, and impact paths;
+- source, indexing, graph, memory, and wiki freshness/quality;
+- prior accepted or rejected backlog analyses when relevant.
+
+It must not present a technically informed recommendation from task text alone
+when project knowledge is available. Every recommendation cites its evidence
+and explicitly reports missing, stale, or degraded sources.
+
+The feature remains read-only by default. It may group work, identify risks and
+dependencies, and recommend ordering, but cannot mutate Kanban tasks without a
+separate authorized action and explicit human approval.
+
+An analysis becomes stale when material task fields, relevant curated
+decisions, linked wiki sections, graph version, or source commit changes.
+
+## 7. Memory, wiki, and graph information architecture
+
+### 7.1 Memory
 
 The default memory page shows compact, curated project knowledge:
 
@@ -187,7 +264,7 @@ curated entries. Supported states include `raw`, `proposed`, `accepted`,
 Raw chunks remain retrievable for audit and debugging, but are not treated as
 authoritative memory or shown as the main human representation.
 
-### 6.2 Wiki
+### 7.2 Wiki
 
 The same wiki URL provides two presentations of one canonical page model:
 
@@ -199,7 +276,7 @@ Canonical page blocks include summary, concepts, components,
 responsibilities, workflows, decisions, risks, references, and linked graph
 nodes. The two views must not drift into separately generated wikis.
 
-### 6.3 Cross-links
+### 7.3 Cross-links
 
 - Wiki sections may link to verified graph nodes and graph versions.
 - Graph nodes may link to relevant wiki pages and curated memory.
@@ -215,7 +292,7 @@ Wiki   = how the project is explained
 Graph  = how the project is built
 ```
 
-## 7. Platon memory-first task clarification
+## 8. Platon memory-first task clarification
 
 Platon builds a bounded task dossier before asking questions:
 
@@ -228,13 +305,13 @@ Raw task
     -> ask at most 1-3 high-impact questions per cycle
 ```
 
-### 7.1 Retrieval contract
+### 8.1 Retrieval contract
 
 Each selected context item records source, version/freshness, trust state,
 relevant excerpt or structured fact, and selection reason. Graph retrieval is
 used only when the task identifies technical components or symbols.
 
-### 7.2 Question policy
+### 8.2 Question policy
 
 Platon asks only when the answer can materially change scope, architecture,
 behavior, risk, or acceptance criteria. It does not ask questions already
@@ -244,13 +321,13 @@ used without interruption.
 Conflicting sources generate a clarification with the conflict summarized.
 Missing but low-impact details become explicit assumptions.
 
-### 7.3 Evidence-backed proposals
+### 8.3 Evidence-backed proposals
 
 Options and recommendations cite the project facts that support them. The UI
 shows concise reasoning with expandable references rather than raw memory
 dumps.
 
-### 7.4 Evaluation
+### 8.4 Evaluation
 
 A curated corpus of realistic tasks is annotated for required questions,
 redundant questions, irrelevant questions, retrievable facts, conflicts, and
@@ -262,7 +339,7 @@ acceptable assumptions. Release metrics include:
 - source relevance and freshness;
 - clarification cycles required before an executable task exists.
 
-## 8. Multi-organization tenancy
+## 9. Multi-organization tenancy
 
 Users have global identities and may belong to multiple organizations. They
 select an active organization, but the backend derives authorization from a
@@ -278,7 +355,7 @@ Global user
           -> memory/wiki/graphs/tasks
 ```
 
-### 8.1 Enforcement
+### 9.1 Enforcement
 
 - Every tenant-owned record has an unambiguous organization path.
 - Frequently queried or security-sensitive tables may also carry a direct
@@ -292,7 +369,7 @@ Global user
 - Cache keys, object paths, Neo4j labels/properties, logs, metrics, exports, and
   idempotency keys include tenant scope.
 
-### 8.2 Lifecycle
+### 9.2 Lifecycle
 
 The first release supports organization creation, invitations, membership
 suspension/removal, role changes, ownership transfer, and users belonging to
@@ -302,19 +379,19 @@ role, token, export, and destructive operations.
 Selective per-organization restore is explicitly outside the first backup
 release. Tenant deletion and export require separate lifecycle specifications.
 
-## 9. Disaster recovery
+## 10. Disaster recovery
 
 The first release provides whole-backend disaster recovery, not selective
 tenant restore.
 
-### 9.1 Objectives
+### 10.1 Objectives
 
 - PostgreSQL RPO: minutes through continuous WAL archiving.
 - Object/artifact RPO: no more than one hour through incremental replication.
 - Whole-service RTO target: four hours.
 - Initial retention: 30 rolling days, with later policy extension possible.
 
-### 9.2 PostgreSQL
+### 10.2 PostgreSQL
 
 - Periodic physical base backup.
 - Continuous encrypted WAL archive for point-in-time recovery.
@@ -323,7 +400,7 @@ tenant restore.
 - Encryption keys are stored separately from the application host and backup
   payload.
 
-### 9.3 Object and artifact storage
+### 10.3 Object and artifact storage
 
 - Versioning enabled.
 - Encrypted incremental replication at least hourly.
@@ -333,14 +410,14 @@ tenant restore.
 - Restore tooling verifies that database references resolve to the matching
   object generation.
 
-### 9.4 Neo4j
+### 10.4 Neo4j
 
 Canonical graph artifacts make Neo4j rebuildable. Daily Neo4j snapshots may
 reduce RTO but are not correctness-critical. Recovery reconciles or rebuilds
 projections and verifies counts/checksums before the graph service becomes
 ready.
 
-### 9.5 Verification and operations
+### 10.5 Verification and operations
 
 - Backup jobs emit structured success/failure and freshness metrics.
 - Missing or incomplete backups alert operators.
@@ -350,7 +427,7 @@ ready.
 - A complete disaster-recovery exercise is performed at least monthly.
 - Production restore requires explicit human authorization and is audited.
 
-## 10. Failure behavior
+## 11. Failure behavior
 
 - Extractor failure records an explicit degraded artifact or failed run.
 - Projection failure does not replace the last verified current projection.
@@ -361,9 +438,9 @@ ready.
 - Backup freshness outside the objective raises an operational alert.
 - A restore that has not passed verification remains non-ready.
 
-## 11. Testing strategy
+## 12. Testing strategy
 
-### 11.1 Graph and Graphify
+### 12.1 Graph and Graphify
 
 - Contract tests for each extractor and canonical schema.
 - Comparative corpus tests across PHP, TypeScript, and Python.
@@ -373,14 +450,23 @@ ready.
 - Frontend tests for empty, degraded, stale, rebuilding, partial, and current
   graph states.
 
-### 11.2 Memory, wiki, and Platon
+### 12.2 Project overview, memory, wiki, and assistants
 
+- Unified overview-state tests for Hades-only, plugin-only, mixed, empty,
+  stale, degraded, and failed projects.
+- Tests proving that Hades artifacts and workspace bindings satisfy canonical
+  graph/source states without legacy snapshot/workspace rows.
+- Backlog analysis state, freshness, and invalidation tests.
+- Evidence-pack tests proving that task, memory, wiki, graph, decisions, and
+  freshness inputs are used or explicitly reported unavailable.
+- Tests proving backlog analysis remains read-only without a separately
+  authorized and human-approved mutation.
 - Human/structured wiki rendering from the same canonical page.
 - Raw-to-curated provenance and state transition tests.
 - Cross-link authorization and version tests.
 - Platon retrieval, conflict, question-ranking, and evaluation-corpus tests.
 
-### 11.3 Tenancy
+### 12.3 Tenancy
 
 - Authorization matrix tests for every role and resource class.
 - Cross-tenant negative tests for IDs, search, queues, caches, exports, graph,
@@ -388,7 +474,7 @@ ready.
 - Membership lifecycle and ownership-transfer tests.
 - End-to-end tests with one user in multiple organizations.
 
-### 11.4 Disaster recovery
+### 12.4 Disaster recovery
 
 - Automated base backup plus WAL restore to a chosen timestamp.
 - Hourly object delta restore with manifest verification.
@@ -396,17 +482,19 @@ ready.
 - Corrupted, incomplete, stale, and mismatched backup tests.
 - Measured RPO/RTO evidence retained with each recovery exercise.
 
-## 12. Delivery decomposition and priority
+## 13. Delivery decomposition and priority
 
 This design must not be implemented as one change. Recommended order:
 
 1. **Graph foundation:** canonical artifact contract, extractor observability,
    unified graph read service, and projection state.
-2. **Graph product:** visible navigation, Architecture, Symbol Explorer,
+2. **Project overview and graph product:** unified Hades/plugin lifecycle,
+   meaningful status cards, visible navigation, Architecture, Symbol Explorer,
    impact, and version diff.
-3. **Memory/wiki presentation:** curated/default memory, raw-source view, and
-   dual wiki rendering with cross-links.
-4. **Platon:** bounded memory-first dossier, gap analysis, citations, and
+3. **Memory/wiki presentation:** curated/default memory, raw-source view, dual
+   wiki rendering, and cross-links.
+4. **Project-aware assistants:** evidence-backed Backlog analysis followed by
+   Platon's bounded memory-first dossier, gap analysis, citations, and a shared
    evaluation corpus.
 5. **Disaster recovery baseline:** WAL/base backups, hourly object replication,
    isolated restore verification, and runbook. This may run in parallel with
@@ -419,7 +507,7 @@ Multi-tenancy changes the security boundary and requires its own detailed
 specification and migration plan before implementation. Disaster recovery must
 be operational before migrating valuable production tenants.
 
-## 13. Explicit non-goals
+## 14. Explicit non-goals
 
 - Neo4j as authoritative storage.
 - Rendering the entire graph by default.
