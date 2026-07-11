@@ -29,6 +29,7 @@ from hermes_cli.hades_persephone_store import (
     claim_information_request,
     get_cursor,
     get_message,
+    insert_cursor_if_absent,
     record_cursor,
     record_inbox,
     record_subscription_mismatch,
@@ -777,7 +778,7 @@ class PersephoneReceiver:
                     if cursor and stored.state in {
                         "responded", "acknowledged", "rejected", "expired"
                     }:
-                        record_cursor(
+                        insert_cursor_if_absent(
                             conn,
                             project_id=cursor_project,
                             target_agent_id=cursor_agent,

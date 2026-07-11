@@ -955,6 +955,56 @@ def test_cursor_is_independent_per_project_and_agent(tmp_db):
     assert get_cursor(tmp_db, project_id="project_2", target_agent_id="agent_1") == "7"
 
 
+def test_insert_cursor_if_absent_initializes_once_and_is_scope_local(tmp_db):
+    from hermes_cli.hades_persephone_store import get_cursor, insert_cursor_if_absent
+
+    assert insert_cursor_if_absent(
+        tmp_db, project_id="project_1", target_agent_id="agent_1", cursor="opaque-c1", now=100
+    )
+    assert not insert_cursor_if_absent(
+        tmp_db, project_id="project_1", target_agent_id="agent_1", cursor="opaque-c0", now=101
+    )
+    assert insert_cursor_if_absent(
+        tmp_db, project_id="project_1", target_agent_id="agent_2", cursor="agent-2", now=102
+    )
+    assert insert_cursor_if_absent(
+        tmp_db, project_id="project_2", target_agent_id="agent_1", cursor="project-2", now=103
+    )
+
+    assert get_cursor(tmp_db, project_id="project_1", target_agent_id="agent_1") == "opaque-c1"
+    assert get_cursor(tmp_db, project_id="project_1", target_agent_id="agent_2") == "agent-2"
+    assert get_cursor(tmp_db, project_id="project_2", target_agent_id="agent_1") == "project-2"
+
+
+def test_concurrent_insert_cursor_if_absent_has_exactly_one_initializer(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_persephone_store import get_cursor, insert_cursor_if_absent
+
+    path = tmp_path / "cursor-race.db"
+    with db.connect_closing(path):
+        pass
+
+    def initialize(index: int) -> bool:
+        with db.connect_closing(path) as conn:
+            return insert_cursor_if_absent(
+                conn,
+                project_id="project_1",
+                target_agent_id="agent_1",
+                cursor=f"opaque-{index}",
+                now=100 + index,
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(initialize, range(16)))
+
+    assert sum(results) == 1
+    with db.connect_closing(path) as conn:
+        stored = get_cursor(conn, project_id="project_1", target_agent_id="agent_1")
+    assert stored in {f"opaque-{index}" for index in range(16)}
+
+
 def test_existing_database_migrates_without_replacing_legacy_inbox(tmp_path):
     from hermes_cli import hades_backend_db as db
 

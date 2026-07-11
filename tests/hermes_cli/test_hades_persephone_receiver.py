@@ -316,6 +316,61 @@ def test_terminal_duplicate_repairs_cursor_without_reexecuting(tmp_path):
     assert cursor == "cursor_msg_1"
 
 
+def test_terminal_duplicate_with_older_opaque_cursor_does_not_rewind_current(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_cursor, record_cursor
+
+    path = tmp_path / "cursor-no-rewind.db"
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    calls = 0
+
+    def execute(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return execute_stored_information_request(*args, **kwargs)
+
+    binding = _binding()
+    object.__setattr__(binding, "repo_root", str(tmp_path))
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=execute,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([binding])
+    current = _event()
+    current["id"] = "opaque-c2"
+    assert receiver.ingest_event(current) == "accepted"
+    with connections() as conn:
+        record_cursor(
+            conn,
+            project_id="project_a",
+            target_agent_id="agent_a",
+            cursor="opaque-c2",
+            now=NOW + 1,
+        )
+
+    replay = _event()
+    replay["id"] = "opaque-c1"
+    assert receiver.ingest_event(replay) == "accepted"
+
+    with connections() as conn:
+        cursor = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+    assert calls == 1
+    assert cursor == "opaque-c2"
+
+
 def test_executor_refresh_recovers_abandoned_processing_before_redelivery(tmp_path):
     from contextlib import contextmanager
 

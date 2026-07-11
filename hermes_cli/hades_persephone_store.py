@@ -779,6 +779,34 @@ def record_cursor(
         )
 
 
+def insert_cursor_if_absent(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    target_agent_id: str,
+    cursor: str,
+    now: int | None = None,
+) -> bool:
+    """Initialize one subscription cursor without replacing an existing value.
+
+    Cursors are opaque transport tokens: their values cannot be ordered or
+    compared.  This primitive is reserved for crash-gap repair, where the
+    absence of any cursor is the only safe evidence that initialization is
+    needed.  ``INSERT OR IGNORE`` makes that decision atomic across competing
+    receiver processes.
+    """
+    if not project_id.strip() or not target_agent_id.strip() or not str(cursor).strip():
+        raise ValueError("project_id, target_agent_id, and cursor must be non-blank")
+    timestamp = _now(now)
+    with write_txn(conn):
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO persephone_cursors "
+            "(project_id, target_agent_id, cursor, updated_at) VALUES (?, ?, ?, ?)",
+            (project_id, target_agent_id, str(cursor), timestamp),
+        )
+    return inserted.rowcount == 1
+
+
 def get_cursor(
     conn: sqlite3.Connection,
     *,
@@ -856,6 +884,7 @@ __all__ = [
     "claim_due_outbox",
     "enqueue_outbox",
     "get_cursor",
+    "insert_cursor_if_absent",
     "get_message",
     "pending_human_requests",
     "persist_response_for_request",
