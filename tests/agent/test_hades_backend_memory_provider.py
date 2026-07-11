@@ -1140,8 +1140,8 @@ def test_hades_backend_memory_provider_prefetch_answers_explicit_backend_logbook
         "Guarda nel logbook del backend cosa si dice in merito al task #459"
     )
 
-    assert [call["domain"] for call in calls] == ["all", "wiki"]
-    assert calls[1]["timeout"] == 2.0
+    assert [call["domain"] for call in calls] == ["wiki"]
+    assert calls[0]["timeout"] == 2.0
     assert "task #459" in context
 
 
