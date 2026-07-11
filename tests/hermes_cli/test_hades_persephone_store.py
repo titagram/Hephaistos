@@ -72,6 +72,23 @@ def test_persist_before_send_and_deduplicate(tmp_db):
     assert claim_due_outbox(tmp_db, now=100, limit=10) == []
 
 
+def test_claim_due_outbox_can_be_scoped_to_one_project(tmp_db):
+    from hermes_cli.hades_persephone_store import claim_due_outbox, enqueue_outbox
+
+    enqueue_outbox(tmp_db, _envelope(message_id="p1", project_id="project_1"), now=100)
+    enqueue_outbox(tmp_db, _envelope(message_id="p2", project_id="project_2"), now=100)
+
+    claimed = claim_due_outbox(
+        tmp_db, now=100, limit=10, project_id="project_2"
+    )
+
+    assert [item.message_id for item in claimed] == ["p2"]
+    untouched = tmp_db.execute(
+        "SELECT state FROM persephone_outbox WHERE message_id = 'p1'"
+    ).fetchone()
+    assert untouched["state"] == "outbox_pending"
+
+
 def test_duplicate_message_id_with_different_envelope_is_rejected(tmp_db):
     from hermes_cli.hades_persephone_store import MessageConflict, enqueue_outbox
 

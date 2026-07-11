@@ -215,13 +215,16 @@ def send_due_messages(
     limit: int = 50,
     retry: RetryPolicy | None = None,
     rng: random.Random | None = None,
+    project_id: str | None = None,
 ) -> dict[str, int]:
     """Claim and deliver due durable messages with bounded retry semantics."""
     policy = retry or RetryPolicy()
     random_source = rng or random.SystemRandom()
     timestamp = int(time.time()) if now is None else int(now)
     counts = {"sent": 0, "retry": 0, "dead_letter": 0}
-    for message in claim_due_outbox(conn, now=timestamp, limit=limit):
+    for message in claim_due_outbox(
+        conn, now=timestamp, limit=limit, project_id=project_id
+    ):
         try:
             client.create_inbox_message(**message.envelope.to_dict())
         except HadesBackendError as exc:

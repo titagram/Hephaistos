@@ -17,6 +17,10 @@ WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s,;:]+")
 QUALITY_REPORT_STALE_SECONDS = 7 * 24 * 60 * 60
 QUALITY_REPORT_HISTORY_KEY = "quality_report_history"
 QUALITY_REPORT_HISTORY_LIMIT = 10
+PERSEPHONE_STATUS_KEY = "persephone_receiver_status"
+PERSEPHONE_STATES = frozenset(
+    {"disabled_capability", "polling", "connected", "backoff", "failed"}
+)
 
 
 def load_backend_status_payload() -> dict[str, Any]:
@@ -46,6 +50,7 @@ def load_backend_status_payload() -> dict[str, Any]:
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report = db.get_sync_state(conn, "last_quality_report")
             quality_report_history = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY)
+            persephone = _load_persephone_status(conn, agent=agent, bindings=bindings)
             plugin_work_items = [
                 item
                 for item in db.list_plugin_work_items(conn)
@@ -67,6 +72,7 @@ def load_backend_status_payload() -> dict[str, Any]:
             background_sync = None
             last_quality_report = None
             quality_report_history = None
+            persephone = _load_persephone_status(conn, agent=None, bindings=[])
             plugin_work_items = []
             last_summary_updated_at = None
             last_error_updated_at = None
@@ -96,6 +102,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         quality_report_history_updated_at=quality_report_history_updated_at,
         plugin_work_items=plugin_work_items,
         plugin_local_workspace_id=plugin_local_workspace_id,
+        persephone=persephone,
     )
 
 
@@ -126,6 +133,7 @@ def support_report_payload(status: dict[str, Any] | None = None) -> dict[str, An
         "proposal_counts": payload.get("proposal_counts") if isinstance(payload.get("proposal_counts"), dict) else {},
         "inbox_counts": payload.get("inbox_counts") if isinstance(payload.get("inbox_counts"), dict) else {},
         "task_work": payload.get("task_work") if isinstance(payload.get("task_work"), dict) else {},
+        "persephone": payload.get("persephone") if isinstance(payload.get("persephone"), dict) else {},
         "sync": {
             "last_summary": _numeric_summary(sync.get("last_summary")),
             "last_summary_updated_at": sync.get("last_summary_updated_at"),
@@ -208,6 +216,7 @@ def backend_status_payload(
     quality_report_history_updated_at: int | None = None,
     plugin_work_items: list[Any] | None = None,
     plugin_local_workspace_id: str = "",
+    persephone: dict[str, Any] | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
@@ -230,6 +239,7 @@ def backend_status_payload(
         project_id=getattr(agent, "project_id", None),
         plugin_local_workspace_id=plugin_local_workspace_id,
     )
+    persephone_state = _persephone_payload(persephone)
     actions: list[str] = []
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
@@ -310,8 +320,77 @@ def backend_status_payload(
             "background": background_sync,
             "background_updated_at": background_sync_updated_at,
         },
-        "degraded": bool(refused or last_error or background_failed or quality_failed or task_work.get("failed")),
+        "persephone": persephone_state,
+        "degraded": bool(
+            refused
+            or last_error
+            or background_failed
+            or quality_failed
+            or task_work.get("failed")
+            or persephone_state["state"] in {"backoff", "failed"}
+        ),
         "actions": actions,
+    }
+
+
+def _load_persephone_status(
+    conn: Any, *, agent: Any, bindings: list[Any]
+) -> dict[str, Any]:
+    """Load queue health counters without reading stored envelope payloads."""
+    recorded = db.get_sync_state(conn, PERSEPHONE_STATUS_KEY) or {}
+    if agent is None:
+        state = "disabled_capability"
+        active = False
+    else:
+        state = str(recorded.get("state") or "disabled_capability")
+        active = bool(recorded.get("active"))
+    counts = conn.execute(
+        "SELECT "
+        "(SELECT COUNT(*) FROM persephone_inbox WHERE state = 'received') AS unread, "
+        "(SELECT COUNT(*) FROM persephone_inbox WHERE state = 'waiting_human_approval') AS pending_approval, "
+        "((SELECT COUNT(*) FROM persephone_inbox WHERE state = 'retry') + "
+        " (SELECT COUNT(*) FROM persephone_outbox WHERE state = 'retry')) AS retry, "
+        "((SELECT COUNT(*) FROM persephone_inbox WHERE state = 'dead_letter') + "
+        " (SELECT COUNT(*) FROM persephone_outbox WHERE state = 'dead_letter')) AS dead_letters"
+    ).fetchone()
+    linked_projects = {
+        str(_binding_value(binding, "project_id"))
+        for binding in bindings
+        if _binding_value(binding, "status") == "linked"
+    }
+    return {
+        "state": state,
+        "active": active,
+        "projects": len(linked_projects),
+        "unread": counts["unread"] if counts is not None else 0,
+        "pending_approval": counts["pending_approval"] if counts is not None else 0,
+        "retry": counts["retry"] if counts is not None else 0,
+        "dead_letters": counts["dead_letters"] if counts is not None else 0,
+        "failure_count": recorded.get("failure_count", 0),
+        "next_retry_at": recorded.get("next_retry_at"),
+    }
+
+
+def _persephone_payload(value: dict[str, Any] | None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    state = str(raw.get("state") or "disabled_capability")
+    if state not in PERSEPHONE_STATES:
+        state = "failed"
+    active_default = state in {"polling", "connected", "backoff"}
+    return {
+        "state": state,
+        "active": bool(raw.get("active", active_default)),
+        "projects": _nonnegative_int(raw.get("projects")),
+        "unread": _nonnegative_int(raw.get("unread")),
+        "pending_approval": _nonnegative_int(raw.get("pending_approval")),
+        "retry": _nonnegative_int(raw.get("retry")),
+        "dead_letters": _nonnegative_int(raw.get("dead_letters")),
+        "failure_count": _nonnegative_int(raw.get("failure_count")),
+        "next_retry_at": (
+            _nonnegative_int(raw.get("next_retry_at"))
+            if raw.get("next_retry_at") is not None
+            else None
+        ),
     }
 
 

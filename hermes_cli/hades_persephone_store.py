@@ -248,17 +248,26 @@ def claim_due_outbox(
     *,
     now: int | None = None,
     limit: int = 50,
+    project_id: str | None = None,
 ) -> list[StoredMessage]:
     timestamp = _now(now)
     bounded_limit = max(0, int(limit))
     if bounded_limit == 0:
         return []
     with write_txn(conn):
+        project = str(project_id or "").strip()
+        project_clause = " AND project_id = ?" if project else ""
+        params: tuple[Any, ...] = (
+            (timestamp, project, bounded_limit)
+            if project
+            else (timestamp, bounded_limit)
+        )
         rows = conn.execute(
             "SELECT message_id FROM persephone_outbox "
-            "WHERE state IN ('outbox_pending', 'retry') AND next_attempt_at <= ? "
+            "WHERE state IN ('outbox_pending', 'retry') AND next_attempt_at <= ?"
+            f"{project_clause} "
             "ORDER BY next_attempt_at ASC, created_at ASC, message_id ASC LIMIT ?",
-            (timestamp, bounded_limit),
+            params,
         ).fetchall()
         message_ids = [str(row["message_id"]) for row in rows]
         for message_id in message_ids:

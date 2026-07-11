@@ -484,6 +484,61 @@ def test_bounded_round_robin_does_not_starve_later_projects(tmp_path):
     assert calls == ["project_0", "project_1", "project_2"]
 
 
+def test_receiver_health_enters_bounded_backoff_and_recovers(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    path = tmp_path / "health.db"
+    clock = [NOW]
+    calls = [0]
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+    def events(client, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("temporary")
+        return []
+
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda agent: Client(),
+        event_reader=events,
+        now=lambda: clock[0],
+    )
+    binding = _binding()
+    agent = db.BackendAgent(
+        agent_id="agent_a",
+        project_id="project_a",
+        base_url="https://example.invalid",
+        label="test",
+        token_env_key="TOKEN",
+        capabilities={},
+    )
+    receiver.refresh_bindings([binding], agents={agent.agent_id: agent})
+
+    receiver.run_once()
+    health = receiver.health_snapshot()
+    assert health["state"] == "backoff"
+    assert health["failure_count"] == 1
+    assert health["next_retry_at"] == NOW + 2
+
+    receiver.run_once()
+    assert calls[0] == 1
+    clock[0] += 2
+    receiver.run_once()
+    assert receiver.health_snapshot()["state"] == "connected"
+
+
 def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_path):
     from hermes_cli.hades_persephone_receiver import PersephoneReceiver
     from hermes_cli.hades_persephone_store import get_cursor, get_message

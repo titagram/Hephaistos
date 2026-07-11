@@ -2844,6 +2844,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        # One service-owned Persephone receiver.  It is deliberately outside
+        # the model/tool lifecycle: starting or reloading the gateway never
+        # mutates an existing conversation's prompt prefix or tool schema.
+        self._hades_persephone_receiver = None
+        self._hades_persephone_monitor_task = None
 
         # scale-to-zero (Phase 0, F13): gateway-scoped "last inbound seen" clock.
         # There is no such clock today (only a per-agent _last_activity_ts), so the
@@ -6377,6 +6382,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._running = True
         self._update_runtime_status("running")
+
+        # Hades peer delivery is a service feature, not an agent tool.  Start
+        # it only after local backend bindings are available and keep it wholly
+        # outside conversation prompt/tool construction.
+        await self._start_hades_persephone_receiver()
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -6933,6 +6943,210 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return "default"
 
+    def _create_hades_persephone_receiver(self):
+        """Build the profile-local receiver, or return ``None`` when inert.
+
+        Capability discovery remains inside ``PersephoneReceiver`` so a stale
+        local capability snapshot cannot enable delivery.  Until the backend
+        explicitly advertises ``persephone_agent_queue_v1`` each worker stops
+        before opening its inbox/event stream.
+        """
+        from hermes_cli import hades_backend_db as hades_db
+        from hermes_cli import hades_backend_runtime as hades_runtime
+        from hermes_cli.hades_information_worker import (
+            execute_stored_information_request,
+        )
+        from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+        with hades_db.connect_closing() as conn:
+            bindings = hades_db.list_workspace_bindings(conn, status="linked")
+            agents = {
+                binding.agent_id: agent
+                for binding in bindings
+                if (agent := hades_db.get_agent(conn, binding.agent_id)) is not None
+            }
+        bindings = [binding for binding in bindings if binding.agent_id in agents]
+        if not bindings:
+            return None
+
+        receiver = PersephoneReceiver(
+            client_factory=lambda agent: hades_runtime.client_for_agent(
+                agent, timeout=15.0
+            ),
+            information_executor=execute_stored_information_request,
+        )
+        receiver.refresh_bindings(bindings, agents=agents)
+        return receiver
+
+    def _record_hades_persephone_lifecycle(
+        self, state: str, *, error: str | None = None
+    ) -> None:
+        """Persist operator-visible lifecycle state without payloads/secrets."""
+        del error  # Errors stay in redacted logs; status exposes only counters.
+        try:
+            from hermes_cli import hades_backend_db as hades_db
+
+            with hades_db.connect_closing() as conn:
+                previous = hades_db.get_sync_state(
+                    conn, "persephone_receiver_status"
+                ) or {}
+                failure_count = int(previous.get("failure_count") or 0)
+                if state == "failed":
+                    failure_count += 1
+                elif state in {"connected", "polling", "disabled_capability"}:
+                    failure_count = 0
+                hades_db.record_sync_state(
+                    conn,
+                    "persephone_receiver_status",
+                    {
+                        "state": state,
+                        "active": state in {"connected", "polling", "backoff"},
+                        "failure_count": failure_count,
+                        "next_retry_at": previous.get("next_retry_at")
+                        if state == "backoff"
+                        else None,
+                    },
+                )
+        except Exception:
+            logger.debug(
+                "could not persist Persephone receiver lifecycle", exc_info=True
+            )
+
+    async def _start_hades_persephone_receiver(self) -> None:
+        """Start exactly one receiver owned by this gateway instance."""
+        existing = getattr(self, "_hades_persephone_receiver", None)
+        if existing is not None:
+            return
+        factory = getattr(
+            self,
+            "_hades_persephone_receiver_factory",
+            self._create_hades_persephone_receiver,
+        )
+        try:
+            receiver = await asyncio.to_thread(factory)
+            if receiver is None:
+                self._record_hades_persephone_lifecycle("disabled_capability")
+                return
+            # Publish ownership before starting so a concurrent/re-entrant
+            # lifecycle call cannot create a duplicate receiver.
+            self._hades_persephone_receiver = receiver
+            await asyncio.to_thread(receiver.start)
+            snapshot_fn = getattr(receiver, "health_snapshot", None)
+            snapshot = snapshot_fn() if callable(snapshot_fn) else {"state": "polling"}
+            self._record_hades_persephone_lifecycle(
+                str(snapshot.get("state") or "polling")
+            )
+            if callable(snapshot_fn):
+                task = asyncio.create_task(
+                    self._monitor_hades_persephone_receiver(receiver)
+                )
+                self._hades_persephone_monitor_task = task
+                background = getattr(self, "_background_tasks", None)
+                if isinstance(background, set):
+                    background.add(task)
+                    task.add_done_callback(background.discard)
+            logger.info("Hades Persephone receiver started")
+        except Exception as exc:
+            receiver = getattr(self, "_hades_persephone_receiver", None)
+            self._hades_persephone_receiver = None
+            if receiver is not None:
+                try:
+                    await asyncio.to_thread(receiver.stop, timeout=1.0)
+                except Exception:
+                    logger.debug(
+                        "Persephone receiver cleanup after start failure failed",
+                        exc_info=True,
+                    )
+            try:
+                from hermes_cli.hades_backend_client import redact_secret
+                safe_error = redact_secret(str(exc))
+            except Exception:
+                safe_error = type(exc).__name__
+            self._record_hades_persephone_lifecycle("failed", error=safe_error)
+            logger.warning(
+                "Hades Persephone receiver could not start; gateway remains active: %s",
+                safe_error,
+            )
+
+    async def _stop_hades_persephone_receiver(self) -> None:
+        """Detach and synchronously stop the gateway-owned receiver once."""
+        monitor = getattr(self, "_hades_persephone_monitor_task", None)
+        self._hades_persephone_monitor_task = None
+        if monitor is not None:
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
+        receiver = getattr(self, "_hades_persephone_receiver", None)
+        if receiver is None:
+            return
+        self._hades_persephone_receiver = None
+        try:
+            await asyncio.to_thread(receiver.stop, timeout=5.0)
+        except Exception as exc:
+            try:
+                from hermes_cli.hades_backend_client import redact_secret
+                safe_error = redact_secret(str(exc))
+            except Exception:
+                safe_error = type(exc).__name__
+            self._record_hades_persephone_lifecycle("failed", error=safe_error)
+            logger.warning("Hades Persephone receiver stop failed: %s", safe_error)
+        else:
+            snapshot_fn = getattr(receiver, "health_snapshot", None)
+            if callable(snapshot_fn):
+                snapshot = dict(snapshot_fn())
+                snapshot["active"] = False
+                self._record_hades_persephone_health(snapshot)
+            logger.info("Hades Persephone receiver stopped")
+
+    async def _monitor_hades_persephone_receiver(self, receiver) -> None:
+        """Mirror receiver health into the profile DB while ownership holds."""
+        previous: tuple[Any, ...] | None = None
+        try:
+            while self._hades_persephone_receiver is receiver:
+                snapshot = receiver.health_snapshot()
+                marker = (
+                    snapshot.get("state"),
+                    snapshot.get("failure_count"),
+                    snapshot.get("next_retry_at"),
+                )
+                if marker != previous:
+                    self._record_hades_persephone_health(snapshot)
+                    previous = marker
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Hades Persephone health monitor failed")
+            self._record_hades_persephone_lifecycle("failed")
+
+    def _record_hades_persephone_health(self, snapshot: dict[str, Any]) -> None:
+        """Persist the receiver's bounded health fields verbatim by allow-list."""
+        try:
+            from hermes_cli import hades_backend_db as hades_db
+
+            state = str(snapshot.get("state") or "failed")
+            if state not in {
+                "disabled_capability", "polling", "connected", "backoff", "failed"
+            }:
+                state = "failed"
+            with hades_db.connect_closing() as conn:
+                hades_db.record_sync_state(
+                    conn,
+                    "persephone_receiver_status",
+                    {
+                        "state": state,
+                        "active": bool(snapshot.get("active")),
+                        "failure_count": max(
+                            0, int(snapshot.get("failure_count") or 0)
+                        ),
+                        "next_retry_at": snapshot.get("next_retry_at"),
+                    },
+                )
+        except Exception:
+            logger.debug("could not persist Persephone health", exc_info=True)
+
     # ── Kanban board watchers ───────────────────────────────────────────
     # The kanban notifier/dispatcher watcher loops + their helpers live in
     # GatewayKanbanWatchersMixin (gateway/kanban_watchers.py). They use only
@@ -7200,6 +7414,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
+
+            # Stop accepting peer work as soon as drain begins.  Receiver.stop
+            # persists completed cursor/inbox transitions before subscriptions
+            # and owned HTTP clients are closed.
+            await self._stop_hades_persephone_receiver()
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.

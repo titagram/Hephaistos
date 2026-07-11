@@ -32,9 +32,13 @@ from hermes_cli.hades_persephone_store import (
     record_inbox,
     record_subscription_mismatch,
     recover_abandoned_information_requests,
+    recover_abandoned_outbox,
     transition_message,
 )
-from hermes_cli.hades_persephone_transport import iter_persephone_events
+from hermes_cli.hades_persephone_transport import (
+    iter_persephone_events,
+    send_due_messages,
+)
 
 
 logger = logging.getLogger("hermes_cli.hades_backend")
@@ -75,6 +79,8 @@ class _ReceiverWorker:
     client: object | None = None
     queue_supported: bool | None = None
     descriptor: tuple[Any, ...] = ()
+    failure_count: int = 0
+    next_retry_at: int | None = None
 
 
 ConnectionFactory = Callable[[], ContextManager[sqlite3.Connection]]
@@ -121,6 +127,7 @@ class PersephoneReceiver:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self._fatal_error = False
 
     @property
     def workers(self) -> tuple[tuple[str, str], ...]:
@@ -197,6 +204,8 @@ class PersephoneReceiver:
                     client=old.client if reusable else None,
                     queue_supported=(old.queue_supported if reusable else None),
                     descriptor=descriptor,
+                    failure_count=(old.failure_count if reusable else 0),
+                    next_retry_at=(old.next_retry_at if reusable else None),
                 )
                 if old is not None and not reusable and old.client is not None:
                     clients_to_close.append(old.client)
@@ -208,15 +217,20 @@ class PersephoneReceiver:
             else:
                 self._next_worker = 0
         self._close_detached_clients(clients_to_close)
-        if self.information_executor is not None:
-            timestamp = self._now()
-            with self.connection_factory() as conn:
+        timestamp = self._now()
+        with self.connection_factory() as conn:
+            if self.information_executor is not None:
                 recover_abandoned_information_requests(
                     conn,
                     now=timestamp,
                     abandoned_before=timestamp - 30,
                     limit=self.batch_size,
                 )
+            recover_abandoned_outbox(
+                conn,
+                now=timestamp,
+                abandoned_before=timestamp - 30,
+            )
 
     def start(self) -> None:
         """Start the single owned coordinator thread; repeated calls are safe."""
@@ -226,6 +240,7 @@ class PersephoneReceiver:
             if not self._workers:
                 self.refresh_bindings()
             self._stop_event.clear()
+            self._fatal_error = False
             thread = threading.Thread(
                 target=self._run_loop,
                 name="hades-persephone-receiver",
@@ -316,6 +331,40 @@ class PersephoneReceiver:
                 if self.thread is threading.current_thread():
                     self.thread = None
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return bounded lifecycle health without message payload contents."""
+        with self._lock:
+            workers = tuple(self._workers.values())
+            thread = self.thread
+            fatal = self._fatal_error
+            queue_capability = self._queue_capability
+        projects = len({worker.project_id for worker in workers})
+        failure_count = sum(worker.failure_count for worker in workers)
+        retry_values = [
+            worker.next_retry_at
+            for worker in workers
+            if worker.next_retry_at is not None
+        ]
+        if fatal or (thread is not None and not thread.is_alive()):
+            state = "failed"
+        elif not queue_capability or not workers or all(
+            worker.queue_supported is False for worker in workers
+        ):
+            state = "disabled_capability"
+        elif failure_count:
+            state = "backoff"
+        elif any(worker.queue_supported is True for worker in workers):
+            state = "connected"
+        else:
+            state = "polling"
+        return {
+            "state": state,
+            "active": bool(thread is not None and thread.is_alive()),
+            "projects": projects,
+            "failure_count": failure_count,
+            "next_retry_at": min(retry_values) if retry_values else None,
+        }
+
     def _worker_batch(self) -> list[_ReceiverWorker]:
         with self._lock:
             ordered = [self._workers[key] for key in sorted(self._workers)]
@@ -353,22 +402,43 @@ class PersephoneReceiver:
 
     def run_once(self) -> int:
         """Poll a fair bounded subset of project queues and durably ingest it."""
-        if self.information_executor is not None:
-            timestamp = self._now()
-            with self.connection_factory() as conn:
+        timestamp = self._now()
+        with self.connection_factory() as conn:
+            if self.information_executor is not None:
                 recover_abandoned_information_requests(
                     conn,
                     now=timestamp,
                     abandoned_before=timestamp - 30,
                     limit=self.batch_size,
                 )
+            recover_abandoned_outbox(
+                conn,
+                now=timestamp,
+                abandoned_before=timestamp - 30,
+            )
         ingested = 0
+        delivered_projects: set[str] = set()
         for worker in self._worker_batch():
+            timestamp = self._now()
+            if (
+                worker.next_retry_at is not None
+                and worker.next_retry_at > timestamp
+            ):
+                continue
             try:
                 client = self._prepare_worker(worker)
                 if client is None:
                     continue
                 with self.connection_factory() as conn:
+                    if worker.project_id not in delivered_projects:
+                        send_due_messages(
+                            conn,
+                            client,
+                            now=timestamp,
+                            limit=self.batch_size,
+                            project_id=worker.project_id,
+                        )
+                        delivered_projects.add(worker.project_id)
                     cursor = get_cursor(
                         conn,
                         project_id=worker.project_id,
@@ -390,6 +460,9 @@ class PersephoneReceiver:
                         expected_target_agent_id=worker.agent_id,
                     )
                     ingested += 1
+                with self._lock:
+                    worker.failure_count = 0
+                    worker.next_retry_at = None
             except Exception:
                 # One broken project must not starve the following project in
                 # the same round-robin cycle.
@@ -401,6 +474,10 @@ class PersephoneReceiver:
                         "hades_agent_id": worker.agent_id,
                     },
                 )
+                with self._lock:
+                    worker.failure_count += 1
+                    delay = min(300, 2 ** min(worker.failure_count, 8))
+                    worker.next_retry_at = int(self._now()) + delay
         return ingested
 
     @staticmethod
