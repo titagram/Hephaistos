@@ -59,7 +59,7 @@ _LOCAL_PATH_RE = re.compile(
     r"(?<![\w])/(?:Users|home|private|tmp|var/folders)/[^\s,'\"}]+"
 )
 _ASSIGNMENT_LINE_RE = re.compile(
-    r"^(?P<prefix>\s*(?:export\s+)?)(?P<quote>[\"']?)"
+    r"^(?P<prefix>\s*(?:(?:export|-)[ \t]+)?)(?P<quote>[\"']?)"
     r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
     r"(?P<separator>[:=])(?P<value>.*)$"
 )
@@ -534,7 +534,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     clipped = False
     deadline = time.monotonic() + MAX_SCAN_SECONDS
 
-    def redact_text(value: str) -> str:
+    def redact_plain_text(value: str) -> str:
         nonlocal clipped
         without_root = value.replace(root_text, "<workspace>")
         without_paths = _LOCAL_PATH_RE.sub("<redacted-path>", without_root)
@@ -547,6 +547,45 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         if len(safe) > 2_000:
             clipped = True
         return safe[:2_000]
+
+    def clean_json(value: Any, *, depth: int = 0) -> Any:
+        nonlocal clipped
+        if depth > MAX_MEMORY_DEPTH or time.monotonic() > deadline:
+            clipped = True
+            return "[TRUNCATED]"
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 128:
+                    clipped = True
+                    break
+                result[str(key)] = (
+                    "***"
+                    if _is_sensitive_key(key)
+                    else clean_json(item, depth=depth + 1)
+                )
+            return result
+        if isinstance(value, list):
+            if len(value) > 128:
+                clipped = True
+            return [clean_json(item, depth=depth + 1) for item in value[:128]]
+        if isinstance(value, str):
+            return redact_plain_text(value)
+        return value
+
+    def redact_text(value: str) -> str:
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+            else:
+                rendered = json.dumps(
+                    clean_json(parsed), ensure_ascii=False, separators=(",", ":")
+                )
+                return redact_plain_text(rendered)
+        return redact_plain_text(value)
 
     def clean(value: Any, *, depth: int = 0) -> Any:
         nonlocal nodes, clipped

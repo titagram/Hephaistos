@@ -154,6 +154,9 @@ application-default credentials, Docker/AWS/Azure/GCP credential stores and
 compound cloud/provider conventions, while regression tests prove ordinary
 `environment.py`, `provider.py`, `authenticator.py`, `tokenizer.py`, and a
 normal `gcloud` source package remain readable.
+Valid JSON evidence is parsed under the same depth/container bounds before
+serialization, covering minified objects where a sensitive key is not the
+first field. YAML list-item assignment prefixes are classified as well.
 
 Recursive source discovery now uses a custom lazy `os.scandir` stack. Deadline,
 entry, directory, pending-directory, file and byte budgets are checked before

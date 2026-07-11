@@ -303,6 +303,24 @@ def test_exact_adversarial_assignment_corpus_is_redacted(tmp_path, line, secret)
 
 
 @pytest.mark.parametrize(
+    ("content", "secret"),
+    [
+        ('{"safe":true,"DATABASE_PASSWORD":"minified-private"}', "minified-private"),
+        ("- AZURE_CLIENT_SECRET: yaml-list-private", "yaml-list-private"),
+    ],
+)
+def test_minified_json_and_yaml_list_secrets_are_redacted(tmp_path, content, secret):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    assert secret not in str(response.to_payload())
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",
