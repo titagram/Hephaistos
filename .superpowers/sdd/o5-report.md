@@ -134,3 +134,6 @@ Startup recovery is invoked during receiver binding refresh as well as
 `run_once()`, so synchronous backend sync also reclaims stale `processing` and
 legacy `processed` information rows before redelivery. Restart tests prove the
 request produces exactly one durable response.
+File reads use descriptor-level `O_NOFOLLOW` where available plus `fstat`
+regular-file and byte-budget checks, closing the symlink replacement TOCTOU
+window between traversal and content read.

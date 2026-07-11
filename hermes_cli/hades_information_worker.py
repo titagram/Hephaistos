@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -218,15 +219,20 @@ def _validate_optional_glob(payload: Mapping[str, Any]) -> None:
 
 def _safe_text(path: Path, budget: _ReadBudget | None = None) -> str | None:
     try:
-        if path.is_symlink() or not path.is_file():
-            return None
-        size = path.stat().st_size
-        if size > MAX_FILE_BYTES:
+        if path.is_symlink():
             return None
         active = budget or _ReadBudget.start()
-        if not active.available() or active.bytes_read + size > MAX_AGGREGATE_BYTES:
+        if not active.available():
             return None
-        with path.open("rb") as handle:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            file_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(file_stat.st_mode):
+                return None
+            size = int(file_stat.st_size)
+            if size > MAX_FILE_BYTES or active.bytes_read + size > MAX_AGGREGATE_BYTES:
+                return None
             raw = handle.read(MAX_FILE_BYTES + 1)
         if len(raw) > MAX_FILE_BYTES:
             return None
