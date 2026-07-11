@@ -248,3 +248,61 @@ async def test_service_supervisor_cold_starts_only_after_enabled_binding_revisio
 
     receiver.start.assert_called_once_with()
     assert runner._hades_persephone_receiver is receiver
+
+
+@pytest.mark.asyncio
+async def test_monitor_retries_incomplete_drain_with_positive_slice_and_clears_owner() -> None:
+    receiver = Mock(spec=["stop", "health_snapshot"])
+    receiver.stop.side_effect = [False, True]
+    receiver.health_snapshot.return_value = {
+        "state": "draining", "active": True, "failure_count": 1,
+    }
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = receiver
+    runner._hades_persephone_generation = 1
+    runner._hades_persephone_draining = False
+    runner._hades_persephone_monitor_interval_seconds = 0.005
+    runner._hades_persephone_drain_retry_base_seconds = 0.005
+    runner._hades_persephone_drain_cleanup_slice_seconds = 0.05
+    runner._record_hades_persephone_health = lambda snapshot: None
+
+    await runner._stop_hades_persephone_receiver()
+    assert runner._hades_persephone_receiver is receiver
+    monitor = asyncio.create_task(
+        runner._monitor_hades_persephone_receiver(receiver, generation=1)
+    )
+    await asyncio.wait_for(monitor, timeout=1)
+
+    assert runner._hades_persephone_receiver is None
+    assert receiver.stop.call_args_list[0].kwargs["timeout"] == 5.0
+    retry_timeout = receiver.stop.call_args_list[1].kwargs["timeout"]
+    assert 0 < retry_timeout <= 0.05
+
+
+@pytest.mark.asyncio
+async def test_repeated_drain_failure_backs_off_without_spinning() -> None:
+    receiver = Mock(spec=["stop", "health_snapshot"])
+    receiver.stop.return_value = False
+    receiver.health_snapshot.return_value = {
+        "state": "draining", "active": True, "failure_count": 1,
+    }
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = receiver
+    runner._hades_persephone_generation = 2
+    runner._hades_persephone_draining = True
+    runner._hades_persephone_shutdown_deadline = __import__("time").monotonic() + 0.2
+    runner._hades_persephone_monitor_interval_seconds = 0.005
+    runner._hades_persephone_drain_retry_base_seconds = 0.04
+    runner._hades_persephone_drain_retry_max_seconds = 0.1
+    runner._hades_persephone_drain_cleanup_slice_seconds = 0.01
+    runner._record_hades_persephone_health = lambda snapshot: None
+    task = asyncio.create_task(
+        runner._monitor_hades_persephone_receiver(receiver, generation=2)
+    )
+
+    await asyncio.sleep(0.12)
+    runner._hades_persephone_receiver = None
+    await asyncio.wait_for(task, timeout=1)
+
+    assert 1 <= receiver.stop.call_count <= 3
+    assert all(call.kwargs["timeout"] > 0 for call in receiver.stop.call_args_list)

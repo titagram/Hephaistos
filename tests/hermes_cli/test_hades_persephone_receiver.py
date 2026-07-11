@@ -924,9 +924,27 @@ def test_shutdown_client_acquisition_failure_keeps_ownership_incomplete(tmp_path
             conn.close()
 
     agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    online = [False]
+    sent = []
+
+    class RecoveredClient:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def create_inbox_message(self, **payload):
+            sent.append(payload["message_id"])
+
+        def close(self):
+            pass
+
+    def client_factory(item):
+        if not online[0]:
+            raise RuntimeError("offline")
+        return RecoveredClient()
+
     receiver = PersephoneReceiver(
         connection_factory=connections,
-        client_factory=lambda item: (_ for _ in ()).throw(RuntimeError("offline")),
+        client_factory=client_factory,
         now=lambda: NOW,
     )
     receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
@@ -949,6 +967,10 @@ def test_shutdown_client_acquisition_failure_keeps_ownership_incomplete(tmp_path
 
     assert receiver.stop(timeout=0.2) is False
     assert receiver.health_snapshot()["state"] == "draining"
+    online[0] = True
+    assert receiver.stop(timeout=0.2) is True
+    assert sent == ["cold_fail"]
+    assert receiver.health_snapshot()["state"] == "stopped"
 
 
 def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_path):

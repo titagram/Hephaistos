@@ -2857,6 +2857,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._hades_persephone_next_retry_at = None
         self._hades_persephone_stable_since = None
         self._hades_persephone_failure_generation = None
+        self._hades_persephone_shutdown_deadline = None
+        self._hades_persephone_drain_retry_streak = 0
+        self._hades_persephone_drain_next_retry_at = None
 
         # scale-to-zero (Phase 0, F13): gateway-scoped "last inbound seen" clock.
         # There is no such clock today (only a per-agent _last_activity_ts), so the
@@ -7293,6 +7296,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     async def _stop_hades_persephone_receiver(self) -> None:
         """Quiesce and stop the owned receiver without losing timed-out ownership."""
         self._hades_persephone_draining = True
+        shutdown_budget = max(
+            0.0,
+            float(
+                getattr(self, "_hades_persephone_shutdown_budget_seconds", 5.0)
+            ),
+        )
+        self._hades_persephone_shutdown_deadline = time.monotonic() + shutdown_budget
+        self._hades_persephone_drain_retry_streak = 0
+        self._hades_persephone_drain_next_retry_at = None
         self._hades_persephone_generation = int(
             getattr(self, "_hades_persephone_generation", 0)
         ) + 1
@@ -7314,7 +7326,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return
             joined = False
             try:
-                result = await asyncio.to_thread(receiver.stop, timeout=5.0)
+                result = await asyncio.to_thread(
+                    receiver.stop, timeout=min(5.0, shutdown_budget)
+                )
                 joined = result is not False
             except Exception as exc:
                 try:
@@ -7423,23 +7437,118 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._hades_persephone_monitor_task = None
                     return
                 if state == "draining":
-                    joined = await asyncio.to_thread(receiver.stop, timeout=0.0)
-                    if joined is not False:
-                        self._hades_persephone_receiver = None
-                        self._hades_persephone_monitor_task = None
-                        terminal_state = (
-                            "stopped"
-                            if getattr(self, "_hades_persephone_draining", False)
-                            else "failed"
+                    monotonic_now = time.monotonic()
+                    retry_at = getattr(
+                        self, "_hades_persephone_drain_next_retry_at", None
+                    )
+                    deadline = getattr(
+                        self, "_hades_persephone_shutdown_deadline", None
+                    )
+                    remaining = (
+                        max(0.0, float(deadline) - monotonic_now)
+                        if deadline is not None
+                        else 0.0
+                    )
+                    if retry_at is None or monotonic_now >= float(retry_at):
+                        cleanup_slice = min(
+                            remaining,
+                            max(
+                                0.001,
+                                float(
+                                    getattr(
+                                        self,
+                                        "_hades_persephone_drain_cleanup_slice_seconds",
+                                        0.25,
+                                    )
+                                ),
+                            ),
                         )
-                        self._record_hades_persephone_health(
-                            {
-                                "state": terminal_state,
-                                "active": False,
-                                "failure_count": snapshot.get("failure_count", 0),
-                            }
+                        if cleanup_slice > 0:
+                            joined = await asyncio.to_thread(
+                                receiver.stop, timeout=cleanup_slice
+                            )
+                            if joined is not False:
+                                self._hades_persephone_receiver = None
+                                self._hades_persephone_monitor_task = None
+                                self._hades_persephone_drain_retry_streak = 0
+                                self._hades_persephone_drain_next_retry_at = None
+                                terminal_state = (
+                                    "stopped"
+                                    if getattr(
+                                        self, "_hades_persephone_draining", False
+                                    )
+                                    else "failed"
+                                )
+                                self._record_hades_persephone_health(
+                                    {
+                                        "state": terminal_state,
+                                        "active": False,
+                                        "failure_count": snapshot.get(
+                                            "failure_count", 0
+                                        ),
+                                    }
+                                )
+                                return
+                        streak = int(
+                            getattr(
+                                self, "_hades_persephone_drain_retry_streak", 0
+                            )
+                        ) + 1
+                        self._hades_persephone_drain_retry_streak = streak
+                        base = max(
+                            0.001,
+                            float(
+                                getattr(
+                                    self,
+                                    "_hades_persephone_drain_retry_base_seconds",
+                                    0.25,
+                                )
+                            ),
                         )
-                        return
+                        maximum = max(
+                            base,
+                            float(
+                                getattr(
+                                    self,
+                                    "_hades_persephone_drain_retry_max_seconds",
+                                    2.0,
+                                )
+                            ),
+                        )
+                        self._hades_persephone_drain_next_retry_at = (
+                            monotonic_now
+                            + min(maximum, base * float(2 ** min(streak - 1, 8)))
+                        )
+                    interval = max(
+                        0.001,
+                        float(
+                            getattr(
+                                self,
+                                "_hades_persephone_monitor_interval_seconds",
+                                1.0,
+                            )
+                        ),
+                    )
+                    retry_at = getattr(
+                        self, "_hades_persephone_drain_next_retry_at", None
+                    )
+                    delay = interval
+                    if retry_at is not None:
+                        delay = max(
+                            delay,
+                            min(
+                                max(0.0, float(retry_at) - time.monotonic()),
+                                float(
+                                    getattr(
+                                        self,
+                                        "_hades_persephone_drain_retry_max_seconds",
+                                        2.0,
+                                    )
+                                ),
+                            ),
+                        )
+                    await asyncio.sleep(delay)
+                    continue
                 try:
                     revision = await asyncio.to_thread(
                         self._hades_persephone_runtime_revision
