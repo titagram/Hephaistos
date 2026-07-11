@@ -57,3 +57,25 @@ def test_contract_prompt_block_contains_each_contract_section():
         assert key.replace("_", " ").title() in block
     assert "hermes_cli/delegation_onboarding.py" in block
     assert "(none)" in block
+
+
+def test_contract_carries_manifest_interfaces_artifacts_and_versions():
+    contract = parse_orchestrator_contract(
+        {
+            **VALID,
+            "interfaces": ["users-api"],
+            "produces": ["schema.json"],
+            "task_version": 2,
+            "contract_version": 3,
+        }
+    )
+    assert contract.interfaces == ("users-api",)
+    assert contract.produces == ("schema.json",)
+    assert contract.task_version == 2
+    assert contract.contract_version == 3
+
+
+@pytest.mark.parametrize("field", ["task_version", "contract_version"])
+def test_contract_rejects_invalid_manifest_versions(field):
+    with pytest.raises(ValueError, match=field):
+        parse_orchestrator_contract({**VALID, field: 0})

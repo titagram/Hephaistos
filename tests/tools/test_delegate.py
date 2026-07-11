@@ -3386,5 +3386,53 @@ class TestAdaptiveCapacityPreflight(unittest.TestCase):
         self.assertIsNone(request.max_active_agents)
 
 
+class TestDelegationManifestAwareness(unittest.TestCase):
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"max_iterations": 5, "max_concurrent_children": 3},
+    )
+    def test_batch_children_know_sibling_roles_before_running(
+        self, _config, credentials, build_child, run_child
+    ):
+        credentials.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        children = []
+        for index in range(2):
+            child = _make_role_mock_child()
+            child._subagent_id = f"leaf-{index}"
+            child._delegate_role = "leaf" if index == 0 else "reviewer"
+            child._delegate_task_contract = None
+            child.ephemeral_system_prompt = f"child {index}"
+            children.append(child)
+        build_child.side_effect = children
+        run_child.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "done",
+            "api_calls": 1,
+            "duration_seconds": 0,
+        }
+
+        result = json.loads(
+            delegate_task(
+                tasks=[{"goal": "alpha"}, {"goal": "beta", "role": "reviewer"}],
+                parent_agent=_make_mock_parent(),
+            )
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(children[0]._hades_sibling_manifests[0].agent_id, "leaf-1")
+        self.assertIn("`leaf-1` (reviewer): beta", children[0].ephemeral_system_prompt)
+        self.assertIn("Only your direct parent may command", children[0].ephemeral_system_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

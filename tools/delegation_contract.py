@@ -20,6 +20,10 @@ class OrchestratorTaskContract:
     acceptance_criteria: tuple[str, ...]
     required_verification: tuple[str, ...]
     return_schema: tuple[str, ...]
+    interfaces: tuple[str, ...] = ()
+    produces: tuple[str, ...] = ()
+    task_version: int = 1
+    contract_version: int = 1
 
 
 def _required_text(raw: Mapping[str, Any], key: str) -> str:
@@ -54,6 +58,15 @@ def parse_orchestrator_contract(
     """Validate and freeze a model-supplied orchestrator task contract."""
     if not isinstance(raw, Mapping):
         raise ValueError("task_contract is required for orchestrator role")
+    def optional_list(key: str) -> tuple[str, ...]:
+        return _required_list(raw, key, allow_empty=True) if key in raw else ()
+
+    def optional_version(key: str) -> int:
+        value = raw.get(key, 1)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{key} must be a positive integer")
+        return value
+
     return OrchestratorTaskContract(
         objective=_required_text(raw, "objective"),
         deliverable=_required_text(raw, "deliverable"),
@@ -66,6 +79,10 @@ def parse_orchestrator_contract(
         acceptance_criteria=_required_list(raw, "acceptance_criteria"),
         required_verification=_required_list(raw, "required_verification"),
         return_schema=_required_list(raw, "return_schema"),
+        interfaces=optional_list("interfaces"),
+        produces=optional_list("produces"),
+        task_version=optional_version("task_version"),
+        contract_version=optional_version("contract_version"),
     )
 
 
@@ -83,6 +100,10 @@ def contract_prompt_block(contract: OrchestratorTaskContract) -> str:
         ("Acceptance Criteria", contract.acceptance_criteria),
         ("Required Verification", contract.required_verification),
         ("Return Schema", contract.return_schema),
+        ("Interfaces", contract.interfaces),
+        ("Produces", contract.produces),
+        ("Task Version", (str(contract.task_version),)),
+        ("Contract Version", (str(contract.contract_version),)),
     )
     lines = ["## Structured Task Contract"]
     for heading, values in fields:

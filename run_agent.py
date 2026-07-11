@@ -1287,7 +1287,7 @@ class AIAgent:
         model: str,
         *,
         provider: Optional[str] = None,
-    ) -> bool:
+    ) -> str:
         """Return True when this provider/model pair should use Responses API."""
         normalized_provider = (provider or "").strip().lower()
         # Nous serves GPT-5.x models via its OpenAI-compatible chat
@@ -1632,7 +1632,9 @@ class AIAgent:
         from agent.agent_runtime_helpers import repair_message_sequence
         return repair_message_sequence(self, messages)
 
-    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _flush_messages_to_session_db(
+        self, messages: List[Dict], conversation_history: List[Dict] = None
+    ) -> bool:
         """Persist any un-flushed messages to the SQLite session store.
 
         Uses per-session message identity tracking so repeated calls (from
@@ -1641,7 +1643,7 @@ class AIAgent:
         can drift after message-sequence repair.
         """
         if not self._session_db:
-            return
+            return "unavailable"
         self._apply_persist_user_message_override(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
@@ -1723,8 +1725,10 @@ class AIAgent:
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)
+            return "durable"
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
+            return "failed"
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -2871,6 +2875,18 @@ class AIAgent:
         """Forwarder — see ``agent.agent_runtime_helpers.apply_pending_steer_to_tool_results``."""
         from agent.agent_runtime_helpers import apply_pending_steer_to_tool_results
         return apply_pending_steer_to_tool_results(self, messages, num_tool_msgs)
+
+    def _apply_pending_coordination_to_tool_results(
+        self, messages: list, num_tool_msgs: int
+    ):
+        """Forwarder for addressed Hades coordination safe-boundary delivery."""
+        from agent.agent_runtime_helpers import (
+            apply_pending_coordination_to_tool_results,
+        )
+
+        return apply_pending_coordination_to_tool_results(
+            self, messages, num_tool_msgs
+        )
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe).

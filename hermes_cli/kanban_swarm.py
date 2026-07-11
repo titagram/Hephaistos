@@ -18,10 +18,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.hades_agent_coordination import (
+    CoordinationEvent,
+    DelegationAuthority,
+    post_addressed_event,
+)
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 
@@ -237,6 +243,40 @@ def post_blackboard_update(
     key = _require_text(key, "key")
     payload = json.dumps({"key": key, "value": value}, ensure_ascii=False, sort_keys=True)
     return kb.add_comment(conn, root_id, author=author, body=BLACKBOARD_PREFIX + payload)
+
+
+def post_addressed_blackboard_update(
+    conn: sqlite3.Connection,
+    *,
+    authority: DelegationAuthority,
+    actor_id: str,
+    recipient_id: str,
+    event_id: str,
+    event_type: str,
+    summary: str,
+    evidence_refs: list[str] | None = None,
+    artifact: str | None = None,
+    blocker: str | None = None,
+    db_path: Path | None = None,
+) -> CoordinationEvent:
+    """Post through an owned coordination transaction.
+
+    ``conn`` identifies the caller's Kanban context only; this function never
+    executes or commits against it, preserving any surrounding transaction.
+    """
+
+    return post_addressed_event(
+        authority=authority,
+        actor_id=actor_id,
+        recipient_id=recipient_id,
+        event_id=event_id,
+        event_type=event_type,
+        summary=summary,
+        evidence_refs=evidence_refs or (),
+        artifact=artifact,
+        blocker=blocker,
+        db_path=db_path,
+    )
 
 
 def latest_blackboard(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:

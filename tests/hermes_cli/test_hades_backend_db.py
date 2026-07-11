@@ -253,3 +253,35 @@ def test_cleanup_terminal_plugin_work_items_keeps_active_and_fresh_items(tmp_pat
     }
     assert deleted["removed"] == 1
     assert {item.work_item_id for item in remaining} == {"awi_failed_fresh", "awi_queued_old"}
+
+
+def test_legacy_coordination_rows_migrate_without_loss(tmp_path):
+    import json
+    import sqlite3
+
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE agent_coordination_events (
+           sequence INTEGER PRIMARY KEY AUTOINCREMENT, sender_id TEXT,
+           parent_id TEXT, recipients TEXT, event_type TEXT, summary TEXT,
+           evidence_refs TEXT, artifact TEXT, created_at INTEGER, expires_at INTEGER)"""
+    )
+    conn.execute(
+        """INSERT INTO agent_coordination_events
+           (sender_id, parent_id, recipients, event_type, summary, evidence_refs,
+            artifact, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("a", "parent", json.dumps(["b"]), "question", "legacy", "[]", None, 1, 9999999999),
+    )
+    conn.commit()
+    conn.close()
+
+    with db.connect_closing(path) as migrated:
+        event = migrated.execute("SELECT event_id FROM agent_coordination_events").fetchone()
+        recipient = migrated.execute(
+            "SELECT recipient_id FROM agent_coordination_event_recipients"
+        ).fetchone()
+    assert event[0] == "legacy:1"
+    assert recipient[0] == "b"

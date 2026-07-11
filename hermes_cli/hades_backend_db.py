@@ -69,6 +69,61 @@ CREATE TABLE IF NOT EXISTS workspace_bindings (
 CREATE INDEX IF NOT EXISTS idx_workspace_bindings_project
     ON workspace_bindings(project_id, local_project_id);
 
+CREATE TABLE IF NOT EXISTS agent_coordination_manifests (
+    agent_id          TEXT PRIMARY KEY,
+    parent_id         TEXT NOT NULL,
+    role              TEXT NOT NULL,
+    objective         TEXT NOT NULL,
+    write_scope       TEXT NOT NULL,
+    dependencies      TEXT NOT NULL,
+    interfaces        TEXT NOT NULL,
+    produces          TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    task_version      INTEGER NOT NULL,
+    contract_version  INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_coordination_manifests_parent
+    ON agent_coordination_manifests(parent_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS agent_coordination_events (
+    sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id       TEXT NOT NULL UNIQUE,
+    sender_id      TEXT NOT NULL,
+    parent_id      TEXT NOT NULL,
+    event_type     TEXT NOT NULL,
+    summary        TEXT NOT NULL,
+    evidence_refs  TEXT NOT NULL,
+    artifact       TEXT,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_coordination_events_expiry
+    ON agent_coordination_events(expires_at, sequence);
+
+CREATE TABLE IF NOT EXISTS agent_coordination_event_recipients (
+    event_id       TEXT NOT NULL,
+    recipient_id   TEXT NOT NULL,
+    sequence       INTEGER NOT NULL,
+    PRIMARY KEY(event_id, recipient_id),
+    FOREIGN KEY(event_id) REFERENCES agent_coordination_events(event_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_coordination_recipient_sequence
+    ON agent_coordination_event_recipients(recipient_id, sequence);
+
+CREATE TABLE IF NOT EXISTS agent_coordination_state (
+    recipient_id       TEXT PRIMARY KEY,
+    parent_id          TEXT NOT NULL,
+    generation         INTEGER NOT NULL DEFAULT 0,
+    ack_generation     INTEGER NOT NULL DEFAULT 0,
+    ack_sequence       INTEGER NOT NULL DEFAULT 0,
+    dirty              INTEGER NOT NULL DEFAULT 0,
+    completed          INTEGER NOT NULL DEFAULT 0,
+    last_notified_at   INTEGER NOT NULL DEFAULT 0,
+    updated_at         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS backend_jobs (
     job_id               TEXT PRIMARY KEY,
     project_id           TEXT NOT NULL,
@@ -226,6 +281,100 @@ _INITIALIZED_PATHS: set[str] = set()
 
 class PersephoneIdentityMigrationConflict(RuntimeError):
     """Existing queue rows violate the global agent-message ID invariant."""
+
+
+def _migrate_agent_coordination_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade the pre-review O7 append-only table without losing its rows."""
+
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(agent_coordination_events)").fetchall()
+    }
+    if not columns or "event_id" in columns:
+        return
+    legacy_rows = conn.execute(
+        "SELECT * FROM agent_coordination_events ORDER BY sequence"
+    ).fetchall()
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS agent_coordination_event_recipients;
+        DROP TABLE IF EXISTS agent_coordination_state;
+        DROP TABLE IF EXISTS agent_coordination_cursors;
+        ALTER TABLE agent_coordination_events RENAME TO agent_coordination_events_legacy;
+        DROP INDEX IF EXISTS idx_agent_coordination_events_expiry;
+        CREATE TABLE agent_coordination_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            sender_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            evidence_refs TEXT NOT NULL,
+            artifact TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_agent_coordination_events_expiry
+            ON agent_coordination_events(expires_at, sequence);
+        CREATE TABLE agent_coordination_event_recipients (
+            event_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            PRIMARY KEY(event_id, recipient_id),
+            FOREIGN KEY(event_id) REFERENCES agent_coordination_events(event_id)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX idx_coordination_recipient_sequence
+            ON agent_coordination_event_recipients(recipient_id, sequence);
+        CREATE TABLE agent_coordination_state (
+            recipient_id TEXT PRIMARY KEY,
+            parent_id TEXT NOT NULL,
+            generation INTEGER NOT NULL DEFAULT 0,
+            ack_generation INTEGER NOT NULL DEFAULT 0,
+            ack_sequence INTEGER NOT NULL DEFAULT 0,
+            dirty INTEGER NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0,
+            last_notified_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+        """
+    )
+    generations: dict[str, int] = {}
+    for row in legacy_rows:
+        event_id = f"legacy:{int(row['sequence'])}"
+        conn.execute(
+            """INSERT INTO agent_coordination_events
+               (sequence, event_id, sender_id, parent_id, event_type, summary,
+                evidence_refs, artifact, created_at, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                int(row["sequence"]), event_id, row["sender_id"], row["parent_id"],
+                row["event_type"], row["summary"], row["evidence_refs"],
+                row["artifact"], int(row["created_at"]), int(row["expires_at"]),
+            ),
+        )
+        try:
+            recipients = json.loads(row["recipients"])
+        except (TypeError, ValueError):
+            recipients = []
+        for recipient in recipients if isinstance(recipients, list) else []:
+            recipient = str(recipient)
+            conn.execute(
+                """INSERT OR IGNORE INTO agent_coordination_event_recipients
+                   (event_id, recipient_id, sequence) VALUES (?, ?, ?)""",
+                (event_id, recipient, int(row["sequence"])),
+            )
+            generations[recipient] = generations.get(recipient, 0) + 1
+    now = _now()
+    for recipient, generation in generations.items():
+        conn.execute(
+            """INSERT INTO agent_coordination_state
+               (recipient_id, parent_id, generation, dirty, updated_at)
+               VALUES (?, '', ?, 1, ?)""",
+            (recipient, generation, now),
+        )
+    conn.execute("DROP TABLE agent_coordination_events_legacy")
+    conn.commit()
 
 
 def _canonical_envelope_json(value: str, *, message_id: str) -> str:
@@ -428,6 +577,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
         apply_wal_with_fallback(conn, db_label="hades_backend.db")
         if resolved not in _INITIALIZED_PATHS:
             conn.executescript(SCHEMA_SQL)
+            _migrate_agent_coordination_schema(conn)
             _migrate_persephone_message_identities(conn)
             _INITIALIZED_PATHS.add(resolved)
     except Exception:

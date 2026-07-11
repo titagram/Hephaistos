@@ -640,6 +640,18 @@ def run_conversation(
             if not agent.quiet_mode:
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
+
+        # Cooperative Hades wakeup: only a trailing, not-yet-sent tool result
+        # is eligible. This never injects a role or mutates the stable system
+        # prompt; events without such a boundary remain durable for handoff.
+        try:
+            from agent.agent_runtime_helpers import (
+                deliver_pending_coordination_before_model,
+            )
+
+            deliver_pending_coordination_before_model(agent, messages)
+        except Exception as exc:
+            logger.warning("Pre-model Hades coordination check failed: %s", exc)
         
         api_call_count += 1
         agent._api_call_count = api_call_count
@@ -4448,6 +4460,19 @@ def run_conversation(
             
             else:
                 # No tool calls - this is the final response
+                # The model may have completed while a sibling event arrived.
+                # There is no legal tool boundary after this response, so do
+                # not synthesize a user message or rewrite already-sent
+                # history: atomically complete the child and coalesce pending
+                # work to its direct parent/orchestrator instead.
+                try:
+                    from agent.agent_runtime_helpers import (
+                        finalize_hades_coordination_recipient,
+                    )
+
+                    finalize_hades_coordination_recipient(agent)
+                except Exception as exc:
+                    logger.warning("Final Hades coordination handoff failed: %s", exc)
                 final_response = assistant_message.content or ""
                 
                 # Fix: unmute output when entering the no-tool-call branch

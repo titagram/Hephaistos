@@ -2736,6 +2736,69 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     )
 
 
+def apply_pending_coordination_to_tool_results(
+    agent, messages: list, num_tool_msgs: int
+):
+    """Prepare a trusted coordination sidecar without mutating tool content."""
+
+    from hermes_cli.hades_agent_coordination import prepare_pending_coordination
+
+    return prepare_pending_coordination(agent, messages, num_tool_msgs)
+
+
+def deliver_pending_coordination_before_model(agent, messages: list) -> bool:
+    """Deliver a newly-dirtied sidecar only on an unsent trailing tool boundary."""
+
+    if not messages or not isinstance(messages[-1], dict) or messages[-1].get("role") != "tool":
+        return False
+    num_tool_msgs = 0
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            break
+        num_tool_msgs += 1
+    delivery = apply_pending_coordination_to_tool_results(
+        agent, messages, num_tool_msgs
+    )
+    if delivery is None:
+        return False
+    from agent.tool_executor import _budget_for_agent, _compose_runtime_coordination
+
+    budget = _budget_for_agent(agent)
+    composed = _compose_runtime_coordination(
+        messages[-num_tool_msgs:], [delivery], aggregate_budget=budget.turn_budget
+    )
+    if not composed:
+        return False
+    agent._hades_coordination_attached_generation = delivery.generation
+    persisted = agent._flush_messages_to_session_db(messages)
+    if persisted == "durable":
+        delivery.durably_persisted = True
+        delivery.ack()
+    return True
+
+
+def finalize_hades_coordination_recipient(agent) -> bool:
+    """Mark terminal child completion and coalesce pending work to its parent."""
+
+    recipient_id = getattr(agent, "_hades_coordination_id", None)
+    authority = getattr(agent, "_hades_delegation_authority", None)
+    from hermes_cli.hades_agent_coordination import DelegationAuthority
+
+    if not recipient_id or not isinstance(authority, DelegationAuthority):
+        return False
+    try:
+        authority.get(recipient_id)
+    except KeyError:
+        # The root coordination id is observable/queryable but is not a child
+        # and must never hand pending work back to itself.
+        return False
+    from hermes_cli.hades_agent_coordination import complete_and_handoff_pending
+
+    return complete_and_handoff_pending(
+        recipient_id, db_path=authority.db_path
+    )
+
+
 
 def force_close_tcp_sockets(client: Any) -> int:
     """Abort in-flight TCP I/O by shutting down sockets WITHOUT closing FDs.
@@ -2813,6 +2876,9 @@ __all__ = [
     "cleanup_dead_connections",
     "extract_api_error_context",
     "apply_pending_steer_to_tool_results",
+    "apply_pending_coordination_to_tool_results",
+    "deliver_pending_coordination_before_model",
+    "finalize_hades_coordination_recipient",
     "_iter_pool_sockets",
     "force_close_tcp_sockets",
 ]

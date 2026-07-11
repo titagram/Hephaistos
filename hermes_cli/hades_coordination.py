@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Any, Callable, TypeVar
 
 from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+from hermes_cli.hades_agent_coordination import DelegationAuthority, LeafManifest
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,26 @@ class HadesCoordination:
         # Heartbeat thread management
         self._heartbeat_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self.delegation_authority = DelegationAuthority(root_id=agent_id)
+
+    def register_delegated_agent(self, manifest: LeafManifest) -> None:
+        """Register a child manifest for root observation and parent authority."""
+
+        self.delegation_authority.register(actor_id=manifest.parent_id, manifest=manifest)
+
+    def inspect_delegated_agent(self, actor_id: str, agent_id: str) -> LeafManifest:
+        """Inspect role/scope without granting command authority."""
+
+        return self.delegation_authority.inspect(actor_id, agent_id)
+
+    def update_delegated_contract(
+        self, actor_id: str, agent_id: str, patch: dict[str, Any]
+    ) -> LeafManifest:
+        """Apply a contract patch only when ``actor_id`` is the direct parent."""
+
+        return self.delegation_authority.update_contract(
+            actor=actor_id, target=agent_id, patch=patch
+        )
 
     def set_git_state(
         self,

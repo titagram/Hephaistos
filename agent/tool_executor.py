@@ -70,6 +70,70 @@ def _budget_for_agent(agent) -> BudgetConfig:
 _MAX_TOOL_WORKERS = 8
 
 
+def _content_bytes(content: Any) -> int:
+    return len(content.encode("utf-8")) if isinstance(content, str) else len(str(content).encode("utf-8"))
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+
+
+def _compose_runtime_coordination(
+    messages: list[dict], deliveries: list[Any], *, aggregate_budget: int
+) -> bool:
+    """Compose trusted runtime sidecars after budget enforcement.
+
+    Tool text is never searched for coordination markers.  Sidecars originate
+    only from the authority-backed runtime and reserve space inside the final
+    aggregate byte budget.
+    """
+
+    if not deliveries or aggregate_budget <= 0:
+        return False
+    by_id = {
+        str(message.get("tool_call_id") or id(message)): message for message in messages
+    }
+    trusted: list[tuple[dict, str]] = []
+    for delivery in deliveries:
+        target = by_id.get(str(delivery.target_tool_call_id))
+        block = delivery.rendered_block
+        if target is not None and isinstance(block, str):
+            trusted.append((target, block))
+    if not trusted:
+        return False
+    non_text_bytes = sum(
+        _content_bytes(message.get("content", ""))
+        for message in messages
+        if not isinstance(message.get("content", ""), str)
+    )
+    if non_text_bytes >= aggregate_budget:
+        return False
+    sidecar_bytes = sum(_content_bytes(block) + 2 for _, block in trusted)
+    sidecar_bytes = min(sidecar_bytes, aggregate_budget)
+    base_budget = max(0, aggregate_budget - sidecar_bytes)
+    remaining = base_budget
+    for message in messages:
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            remaining = max(0, remaining - _content_bytes(content))
+            continue
+        size = _content_bytes(content)
+        if size > remaining:
+            content = _truncate_utf8(content, remaining)
+        message["content"] = content
+        remaining = max(0, remaining - _content_bytes(content))
+    for target, block in trusted:
+        available = aggregate_budget - sum(
+            _content_bytes(message.get("content", "")) for message in messages
+        )
+        rendered = _truncate_utf8(block, max(0, available - 2))
+        if rendered:
+            target["content"] = f"{target.get('content', '')}\n\n{rendered}"
+    return all(delivery.rendered_block in str(by_id.get(str(delivery.target_tool_call_id), {}).get("content", "")) for delivery in deliveries)
+
+
 def _flush_session_db_after_tool_progress(
     agent,
     messages: list,
@@ -87,6 +151,29 @@ def _flush_session_db_after_tool_progress(
         agent._flush_messages_to_session_db(messages)
     except Exception as exc:
         logger.warning("Incremental tool-call persistence failed after %s: %s", stage, exc)
+
+
+def _deliver_pending_coordination(
+    agent, messages: list, *, num_tool_msgs: int, stage: str
+) -> Any:
+    """Prepare a trusted sidecar; composition/persistence/ack happen in order later."""
+
+    try:
+        from agent.agent_runtime_helpers import (
+            apply_pending_coordination_to_tool_results,
+        )
+
+        delivery = apply_pending_coordination_to_tool_results(
+            agent, messages, num_tool_msgs
+        )
+        if delivery is None:
+            return
+        return delivery
+    except Exception as exc:
+        # Coordination is cooperative and must never break the agent loop.  A
+        # missing ack intentionally replays the event at the next boundary.
+        logger.warning("Pending Hades coordination delivery failed after %s: %s", stage, exc)
+        return None
 
 
 def _ra():
@@ -293,6 +380,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # Resolve the context-scaled tool-output budget once per turn (cheap, but
     # avoids rebuilding it per result inside the loop below).
     _tool_budget = _budget_for_agent(agent)
+    coordination_deliveries: list[Any] = []
 
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
@@ -828,22 +916,43 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # String results pass through unchanged.
         _tool_content = agent._tool_result_content_for_active_model(name, function_result)
         messages.append(make_tool_result_message(name, _tool_content, tc.id))
-        _flush_session_db_after_tool_progress(
-            agent,
-            messages,
-            stage=f"tool result {name}",
-        )
 
         # ── Per-tool /steer drain ───────────────────────────────────
         # Same as the sequential path: drain between each collected
         # result so the steer lands as early as possible.
         agent._apply_pending_steer_to_tool_results(messages, 1)
+        if not coordination_deliveries:
+            delivery = _deliver_pending_coordination(
+                agent, messages, num_tool_msgs=1, stage=f"tool result {name}"
+            )
+            if delivery is not None:
+                coordination_deliveries.append(delivery)
+        if not coordination_deliveries:
+            _flush_session_db_after_tool_progress(
+                agent,
+                messages,
+                stage=f"tool result {name}",
+            )
 
     # ── Per-turn aggregate budget enforcement ─────────────────────────
     num_tools = len(parsed_calls)
     if num_tools > 0:
         turn_tool_msgs = messages[-num_tools:]
         enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id), config=_tool_budget)
+        composed = _compose_runtime_coordination(
+            turn_tool_msgs,
+            coordination_deliveries,
+            aggregate_budget=_tool_budget.turn_budget,
+        )
+        if coordination_deliveries and composed:
+            agent._hades_coordination_attached_generation = max(
+                delivery.generation for delivery in coordination_deliveries
+            )
+            persisted = agent._flush_messages_to_session_db(messages)
+            if persisted == "durable":
+                for delivery in coordination_deliveries:
+                    delivery.durably_persisted = True
+                    delivery.ack()
 
     # ── /steer injection ──────────────────────────────────────────────
     # Append any pending user steer text to the last tool result so the
@@ -858,6 +967,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
     # Resolve the context-scaled tool-output budget once per turn.
     _tool_budget = _budget_for_agent(agent)
+    coordination_deliveries: list[Any] = []
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
         # SAFETY: check interrupt BEFORE starting each tool.
         # If the user sent "stop" during a previous tool's execution,
@@ -1477,17 +1587,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # (see parallel path for rationale). String results pass through.
         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
         messages.append(make_tool_result_message(function_name, _tool_content, tool_call.id))
-        _flush_session_db_after_tool_progress(
-            agent,
-            messages,
-            stage=f"tool result {function_name}",
-        )
 
         # ── Per-tool /steer drain ───────────────────────────────────
         # Drain pending steer BETWEEN individual tool calls so the
         # injection lands as soon as a tool finishes — not after the
         # entire batch.  The model sees it on the next API iteration.
         agent._apply_pending_steer_to_tool_results(messages, 1)
+        if not coordination_deliveries:
+            delivery = _deliver_pending_coordination(
+                agent,
+                messages,
+                num_tool_msgs=1,
+                stage=f"tool result {function_name}",
+            )
+            if delivery is not None:
+                coordination_deliveries.append(delivery)
+        if not coordination_deliveries:
+            _flush_session_db_after_tool_progress(
+                agent,
+                messages,
+                stage=f"tool result {function_name}",
+            )
 
         if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
             if agent.verbose_logging:
@@ -1521,7 +1641,26 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     # ── Per-turn aggregate budget enforcement ─────────────────────────
     num_tools_seq = len(assistant_message.tool_calls)
     if num_tools_seq > 0:
-        enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id), config=_tool_budget)
+        turn_tool_msgs = messages[-num_tools_seq:]
+        enforce_turn_budget(
+            turn_tool_msgs,
+            env=get_active_env(effective_task_id),
+            config=_tool_budget,
+        )
+        composed = _compose_runtime_coordination(
+            turn_tool_msgs,
+            coordination_deliveries,
+            aggregate_budget=_tool_budget.turn_budget,
+        )
+        if coordination_deliveries and composed:
+            agent._hades_coordination_attached_generation = max(
+                delivery.generation for delivery in coordination_deliveries
+            )
+            persisted = agent._flush_messages_to_session_db(messages)
+            if persisted == "durable":
+                for delivery in coordination_deliveries:
+                    delivery.durably_persisted = True
+                    delivery.ack()
 
     # ── /steer injection ──────────────────────────────────────────────
     # See _execute_tool_calls_parallel for the rationale. Same hook,

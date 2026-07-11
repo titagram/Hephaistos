@@ -2257,6 +2257,15 @@ def _run_single_child(
         if _heartbeat_thread.ident is not None:
             _heartbeat_thread.join(timeout=5)
 
+        # Preserve the completed tombstone and atomically coalesce any
+        # undelivered child events to its direct parent before registry removal.
+        try:
+            from agent.agent_runtime_helpers import finalize_hades_coordination_recipient
+
+            finalize_hades_coordination_recipient(child)
+        except Exception:
+            logger.debug("Failed to finalize child coordination state", exc_info=True)
+
         # Drop the TUI-facing registry entry.  Safe to call even if the
         # child was never registered (e.g. ID missing on test doubles).
         if _subagent_id:
@@ -2597,6 +2606,70 @@ def delegate_task(
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
+
+        # Build the sibling-visible DAG manifest only after every child has a
+        # stable id, but before any child starts its first conversation.  This
+        # preserves a byte-stable prompt for each child while giving it just
+        # enough role/scope awareness to address relevant information requests.
+        from hermes_cli.hades_agent_coordination import (
+            DelegationAuthority,
+            LeafManifest,
+            format_manifest_awareness,
+        )
+
+        parent_subagent_id = getattr(parent_agent, "_subagent_id", None)
+        if isinstance(parent_subagent_id, str) and parent_subagent_id:
+            root_id = parent_subagent_id
+        else:
+            parent_session_id = getattr(parent_agent, "session_id", None)
+            if not isinstance(parent_session_id, str) or not parent_session_id:
+                parent_session_id = "local"
+            root_id = f"root:{parent_session_id}"
+        authority = getattr(parent_agent, "_hades_delegation_authority", None)
+        if not isinstance(authority, DelegationAuthority):
+            authority = DelegationAuthority(root_id=root_id)
+            parent_agent._hades_delegation_authority = authority
+        parent_agent._hades_coordination_id = root_id
+        manifests = []
+        for child_index, task, child in children:
+            contract = getattr(child, "_delegate_task_contract", None)
+            if not isinstance(contract, OrchestratorTaskContract):
+                contract = task.get("_orchestrator_contract")
+            role = getattr(child, "_delegate_role", None)
+            if role not in {"leaf", "orchestrator", "reviewer"}:
+                role = task.get("_normalized_role", "leaf")
+            child_id = getattr(child, "_subagent_id", None)
+            if not isinstance(child_id, str) or not child_id:
+                child_id = f"sa-{child_index}-pending"
+            manifest = LeafManifest(
+                agent_id=child_id,
+                parent_id=root_id,
+                role=role,
+                objective=(contract.objective if contract is not None else task["goal"]),
+                write_scope=(contract.write_scope if contract is not None else ()),
+                dependencies=(contract.dependencies if contract is not None else ()),
+                interfaces=(getattr(contract, "interfaces", ()) if contract is not None else ()),
+                produces=(getattr(contract, "produces", ()) if contract is not None else ()),
+                status="running",
+                task_version=(getattr(contract, "task_version", 1) if contract is not None else 1),
+                contract_version=(
+                    getattr(contract, "contract_version", 1) if contract is not None else 1
+                ),
+            )
+            authority.register(actor_id=root_id, manifest=manifest)
+            manifests.append((child, manifest))
+        for child, manifest in manifests:
+            siblings = tuple(item for _, item in manifests if item.agent_id != manifest.agent_id)
+            child._hades_manifest = manifest
+            child._hades_coordination_id = manifest.agent_id
+            child._hades_sibling_manifests = siblings
+            child._hades_delegation_authority = authority
+            awareness = format_manifest_awareness(manifest, siblings)
+            child.ephemeral_system_prompt = (
+                f"{child.ephemeral_system_prompt}\n\n{awareness}"
+                if child.ephemeral_system_prompt
+                else awareness
+            )
         for reservation in reservations:
             reservation.commit()
     except Exception:
@@ -3401,8 +3474,16 @@ _TASK_CONTRACT_PROPERTIES = {
     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
     "required_verification": {"type": "array", "items": {"type": "string"}},
     "return_schema": {"type": "array", "items": {"type": "string"}},
+    "interfaces": {"type": "array", "items": {"type": "string"}},
+    "produces": {"type": "array", "items": {"type": "string"}},
+    "task_version": {"type": "integer", "minimum": 1},
+    "contract_version": {"type": "integer", "minimum": 1},
 }
-_TASK_CONTRACT_REQUIRED = list(_TASK_CONTRACT_PROPERTIES)
+_TASK_CONTRACT_REQUIRED = [
+    key
+    for key in _TASK_CONTRACT_PROPERTIES
+    if key not in {"interfaces", "produces", "task_version", "contract_version"}
+]
 
 
 def _task_contract_schema(description: str) -> Dict[str, Any]:
