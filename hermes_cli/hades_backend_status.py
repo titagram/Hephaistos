@@ -35,6 +35,12 @@ def load_backend_status_payload() -> dict[str, Any]:
     plugin_local_workspace_id = str(backend_config.get("plugin_local_workspace_id") or "").strip()
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
+        # The gateway receiver is profile-scoped, not default-agent-scoped: it
+        # owns one worker for every exact (project_id, agent_id) route that has
+        # at least one currently linked workspace.  Keep the ordinary status
+        # identity/bindings anchored to the default agent, but give queue
+        # health the same complete route inventory as the receiver.
+        profile_linked_bindings = db.list_workspace_bindings(conn, status="linked")
         if agent:
             bindings = conn.execute(
                 "SELECT * FROM workspace_bindings WHERE agent_id = ? ORDER BY updated_at DESC",
@@ -53,7 +59,9 @@ def load_backend_status_payload() -> dict[str, Any]:
             background_sync = db.get_sync_state(conn, BACKGROUND_SYNC_STATE_KEY)
             last_quality_report = db.get_sync_state(conn, "last_quality_report")
             quality_report_history = db.get_sync_state(conn, QUALITY_REPORT_HISTORY_KEY)
-            persephone = _load_persephone_status(conn, agent=agent, bindings=bindings)
+            persephone = _load_persephone_status(
+                conn, agent=agent, bindings=profile_linked_bindings
+            )
             plugin_work_items = [
                 item
                 for item in db.list_plugin_work_items(conn)
@@ -351,33 +359,84 @@ def _load_persephone_status(
     else:
         state = str(recorded.get("state") or "disabled_capability")
         active = bool(recorded.get("active"))
-    project_id = str(getattr(agent, "project_id", "") or "")
-    agent_id = str(getattr(agent, "agent_id", "") or "")
-    counts = conn.execute(
-        "SELECT "
-        "(SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'received') AS unread, "
-        "(SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'waiting_human_approval') AS pending_approval, "
-        "((SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'retry') + "
-        " (SELECT COUNT(*) FROM persephone_outbox WHERE project_id = ? AND sender_agent_id = ? AND state = 'retry')) AS retry, "
-        "((SELECT COUNT(*) FROM persephone_inbox WHERE project_id = ? AND target_agent_id = ? AND state = 'dead_letter') + "
-        " (SELECT COUNT(*) FROM persephone_outbox WHERE project_id = ? AND sender_agent_id = ? AND state = 'dead_letter')) AS dead_letters",
-        (project_id, agent_id) * 6,
-    ).fetchone()
-    linked_projects = {
-        str(_binding_value(binding, "project_id"))
+    owned_routes = sorted({
+        (
+            str(_binding_value(binding, "project_id") or ""),
+            str(_binding_value(binding, "agent_id") or ""),
+        )
         for binding in bindings
         if _binding_value(binding, "status") == "linked"
-    }
+        and _binding_value(binding, "project_id")
+        and _binding_value(binding, "agent_id")
+    })
+    counts = _persephone_route_counts(conn, owned_routes)
     return {
+        "scope": "profile_linked_routes",
         "state": state,
         "active": active,
-        "projects": len(linked_projects),
-        "unread": counts["unread"] if counts is not None else 0,
-        "pending_approval": counts["pending_approval"] if counts is not None else 0,
-        "retry": counts["retry"] if counts is not None else 0,
-        "dead_letters": counts["dead_letters"] if counts is not None else 0,
+        "routes": len(owned_routes),
+        "agents": len({agent_id for _, agent_id in owned_routes}),
+        "projects": len({project_id for project_id, _ in owned_routes}),
+        **counts,
         "failure_count": recorded.get("failure_count", 0),
+        "restart_streak": recorded.get("restart_streak", 0),
         "next_retry_at": recorded.get("next_retry_at"),
+        "stable_since": recorded.get("stable_since"),
+    }
+
+
+def _persephone_route_counts(
+    conn: Any, owned_routes: list[tuple[str, str]]
+) -> dict[str, int]:
+    """Aggregate metadata-only queue states over an exact route allow-list."""
+    totals = {"unread": 0, "pending_approval": 0, "retry": 0, "dead_letters": 0}
+    if not owned_routes:
+        return totals
+
+    # Two parameters per route must stay below SQLite's host-parameter limit.
+    # Summing disjoint chunks preserves exact-pair semantics for large profiles.
+    for offset in range(0, len(owned_routes), 400):
+        chunk = owned_routes[offset:offset + 400]
+        counts = _persephone_route_count_chunk(conn, chunk)
+        for key in totals:
+            totals[key] += counts[key]
+    return totals
+
+
+def _persephone_route_count_chunk(
+    conn: Any, owned_routes: list[tuple[str, str]]
+) -> dict[str, int]:
+    """Count one bounded, duplicate-free chunk of owned routes."""
+
+    values = ", ".join("(?, ?)" for _ in owned_routes)
+    params = tuple(value for route in owned_routes for value in route)
+    inbox = conn.execute(
+        f"WITH owned_routes(project_id, agent_id) AS (VALUES {values}) "
+        "SELECT "
+        "COALESCE(SUM(CASE WHEN state = 'received' THEN 1 ELSE 0 END), 0) AS unread, "
+        "COALESCE(SUM(CASE WHEN state = 'waiting_human_approval' THEN 1 ELSE 0 END), 0) AS pending_approval, "
+        "COALESCE(SUM(CASE WHEN state = 'retry' THEN 1 ELSE 0 END), 0) AS retry, "
+        "COALESCE(SUM(CASE WHEN state = 'dead_letter' THEN 1 ELSE 0 END), 0) AS dead_letters "
+        "FROM persephone_inbox AS inbox "
+        "JOIN owned_routes AS owned ON owned.project_id = inbox.project_id "
+        "AND owned.agent_id = inbox.target_agent_id",
+        params,
+    ).fetchone()
+    outbox = conn.execute(
+        f"WITH owned_routes(project_id, agent_id) AS (VALUES {values}) "
+        "SELECT "
+        "COALESCE(SUM(CASE WHEN state = 'retry' THEN 1 ELSE 0 END), 0) AS retry, "
+        "COALESCE(SUM(CASE WHEN state = 'dead_letter' THEN 1 ELSE 0 END), 0) AS dead_letters "
+        "FROM persephone_outbox AS outbox "
+        "JOIN owned_routes AS owned ON owned.project_id = outbox.project_id "
+        "AND owned.agent_id = outbox.sender_agent_id",
+        params,
+    ).fetchone()
+    return {
+        "unread": int(inbox["unread"]),
+        "pending_approval": int(inbox["pending_approval"]),
+        "retry": int(inbox["retry"]) + int(outbox["retry"]),
+        "dead_letters": int(inbox["dead_letters"]) + int(outbox["dead_letters"]),
     }
 
 
@@ -388,17 +447,26 @@ def _persephone_payload(value: dict[str, Any] | None) -> dict[str, Any]:
         state = "failed"
     active_default = state in {"polling", "connected", "backoff", "draining"}
     return {
+        "scope": "profile_linked_routes",
         "state": state,
         "active": bool(active_default and raw.get("active", True)),
+        "routes": _nonnegative_int(raw.get("routes")),
+        "agents": _nonnegative_int(raw.get("agents")),
         "projects": _nonnegative_int(raw.get("projects")),
         "unread": _nonnegative_int(raw.get("unread")),
         "pending_approval": _nonnegative_int(raw.get("pending_approval")),
         "retry": _nonnegative_int(raw.get("retry")),
         "dead_letters": _nonnegative_int(raw.get("dead_letters")),
         "failure_count": _nonnegative_int(raw.get("failure_count")),
+        "restart_streak": _nonnegative_int(raw.get("restart_streak")),
         "next_retry_at": (
             _nonnegative_int(raw.get("next_retry_at"))
             if state == "backoff" and raw.get("next_retry_at") is not None
+            else None
+        ),
+        "stable_since": (
+            _nonnegative_int(raw.get("stable_since"))
+            if raw.get("stable_since") is not None
             else None
         ),
     }
