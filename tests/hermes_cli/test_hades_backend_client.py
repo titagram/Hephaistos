@@ -98,7 +98,7 @@ CLIENT_ROUTE_CASES = [
             "query": "hades routes",
             "domain": "wiki",
             "limit": "5",
-            "include_raw_chunks": "false",
+            "include_raw_chunks": "0",
         },
     },
     {
@@ -542,7 +542,7 @@ CLIENT_ROUTE_CASES = [
         "query": {
             "project_id": "proj_1",
             "workspace_binding_id": "wb_1",
-            "include_content": "false",
+            "include_content": "0",
         },
     },
     {

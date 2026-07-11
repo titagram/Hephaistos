@@ -73,7 +73,7 @@ def redact_secret(text: Any) -> str:
 
 def _string_param(value: Any) -> str:
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return "1" if value else "0"
     if isinstance(value, (str, int, float)):
         return str(value)
     return json.dumps(value, sort_keys=True, default=str)
