@@ -7758,3 +7758,18 @@ Smoke live dopo il reset:
   artefatti, inbox e job pull senza errori o `401`;
 - l'app pubblica e' stata ricreata sulla rete `traefik_default` con il router
   dedicato `/api/hades/v1`; lo smoke health pubblico restituisce HTTP 200.
+
+Correzione immediata del routing Traefik:
+
+- la ricreazione minimale dell'app aveva conservato soltanto il router Hades;
+  il router frontend rimasto sul container nginx dipendeva dal middleware
+  `devboard-basic-auth`, la cui definizione era invece ospitata sulle label di
+  `devboard-app-1`; Traefik scartava quindi il router web e rispondeva 404;
+- `devboard-app-1` e' stato ricreato con entrambi i compose file originali,
+  `docker-compose.devboard.yaml` e `docker-compose.devboard.traefik.yaml`, senza
+  ricreare o cancellare PostgreSQL;
+- ripristinati middleware BasicAuth, redirect HTTP/HTTPS, router web, plugin e
+  Hades e collegamento a `traefik_default`;
+- smoke finale: root senza credenziali `401` BasicAuth, root con le credenziali
+  preesistenti `200` e titolo `DevBoard — Operational Console`, health Hades
+  `200`, sync Hades completato senza errori.
