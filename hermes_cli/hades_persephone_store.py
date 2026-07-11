@@ -624,6 +624,61 @@ def get_cursor(
     return str(row["cursor"]) if row is not None else None
 
 
+def record_subscription_mismatch(
+    conn: sqlite3.Connection,
+    envelope: AgentMessageEnvelope,
+    *,
+    subscription_project_id: str,
+    subscription_agent_id: str,
+    subscription_workspace_binding_id: str | None = None,
+    cursor: str | None = None,
+    now: int | None = None,
+) -> bool:
+    """Durably reject one misrouted delivery without rejecting its envelope.
+
+    The same globally valid envelope may later arrive on its correct queue.
+    Therefore this audit is keyed by subscription context rather than by the
+    global message state.  Only the first durable delivery advances the opaque
+    subscription cursor, preventing a replay from rewinding a newer cursor.
+    """
+    project = str(subscription_project_id or "").strip()
+    agent = str(subscription_agent_id or "").strip()
+    binding = str(subscription_workspace_binding_id or "").strip()
+    resume = str(cursor or "").strip() or None
+    if not project or not agent:
+        raise ValueError("subscription project and agent must be non-blank")
+    timestamp = _now(now)
+    with write_txn(conn):
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO persephone_subscription_deliveries "
+            "(subscription_project_id, subscription_agent_id, "
+            " subscription_workspace_binding_id, message_id, cursor, disposition, "
+            " envelope_project_id, envelope_target_agent_id, "
+            " envelope_target_workspace_binding_id, received_at) "
+            "VALUES (?, ?, ?, ?, ?, 'subscription_route_mismatch', ?, ?, ?, ?)",
+            (
+                project,
+                agent,
+                binding,
+                envelope.message_id,
+                resume,
+                envelope.project_id,
+                envelope.target_agent_id,
+                envelope.target_workspace_binding_id,
+                timestamp,
+            ),
+        ).rowcount == 1
+        if inserted and resume is not None:
+            conn.execute(
+                "INSERT INTO persephone_cursors "
+                "(project_id, target_agent_id, cursor, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(project_id, target_agent_id) DO UPDATE SET "
+                "cursor = excluded.cursor, updated_at = excluded.updated_at",
+                (project, agent, resume, timestamp),
+            )
+    return inserted
+
+
 __all__ = [
     "InvalidTransition",
     "MessageConflict",
@@ -637,6 +692,7 @@ __all__ = [
     "persist_response_for_request",
     "record_cursor",
     "record_inbox",
+    "record_subscription_mismatch",
     "recover_abandoned_outbox",
     "transition_message",
 ]

@@ -329,9 +329,53 @@ def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_p
         stored = get_message(conn, "from_a_claiming_b")
         cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
         cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
-    assert stored is not None and stored.state == "rejected"
+    assert stored is not None and stored.state == "received"
     assert cursor_a == "cursor_from_a_claiming_b"
     assert cursor_b is None
+
+    # The envelope remains globally valid and is processed when B receives it.
+    assert receiver.ingest_event(
+        _event(
+            message_id="from_a_claiming_b",
+            project="project_b",
+            agent="agent_b",
+            binding="wb_b",
+        ),
+        expected_project_id="project_b",
+        expected_target_agent_id="agent_b",
+    ) == "accepted"
+    with connections() as conn:
+        from hermes_cli.hades_persephone_store import record_cursor
+
+        record_cursor(
+            conn,
+            project_id="project_b",
+            target_agent_id="agent_b",
+            cursor="newer_b_cursor",
+            now=NOW + 1,
+        )
+    assert receiver.ingest_event(
+        _event(
+            message_id="from_a_claiming_b",
+            project="project_b",
+            agent="agent_b",
+            binding="wb_b",
+        ),
+        expected_project_id="project_b",
+        expected_target_agent_id="agent_b",
+    ) == "accepted"
+    with connections() as conn:
+        stored = get_message(conn, "from_a_claiming_b")
+        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
+        audit = conn.execute(
+            "SELECT disposition FROM persephone_subscription_deliveries "
+            "WHERE subscription_project_id = ? AND subscription_agent_id = ? "
+            "AND message_id = ?",
+            ("project_a", "agent_a", "from_a_claiming_b"),
+        ).fetchone()
+    assert stored is not None and stored.state == "processing"
+    assert cursor_b == "newer_b_cursor"
+    assert audit is not None and audit["disposition"] == "subscription_route_mismatch"
 
 
 def test_binding_scoped_subscription_rejects_other_binding(receiver):
@@ -378,7 +422,7 @@ def test_manual_poll_a_rejects_b_envelope_and_advances_only_a_cursor(receiver):
         stored = get_message(conn, "manual_b")
         cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
         cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
-    assert stored is not None and stored.state == "rejected"
+    assert stored is not None and stored.state == "received"
     assert cursor_a == "cursor_manual_b"
     assert cursor_b is None
 
@@ -413,6 +457,78 @@ def test_cross_subscription_duplicate_is_still_rejected_without_rewriting_b(rece
     assert stored is not None and stored.state == "processing"
     assert cursor_a == "cursor_already_b"
     assert cursor_b == "cursor_already_b"
+
+
+def test_wrong_subscription_audit_survives_restart_and_replay(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_cursor, get_message
+
+    path = tmp_path / "restart.db"
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    bindings = [
+        _binding(project="project_a", agent="agent_a", binding="wb_a"),
+        _binding(project="project_b", agent="agent_b", binding="wb_b"),
+    ]
+    event = _event(
+        message_id="restart_mismatch",
+        project="project_b",
+        agent="agent_b",
+        binding="wb_b",
+    )
+    first = PersephoneReceiver(connection_factory=connections, now=lambda: NOW)
+    first.refresh_bindings(bindings)
+    assert first.ingest_event(
+        event,
+        expected_project_id="project_a",
+        expected_target_agent_id="agent_a",
+    ) == "subscription_route_mismatch"
+
+    # A newer A cursor must not be rewound when the old mismatched delivery is
+    # replayed after process restart.
+    with connections() as conn:
+        from hermes_cli.hades_persephone_store import record_cursor
+
+        record_cursor(
+            conn,
+            project_id="project_a",
+            target_agent_id="agent_a",
+            cursor="newer_a_cursor",
+            now=NOW + 1,
+        )
+    second = PersephoneReceiver(connection_factory=connections, now=lambda: NOW + 2)
+    second.refresh_bindings(bindings)
+    assert second.ingest_event(
+        event,
+        expected_project_id="project_a",
+        expected_target_agent_id="agent_a",
+    ) == "subscription_route_mismatch"
+    assert second.ingest_event(
+        event,
+        expected_project_id="project_b",
+        expected_target_agent_id="agent_b",
+    ) == "accepted"
+
+    with connections() as conn:
+        stored = get_message(conn, "restart_mismatch")
+        cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM persephone_subscription_deliveries "
+            "WHERE message_id = ?",
+            ("restart_mismatch",),
+        ).fetchone()[0]
+    assert stored is not None and stored.state == "processing"
+    assert cursor_a == "newer_a_cursor"
+    assert cursor_b == "cursor_restart_mismatch"
+    assert audit_count == 1
 
 
 class _CloseCountingClient:
@@ -530,6 +646,91 @@ def test_stop_closes_client_to_unblock_reader_and_eventually_joins(tmp_path):
 
     receiver.stop(timeout=1)
 
+    assert receiver.thread is None
+    assert client.close_count == 1
+
+
+def test_many_refresh_rotations_do_not_retain_closed_clients(receiver):
+    import gc
+    import weakref
+
+    close_calls: list[int] = []
+    refs: list[weakref.ReferenceType] = []
+
+    class RotatingClient(_CloseCountingClient):
+        def close(self):
+            super().close()
+            close_calls.append(self.close_count)
+
+    def factory(agent):
+        client = RotatingClient()
+        refs.append(weakref.ref(client))
+        return client
+
+    receiver.client_factory = factory
+    receiver.event_reader = lambda client, **kwargs: []
+    for index in range(30):
+        receiver.refresh_bindings(
+            [_binding()], agents={"agent_a": _agent(token=f"TOKEN_{index}")}
+        )
+        receiver.run_once()
+    receiver.refresh_bindings([], agents={})
+
+    gc.collect()
+    assert len(close_calls) == 30
+    assert all(reference() is None for reference in refs)
+    assert not hasattr(receiver, "_closed_clients")
+
+
+def test_stop_refresh_race_detaches_and_closes_client_exactly_once():
+    from threading import Barrier, Event, Thread
+
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    entered = Event()
+    released = Event()
+    barrier = Barrier(3)
+
+    class BlockingClient(_CloseCountingClient):
+        def close(self):
+            super().close()
+            released.set()
+
+    client = BlockingClient()
+
+    def reader(active_client, **kwargs):
+        entered.set()
+        assert released.wait(timeout=2)
+        return []
+
+    receiver = PersephoneReceiver(
+        client_factory=lambda agent: client,
+        event_reader=reader,
+        poll_interval=30,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+    receiver.start()
+    assert entered.wait(timeout=1)
+
+    def refresh():
+        barrier.wait()
+        receiver.refresh_bindings([], agents={})
+
+    def stop():
+        barrier.wait()
+        receiver.stop(timeout=1)
+
+    refresh_thread = Thread(target=refresh)
+    stop_thread = Thread(target=stop)
+    refresh_thread.start()
+    stop_thread.start()
+    barrier.wait()
+    refresh_thread.join(timeout=2)
+    stop_thread.join(timeout=2)
+
+    assert not refresh_thread.is_alive()
+    assert not stop_thread.is_alive()
     assert receiver.thread is None
     assert client.close_count == 1
 

@@ -29,6 +29,7 @@ from hermes_cli.hades_persephone_store import (
     get_message,
     record_cursor,
     record_inbox,
+    record_subscription_mismatch,
     transition_message,
 )
 from hermes_cli.hades_persephone_transport import iter_persephone_events
@@ -113,7 +114,6 @@ class PersephoneReceiver:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self._closed_clients: list[object] = []
 
     @property
     def workers(self) -> tuple[tuple[str, str], ...]:
@@ -200,8 +200,7 @@ class PersephoneReceiver:
                 self._next_worker %= len(self._workers)
             else:
                 self._next_worker = 0
-        for client in clients_to_close:
-            self._close_client_once(client)
+        self._close_detached_clients(clients_to_close)
 
     def start(self) -> None:
         """Start the single owned coordinator thread; repeated calls are safe."""
@@ -233,16 +232,11 @@ class PersephoneReceiver:
         with self._lock:
             thread = self.thread
             self._stop_event.set()
-            clients = [
-                worker.client
-                for worker in self._workers.values()
-                if worker.client is not None
-            ]
+            clients = self._detach_worker_clients_locked()
         # Closing the active httpx client tears down a blocked streaming read.
         # This occurs outside the receiver lock so reader cleanup cannot
         # deadlock against lifecycle state.
-        for client in clients:
-            self._close_client_once(client)
+        self._close_detached_clients(clients)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
         with self._lock:
@@ -251,26 +245,43 @@ class PersephoneReceiver:
                 for worker in self._workers.values():
                     worker.client = None
 
-    def _close_client_once(self, client: object) -> None:
-        with self._lock:
-            if any(closed is client for closed in self._closed_clients):
-                return
-            self._closed_clients.append(client)
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
+    @staticmethod
+    def _unique_clients(clients: Iterable[object]) -> list[object]:
+        unique: list[object] = []
+        for client in clients:
+            if not any(existing is client for existing in unique):
+                unique.append(client)
+        return unique
+
+    def _close_detached_clients(self, clients: Iterable[object]) -> None:
+        """Close clients whose ownership was already removed under the lock."""
+        for client in self._unique_clients(clients):
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.exception(
+                        "hades_persephone.receiver_client_close_failed",
+                        extra={
+                            "hades_event": "persephone.receiver_client_close_failed"
+                        },
+                    )
+
+    def _detach_worker_clients_locked(self) -> list[object]:
+        clients = self._unique_clients(
+            worker.client
+            for worker in self._workers.values()
+            if worker.client is not None
+        )
+        for worker in self._workers.values():
+            worker.client = None
+        return clients
 
     def _release_worker_clients(self) -> None:
         with self._lock:
-            clients = [
-                worker.client
-                for worker in self._workers.values()
-                if worker.client is not None
-            ]
-            for worker in self._workers.values():
-                worker.client = None
-        for client in clients:
-            self._close_client_once(client)
+            clients = self._detach_worker_clients_locked()
+        self._close_detached_clients(clients)
 
     def _run_loop(self) -> None:
         try:
@@ -300,24 +311,37 @@ class PersephoneReceiver:
             self._next_worker = (start + count) % len(ordered)
             return selected
 
-    def _prepare_worker(self, worker: _ReceiverWorker) -> bool:
+    def _prepare_worker(self, worker: _ReceiverWorker) -> object | None:
         if not self._queue_capability or worker.agent is None or self.client_factory is None:
-            return False
-        if worker.client is None:
-            worker.client = self.client_factory(worker.agent)
-        if worker.queue_supported is not True:
-            response = worker.client.capabilities()
-            worker.queue_supported = bool(
+            return None
+        key = (worker.project_id, worker.agent_id)
+        with self._lock:
+            if self._stop_event.is_set() or self._workers.get(key) is not worker:
+                return None
+            if worker.client is None:
+                worker.client = self.client_factory(worker.agent)
+            client = worker.client
+            known_supported = worker.queue_supported is True
+        if not known_supported:
+            response = client.capabilities()
+            supported = bool(
                 isinstance(response, dict) and response.get(BACKEND_CAPABILITY) is True
             )
-        return worker.queue_supported is True
+            with self._lock:
+                if self._workers.get(key) is not worker or worker.client is not client:
+                    return None
+                worker.queue_supported = supported
+            if not supported:
+                return None
+        return client
 
     def run_once(self) -> int:
         """Poll a fair bounded subset of project queues and durably ingest it."""
         ingested = 0
         for worker in self._worker_batch():
             try:
-                if not self._prepare_worker(worker):
+                client = self._prepare_worker(worker)
+                if client is None:
                     continue
                 with self.connection_factory() as conn:
                     cursor = get_cursor(
@@ -326,7 +350,7 @@ class PersephoneReceiver:
                         target_agent_id=worker.agent_id,
                     )
                 events = self.event_reader(
-                    worker.client,
+                    client,
                     project_id=worker.project_id,
                     target_agent_id=worker.agent_id,
                     cursor=cursor,
@@ -468,18 +492,15 @@ class PersephoneReceiver:
                     )
                 )
                 if subscription_mismatch:
-                    if stored.state == "received":
-                        transition_message(
-                            conn, envelope.message_id, "rejected", now=timestamp
-                        )
-                    if cursor:
-                        record_cursor(
-                            conn,
-                            project_id=cursor_project,
-                            target_agent_id=cursor_agent,
-                            cursor=cursor,
-                            now=timestamp,
-                        )
+                    record_subscription_mismatch(
+                        conn,
+                        durable,
+                        subscription_project_id=cursor_project,
+                        subscription_agent_id=cursor_agent,
+                        subscription_workspace_binding_id=expected_binding,
+                        cursor=cursor,
+                        now=timestamp,
+                    )
                     return "subscription_route_mismatch"
                 if stored.state != "received":
                     # Its first delivery already advanced its own opaque

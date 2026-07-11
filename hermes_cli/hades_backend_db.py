@@ -174,6 +174,28 @@ CREATE TABLE IF NOT EXISTS persephone_cursors (
     PRIMARY KEY(project_id, target_agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS persephone_subscription_deliveries (
+    subscription_project_id TEXT NOT NULL,
+    subscription_agent_id TEXT NOT NULL,
+    subscription_workspace_binding_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL,
+    cursor TEXT,
+    disposition TEXT NOT NULL,
+    envelope_project_id TEXT NOT NULL,
+    envelope_target_agent_id TEXT NOT NULL,
+    envelope_target_workspace_binding_id TEXT,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY(
+        subscription_project_id,
+        subscription_agent_id,
+        subscription_workspace_binding_id,
+        message_id
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_persephone_subscription_delivery_message
+    ON persephone_subscription_deliveries(message_id);
+
 CREATE TABLE IF NOT EXISTS persephone_message_identities (
     message_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
