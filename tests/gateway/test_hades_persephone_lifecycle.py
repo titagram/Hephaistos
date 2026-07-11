@@ -217,6 +217,57 @@ def test_restart_streak_persists_across_generations_and_resets_only_when_stable(
     assert runner._hades_persephone_next_retry_at is None
 
 
+def test_same_failed_attempt_is_counted_once_and_extreme_streak_saturates() -> None:
+    runner = object.__new__(GatewayRunner)
+    runner._hades_persephone_restart_base_seconds = 2
+    runner._hades_persephone_restart_max_seconds = 30
+
+    assert runner._update_hades_persephone_restart_health(
+        "failed", generation=7, now=100
+    ) == 2
+    assert runner._update_hades_persephone_restart_health(
+        "failed", generation=7, now=101
+    ) == 2
+    assert runner._hades_persephone_restart_streak == 1
+
+    runner._hades_persephone_restart_streak = 1999
+    runner._hades_persephone_failure_generation = 7
+    delay = runner._update_hades_persephone_restart_health(
+        "failed", generation=8, now=102
+    )
+    assert runner._hades_persephone_restart_streak == 2000
+    assert delay == 30
+    assert runner._hades_persephone_next_retry_at == 132
+
+
+@pytest.mark.asyncio
+async def test_each_factory_failure_gets_unique_attempt_and_increasing_capped_gap(
+    monkeypatch,
+) -> None:
+    import gateway.run as gateway_run
+
+    runner = object.__new__(GatewayRunner)
+    runner._hades_persephone_receiver = None
+    runner._hades_persephone_generation = 0
+    runner._hades_persephone_draining = False
+    runner._hades_persephone_restart_base_seconds = 1
+    runner._hades_persephone_restart_max_seconds = 8
+    runner._hades_persephone_receiver_factory = lambda: (_ for _ in ()).throw(
+        RuntimeError("offline")
+    )
+    runner._record_hades_persephone_lifecycle = lambda state, error=None: None
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 100.0)
+    gaps = []
+
+    for _ in range(5):
+        await runner._start_hades_persephone_receiver()
+        gaps.append(runner._hades_persephone_next_retry_at - 100.0)
+
+    assert runner._hades_persephone_generation == 5
+    assert runner._hades_persephone_restart_streak == 5
+    assert gaps == [1, 2, 4, 8, 8]
+
+
 @pytest.mark.asyncio
 async def test_service_supervisor_cold_starts_only_after_enabled_binding_revision() -> None:
     receiver = Mock(spec=["start", "stop"])

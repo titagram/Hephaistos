@@ -30,6 +30,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -7174,15 +7175,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             streak += 1
             self._hades_persephone_restart_streak = streak
             self._hades_persephone_failure_generation = generation
-        base = max(
-            0.0,
-            float(getattr(self, "_hades_persephone_restart_base_seconds", 2.0)),
+        base = float(
+            getattr(self, "_hades_persephone_restart_base_seconds", 2.0)
         )
-        maximum = max(
-            base,
-            float(getattr(self, "_hades_persephone_restart_max_seconds", 30.0)),
+        if not math.isfinite(base) or base < 0:
+            base = 2.0
+        maximum = float(
+            getattr(self, "_hades_persephone_restart_max_seconds", 30.0)
         )
-        delay = min(maximum, base * float(2 ** max(0, streak - 1)))
+        if not math.isfinite(maximum) or maximum < 0:
+            maximum = 30.0
+        maximum = max(base, maximum)
+        exponent = max(0, streak - 1)
+        if base == 0.0:
+            delay = 0.0
+        elif maximum <= base:
+            delay = maximum
+        else:
+            saturation_exponent = max(
+                0,
+                math.ceil(math.log2(maximum) - math.log2(base)),
+            )
+            if exponent >= saturation_exponent:
+                delay = maximum
+            else:
+                try:
+                    delay = min(maximum, math.ldexp(base, exponent))
+                except OverflowError:
+                    delay = maximum
         self._hades_persephone_next_retry_at = current + delay
         return delay
 
@@ -7197,7 +7217,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return
             if getattr(self, "_hades_persephone_draining", False):
                 return
-            generation = int(getattr(self, "_hades_persephone_generation", 0))
+            generation = int(getattr(self, "_hades_persephone_generation", 0)) + 1
+            self._hades_persephone_generation = generation
             factory = getattr(
                 self,
                 "_hades_persephone_receiver_factory",
@@ -7425,9 +7446,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         continue
                     self._hades_persephone_receiver = None
                     self._hades_persephone_monitor_task = None
-                    self._hades_persephone_generation = int(
-                        getattr(self, "_hades_persephone_generation", 0)
-                    ) + 1
                     await self._start_hades_persephone_receiver()
                     return
                 if state == "stopped" and getattr(
