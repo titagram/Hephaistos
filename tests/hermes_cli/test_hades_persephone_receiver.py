@@ -94,6 +94,14 @@ def test_receiver_routes_project_b_while_started_from_project_a(receiver):
     assert result == "accepted"
 
 
+def test_sse_cursor_can_wrap_a_top_level_envelope(receiver):
+    receiver.refresh_bindings([_binding()])
+    event = _envelope()
+    event["id"] = "opaque_sse_cursor"
+
+    assert receiver.ingest_event(event) == "accepted"
+
+
 def test_missing_binding_never_falls_back(receiver):
     receiver.refresh_bindings([_binding()])
 

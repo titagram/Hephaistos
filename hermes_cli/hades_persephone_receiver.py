@@ -300,7 +300,10 @@ class PersephoneReceiver:
     @staticmethod
     def _event_envelope(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
         if event.get("schema") == AGENT_MESSAGE_SCHEMA:
-            return event
+            # SSE injects its opaque transport cursor as ``id`` into the JSON
+            # event.  It is not an envelope extension and must not make the
+            # otherwise exact O1 contract fail unknown-field validation.
+            return {key: value for key, value in event.items() if key != "id"}
         payload = event.get("payload")
         if isinstance(payload, Mapping) and payload.get("schema") == AGENT_MESSAGE_SCHEMA:
             return payload
