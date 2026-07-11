@@ -135,6 +135,9 @@ Bounded global key/value replacement covers inline `const`/`let`/`var`,
 nested/minified objects, YAML list items, XML sensitive elements, and XML
 attributes. Scalar quoting is retained while only the value becomes `***`.
 Any omission adds `sensitive values were redacted` to residual uncertainty.
+Text is capped before structured parsing or pattern processing, and the final
+payload budget is recomputed after residual uncertainty is added; evidence is
+dropped with `truncated=true` until the composed envelope fits.
 
 Filename policy distinguishes credential containers from source code by
 extension and path context. Tests prove `auth`, `oauth`, `providers`, `token`,

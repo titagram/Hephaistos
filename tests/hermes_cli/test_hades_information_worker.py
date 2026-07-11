@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -644,6 +645,22 @@ def test_structural_redaction_clipping_sets_truncated(tmp_path, evidence):
         worker.InformationResponse("summary", evidence, False, ()), tmp_path
     )
     assert response.truncated is True
+
+
+def test_redaction_uncertainty_composes_with_final_output_byte_budget(tmp_path):
+    from hermes_cli import hades_information_worker as worker
+
+    evidence = tuple(
+        {"content": "x" * 1_990, "databasePassword": "private-value"}
+        for _ in range(10)
+    )
+    response = worker._redacted(
+        worker.InformationResponse("summary", evidence, False, ()), tmp_path
+    )
+    encoded = json.dumps(response.to_payload(), ensure_ascii=False).encode("utf-8")
+    assert len(encoded) <= worker.MAX_RESULT_CHARS
+    assert response.truncated is True
+    assert "private-value" not in encoded.decode()
 
 
 def test_worker_persists_bounded_response_atomically(tmp_path):

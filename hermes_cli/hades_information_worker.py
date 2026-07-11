@@ -588,7 +588,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
 
     def redact_plain_text(value: str) -> str:
         nonlocal clipped, redacted
-        without_root = value.replace(root_text, "<workspace>")
+        working = value
+        if len(working) > MAX_RESULT_CHARS:
+            clipped = True
+            working = working[:MAX_RESULT_CHARS]
+        without_root = working.replace(root_text, "<workspace>")
         without_paths = _LOCAL_PATH_RE.sub("<redacted-path>", without_root)
         without_pem = _PEM_RE.sub("[REDACTED PRIVATE MATERIAL]", without_paths)
         without_keys = _AWS_KEY_RE.sub("[REDACTED ACCESS KEY]", without_pem)
@@ -598,7 +602,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         without_pairs = _redact_key_value_pairs(without_assignments)
         without_xml = _redact_xml_elements(without_pairs)
         safe = redact_secret(without_xml)
-        if safe != value:
+        if safe != working:
             redacted = True
         if len(safe) > 2_000:
             clipped = True
@@ -630,6 +634,8 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         return value
 
     def redact_text(value: str) -> str:
+        if len(value) > MAX_RESULT_CHARS:
+            return redact_plain_text(value)
         stripped = value.strip()
         if stripped.startswith(("{", "[")):
             try:
@@ -708,6 +714,20 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
             uncertainty.append("sensitive values were redacted")
         else:
             clipped = True
+    while evidence:
+        final_payload = {
+            "answer_summary": summary,
+            "evidence_refs": evidence,
+            "truncated": truncated or clipped,
+            "residual_uncertainty": uncertainty,
+        }
+        if (
+            len(json.dumps(final_payload, ensure_ascii=False).encode("utf-8"))
+            <= MAX_RESULT_CHARS
+        ):
+            break
+        evidence.pop()
+        clipped = True
     return InformationResponse(
         summary, tuple(evidence), truncated or clipped, tuple(uncertainty)
     )
