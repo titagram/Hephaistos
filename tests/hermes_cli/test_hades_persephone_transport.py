@@ -483,6 +483,37 @@ def test_oversized_or_never_terminated_sse_blocks_are_rejected_safely(body):
     assert "x" * 100 not in str(caught.value)
 
 
+def test_unterminated_stream_is_cut_off_before_all_chunks_are_consumed():
+    consumed = 0
+
+    class EndlessLine(httpx.SyncByteStream):
+        def __iter__(self):
+            nonlocal consumed
+            for _ in range(100):
+                consumed += 1
+                yield b"x" * 40_000
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=EndlessLine(),
+            )
+        ),
+    )
+    with pytest.raises(HadesBackendError, match="size limit"):
+        list(
+            client.iter_persephone_events(
+                project_id="project_1", target_agent_id="agent_target", limit=2
+            )
+        )
+
+    assert consumed == 3
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

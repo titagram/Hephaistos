@@ -93,6 +93,63 @@ def _query_params(payload: dict[str, Any] | None) -> list[tuple[str, str]] | Non
     return params
 
 
+def _iter_bounded_sse_lines(response: httpx.Response) -> Iterator[str]:
+    """Split SSE lines without allowing an unterminated line to grow forever."""
+    pending = bytearray()
+    swallow_lf = False
+    for chunk in response.iter_bytes():
+        offset = 0
+        if swallow_lf:
+            if chunk.startswith(b"\n"):
+                offset = 1
+            swallow_lf = False
+        while offset < len(chunk):
+            lf = chunk.find(b"\n", offset)
+            cr = chunk.find(b"\r", offset)
+            separators = [position for position in (lf, cr) if position >= 0]
+            if not separators:
+                remaining = memoryview(chunk)[offset:]
+                if len(pending) + len(remaining) > PERSEPHONE_SSE_MAX_LINE_BYTES:
+                    raise HadesBackendError(
+                        "Persephone stream line exceeds the size limit",
+                        code="stream_malformed",
+                    )
+                pending.extend(remaining)
+                break
+            separator = min(separators)
+            segment = memoryview(chunk)[offset:separator]
+            if len(pending) + len(segment) > PERSEPHONE_SSE_MAX_LINE_BYTES:
+                raise HadesBackendError(
+                    "Persephone stream line exceeds the size limit",
+                    code="stream_malformed",
+                )
+            pending.extend(segment)
+            try:
+                yield pending.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HadesBackendError(
+                    "Persephone stream contains invalid UTF-8",
+                    code="stream_malformed",
+                ) from None
+            pending.clear()
+            if chunk[separator] == 13:  # CR optionally consumes one following LF.
+                if separator + 1 < len(chunk) and chunk[separator + 1] == 10:
+                    offset = separator + 2
+                else:
+                    offset = separator + 1
+                    swallow_lf = offset == len(chunk)
+            else:
+                offset = separator + 1
+    if pending:
+        try:
+            yield pending.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HadesBackendError(
+                "Persephone stream contains invalid UTF-8",
+                code="stream_malformed",
+            ) from None
+
+
 class HadesBackendClient:
     """Small synchronous client for the Laravel Hades API."""
 
@@ -448,13 +505,8 @@ class HadesBackendClient:
                         parsed.setdefault("id", current_id)
                     return parsed, False
 
-                for line in response.iter_lines():
+                for line in _iter_bounded_sse_lines(response):
                     encoded_size = len(line.encode("utf-8"))
-                    if encoded_size > PERSEPHONE_SSE_MAX_LINE_BYTES:
-                        raise HadesBackendError(
-                            "Persephone stream line exceeds the size limit",
-                            code="stream_malformed",
-                        )
                     block_bytes += encoded_size + 1
                     if block_bytes > PERSEPHONE_SSE_MAX_EVENT_BYTES:
                         raise HadesBackendError(
