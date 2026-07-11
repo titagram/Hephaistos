@@ -21,6 +21,7 @@ from tools.registry import tool_error, tool_result
 
 PIGGYBACK_SYNC_INTERVAL_SECONDS = 60
 LIVE_SEARCH_TIMEOUT_SECONDS = 0.75
+DOCUMENT_PREFETCH_TIMEOUT_SECONDS = 2.0
 SOURCE_SLICE_FETCH_TIMEOUT_SECONDS = 1.25
 LIVE_WRITE_TIMEOUT_SECONDS = 2.0
 CREATE_ACTIONS = {"add", "create"}
@@ -688,6 +689,7 @@ class HadesBackendMemoryProvider(MemoryProvider):
             filters={},
             limit=AUTO_PREFETCH_LIMIT,
             include_raw_chunks=False,
+            timeout=DOCUMENT_PREFETCH_TIMEOUT_SECONDS,
         )
         if wiki_result is not None and _has_usable_prefetch_items(wiki_result):
             return _format_backend_prefetch(wiki_result)
@@ -1608,11 +1610,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
         filters: dict[str, str],
         limit: int,
         include_raw_chunks: bool,
+        timeout: float = LIVE_SEARCH_TIMEOUT_SECONDS,
     ) -> tuple[dict[str, Any] | None, str | None]:
         if self._binding is None:
             return None, None
         try:
-            client = runtime.client_from_config(timeout=LIVE_SEARCH_TIMEOUT_SECONDS)
+            client = runtime.client_from_config(timeout=timeout)
             try:
                 payload = {
                     "project_id": self._binding.project_id,

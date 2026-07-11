@@ -1113,6 +1113,38 @@ def test_hades_backend_memory_provider_prefetch_does_not_query_wiki_when_broad_s
     assert [call["domain"] for call in calls] == ["all"]
 
 
+def test_hades_backend_memory_provider_prefetch_answers_explicit_backend_logbook_task_query(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    calls = []
+
+    def search(**kwargs):
+        calls.append(kwargs)
+        if kwargs["domain"] == "all":
+            return {"items": [], "raw_chunks_omitted": 100}, None
+        return {
+            "items": [
+                {
+                    "domain": "wiki",
+                    "summary": "Logbook: task #459 introduced payroll reconciliation.",
+                }
+            ],
+            "raw_chunks_omitted": 0,
+            "version": "wiki-logbook-v1",
+        }, None
+
+    monkeypatch.setattr(provider, "_backend_memory_search", search)
+
+    context = provider.prefetch(
+        "Guarda nel logbook del backend cosa si dice in merito al task #459"
+    )
+
+    assert [call["domain"] for call in calls] == ["all", "wiki"]
+    assert calls[1]["timeout"] == 2.0
+    assert "task #459" in context
+
+
 def test_hades_backend_memory_search_tool_filters_domains_and_raw_chunks(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
