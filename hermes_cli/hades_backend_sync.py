@@ -61,6 +61,9 @@ def run_backend_sync(
     from hermes_cli.hades_backend_actions import status_payload as _status_payload
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_persephone_messages import BACKEND_CAPABILITY
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_cursor
 
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
@@ -114,6 +117,10 @@ def run_backend_sync(
     started_monotonic = time.monotonic()
 
     clients: dict[str, object] = {}
+    queue_capabilities: dict[str, bool] = {}
+    polled_agent_queues: set[tuple[str, str]] = set()
+    receiver = PersephoneReceiver(now=(lambda: int(time.time()) if now is None else int(now)))
+    receiver.refresh_bindings(bindings, agents=agents)
 
     def client_for_agent(sync_agent: db.BackendAgent) -> object:
         if client_factory is not None:
@@ -162,6 +169,7 @@ def run_backend_sync(
             sync_errors += 1
             _record_sync_error(binding, f"missing local backend agent for {binding.agent_id}")
             continue
+
         try:
             client = client_for_agent(binding_agent)
         except Exception as exc:
@@ -170,6 +178,22 @@ def run_backend_sync(
             if not quiet:
                 print(f"backend sync: failed to configure client for {binding.display_path}: {redact_secret(str(exc))}")
             continue
+
+        if binding_agent.agent_id not in queue_capabilities:
+            try:
+                advertised = client.capabilities()
+            except Exception:
+                advertised = {}
+            queue_capabilities[binding_agent.agent_id] = bool(
+                isinstance(advertised, dict)
+                and advertised.get(BACKEND_CAPABILITY) is True
+            )
+        queue_supported = queue_capabilities[binding_agent.agent_id]
+        receiver.set_queue_capability(
+            project_id=binding.project_id,
+            agent_id=binding_agent.agent_id,
+            supported=queue_supported,
+        )
 
         try:
             snapshots, synced, errors = _sync_memory(client, binding)
@@ -183,17 +207,36 @@ def run_backend_sync(
             if not quiet:
                 print(f"backend sync: failed to sync memory for {binding.display_path}: {redact_secret(str(exc))}")
 
-        try:
-            inbox = client.list_inbox(project_id=binding.project_id)
-            saved = _sync_inbox(inbox, binding.project_id)
-            inbox_events += saved
-        except AttributeError:
-            pass
-        except Exception as exc:
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(f"backend sync: failed to poll Persephone inbox for {binding.display_path}: {redact_secret(str(exc))}")
+        queue_key = (binding.project_id, binding_agent.agent_id)
+        if not queue_supported or queue_key not in polled_agent_queues:
+            try:
+                inbox_params = {"project_id": binding.project_id}
+                if queue_supported:
+                    inbox_params["target_agent_id"] = binding_agent.agent_id
+                    with db.connect_closing() as conn:
+                        cursor = get_cursor(
+                            conn,
+                            project_id=binding.project_id,
+                            target_agent_id=binding_agent.agent_id,
+                        )
+                    if cursor:
+                        inbox_params["cursor"] = cursor
+                    inbox_params["limit"] = receiver.batch_size
+                    polled_agent_queues.add(queue_key)
+                inbox = client.list_inbox(**inbox_params)
+                saved = _sync_inbox(
+                    inbox,
+                    binding.project_id,
+                    receiver=receiver if queue_supported else None,
+                )
+                inbox_events += saved
+            except AttributeError:
+                pass
+            except Exception as exc:
+                sync_errors += 1
+                _record_sync_error(binding, str(exc))
+                if not quiet:
+                    print(f"backend sync: failed to poll Persephone inbox for {binding.display_path}: {redact_secret(str(exc))}")
 
         try:
             response = client.pull_jobs(
@@ -998,7 +1041,12 @@ def _upload_job_source_slice(client: object, agent: db.BackendAgent, binding: db
         return (0, 1)
 
 
-def _sync_inbox(response: dict, project_id: str) -> int:
+def _sync_inbox(
+    response: dict,
+    project_id: str,
+    *,
+    receiver: object | None = None,
+) -> int:
     events = response.get("events") if isinstance(response, dict) else None
     if not isinstance(events, list):
         return 0
@@ -1006,6 +1054,14 @@ def _sync_inbox(response: dict, project_id: str) -> int:
     with db.connect_closing() as conn:
         for event in events:
             if not isinstance(event, dict):
+                continue
+            if (
+                receiver is not None
+                and getattr(receiver, "is_agent_event")(event)
+            ):
+                disposition = getattr(receiver, "ingest_event")(event)
+                if disposition not in {"invalid_agent_message", "not_agent_message"}:
+                    saved += 1
                 continue
             event_id = str(event.get("id") or event.get("event_id") or "").strip()
             event_type = str(event.get("event_type") or "").strip()

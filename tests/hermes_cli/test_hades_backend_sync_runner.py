@@ -1,6 +1,51 @@
 from __future__ import annotations
 
 
+def test_sync_inbox_routes_agent_messages_and_preserves_legacy_events(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_sync import _sync_inbox
+
+    agent_message = {
+        "schema": "hades.persephone.agent-message.v1",
+        "message_id": "msg_1",
+    }
+    routed = []
+
+    class FakeReceiver:
+        @staticmethod
+        def is_agent_event(event):
+            return event.get("payload", {}).get("schema") == agent_message["schema"]
+
+        def ingest_event(self, event):
+            routed.append(event)
+            return "accepted"
+
+    saved = _sync_inbox(
+        {
+            "events": [
+                {"id": "cursor_1", "payload": agent_message},
+                {
+                    "id": "legacy_1",
+                    "event_type": "proposal.reviewed",
+                    "payload": {"message": "Proposal accepted."},
+                },
+            ]
+        },
+        "project_1",
+        receiver=FakeReceiver(),
+    )
+
+    with hdb.connect_closing() as conn:
+        legacy = hdb.list_inbox_events(conn, project_id="project_1")
+    assert saved == 2
+    assert [event["id"] for event in routed] == ["cursor_1"]
+    assert [event.event_id for event in legacy] == ["legacy_1"]
+
+
 def _decode_compressed_artifact_payload(payload):
     import base64
     import gzip
@@ -597,6 +642,10 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
         def __init__(self):
             self.artifacts = []
             self.results = []
+            self.inbox_queries = []
+
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
 
         def memory_snapshot(self, **payload):
             return {"items": []}
@@ -624,6 +673,7 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
             return {"artifact": {"id": "artifact_1"}}
 
         def list_inbox(self, **payload):
+            self.inbox_queries.append(payload)
             return {
                 "events": [
                     {
@@ -651,6 +701,9 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     assert fake.artifacts[0]["artifact"]["indexed_head_commit"] == head_commit
     assert fake.artifacts[0]["artifact"]["workspace_head_commit"] == head_commit
     assert fake.results[0][0] == "job_tree"
+    assert fake.inbox_queries == [
+        {"project_id": "proj_1", "target_agent_id": "agent_1", "limit": 50}
+    ]
     assert events[0].event_id == "evt_1"
     assert events[0].event_type == "proposal.reviewed"
 
