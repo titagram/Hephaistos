@@ -330,3 +330,126 @@ def test_partial_legacy_coordination_schema_migrates_before_new_indexes(tmp_path
 
     assert {"root_id", "project_id"}.issubset(columns)
     assert quarantined == 1
+
+
+def test_route_auth_health_quarantines_only_exact_route_after_three_cycles(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing(tmp_path / "hades_backend.db") as conn:
+        for suffix in ("a", "b"):
+            db.save_agent(
+                conn,
+                agent_id=f"agent_{suffix}",
+                project_id=f"project_{suffix}",
+                base_url="https://backend.example",
+                label=suffix,
+                token_env_key=f"TOKEN_{suffix.upper()}",
+                capabilities={},
+            )
+            db.upsert_workspace_binding(
+                conn,
+                project_id=f"project_{suffix}",
+                agent_id=f"agent_{suffix}",
+                local_project_id=f"local_{suffix}",
+                workspace_fingerprint=f"wf_{suffix}",
+                display_path=f"~/repo-{suffix}",
+                repo_root=f"/repo-{suffix}",
+                git_remote_display="",
+                git_remote_hash="",
+                head_commit="",
+                backend_workspace_binding_id=f"binding_{suffix}",
+            )
+
+        first = db.record_route_auth_cycle(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            unauthorized=True,
+            now=100,
+        )
+        second = db.record_route_auth_cycle(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            unauthorized=True,
+            now=200,
+        )
+        third = db.record_route_auth_cycle(
+            conn,
+            project_id="project_a",
+            agent_id="agent_a",
+            unauthorized=True,
+            now=300,
+        )
+
+        binding_a = db.get_binding_for_fingerprint(conn, "wf_a")
+        binding_b = db.get_binding_for_fingerprint(conn, "wf_b")
+
+    assert first == {
+        "consecutive_failures": 1,
+        "first_failed_at": 100,
+        "last_failed_at": 100,
+        "reason_code": "unauthorized",
+        "quarantined": False,
+    }
+    assert second["consecutive_failures"] == 2
+    assert second["quarantined"] is False
+    assert third["consecutive_failures"] == 3
+    assert third["quarantined"] is True
+    assert binding_a is not None and binding_a.status == "auth_failed"
+    assert binding_b is not None and binding_b.status == "linked"
+
+
+def test_route_auth_health_success_and_rebootstrap_clear_quarantine(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "hades_backend.db"
+    with db.connect_closing(path) as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_a",
+            project_id="project_a",
+            base_url="https://backend.example",
+            label="a",
+            token_env_key="TOKEN_A",
+            capabilities={},
+        )
+        kwargs = {
+            "project_id": "project_a",
+            "agent_id": "agent_a",
+            "local_project_id": "local_a",
+            "workspace_fingerprint": "wf_a",
+            "display_path": "~/repo-a",
+            "repo_root": "/repo-a",
+            "git_remote_display": "",
+            "git_remote_hash": "",
+            "head_commit": "",
+            "backend_workspace_binding_id": "binding_a",
+        }
+        db.upsert_workspace_binding(conn, **kwargs)
+        db.record_route_auth_cycle(
+            conn, project_id="project_a", agent_id="agent_a",
+            unauthorized=True, now=100,
+        )
+        db.record_route_auth_cycle(
+            conn, project_id="project_a", agent_id="agent_a",
+            unauthorized=False, now=200,
+        )
+        assert db.get_route_auth_health(
+            conn, project_id="project_a", agent_id="agent_a"
+        ) is None
+
+        for now in (300, 400, 500):
+            db.record_route_auth_cycle(
+                conn, project_id="project_a", agent_id="agent_a",
+                unauthorized=True, now=now,
+            )
+        assert db.get_binding_for_fingerprint(conn, "wf_a").status == "auth_failed"
+
+        restored = db.upsert_workspace_binding(conn, **kwargs)
+        health = db.get_route_auth_health(
+            conn, project_id="project_a", agent_id="agent_a"
+        )
+
+    assert restored.status == "linked"
+    assert health is None

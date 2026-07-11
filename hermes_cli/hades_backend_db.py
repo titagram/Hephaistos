@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS workspace_bindings (
 CREATE INDEX IF NOT EXISTS idx_workspace_bindings_project
     ON workspace_bindings(project_id, local_project_id);
 
+CREATE TABLE IF NOT EXISTS backend_route_auth_health (
+    project_id            TEXT NOT NULL,
+    agent_id              TEXT NOT NULL,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    first_failed_at       INTEGER,
+    last_failed_at        INTEGER,
+    reason_code           TEXT,
+    updated_at            INTEGER NOT NULL,
+    PRIMARY KEY (project_id, agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS agent_coordination_manifests (
     root_id           TEXT NOT NULL,
     project_id        TEXT NOT NULL,
@@ -837,6 +848,10 @@ def save_agent(
                 now,
             ),
         )
+        conn.execute(
+            "DELETE FROM backend_route_auth_health WHERE project_id = ? AND agent_id = ?",
+            (project_id, agent_id),
+        )
     loaded = get_agent(conn, agent_id)
     assert loaded is not None
     return loaded
@@ -904,6 +919,10 @@ def upsert_workspace_binding(
                 now,
             ),
         )
+        conn.execute(
+            "DELETE FROM backend_route_auth_health WHERE project_id = ? AND agent_id = ?",
+            (project_id, agent_id),
+        )
     loaded = get_binding_for_fingerprint(conn, workspace_fingerprint)
     assert loaded is not None
     return loaded
@@ -933,6 +952,92 @@ def mark_binding_unlinked(conn: sqlite3.Connection, workspace_fingerprint: str) 
             "UPDATE workspace_bindings SET status = 'unlinked', updated_at = ? WHERE workspace_fingerprint = ?",
             (_now(), workspace_fingerprint),
         )
+
+
+def get_route_auth_health(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    agent_id: str,
+) -> dict[str, object] | None:
+    row = conn.execute(
+        "SELECT * FROM backend_route_auth_health WHERE project_id = ? AND agent_id = ?",
+        (project_id, agent_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def clear_route_auth_health(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    agent_id: str,
+) -> None:
+    with write_txn(conn):
+        conn.execute(
+            "DELETE FROM backend_route_auth_health WHERE project_id = ? AND agent_id = ?",
+            (project_id, agent_id),
+        )
+
+
+def record_route_auth_cycle(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    agent_id: str,
+    unauthorized: bool,
+    now: int | None = None,
+) -> dict[str, object]:
+    current = int(_now() if now is None else now)
+    if not unauthorized:
+        clear_route_auth_health(conn, project_id=project_id, agent_id=agent_id)
+        return {
+            "consecutive_failures": 0,
+            "first_failed_at": None,
+            "last_failed_at": None,
+            "reason_code": None,
+            "quarantined": False,
+        }
+
+    existing = get_route_auth_health(
+        conn, project_id=project_id, agent_id=agent_id
+    )
+    failures = int(existing["consecutive_failures"]) + 1 if existing else 1
+    first_failed_at = int(existing["first_failed_at"]) if existing else current
+    quarantined = failures >= 3
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO backend_route_auth_health "
+            "(project_id, agent_id, consecutive_failures, first_failed_at, "
+            " last_failed_at, reason_code, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'unauthorized', ?) "
+            "ON CONFLICT(project_id, agent_id) DO UPDATE SET "
+            "consecutive_failures = excluded.consecutive_failures, "
+            "first_failed_at = excluded.first_failed_at, "
+            "last_failed_at = excluded.last_failed_at, "
+            "reason_code = excluded.reason_code, updated_at = excluded.updated_at",
+            (
+                project_id,
+                agent_id,
+                failures,
+                first_failed_at,
+                current,
+                current,
+            ),
+        )
+        if quarantined:
+            conn.execute(
+                "UPDATE workspace_bindings SET status = 'auth_failed', updated_at = ? "
+                "WHERE project_id = ? AND agent_id = ? AND status = 'linked'",
+                (current, project_id, agent_id),
+            )
+    return {
+        "consecutive_failures": failures,
+        "first_failed_at": first_failed_at,
+        "last_failed_at": current,
+        "reason_code": "unauthorized",
+        "quarantined": quarantined,
+    }
 
 
 def list_workspace_bindings(conn: sqlite3.Connection, *, status: str | None = None) -> list[WorkspaceBinding]:
