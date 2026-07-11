@@ -123,6 +123,43 @@ py_compile: passed
 git diff --check: passed
 ```
 
+## Third adversarial re-review
+
+The third corpus began with 16 expected functional RED failures. Semantic key
+classification now splits camelCase and acronym boundaries as well as common
+separators, so `databasePassword`, `accessToken`, `apiToken`, and mixed-prefix
+keys are recognized in structured cache objects and textual evidence.
+
+Bounded global key/value replacement covers inline `const`/`let`/`var`,
+`export`, Windows `SET`, semicolon-terminated assignments, JSON arrays and
+nested/minified objects, YAML list items, XML sensitive elements, and XML
+attributes. Scalar quoting is retained while only the value becomes `***`.
+Any omission adds `sensitive values were redacted` to residual uncertainty.
+
+Filename policy distinguishes credential containers from source code by
+extension and path context. Tests prove `auth`, `oauth`, `providers`, `token`,
+`token_bucket`, and `access_token` source modules remain readable and have
+their contents redacted. Real repository paths for Hermes auth/providers and a
+Google Chat OAuth plugin are included in the corpus.
+
+Recovery eligibility now executes in SQLite before `ORDER BY ... LIMIT`, using
+validated envelope JSON fields for exact information request/effect/capability
+matching. A dedicated `(state, updated_at, message_id)` index is present and
+observed in `EXPLAIN QUERY PLAN`; older mutating rows cannot starve eligible
+information work.
+
+Final third-review verification:
+
+```text
+Exact third-review corpus: 17 passed
+Focused worker/store/receiver: 156 passed
+O1-O5 + sync + DB + quality: 317 passed
+Current-repository path corpus: 3 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```
+
 Post-commit audit added two further guards: retry/recovery rejects non-information
 `processing` rows, and project-memory cache size is checked in SQLite before JSON
 materialization. Known standalone Bearer, GitHub, OpenAI-style, Slack, AWS, JWT,

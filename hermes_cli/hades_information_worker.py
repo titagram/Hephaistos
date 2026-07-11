@@ -63,6 +63,16 @@ _ASSIGNMENT_LINE_RE = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
     r"(?P<separator>[:=])(?P<value>.*)$"
 )
+_KEY_VALUE_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?P<prefix>(?:(?:const|let|var|export|set)\s+)?"
+    r"(?P<quote>[\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
+    r"(?P<separator>[:=])\s*)(?P<value>\"[^\"]*\"|'[^']*'|[^,;\r\n}\]]+)"
+)
+_XML_ELEMENT_RE = re.compile(
+    r"<(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P<attrs>\s[^>]*)?>"
+    r"(?P<value>[^<]*)</(?P=key)>",
+    re.IGNORECASE,
+)
 _PEM_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----.*?"
     r"(?:-----END [A-Z0-9 ]+-----|\Z)",
@@ -80,6 +90,14 @@ _EXCLUDED_DIRS = frozenset(
     {".git", ".hermes", ".hades", ".codex", ".ssh", ".docker", ".aws", ".azure", ".gcp", "secrets", "credentials", ".venv", "venv", "node_modules", "dist", "build"}
 )
 _SENSITIVE_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".crt", ".cer"})
+_SOURCE_EXTENSIONS = frozenset(
+    {
+        ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+        ".go", ".rs", ".java", ".kt", ".scala", ".rb", ".php", ".cs",
+        ".c", ".cc", ".cpp", ".h", ".hpp", ".swift", ".sh", ".bash",
+        ".zsh", ".fish", ".sql",
+    }
+)
 
 
 @dataclass
@@ -188,8 +206,12 @@ def _is_sensitive_name(path: Path) -> bool:
         parts[index : index + 2] == (".config", "gcloud")
         for index in range(max(0, len(parts) - 1))
     )
+    sensitive_directory = any(part in _EXCLUDED_DIRS for part in parts[:-1])
+    if suffix in _SOURCE_EXTENSIONS and not sensitive_directory and not cloud_config_path:
+        return False
     return (
         cloud_config_path
+        or sensitive_directory
         or name == ".env"
         or name.startswith(".env.")
         or name == ".envrc"
@@ -493,7 +515,10 @@ def _bounded_contains(
 
 
 def _is_sensitive_key(value: Any) -> bool:
-    normalized = str(value).strip(" \"'").casefold()
+    raw = str(value).strip(" \"'")
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", raw)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    normalized = separated.casefold()
     tokens = tuple(token for token in re.split(r"[^a-z0-9]+", normalized) if token)
     compact = "".join(tokens)
     sensitive_tokens = {
@@ -527,15 +552,42 @@ def _redact_assignment_lines(value: str) -> str:
     return "".join(cleaned)
 
 
+def _redact_key_value_pairs(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not _is_sensitive_key(match.group("key")):
+            return match.group(0)
+        scalar = match.group("value")
+        replacement = (
+            f"{scalar[0]}***{scalar[-1]}"
+            if len(scalar) >= 2 and scalar[0] == scalar[-1] and scalar[0] in "\"'"
+            else "***"
+        )
+        return f"{match.group('prefix')}{replacement}"
+
+    return _KEY_VALUE_RE.sub(replace, value)
+
+
+def _redact_xml_elements(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not _is_sensitive_key(match.group("key")):
+            return match.group(0)
+        attrs = match.group("attrs") or ""
+        key = match.group("key")
+        return f"<{key}{attrs}>***</{key}>"
+
+    return _XML_ELEMENT_RE.sub(replace, value)
+
+
 def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     root_text = str(root)
     seen: set[int] = set()
     nodes = 0
     clipped = False
+    redacted = False
     deadline = time.monotonic() + MAX_SCAN_SECONDS
 
     def redact_plain_text(value: str) -> str:
-        nonlocal clipped
+        nonlocal clipped, redacted
         without_root = value.replace(root_text, "<workspace>")
         without_paths = _LOCAL_PATH_RE.sub("<redacted-path>", without_root)
         without_pem = _PEM_RE.sub("[REDACTED PRIVATE MATERIAL]", without_paths)
@@ -543,13 +595,17 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         without_jwt = _JWT_RE.sub("[REDACTED TOKEN]", without_keys)
         without_tokens = _KNOWN_TOKEN_RE.sub("[REDACTED TOKEN]", without_jwt)
         without_assignments = _redact_assignment_lines(without_tokens)
-        safe = redact_secret(without_assignments)
+        without_pairs = _redact_key_value_pairs(without_assignments)
+        without_xml = _redact_xml_elements(without_pairs)
+        safe = redact_secret(without_xml)
+        if safe != value:
+            redacted = True
         if len(safe) > 2_000:
             clipped = True
         return safe[:2_000]
 
     def clean_json(value: Any, *, depth: int = 0) -> Any:
-        nonlocal clipped
+        nonlocal clipped, redacted
         if depth > MAX_MEMORY_DEPTH or time.monotonic() > deadline:
             clipped = True
             return "[TRUNCATED]"
@@ -559,11 +615,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
                 if index >= 128:
                     clipped = True
                     break
-                result[str(key)] = (
-                    "***"
-                    if _is_sensitive_key(key)
-                    else clean_json(item, depth=depth + 1)
-                )
+                if _is_sensitive_key(key):
+                    redacted = True
+                    result[str(key)] = "***"
+                else:
+                    result[str(key)] = clean_json(item, depth=depth + 1)
             return result
         if isinstance(value, list):
             if len(value) > 128:
@@ -588,7 +644,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
         return redact_plain_text(value)
 
     def clean(value: Any, *, depth: int = 0) -> Any:
-        nonlocal nodes, clipped
+        nonlocal nodes, clipped, redacted
         nodes += 1
         if (
             nodes > MAX_MEMORY_NODES
@@ -612,7 +668,11 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
                     result["[TRUNCATED]"] = True
                     break
                 clean_key = redact_text(str(key))
-                result[clean_key] = "***" if _is_sensitive_key(key) else clean(item, depth=depth + 1)
+                if _is_sensitive_key(key):
+                    redacted = True
+                    result[clean_key] = "***"
+                else:
+                    result[clean_key] = clean(item, depth=depth + 1)
             return result
         if isinstance(value, (list, tuple)):
             identity = id(value)
@@ -628,7 +688,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     summary = clean(response.answer_summary)
     if len(response.residual_uncertainty) > 20:
         clipped = True
-    uncertainty = tuple(clean(item) for item in response.residual_uncertainty[:20])
+    uncertainty = [clean(item) for item in response.residual_uncertainty[:20]]
     evidence: list[dict[str, Any]] = []
     truncated = response.truncated or len(response.evidence_refs) > MAX_EVIDENCE_ITEMS
     for raw_item in response.evidence_refs[:MAX_EVIDENCE_ITEMS]:
@@ -643,7 +703,14 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
             truncated = True
             break
         evidence.append(item)
-    return InformationResponse(summary, tuple(evidence), truncated or clipped, uncertainty)
+    if redacted and "sensitive values were redacted" not in uncertainty:
+        if len(uncertainty) < 20:
+            uncertainty.append("sensitive values were redacted")
+        else:
+            clipped = True
+    return InformationResponse(
+        summary, tuple(evidence), truncated or clipped, tuple(uncertainty)
+    )
 
 
 def run_information_request(

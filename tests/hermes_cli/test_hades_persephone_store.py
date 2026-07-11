@@ -336,6 +336,51 @@ def test_abandoned_recovery_processes_one_deterministic_bounded_batch(tmp_db):
     assert recovered == ["batch_0", "batch_1"]
 
 
+def test_recovery_filters_ineligible_rows_before_limit(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        recover_abandoned_information_requests,
+        record_inbox,
+        transition_message,
+    )
+
+    for index in range(8):
+        mutating = _envelope(
+            message_id=f"mutating_{index}",
+            effect=EffectClass.MUTATING.value,
+            capability="run_tests",
+        )
+        record_inbox(tmp_db, mutating, now=10 + index)
+        tmp_db.execute(
+            "UPDATE persephone_inbox SET state = 'processing', updated_at = ? "
+            "WHERE message_id = ?",
+            (20 + index, mutating.message_id),
+        )
+        tmp_db.commit()
+    for index in range(2):
+        request = _envelope(message_id=f"eligible_{index}")
+        record_inbox(tmp_db, request, now=100 + index)
+        transition_message(tmp_db, request.message_id, "processing", now=110 + index)
+    tmp_db.commit()
+
+    assert recover_abandoned_information_requests(
+        tmp_db, now=200, abandoned_before=150, limit=2
+    ) == 2
+    states = dict(
+        tmp_db.execute("SELECT message_id, state FROM persephone_inbox").fetchall()
+    )
+    assert states["eligible_0"] == states["eligible_1"] == "received"
+    assert all(states[f"mutating_{index}"] == "processing" for index in range(8))
+
+    plan = tmp_db.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM persephone_inbox "
+        "WHERE state IN ('processing', 'processed') AND updated_at <= ? "
+        "AND json_extract(envelope, '$.message_type') = 'information_request' "
+        "ORDER BY updated_at, message_id LIMIT ?",
+        (150, 2),
+    ).fetchall()
+    assert "idx_persephone_inbox_recovery" in " ".join(str(row["detail"]) for row in plan)
+
+
 def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

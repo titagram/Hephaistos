@@ -168,6 +168,8 @@ CREATE TABLE IF NOT EXISTS persephone_inbox (
 
 CREATE INDEX IF NOT EXISTS idx_persephone_inbox_target_state
     ON persephone_inbox(project_id, target_agent_id, state);
+CREATE INDEX IF NOT EXISTS idx_persephone_inbox_recovery
+    ON persephone_inbox(state, updated_at, message_id);
 
 CREATE TABLE IF NOT EXISTS persephone_cursors (
     project_id      TEXT NOT NULL,

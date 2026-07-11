@@ -502,8 +502,18 @@ def recover_abandoned_information_requests(
     with write_txn(conn):
         rows = conn.execute(
             "SELECT * FROM persephone_inbox WHERE state IN ('processing', 'processed') "
-            "AND updated_at <= ? ORDER BY updated_at ASC, message_id ASC LIMIT ?",
-            (cutoff, bounded_limit),
+            "AND updated_at <= ? "
+            "AND json_extract(envelope, '$.message_type') = ? "
+            "AND json_extract(envelope, '$.effect') = ? "
+            "AND json_extract(envelope, '$.capability') IN (?, ?, ?, ?, ?, ?) "
+            "ORDER BY updated_at ASC, message_id ASC LIMIT ?",
+            (
+                cutoff,
+                MessageType.INFORMATION_REQUEST.value,
+                EffectClass.INFORMATION_READ.value,
+                *sorted(_INFORMATION_CAPABILITIES),
+                bounded_limit,
+            ),
         ).fetchall()
         for row in rows:
             current = _inbox_from_row(row)

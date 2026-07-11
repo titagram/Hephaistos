@@ -321,6 +321,34 @@ def test_minified_json_and_yaml_list_secrets_are_redacted(tmp_path, content, sec
 
 
 @pytest.mark.parametrize(
+    ("content", "secret"),
+    [
+        ('const databasePassword = "camel-private";', "camel-private"),
+        ('let accessToken="access-private";', "access-private"),
+        ("var apiToken = 'api-private';", "api-private"),
+        ("export AZUREClientSecret=azure-camel-private", "azure-camel-private"),
+        ("SET DATABASE_PASSWORD=windows-private", "windows-private"),
+        ('{"safe":1,"databasePassword":"nested-private"}', "nested-private"),
+        ('[true,{"accessToken":"array-private"}]', "array-private"),
+        ("- apiToken: yaml-camel-private", "yaml-camel-private"),
+        ("<databasePassword>xml-private</databasePassword>", "xml-private"),
+        ('<config accessToken="xml-attribute-private"/>', "xml-attribute-private"),
+    ],
+)
+def test_third_review_inline_camelcase_and_xml_corpus(tmp_path, content, secret):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    payload = response.to_payload()
+    assert secret not in str(payload)
+    assert "sensitive values were redacted" in payload["residual_uncertainty"]
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",
@@ -357,6 +385,51 @@ def test_normal_source_names_are_not_overblocked(tmp_path, relative):
     response = run_information_request(
         _request(tmp_path, capability="source_slice", payload={"path": relative}),
         binding=_binding(tmp_path),
+    )
+    assert response.evidence_refs
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "auth.py",
+        "oauth.ts",
+        "providers.js",
+        "token.tsx",
+        "token_bucket.py",
+        "access_token.go",
+    ],
+)
+def test_sensitive_named_source_code_remains_readable_but_redacted(tmp_path, relative):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    target = tmp_path / relative
+    target.write_text('databasePassword = "source-private"', encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": relative}),
+        binding=_binding(tmp_path),
+    )
+    payload = response.to_payload()
+    assert payload["evidence_refs"]
+    assert "source-private" not in str(payload)
+    assert "sensitive values were redacted" in payload["residual_uncertainty"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "hermes_cli/auth.py",
+        "hermes_cli/providers.py",
+        "plugins/platforms/google_chat/oauth.py",
+    ],
+)
+def test_current_repository_sensitive_named_sources_are_readable(relative):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    root = Path(__file__).resolve().parents[2]
+    response = run_information_request(
+        _request(root, capability="source_slice", payload={"path": relative}),
+        binding=_binding(root),
     )
     assert response.evidence_refs
 
