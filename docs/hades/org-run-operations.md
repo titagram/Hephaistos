@@ -26,6 +26,8 @@ Evidence packets used by projected execution are registered with project, OrgRun
 
 Reconciliation follows `current → awaiting_human → accepted`. Acceptance requires an identified human, approval evidence, and replacement contract hashes/version entries for the complete affected subtree. The transition is single-use and atomic: partial or rejected approval leaves the subtree blocked. Eligible nodes resume according to their dependency gates, while evidence remains invalid until regenerated against the accepted contracts.
 
+Replacement contracts are canonical parsed orchestrator contracts, not caller-supplied hash labels. The local authoritative contract store records their canonical serialization, calculated hash, mandate version and contract version under a compare-and-swap guard. Evidence registration and proposal publication require an exact match across project, OrgRun, mandate, node, accepted mandate version and stored contract hash. Pages returned by backend sync are validated item-by-item for the same project UUID; one missing or foreign project ID rejects the whole page and preserves the prior cursor.
+
 ## Delegation preflight
 
 Resolve local model routing before materializing or dispatching an OrgRun:

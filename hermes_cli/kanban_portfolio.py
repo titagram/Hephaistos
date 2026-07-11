@@ -63,7 +63,46 @@ def _ensure_projection_tables(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_hades_org_evidence_scope
             ON hades_org_evidence(anchor_id, remote_id, state);
+        CREATE TABLE IF NOT EXISTS hades_org_contracts (
+            project_id TEXT NOT NULL, anchor_id TEXT NOT NULL, remote_id TEXT NOT NULL,
+            node_id TEXT NOT NULL, mandate_version TEXT NOT NULL,
+            contract_version INTEGER NOT NULL, contract_hash TEXT NOT NULL,
+            contract TEXT NOT NULL, PRIMARY KEY(project_id, anchor_id, node_id)
+        );
     """)
+
+
+def persist_org_run_contract(
+    conn: sqlite3.Connection, *, topology: OrgRunCreated, remote_id: str,
+    node_id: str, mandate_version: str, contract: dict,
+    expected_contract_version: int | None = None,
+) -> str:
+    """Install one canonical parsed TaskContract with version-CAS semantics."""
+    from dataclasses import asdict
+    from tools.delegation_contract import parse_orchestrator_contract
+    if remote_id not in topology.remote_tasks or not topology.project_id:
+        raise ValueError("contract is outside authoritative OrgRun topology")
+    parsed = parse_orchestrator_contract(contract)
+    canonical = json.dumps(asdict(parsed), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    _ensure_projection_tables(conn)
+    current = conn.execute(
+        "SELECT contract_version FROM hades_org_contracts WHERE project_id=? AND anchor_id=? AND node_id=?",
+        (topology.project_id, topology.anchor_id, node_id),
+    ).fetchone()
+    current_version = int(current["contract_version"]) if current else None
+    if expected_contract_version != current_version:
+        raise ValueError("contract version CAS failed")
+    conn.execute(
+        "INSERT INTO hades_org_contracts VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(project_id,anchor_id,node_id) DO UPDATE SET remote_id=excluded.remote_id, "
+        "mandate_version=excluded.mandate_version, contract_version=excluded.contract_version, "
+        "contract_hash=excluded.contract_hash, contract=excluded.contract",
+        (topology.project_id, topology.anchor_id, remote_id, node_id, str(mandate_version),
+         parsed.contract_version, digest, canonical),
+    )
+    conn.commit()
+    return digest
 
 
 def register_org_run_evidence(
@@ -81,11 +120,23 @@ def register_org_run_evidence(
         raise ValueError("evidence node is outside the mandate-derived subtree")
     from tools.delegation_evidence import validate_evidence_packet
     validate_evidence_packet(packet)
+    _ensure_projection_tables(conn)
+    mandate = _mandates(conn, topology).get(remote_id, {})
+    if str(mandate.get("version") or "") != str(mandate_version) or mandate.get("status") not in {"current", "accepted"}:
+        raise ValueError("evidence mandate version is not currently accepted")
+    contract = conn.execute(
+        "SELECT remote_id, mandate_version, contract_hash FROM hades_org_contracts "
+        "WHERE project_id=? AND anchor_id=? AND node_id=?",
+        (topology.project_id, topology.anchor_id, node_id),
+    ).fetchone()
+    if contract is None or contract["remote_id"] != remote_id or contract["mandate_version"] != str(mandate_version):
+        raise ValueError("evidence has no matching persisted node contract")
+    if packet.get("contract_hash") != contract["contract_hash"]:
+        raise ValueError("evidence contract_hash does not match persisted contract")
     encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"), allow_nan=False)
     evidence_id = "packet:" + hashlib.sha256(
         f"{topology.project_id}:{topology.anchor_id}:{remote_id}:{node_id}:{mandate_version}:{encoded}".encode()
     ).hexdigest()
-    _ensure_projection_tables(conn)
     conn.execute(
         "INSERT OR IGNORE INTO hades_org_evidence VALUES (?, ?, ?, ?, ?, ?, 'current', ?, strftime('%s','now'))",
         (evidence_id, topology.project_id, topology.anchor_id, remote_id, node_id,
@@ -97,17 +148,30 @@ def register_org_run_evidence(
 
 def require_current_org_run_evidence(
     conn: sqlite3.Connection, *, topology: OrgRunCreated, evidence_refs: tuple[str, ...] | list[str],
+    remote_id: str | None = None, mandate_version: str | None = None,
 ) -> None:
     _ensure_projection_tables(conn)
     for evidence_id in evidence_refs:
         row = conn.execute(
-            "SELECT project_id, anchor_id, state FROM hades_org_evidence WHERE evidence_id = ?",
+            "SELECT e.project_id,e.anchor_id,e.remote_id,e.node_id,e.state,e.mandate_version,"
+            "json_extract(e.packet,'$.contract_hash') AS packet_contract,c.contract_hash,c.mandate_version AS contract_mandate "
+            "FROM hades_org_evidence e LEFT JOIN hades_org_contracts c ON c.project_id=e.project_id "
+            "AND c.anchor_id=e.anchor_id AND c.node_id=e.node_id WHERE e.evidence_id = ?",
             (str(evidence_id),),
         ).fetchone()
         if row is None or row["project_id"] != topology.project_id or row["anchor_id"] != topology.anchor_id:
             raise ValueError(f"unknown or cross-project OrgRun evidence: {evidence_id}")
         if row["state"] != "current":
             raise ValueError(f"stale OrgRun evidence rejected: {evidence_id}")
+        mandate = _mandates(conn, topology).get(row["remote_id"], {})
+        if (str(mandate.get("version") or "") != row["mandate_version"]
+                or row["contract_mandate"] != row["mandate_version"]
+                or row["packet_contract"] != row["contract_hash"]):
+            raise ValueError(f"obsolete OrgRun evidence rejected: {evidence_id}")
+        if remote_id is not None and row["remote_id"] != remote_id:
+            raise ValueError(f"cross-mandate OrgRun evidence rejected: {evidence_id}")
+        if mandate_version is not None and row["mandate_version"] != str(mandate_version):
+            raise ValueError(f"wrong-version OrgRun evidence rejected: {evidence_id}")
 
 
 def _mandates(conn: sqlite3.Connection, topology: OrgRunCreated) -> dict[str, dict]:
@@ -195,6 +259,7 @@ def reconcile_remote_mandate(
         f"WHERE project_id = ? AND anchor_id = ? AND remote_id IN ({placeholders})",
         (topology.project_id, topology.anchor_id, *sorted(affected)),
     )
+    projection_blocked: list[str] = []
     for task_id in node_ids:
         task = kb.get_task(conn, task_id)
         if task is not None and task.status not in {"done", "archived", "blocked"}:
@@ -202,6 +267,7 @@ def reconcile_remote_mandate(
                 "UPDATE tasks SET status = 'blocked', block_kind = 'needs_input' WHERE id = ?",
                 (task_id,),
             )
+            projection_blocked.append(task_id)
     conn.commit()
     mandates[remote_id] = {
         "version": str(previous), "observed_version": version,
@@ -213,6 +279,7 @@ def reconcile_remote_mandate(
         value={"schema": "hades.remote-projection-stale.v1", "remote_id": remote_id,
                "accepted_version": str(previous), "observed_version": version,
                "affected_remote_ids": sorted(affected), "evidence_valid": False,
+               "affected_nodes": node_ids, "projection_blocked_nodes": projection_blocked,
                "requires_human_reconciliation": True},
     )
     return RemoteMandateReconciliation(
@@ -234,6 +301,7 @@ def accept_remote_mandate_reconciliation(
         raise ValueError("human approval requires approved_by and evidence_ref")
     remote_id = str(remote_id).strip(); observed_version = str(observed_version).strip()
     from hermes_cli.kanban_swarm import BLACKBOARD_PREFIX
+    _ensure_projection_tables(conn)
     with kb.write_txn(conn):
         mandates = _mandates(conn, topology)
         state = mandates.get(remote_id, {})
@@ -241,28 +309,46 @@ def accept_remote_mandate_reconciliation(
             raise ValueError("mandate is not awaiting this human reconciliation")
         stale = latest_blackboard(conn, topology.anchor_id).get(f"stale_projection:{remote_id}")
         affected_remote = tuple(stale.get("affected_remote_ids", ())) if isinstance(stale, dict) else (remote_id,)
+        affected_nodes = tuple(stale.get("affected_nodes", ())) if isinstance(stale, dict) else ()
+        projection_blocked = set(stale.get("projection_blocked_nodes", ())) if isinstance(stale, dict) else set()
         contracts = approval.get("replacement_contracts")
-        if not isinstance(contracts, dict) or set(contracts) != set(affected_remote):
-            raise ValueError("replacement_contracts must cover the complete affected subtree")
-        normalized_contracts: dict[str, dict[str, str]] = {}
-        for candidate in affected_remote:
-            contract = contracts.get(candidate)
-            if not isinstance(contract, dict):
-                raise ValueError("each replacement contract must be structured")
-            contract_hash = str(contract.get("contract_hash") or "").strip()
-            mandate_version = str(contract.get("mandate_version") or "").strip()
-            if not contract_hash or mandate_version != observed_version:
-                raise ValueError("replacement contract hash/version is invalid")
-            normalized_contracts[candidate] = {
-                "contract_hash": contract_hash, "mandate_version": mandate_version,
-                "evidence_required": "regenerate",
-            }
+        if not isinstance(contracts, dict) or set(contracts) != set(affected_nodes):
+            raise ValueError("replacement_contracts must cover every affected node")
+        from dataclasses import asdict
+        from tools.delegation_contract import parse_orchestrator_contract
+        normalized_contracts: dict[str, dict[str, str | int]] = {}
+        for node_id in affected_nodes:
+            replacement = contracts[node_id]
+            if not isinstance(replacement, dict) or not isinstance(replacement.get("contract"), dict):
+                raise ValueError("each replacement must carry a canonical TaskContract")
+            expected = replacement.get("expected_contract_version")
+            current = conn.execute(
+                "SELECT contract_version FROM hades_org_contracts WHERE project_id=? AND anchor_id=? AND node_id=?",
+                (topology.project_id, topology.anchor_id, node_id),
+            ).fetchone()
+            current_version = int(current["contract_version"]) if current else None
+            if expected != current_version:
+                raise ValueError("replacement contract version CAS failed")
+            parsed = parse_orchestrator_contract(replacement["contract"])
+            canonical = json.dumps(asdict(parsed), sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            owner = next((candidate for candidate in affected_remote if node_id in {
+                topology.remote_tasks[candidate].execution_id, topology.remote_tasks[candidate].review_id,
+                topology.remote_tasks[candidate].integration_ready_id, topology.remote_tasks[candidate].completion_id,
+            }), remote_id)
+            conn.execute(
+                "INSERT INTO hades_org_contracts VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,anchor_id,node_id) "
+                "DO UPDATE SET remote_id=excluded.remote_id,mandate_version=excluded.mandate_version,"
+                "contract_version=excluded.contract_version,contract_hash=excluded.contract_hash,contract=excluded.contract",
+                (topology.project_id, topology.anchor_id, owner, node_id, observed_version,
+                 parsed.contract_version, digest, canonical),
+            )
+            normalized_contracts[node_id] = {"contract_hash": digest, "mandate_version": observed_version,
+                                              "contract_version": parsed.contract_version,
+                                              "evidence_required": "regenerate"}
         resumed: list[str] = []
-        for candidate in affected_remote:
-            remote = topology.remote_tasks.get(str(candidate))
-            if remote is None:
-                continue
-            for node_id in (remote.execution_id, remote.review_id, remote.integration_ready_id, remote.completion_id):
+        for node_id in affected_nodes:
+            if node_id in projection_blocked:
                 row = conn.execute("SELECT status FROM tasks WHERE id = ?", (node_id,)).fetchone()
                 if row is not None and row["status"] == "blocked":
                     parents = conn.execute(

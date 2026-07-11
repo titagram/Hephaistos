@@ -99,7 +99,7 @@ def test_publish_requires_completed_integration_and_org_review(tmp_path):
 
 def test_publish_uses_execution_lease_only_after_gate(tmp_path):
     from tools.delegation_evidence import build_evidence_packet
-    from hermes_cli.kanban_portfolio import register_org_run_evidence
+    from hermes_cli.kanban_portfolio import import_remote_mandate, persist_org_run_contract, register_org_run_evidence
     class Client:
         def claim_agent_work_item(self, work_item_id, *, local_workspace_id):
             assert (work_item_id, local_workspace_id) == ("awi-1", "lw-1")
@@ -127,11 +127,14 @@ def test_publish_uses_execution_lease_only_after_gate(tmp_path):
             remote.completion_id,
         ]:
             assert kb.complete_task(conn, task_id, summary="verified")
+        import_remote_mandate(conn, topology=created, remote_id="HD-1", version="1")
+        contract = {"objective":"Implement","deliverable":"Result","in_scope":["src/a.py"],"out_of_scope":["backend"],"workspace":".","write_scope":["src/a.py"],"input_evidence":["mandate"],"dependencies":[],"acceptance_criteria":["tests"],"required_verification":["pytest"],"return_schema":["evidence"]}
+        contract_hash = persist_org_run_contract(conn, topology=created, remote_id="HD-1", node_id=remote.execution_id, mandate_version="1", contract=contract)
         evidence_ref = register_org_run_evidence(
             conn, topology=created, remote_id="HD-1", node_id=remote.execution_id,
             mandate_version="1",
             packet=build_evidence_packet(
-                contract_hash="contract", base_commit="a" * 40, diff_hash="diff",
+                contract_hash=contract_hash, base_commit="a" * 40, diff_hash="diff",
                 result_ref="b" * 40, covered_files=["src/a.py"],
                 verification=[{"command": "pytest", "passed": True}],
             ).to_dict(),

@@ -13,6 +13,7 @@ from hermes_cli.kanban_portfolio import (
     register_org_run_evidence,
     require_current_org_run_evidence,
     accept_remote_mandate_reconciliation,
+    persist_org_run_contract,
 )
 
 
@@ -30,6 +31,14 @@ def _plan():
             {"remote_task_id": "r3", "work_item_id": "w3", "title": "C", "body": "C", "assignee": "default", "priority": 1, "risk": "low", "depends_on": [], "write_scope": ["src/c.py"]},
         ],
     })
+
+
+def _contract(version=1):
+    return {"objective": "Implement task", "deliverable": "Verified result", "in_scope": ["src"],
+            "out_of_scope": ["backend mutation"], "workspace": ".", "write_scope": ["src/**"],
+            "input_evidence": ["mandate"], "dependencies": [], "acceptance_criteria": ["tests pass"],
+            "required_verification": ["pytest"], "return_schema": ["evidence"],
+            "task_version": version, "contract_version": version}
 
 
 def test_remote_version_change_blocks_only_derived_subtree(tmp_path):
@@ -77,8 +86,12 @@ def test_version_change_invalidates_real_d4_packet_and_validator_rejects_it(tmp_
         plan = _plan(); validation = validate_execution_portfolio(plan)
         org = create_org_run(conn, plan, validation)
         import_remote_mandate(conn, topology=org, remote_id="r1", version="1")
+        contract_hash = persist_org_run_contract(
+            conn, topology=org, remote_id="r1", node_id=org.remote_tasks["r1"].execution_id,
+            mandate_version="1", contract=_contract(), expected_contract_version=None,
+        )
         packet = build_evidence_packet(
-            contract_hash="contract", base_commit="a" * 40, diff_hash="diff",
+            contract_hash=contract_hash, base_commit="a" * 40, diff_hash="diff",
             result_ref="b" * 40, covered_files=["src/a.py"],
             verification=[{"command": "pytest", "passed": True}],
         ).to_dict()
@@ -108,8 +121,8 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
         approval = {
             "decision": "accepted", "approved_by": "human:gabriele", "evidence_ref": "approval:42",
             "replacement_contracts": {
-                candidate: {"contract_hash": f"contract-{candidate}-v2", "mandate_version": "2"}
-                for candidate in stale.affected_remote_ids
+                node_id: {"expected_contract_version": None, "contract": _contract(2)}
+                for node_id in stale.affected_nodes
             },
         }
         accepted = accept_remote_mandate_reconciliation(
@@ -117,7 +130,9 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
             approval=approval,
         )
         assert accepted.status == "accepted"
-        assert set(accepted.resumed_nodes).issubset(set(stale.affected_nodes))
+        assert set(accepted.resumed_nodes) == set(stale.affected_nodes)
+        assert {org.integration_id, org.review_id, org.synthesis_id}.issubset(accepted.resumed_nodes)
+        assert all(kb.get_task(conn, node_id).status in {"ready", "todo"} for node_id in stale.affected_nodes)
         with pytest.raises(ValueError, match="not awaiting"):
             accept_remote_mandate_reconciliation(
                 conn, topology=org, remote_id="r1", observed_version="2",
@@ -142,17 +157,17 @@ def test_publish_is_durable_project_scoped_and_idempotent(tmp_path):
     outbox = hades_backend_db.connect(tmp_path / "backend.db")
     client = Client()
     first = publish_org_run_proposal(
-        outbox_conn=outbox, topology=org, sender_agent_id="agent-a",
+        outbox_conn=outbox, org_conn=kanban, topology=org, sender_agent_id="agent-a",
         target_agent_id="agent-pm", remote_task_id="r1", remote_task_version="2",
         proposal_type="decision_proposal", summary="Mandate changed; reconcile local scope.",
-        evidence_refs=["packet:ev-1"], idempotency_key="projection:r1:2",
+        evidence_refs=[], idempotency_key="projection:r1:2",
         now=1_000,
     )
     second = publish_org_run_proposal(
-        outbox_conn=outbox, topology=org, sender_agent_id="agent-a",
+        outbox_conn=outbox, org_conn=kanban, topology=org, sender_agent_id="agent-a",
         target_agent_id="agent-pm", remote_task_id="r1", remote_task_version="2",
         proposal_type="decision_proposal", summary="Mandate changed; reconcile local scope.",
-        evidence_refs=["packet:ev-1"], idempotency_key="projection:r1:2",
+        evidence_refs=[], idempotency_key="projection:r1:2",
         now=1_000,
     )
     assert first == second
@@ -165,7 +180,7 @@ def test_publish_is_durable_project_scoped_and_idempotent(tmp_path):
     assert envelope["effect"] == "information_read"
     assert envelope["message_type"] == "local_decision"
     assert envelope["payload"]["proposal_type"] == "decision_proposal"
-    assert envelope["payload"]["evidence_refs"] == ["packet:ev-1"]
+    assert envelope["payload"]["evidence_refs"] == []
     kanban.close(); outbox.close()
 
 
@@ -177,7 +192,7 @@ def test_proposal_rejects_cross_project_before_outbox_persistence(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="authoritative OrgRun project"):
         publish_org_run_proposal(
-            outbox_conn=outbox, topology=org, expected_project_id="other-project",
+            outbox_conn=outbox, org_conn=conn, topology=org, expected_project_id="other-project",
             sender_agent_id="agent-a", target_agent_id="agent-pm", remote_task_id="r1",
             remote_task_version="2", proposal_type="clarification", summary="Question",
             idempotency_key="cross-project", now=1_000,
@@ -196,7 +211,7 @@ def test_proposal_bounds_and_offline_restart_recovery(tmp_path):
     org = create_org_run(kanban, plan, validate_execution_portfolio(plan))
     path = tmp_path / "backend.db"; outbox = hades_backend_db.connect(path)
     common = dict(
-        outbox_conn=outbox, topology=org, sender_agent_id="agent-a",
+        outbox_conn=outbox, org_conn=kanban, topology=org, sender_agent_id="agent-a",
         target_agent_id="agent-pm", remote_task_id="r1", remote_task_version="2",
         proposal_type="clarification", summary="Need clarification", now=1_000,
     )
@@ -255,5 +270,50 @@ def test_projection_cursor_and_offline_status_are_durable(tmp_path):
         assert second.status == "offline" and second.cursor == "cursor-1"
         assert client.cursors == [None, "cursor-1"]
         assert latest_blackboard(conn, org.anchor_id)["remote_projection_sync"]["status"] == "offline"
+    finally:
+        conn.close()
+
+
+def test_projection_rejects_cross_project_page_without_cursor_advance(tmp_path):
+    from hermes_cli.hades_kanban_sync import sync_remote_mandates
+    from hermes_cli.kanban_swarm import latest_blackboard
+    class Client:
+        def list_agent_work_items(self, **kwargs):
+            return {"items": [{"id": "evil", "project_id": "other-project"}], "next_cursor": "evil-cursor"}
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        plan = _plan(); org = create_org_run(conn, plan, validate_execution_portfolio(plan))
+        result = sync_remote_mandates(conn, Client(), topology=org, mode="pull_only", cursor="safe-cursor")
+        assert result.status == "rejected_page" and result.observed == 0
+        assert result.cursor == "safe-cursor"
+        stored = latest_blackboard(conn, org.anchor_id)["remote_projection_sync"]
+        assert stored["cursor"] == "safe-cursor" and stored["status"] == "rejected_page"
+    finally:
+        conn.close()
+
+
+def test_evidence_rejects_wrong_version_hash_and_cross_node(tmp_path):
+    import pytest
+    from tools.delegation_evidence import build_evidence_packet
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        plan = _plan(); org = create_org_run(conn, plan, validate_execution_portfolio(plan))
+        import_remote_mandate(conn, topology=org, remote_id="r1", version="1")
+        node = org.remote_tasks["r1"].execution_id
+        digest = persist_org_run_contract(conn, topology=org, remote_id="r1", node_id=node,
+                                          mandate_version="1", contract=_contract())
+        packet = build_evidence_packet(contract_hash=digest, base_commit="a"*40, diff_hash="d",
+                                       covered_files=["src/a.py"], verification=[]).to_dict()
+        with pytest.raises(ValueError, match="currently accepted"):
+            register_org_run_evidence(conn, topology=org, remote_id="r1", node_id=node,
+                                      mandate_version="2", packet=packet)
+        bad = {**packet, "contract_hash": "forged"}
+        with pytest.raises(ValueError, match="contract_hash"):
+            register_org_run_evidence(conn, topology=org, remote_id="r1", node_id=node,
+                                      mandate_version="1", packet=bad)
+        with pytest.raises(ValueError, match="matching persisted node contract"):
+            register_org_run_evidence(conn, topology=org, remote_id="r1",
+                                      node_id=org.remote_tasks["r1"].review_id,
+                                      mandate_version="1", packet=packet)
     finally:
         conn.close()

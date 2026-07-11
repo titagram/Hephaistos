@@ -511,6 +511,7 @@ _ORG_PROPOSAL_TYPES = frozenset(
 def publish_org_run_proposal(
     *,
     outbox_conn,
+    org_conn,
     topology: _OrgRunCreated,
     sender_agent_id: str,
     target_agent_id: str,
@@ -551,6 +552,16 @@ def publish_org_run_proposal(
     refs = [str(value).strip() for value in evidence_refs if str(value).strip()]
     if len(refs) > 16:
         raise ValueError("evidence_refs exceeds 16 items")
+    if sum(len(value.encode("utf-8")) for value in refs) > 60_000:
+        raise ValueError("payload exceeds the bounded Persephone envelope size")
+    if proposal_type in {"progress_summary", "completion_proposal"} and not refs:
+        raise ValueError(f"{proposal_type} requires current OrgRun evidence")
+    if refs:
+        from hermes_cli.kanban_portfolio import require_current_org_run_evidence
+        require_current_org_run_evidence(
+            org_conn, topology=topology, evidence_refs=refs,
+            remote_id=clean["remote_task_id"], mandate_version=clean["remote_task_version"],
+        )
     message_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL,
         f"hades:{clean['project_id']}:{clean['idempotency_key']}",

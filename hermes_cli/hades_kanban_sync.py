@@ -179,8 +179,19 @@ def sync_remote_mandates(
     next_cursor = None
     if isinstance(response, dict):
         next_cursor = str(response.get("next_cursor") or "").strip() or None
+    items = _items(response)
+    for item in items:
+        item_project = str(item.get("project_id") or _payload(item).get("project_id") or "").strip()
+        if item_project != project_id:
+            result = RemoteMandateSyncResult(
+                mode, project_id, cursor, observed=0, status="rejected_page",
+                error="backend page contains a missing or cross-project item",
+            )
+            if projection_anchor_id:
+                _persist_projection_sync(conn, projection_anchor_id, result)
+            return result
     result = RemoteMandateSyncResult(
-        mode, project_id, next_cursor, observed=len(_items(response)), status="observed"
+        mode, project_id, next_cursor, observed=len(items), status="observed"
     )
     if projection_anchor_id:
         _persist_projection_sync(conn, projection_anchor_id, result)
