@@ -7787,3 +7787,10 @@ Follow-up login dashboard:
 - verifica end-to-end: root autenticata `200`, CSRF cookie `204`, login senza
   CSRF `419` JSON Laravel e login con CSRF/credenziali volutamente errate `422`
   JSON dal controller, non piu' HTML nginx; health Hades `200`.
+
+# 2026-07-11 — Backlog prodotto backend
+
+Le osservazioni future su leggibilita' della memoria, doppia vista wiki
+umana/macchina, architettura multi-azienda e miglioramento memory-first di
+Platon sono raccolte in `docs/hades-backend-product-backlog.md`. Restano temi
+di discovery separati e non sono ancora specifiche implementative approvate.
