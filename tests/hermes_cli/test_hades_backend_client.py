@@ -607,14 +607,28 @@ CLIENT_ROUTE_CASES = [
         "kwargs": {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
         "json_body": {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
     },
+    {
+        "method_name": "iter_persephone_events",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/persephone/events",
+        "wire_path": "/api/hades/v1/persephone/events",
+        "kwargs": {
+            "project_id": "proj_1",
+            "target_agent_id": "agent_1",
+            "cursor": "42",
+            "limit": 25,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "target_agent_id": "agent_1",
+            "cursor": "42",
+            "limit": "25",
+        },
+        "stream": True,
+    },
 ]
 
-INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {
-    (
-        "GET",
-        "/api/hades/v1/persephone/events",
-    ): "SSE fallback for realtime inbox reads; the local sync client uses the polling inbox route.",
-}
+INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}
 
 INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
     "presence_heartbeat",
@@ -668,6 +682,12 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
             assert request.content == b""
         if "query" in case:
             assert _query_dict(request) == case["query"]
+        if case.get("stream"):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text='data: {"ok":true}\n\n',
+            )
         return httpx.Response(200, json={"ok": True})
 
     client = HadesBackendClient(
@@ -676,9 +696,13 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
         transport=httpx.MockTransport(handler),
     )
 
-    response = getattr(client, case["method_name"])(*(case.get("args") or ()), **(case.get("kwargs") or {}))
+    response = getattr(client, case["method_name"])(
+        *(case.get("args") or ()), **(case.get("kwargs") or {})
+    )
+    if case.get("stream"):
+        response = list(response)
 
-    assert response == {"ok": True}
+    assert response == ([{"ok": True}] if case.get("stream") else {"ok": True})
     assert seen
 
 

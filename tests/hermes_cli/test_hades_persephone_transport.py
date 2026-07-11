@@ -1,0 +1,359 @@
+from __future__ import annotations
+
+import json
+import random
+
+import httpx
+import pytest
+
+from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+from hermes_cli.hades_persephone_messages import (
+    AGENT_MESSAGE_SCHEMA,
+    EffectClass,
+    MessageType,
+    parse_envelope,
+)
+
+
+def _envelope(*, message_id: str = "msg_1"):
+    return parse_envelope(
+        {
+            "schema": AGENT_MESSAGE_SCHEMA,
+            "message_id": message_id,
+            "correlation_id": "corr_1",
+            "causation_id": None,
+            "project_id": "project_1",
+            "sender_agent_id": "agent_sender",
+            "target_agent_id": "agent_target",
+            "target_workspace_binding_id": None,
+            "message_type": MessageType.INFORMATION_REQUEST.value,
+            "effect": EffectClass.INFORMATION_READ.value,
+            "capability": "project_memory_search",
+            "remote_task_id": None,
+            "remote_task_version": None,
+            "expires_at": 9_999_999_999,
+            "payload": {"query": "where is the contract?"},
+        },
+        now=100,
+    )
+
+
+@pytest.fixture
+def store(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    with db.connect_closing(tmp_path / "hades.db") as conn:
+        yield conn
+
+
+def test_client_sse_parser_resumes_with_exact_target_query_and_limit():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = (
+            'id: 43\nevent: message\ndata: {"id":"43","payload":{"n":1}}\n\n'
+            'id: 44\ndata: {"id":"44","payload":{"n":2}}\n\n'
+            'id: 45\ndata: {"id":"45"}\n\n'
+        )
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream; charset=utf-8"}, text=body
+        )
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    events = list(
+        client.iter_persephone_events(
+            project_id="project_1",
+            target_agent_id="agent_target",
+            cursor="42",
+            limit=2,
+        )
+    )
+
+    assert [event["id"] for event in events] == ["43", "44"]
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/api/hades/v1/persephone/events"
+    assert dict(seen[0].url.params) == {
+        "project_id": "project_1",
+        "target_agent_id": "agent_target",
+        "cursor": "42",
+        "limit": "2",
+    }
+
+
+def test_client_sse_stops_on_explicit_stop_event_without_yielding_it():
+    body = (
+        'id: 43\ndata: {"id":"43"}\n\n'
+        'event: stop\ndata: {"reason":"bounded"}\n\n'
+        'id: 44\ndata: {"id":"44"}\n\n'
+    )
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, text=body
+            )
+        ),
+    )
+
+    assert list(
+        client.iter_persephone_events(
+            project_id="project_1", target_agent_id="agent_target", limit=10
+        )
+    ) == [{"id": "43"}]
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        (
+            httpx.Response(200, headers={"content-type": "application/json"}, json={}),
+            "content type",
+        ),
+        (
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text="data: not-json\n\n",
+            ),
+            "malformed",
+        ),
+    ],
+)
+def test_client_sse_rejects_wrong_content_type_and_malformed_data(response, error):
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(lambda request: response),
+    )
+
+    with pytest.raises(HadesBackendError, match=error):
+        list(
+            client.iter_persephone_events(
+                project_id="project_1", target_agent_id="agent_target", limit=2
+            )
+        )
+
+
+def test_stream_wrapper_falls_back_to_polling_with_the_same_cursor():
+    from hermes_cli.hades_persephone_transport import iter_persephone_events
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+        return httpx.Response(200, json={"events": [{"id": "43"}], "cursor": "43"})
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    result = list(
+        iter_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            target_workspace_binding_id="binding_1",
+            cursor="42",
+            limit=2,
+        )
+    )
+
+    assert result == [{"id": "43"}]
+    assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
+        "events",
+        "inbox",
+    ]
+    for request in requests:
+        assert dict(request.url.params) == {
+            "project_id": "project_1",
+            "target_agent_id": "agent_target",
+            "target_workspace_binding_id": "binding_1",
+            "cursor": "42",
+            "limit": "2",
+        }
+
+
+def test_malformed_stream_after_an_event_falls_back_without_partial_duplicates():
+    from hermes_cli.hades_persephone_transport import iter_persephone_events
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text='id: 43\ndata: {"id":"43"}\n\ndata: malformed\n\n',
+            )
+        return httpx.Response(
+            200, json={"events": [{"id": "43"}, {"id": "44"}], "cursor": "44"}
+        )
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+
+    assert list(
+        iter_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            cursor="42",
+            limit=2,
+        )
+    ) == [{"id": "43"}, {"id": "44"}]
+    assert [request.url.params["cursor"] for request in requests] == ["42", "42"]
+
+
+def test_poll_rejects_malformed_backend_shape_without_echoing_payload():
+    from hermes_cli.hades_persephone_transport import poll_persephone_events
+
+    secret_payload = "do-not-echo-this-payload"
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"events": secret_payload})
+        ),
+    )
+
+    with pytest.raises(HadesBackendError) as caught:
+        poll_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            cursor="42",
+            limit=2,
+        )
+    assert secret_payload not in str(caught.value)
+
+
+@pytest.mark.parametrize("limit", [0, 101, True])
+def test_poll_enforces_openapi_limit_before_network(limit):
+    from hermes_cli.hades_persephone_transport import poll_persephone_events
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"events": []})
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ValueError, match="limit"):
+        poll_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            limit=limit,
+        )
+    assert calls == 0
+
+
+def test_transient_send_failure_schedules_exponential_jittered_retry(store):
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+    from hermes_cli.hades_persephone_transport import RetryPolicy, send_due_messages
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            raise HadesBackendError("timeout and raw payload must not be stored")
+
+    enqueue_outbox(store, _envelope(), now=100)
+    result = send_due_messages(
+        store,
+        FakeClient(),
+        now=100,
+        retry=RetryPolicy(base=4, maximum=60, jitter=0.25, max_attempts=4),
+        rng=random.Random(7),
+    )
+    row = get_message(store, "msg_1", queue="outbox")
+
+    assert result == {"sent": 0, "retry": 1, "dead_letter": 0}
+    assert row is not None
+    assert row.state == "retry"
+    assert 103 <= row.next_attempt_at <= 105
+    assert row.last_error == "transport_error"
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 405, 406, 410, 415, 422])
+def test_terminal_schema_or_auth_4xx_goes_directly_to_dead_letter(store, status):
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+    from hermes_cli.hades_persephone_transport import send_due_messages
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            raise HadesBackendError(
+                "unsafe body", status_code=status, code="validation_failed"
+            )
+
+    enqueue_outbox(store, _envelope(), now=100)
+    result = send_due_messages(store, FakeClient(), now=100)
+    row = get_message(store, "msg_1", queue="outbox")
+
+    assert result == {"sent": 0, "retry": 0, "dead_letter": 1}
+    assert row is not None
+    assert row.state == "dead_letter"
+    assert row.last_error == f"http_{status}:validation_failed"
+
+
+def test_transient_4xx_retries_but_max_attempts_dead_letters(store):
+    from hermes_cli.hades_persephone_store import (
+        enqueue_outbox,
+        get_message,
+        transition_message,
+    )
+    from hermes_cli.hades_persephone_transport import RetryPolicy, send_due_messages
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            raise HadesBackendError("busy", status_code=429)
+
+    enqueue_outbox(store, _envelope(), now=100)
+    # Seed two completed attempts; the next claim is attempt 3 and reaches the cap.
+    store.execute(
+        "UPDATE persephone_outbox SET state = 'sending', attempts = 2 WHERE message_id = 'msg_1'"
+    )
+    store.commit()
+    transition_message(
+        store, "msg_1", "retry", queue="outbox", now=100, next_attempt_at=100
+    )
+    result = send_due_messages(
+        store, FakeClient(), now=100, retry=RetryPolicy(max_attempts=3)
+    )
+    row = get_message(store, "msg_1", queue="outbox")
+
+    assert result == {"sent": 0, "retry": 0, "dead_letter": 1}
+    assert row is not None
+    assert row.attempts == 3
+    assert row.state == "dead_letter"
+    assert row.last_error == "http_429:max_attempts"
+
+
+def test_successful_delivery_sends_exact_envelope_and_marks_sent(store):
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+    from hermes_cli.hades_persephone_transport import send_due_messages
+
+    sent: list[dict] = []
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            sent.append(payload)
+            return {"ok": True}
+
+    envelope = _envelope()
+    enqueue_outbox(store, envelope, now=100)
+    result = send_due_messages(store, FakeClient(), now=100)
+    row = get_message(store, "msg_1", queue="outbox")
+
+    assert result == {"sent": 1, "retry": 0, "dead_letter": 0}
+    assert sent == [envelope.to_dict()]
+    assert row is not None and row.state == "sent"
