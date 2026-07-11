@@ -28,6 +28,8 @@ Reconciliation follows `current → awaiting_human → accepted`. Acceptance req
 
 Replacement contracts are canonical parsed orchestrator contracts, not caller-supplied hash labels. The local authoritative contract store records their canonical serialization, calculated hash, mandate version and contract version under a compare-and-swap guard. Evidence registration and proposal publication require an exact match across project, OrgRun, mandate, node, accepted mandate version and stored contract hash. Pages returned by backend sync are validated item-by-item for the same project UUID; one missing or foreign project ID rejects the whole page and preserves the prior cursor.
 
+Human acceptance authority comes only from an approved durable Persephone/O2 inbox row whose project, OrgRun anchor, remote mandate, observed version, and action all match exactly. The audited actor is read from that row. Reconciliation consumes its message ID once in the same local transaction as contract installation and node resumption, so forged dictionaries, replay, and concurrent stale acceptance cannot authorize work. Direct mandate import is limited to the first observation or an identical still-current observation; it cannot bypass an awaiting or completed reconciliation.
+
 ## Delegation preflight
 
 Resolve local model routing before materializing or dispatching an OrgRun:

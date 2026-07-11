@@ -454,8 +454,16 @@ def publish_org_run_completion(
     if not refs:
         return False, "current OrgRun evidence is required"
     from hermes_cli.kanban_portfolio import require_current_org_run_evidence
+    from hermes_cli.kanban_swarm import latest_blackboard
+    mandate = latest_blackboard(conn, topology.anchor_id).get("remote_mandates", {}).get(remote_task_id, {})
+    mandate_version = str(mandate.get("version") or "") if isinstance(mandate, dict) else ""
+    if not mandate_version or mandate.get("status") not in {"current", "accepted"}:
+        return False, "remote mandate is not currently accepted"
     try:
-        require_current_org_run_evidence(conn, topology=topology, evidence_refs=refs)
+        require_current_org_run_evidence(
+            conn, topology=topology, evidence_refs=refs,
+            remote_id=remote_task_id, mandate_version=mandate_version,
+        )
     except ValueError as exc:
         return False, str(exc)
     from hermes_cli.hades_kanban_sync import publish_remote_result

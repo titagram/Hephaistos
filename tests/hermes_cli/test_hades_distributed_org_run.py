@@ -41,6 +41,23 @@ def _contract(version=1):
             "task_version": version, "contract_version": version}
 
 
+def _approved_row(conn, org, *, remote_id="r1", version="2", message_id="approval-1"):
+    from hermes_cli.hades_persephone_messages import AGENT_MESSAGE_SCHEMA, parse_envelope
+    from hermes_cli.hades_persephone_store import approve_request, record_inbox, transition_message
+    envelope = parse_envelope({"schema": AGENT_MESSAGE_SCHEMA, "message_id": message_id,
+        "correlation_id": message_id, "causation_id": None, "project_id": org.project_id,
+        "sender_agent_id": "agent", "target_agent_id": "human-gate",
+        "target_workspace_binding_id": None, "message_type": "local_decision", "effect": "mutating",
+        "capability": "org_run_reconciliation", "remote_task_id": remote_id,
+        "remote_task_version": version, "expires_at": 9999999999,
+        "payload": {"action": "accept_org_run_mandate", "org_run_id": org.anchor_id,
+                    "remote_id": remote_id, "mandate_version": version}}, now=100)
+    record_inbox(conn, envelope, now=100)
+    transition_message(conn, message_id, "waiting_human_approval", now=101)
+    approve_request(conn, message_id, approved=True, decided_by="human:gabriele", now=102)
+    return message_id
+
+
 def test_remote_version_change_blocks_only_derived_subtree(tmp_path):
     conn = kb.connect(tmp_path / "kanban.db")
     try:
@@ -116,18 +133,23 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
         org = create_org_run(conn, plan, validation)
         import_remote_mandate(conn, topology=org, remote_id="r1", version="1")
         stale = reconcile_remote_mandate(conn, topology=org, dependencies=validation.ordered_dependencies, remote_id="r1", version="2")
-        with pytest.raises(ValueError, match="human approval"):
-            accept_remote_mandate_reconciliation(conn, topology=org, remote_id="r1", observed_version="2", approval={"decision": "accepted"})
-        approval = {
-            "decision": "accepted", "approved_by": "human:gabriele", "evidence_ref": "approval:42",
-            "replacement_contracts": {
+        with pytest.raises(ValueError, match="guarded reconciliation"):
+            import_remote_mandate(conn, topology=org, remote_id="r1", version="2")
+        from hermes_cli import hades_backend_db
+        approval_conn = hades_backend_db.connect(tmp_path / "approvals.db")
+        replacements = {
                 node_id: {"expected_contract_version": None, "contract": _contract(2)}
                 for node_id in stale.affected_nodes
-            },
         }
+        with pytest.raises(ValueError, match="durable approval"):
+            accept_remote_mandate_reconciliation(conn, topology=org, remote_id="r1", observed_version="2",
+                                                 approval_conn=approval_conn, approval_message_id="forged",
+                                                 replacement_contracts=replacements)
+        approval_id = _approved_row(approval_conn, org)
         accepted = accept_remote_mandate_reconciliation(
             conn, topology=org, remote_id="r1", observed_version="2",
-            approval=approval,
+            approval_conn=approval_conn, approval_message_id=approval_id,
+            replacement_contracts=replacements,
         )
         assert accepted.status == "accepted"
         assert set(accepted.resumed_nodes) == set(stale.affected_nodes)
@@ -136,10 +158,32 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
         with pytest.raises(ValueError, match="not awaiting"):
             accept_remote_mandate_reconciliation(
                 conn, topology=org, remote_id="r1", observed_version="2",
-                approval=approval,
+                approval_conn=approval_conn, approval_message_id=approval_id,
+                replacement_contracts=replacements,
             )
+        approval_conn.close()
     finally:
         conn.close()
+
+
+def test_contract_cas_is_monotonic_across_connections(tmp_path):
+    import pytest
+    path = tmp_path / "kanban.db"
+    first = kb.connect(path)
+    plan = _plan(); org = create_org_run(first, plan, validate_execution_portfolio(plan))
+    node = org.remote_tasks["r1"].execution_id
+    persist_org_run_contract(first, topology=org, remote_id="r1", node_id=node,
+                             mandate_version="1", contract=_contract(1))
+    second = kb.connect(path)
+    persist_org_run_contract(first, topology=org, remote_id="r1", node_id=node,
+                             mandate_version="2", contract=_contract(2), expected_contract_version=1)
+    with pytest.raises(ValueError, match="CAS failed"):
+        persist_org_run_contract(second, topology=org, remote_id="r1", node_id=node,
+                                 mandate_version="2", contract=_contract(3), expected_contract_version=1)
+    with pytest.raises(ValueError, match="monotonically"):
+        persist_org_run_contract(second, topology=org, remote_id="r1", node_id=node,
+                                 mandate_version="2", contract=_contract(2), expected_contract_version=2)
+    first.close(); second.close()
 
 
 def test_publish_is_durable_project_scoped_and_idempotent(tmp_path):
