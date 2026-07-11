@@ -367,7 +367,6 @@ def execute_stored_information_request(
             ),
             root,
         )
-    transition_message(conn, request_message_id, "processed", now=now)
     envelope = make_response(
         stored.envelope,
         message_id=response_message_id,
@@ -378,6 +377,7 @@ def execute_stored_information_request(
         payload=response.to_payload(),
         expires_at=min(stored.envelope.expires_at, now + 300),
     )
+    transition_message(conn, request_message_id, "processed", now=now)
     return persist_response_for_request(conn, request_message_id, envelope, now=now)
 
 

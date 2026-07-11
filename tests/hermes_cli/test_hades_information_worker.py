@@ -318,3 +318,31 @@ def test_large_memory_matches_still_fit_wire_payload(tmp_path):
 
     assert len(str(response.to_payload()).encode()) < 16_000
     assert response.truncated is True
+
+
+def test_response_construction_failure_leaves_request_retryable(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+    from hermes_cli.hades_persephone_store import get_message, record_inbox, transition_message
+
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+    conn = db.connect(tmp_path / "construction-failure.db")
+    request = _request(tmp_path)
+    record_inbox(conn, request, now=NOW)
+    transition_message(conn, request.message_id, "processing", now=NOW)
+    monkeypatch.setattr(
+        worker,
+        "make_response",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("cannot encode")),
+    )
+
+    with pytest.raises(ValueError, match="cannot encode"):
+        worker.execute_stored_information_request(
+            conn,
+            request.message_id,
+            binding=_binding(tmp_path),
+            now=NOW,
+            response_message_id="response_invalid",
+        )
+
+    stored = get_message(conn, request.message_id)
+    assert stored is not None and stored.state == "processing"

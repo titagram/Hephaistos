@@ -39,6 +39,9 @@
 5. Hardening RED/GREEN covered recursive symlink escape, `.git` symlink
    escape, oversized cached-memory evidence, secret-bearing keys, absolute
    local paths, and safely summarized handler errors.
+6. Atomicity RED/GREEN proved response-envelope construction failure leaves
+   the request in `processing` instead of stranding it in `processed` without
+   a durable response.
 
 ## Verification
 
@@ -49,7 +52,7 @@
   tests/hermes_cli/test_hades_persephone_transport.py \
   tests/hermes_cli/test_hades_persephone_receiver.py \
   tests/hermes_cli/test_hades_information_worker.py -q
-163 passed in 3.40s
+164 passed
 
 .venv/bin/python -m ruff check \
   hermes_cli/hades_information_worker.py \
