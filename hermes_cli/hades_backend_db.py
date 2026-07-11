@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from hermes_cli.sqlite_util import write_txn
+from hermes_cli.sqlite_util import add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
 
 TERMINAL_BACKEND_JOB_STATUSES = (
@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS persephone_inbox (
     human_decision   TEXT,
     human_decided_by TEXT,
     human_reason     TEXT,
-    human_decided_at INTEGER
+    human_decided_at INTEGER,
+    response_message_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_persephone_inbox_target_state
@@ -173,6 +174,14 @@ CREATE TABLE IF NOT EXISTS persephone_cursors (
     PRIMARY KEY(project_id, target_agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS persephone_message_identities (
+    message_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    direction  TEXT NOT NULL CHECK(direction IN ('inbox', 'outbox')),
+    envelope   TEXT NOT NULL,
+    claimed_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
@@ -182,6 +191,68 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 
 _INITIALIZED_PATHS: set[str] = set()
+
+
+class PersephoneIdentityMigrationConflict(RuntimeError):
+    """Existing queue rows violate the global agent-message ID invariant."""
+
+
+def _canonical_envelope_json(value: str, *, message_id: str) -> str:
+    try:
+        decoded = json.loads(value)
+        if not isinstance(decoded, dict):
+            raise ValueError("envelope is not an object")
+        return json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise PersephoneIdentityMigrationConflict(
+            f"invalid stored Persephone envelope for message_id {message_id!r}: {exc}"
+        ) from None
+
+
+def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
+    """Backfill the global ID registry from O2 databases, rejecting ambiguity."""
+    add_column_if_missing(
+        conn,
+        "persephone_inbox",
+        "response_message_id",
+        "response_message_id TEXT",
+    )
+    with write_txn(conn):
+        for table, direction in (
+            ("persephone_inbox", "inbox"),
+            ("persephone_outbox", "outbox"),
+        ):
+            rows = conn.execute(
+                f"SELECT message_id, project_id, envelope FROM {table} ORDER BY message_id"
+            ).fetchall()
+            for row in rows:
+                message_id = str(row["message_id"])
+                project_id = str(row["project_id"])
+                envelope = _canonical_envelope_json(row["envelope"], message_id=message_id)
+                existing = conn.execute(
+                    "SELECT project_id, direction, envelope FROM persephone_message_identities "
+                    "WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if existing is not None and (
+                    existing["project_id"] != project_id
+                    or existing["direction"] != direction
+                    or _canonical_envelope_json(existing["envelope"], message_id=message_id)
+                    != envelope
+                ):
+                    raise PersephoneIdentityMigrationConflict(
+                        f"conflicting pre-existing Persephone identity for message_id {message_id!r}"
+                    )
+                conn.execute(
+                    "INSERT OR IGNORE INTO persephone_message_identities "
+                    "(message_id, project_id, direction, envelope, claimed_at) VALUES (?, ?, ?, ?, ?)",
+                    (message_id, project_id, direction, envelope, _now()),
+                )
+                if row["envelope"] != envelope:
+                    conn.execute(
+                        f"UPDATE {table} SET envelope = ? WHERE message_id = ?",
+                        (envelope, message_id),
+                    )
 
 
 def _now() -> int:
@@ -213,6 +284,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
         apply_wal_with_fallback(conn, db_label="hades_backend.db")
         if resolved not in _INITIALIZED_PATHS:
             conn.executescript(SCHEMA_SQL)
+            _migrate_persephone_message_identities(conn)
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
         conn.close()

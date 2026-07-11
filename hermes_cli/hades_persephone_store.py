@@ -14,7 +14,12 @@ import sqlite3
 import time
 from typing import Literal
 
-from hermes_cli.hades_persephone_messages import AgentMessageEnvelope, MessageType, parse_envelope
+from hermes_cli.hades_persephone_messages import (
+    AgentMessageEnvelope,
+    EffectClass,
+    MessageType,
+    parse_envelope,
+)
 from hermes_cli.sqlite_util import write_txn
 
 
@@ -45,6 +50,7 @@ class StoredMessage:
     human_decided_by: str | None = None
     human_reason: str | None = None
     human_decided_at: int | None = None
+    response_message_id: str | None = None
 
 
 _OUTBOX_TRANSITIONS = {
@@ -62,7 +68,9 @@ _INBOX_TRANSITIONS = {
     "waiting_human_approval": frozenset({"expired"}),
     "approved": frozenset({"processing", "expired"}),
     "processing": frozenset({"processed", "rejected", "expired"}),
-    "processed": frozenset({"responded", "acknowledged"}),
+    # A request reaches responded only through persist_response_for_request(),
+    # which links the durable outbox record in the same transaction.
+    "processed": frozenset({"acknowledged"}),
     "responded": frozenset({"acknowledged"}),
     "acknowledged": frozenset(),
     "rejected": frozenset(),
@@ -75,6 +83,11 @@ _RESPONSE_TYPES = frozenset(
         MessageType.LOCAL_DECISION,
     }
 )
+_EXPECTED_RESPONSE_TYPE = {
+    MessageType.INFORMATION_REQUEST: MessageType.INFORMATION_RESPONSE,
+    MessageType.STATUS_QUERY: MessageType.STATUS_RESPONSE,
+    MessageType.CANCEL_REQUEST: MessageType.LOCAL_DECISION,
+}
 
 
 def _now(value: int | None) -> int:
@@ -124,6 +137,71 @@ def _inbox_from_row(row: sqlite3.Row) -> StoredMessage:
         human_decided_at=(
             int(row["human_decided_at"]) if row["human_decided_at"] is not None else None
         ),
+        response_message_id=row["response_message_id"],
+    )
+
+
+def _claim_identity_in_txn(
+    conn: sqlite3.Connection,
+    envelope: AgentMessageEnvelope,
+    *,
+    direction: QueueName,
+    claimed_at: int,
+) -> str:
+    encoded = _serialized(envelope)
+    existing = conn.execute(
+        "SELECT project_id, direction, envelope FROM persephone_message_identities "
+        "WHERE message_id = ?",
+        (envelope.message_id,),
+    ).fetchone()
+    if existing is not None:
+        if existing["direction"] != direction:
+            raise MessageConflict(
+                f"message_id {envelope.message_id!r} is already claimed for direction "
+                f"{existing['direction']!r}"
+            )
+        if existing["project_id"] != envelope.project_id or existing["envelope"] != encoded:
+            raise MessageConflict(
+                f"message_id {envelope.message_id!r} is already claimed with different data"
+            )
+        return encoded
+    conn.execute(
+        "INSERT INTO persephone_message_identities "
+        "(message_id, project_id, direction, envelope, claimed_at) VALUES (?, ?, ?, ?, ?)",
+        (envelope.message_id, envelope.project_id, direction, encoded, claimed_at),
+    )
+    return encoded
+
+
+def _insert_outbox_in_txn(
+    conn: sqlite3.Connection,
+    envelope: AgentMessageEnvelope,
+    *,
+    timestamp: int,
+    due_at: int,
+) -> None:
+    encoded = _claim_identity_in_txn(
+        conn, envelope, direction="outbox", claimed_at=timestamp
+    )
+    existing = conn.execute(
+        "SELECT envelope FROM persephone_outbox WHERE message_id = ?", (envelope.message_id,)
+    ).fetchone()
+    if existing is not None and existing["envelope"] != encoded:
+        raise MessageConflict(f"outbox message_id {envelope.message_id!r} already has other data")
+    conn.execute(
+        "INSERT OR IGNORE INTO persephone_outbox "
+        "(message_id, project_id, target_agent_id, envelope, state, attempts, "
+        " next_attempt_at, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 'outbox_pending', 0, ?, ?, ?)",
+        (
+            envelope.message_id,
+            envelope.project_id,
+            envelope.target_agent_id,
+            encoded,
+            due_at,
+            timestamp,
+            timestamp,
+        ),
     )
 
 
@@ -155,28 +233,8 @@ def enqueue_outbox(
 ) -> StoredMessage:
     timestamp = _now(now)
     due_at = timestamp if next_attempt_at is None else int(next_attempt_at)
-    encoded = _serialized(envelope)
     with write_txn(conn):
-        existing = conn.execute(
-            "SELECT envelope FROM persephone_outbox WHERE message_id = ?", (envelope.message_id,)
-        ).fetchone()
-        if existing is not None and existing["envelope"] != encoded:
-            raise MessageConflict(f"outbox message_id {envelope.message_id!r} already has other data")
-        conn.execute(
-            "INSERT OR IGNORE INTO persephone_outbox "
-            "(message_id, project_id, target_agent_id, envelope, state, attempts, "
-            " next_attempt_at, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'outbox_pending', 0, ?, ?, ?)",
-            (
-                envelope.message_id,
-                envelope.project_id,
-                envelope.target_agent_id,
-                encoded,
-                due_at,
-                timestamp,
-                timestamp,
-            ),
-        )
+        _insert_outbox_in_txn(conn, envelope, timestamp=timestamp, due_at=due_at)
     result = get_message(conn, envelope.message_id, queue="outbox")
     assert result is not None
     return result
@@ -244,6 +302,7 @@ def record_inbox(
     timestamp = _now(now)
     encoded = _serialized(envelope)
     with write_txn(conn):
+        _claim_identity_in_txn(conn, envelope, direction="inbox", claimed_at=timestamp)
         existing = conn.execute(
             "SELECT envelope FROM persephone_inbox WHERE message_id = ?", (envelope.message_id,)
         ).fetchone()
@@ -267,6 +326,118 @@ def record_inbox(
     return result
 
 
+def _validate_response_link(
+    request: AgentMessageEnvelope,
+    response: AgentMessageEnvelope,
+) -> None:
+    checks = (
+        (response.project_id == request.project_id, "response project does not match request"),
+        (
+            response.correlation_id == request.correlation_id,
+            "response correlation does not match request",
+        ),
+        (response.causation_id == request.message_id, "response causation does not match request"),
+        (response.sender_agent_id == request.target_agent_id, "response sender is not request target"),
+        (response.target_agent_id == request.sender_agent_id, "response target is not request sender"),
+        (
+            response.message_type == _EXPECTED_RESPONSE_TYPE.get(request.message_type),
+            "response type does not match request type",
+        ),
+        (response.capability == request.capability, "response capability does not match request"),
+        (response.remote_task_id == request.remote_task_id, "response remote task does not match request"),
+        (
+            response.remote_task_version == request.remote_task_version,
+            "response remote task version does not match request",
+        ),
+        (response.effect == EffectClass.INFORMATION_READ, "response effect must be information_read"),
+    )
+    for valid, message in checks:
+        if not valid:
+            raise MessageConflict(message)
+
+
+def _linked_response_in_txn(
+    conn: sqlite3.Connection,
+    request: StoredMessage,
+) -> StoredMessage | None:
+    response_id = request.response_message_id
+    if not response_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM persephone_outbox WHERE message_id = ?", (response_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    response = _outbox_from_row(row)
+    identity = conn.execute(
+        "SELECT project_id, direction, envelope FROM persephone_message_identities "
+        "WHERE message_id = ?",
+        (response_id,),
+    ).fetchone()
+    if (
+        identity is None
+        or identity["project_id"] != response.project_id
+        or identity["direction"] != "outbox"
+        or identity["envelope"] != _serialized(response.envelope)
+    ):
+        return None
+    try:
+        _validate_response_link(request.envelope, response.envelope)
+    except MessageConflict:
+        return None
+    return response
+
+
+def persist_response_for_request(
+    conn: sqlite3.Connection,
+    request_message_id: str,
+    response: AgentMessageEnvelope,
+    *,
+    now: int | None = None,
+    next_attempt_at: int | None = None,
+) -> StoredMessage:
+    """Atomically persist a correlated response and link its processed request."""
+    timestamp = _now(now)
+    due_at = timestamp if next_attempt_at is None else int(next_attempt_at)
+    with write_txn(conn):
+        request_row = conn.execute(
+            "SELECT * FROM persephone_inbox WHERE message_id = ?", (request_message_id,)
+        ).fetchone()
+        if request_row is None:
+            raise KeyError(request_message_id)
+        request = _inbox_from_row(request_row)
+        _validate_response_link(request.envelope, response)
+
+        if request.state in {"responded", "acknowledged"}:
+            if request.response_message_id != response.message_id:
+                raise MessageConflict("request is already linked to a different response")
+            stored = _linked_response_in_txn(conn, request)
+            if stored is None or _serialized(stored.envelope) != _serialized(response):
+                raise MessageConflict("request response link is not durably valid")
+            return stored
+        if request.state != "processed":
+            raise InvalidTransition(
+                f"request {request_message_id!r} must be processed before persisting a response"
+            )
+
+        _insert_outbox_in_txn(conn, response, timestamp=timestamp, due_at=due_at)
+        cursor = conn.execute(
+            "UPDATE persephone_inbox SET state = 'responded', response_message_id = ?, "
+            "updated_at = ? WHERE message_id = ? AND state = 'processed' "
+            "AND response_message_id IS NULL",
+            (response.message_id, timestamp, request_message_id),
+        )
+        if cursor.rowcount != 1:
+            raise InvalidTransition(
+                f"concurrent response changed request {request_message_id!r}"
+            )
+        row = conn.execute(
+            "SELECT * FROM persephone_outbox WHERE message_id = ?", (response.message_id,)
+        ).fetchone()
+        assert row is not None
+        return _outbox_from_row(row)
+
+
 def transition_message(
     conn: sqlite3.Connection,
     message_id: str,
@@ -278,30 +449,64 @@ def transition_message(
     last_error: str | None = None,
 ) -> StoredMessage:
     timestamp = _now(now)
-    current = get_message(conn, message_id, queue=queue)
-    if current is None:
-        raise KeyError(message_id)
-    if new_state == current.state:
-        return current
-    transitions = _OUTBOX_TRANSITIONS if queue == "outbox" else _INBOX_TRANSITIONS
-    if new_state not in transitions.get(current.state, frozenset()):
-        raise InvalidTransition(f"cannot transition {queue} {current.state!r} to {new_state!r}")
-    if (
-        queue == "inbox"
-        and current.state == "processed"
-        and new_state == "acknowledged"
-        and current.envelope.message_type not in _RESPONSE_TYPES
-    ):
-        raise InvalidTransition("a request must persist its response before acknowledgement")
-    if (
-        queue == "inbox"
-        and current.state == "received"
-        and new_state == "processing"
-        and current.envelope.effect.value == "mutating"
-    ):
-        raise InvalidTransition("mutating requests require a recorded human approval")
-
     with write_txn(conn):
+        if queue == "outbox":
+            row = conn.execute(
+                "SELECT * FROM persephone_outbox WHERE message_id = ?", (message_id,)
+            ).fetchone()
+            current = _outbox_from_row(row) if row is not None else None
+        elif queue == "inbox":
+            row = conn.execute(
+                "SELECT * FROM persephone_inbox WHERE message_id = ?", (message_id,)
+            ).fetchone()
+            current = _inbox_from_row(row) if row is not None else None
+        else:
+            raise ValueError(f"unsupported queue: {queue}")
+        if current is None:
+            raise KeyError(message_id)
+        if (
+            queue == "inbox"
+            and current.envelope.message_type in _EXPECTED_RESPONSE_TYPE
+            and new_state in {"responded", "acknowledged"}
+            and current.state in {"responded", "acknowledged"}
+            and _linked_response_in_txn(conn, current) is None
+        ):
+            raise InvalidTransition("request has no durable validated response link")
+        if new_state == current.state:
+            return current
+        transitions = _OUTBOX_TRANSITIONS if queue == "outbox" else _INBOX_TRANSITIONS
+        if new_state not in transitions.get(current.state, frozenset()):
+            raise InvalidTransition(
+                f"cannot transition {queue} {current.state!r} to {new_state!r}"
+            )
+        if (
+            queue == "inbox"
+            and current.state == "processed"
+            and new_state == "acknowledged"
+            and current.envelope.message_type not in _RESPONSE_TYPES
+        ):
+            raise InvalidTransition("a request must persist its response before acknowledgement")
+        if (
+            queue == "inbox"
+            and current.envelope.message_type in _EXPECTED_RESPONSE_TYPE
+            and new_state == "responded"
+        ):
+            raise InvalidTransition("requests become responded only when a response is persisted")
+        if (
+            queue == "inbox"
+            and current.state == "responded"
+            and new_state == "acknowledged"
+            and _linked_response_in_txn(conn, current) is None
+        ):
+            raise InvalidTransition("request has no durable validated response link")
+        if (
+            queue == "inbox"
+            and current.state == "received"
+            and new_state == "processing"
+            and current.envelope.effect == EffectClass.MUTATING
+        ):
+            raise InvalidTransition("mutating requests require a recorded human approval")
+
         if queue == "outbox":
             due_at = current.next_attempt_at if next_attempt_at is None else int(next_attempt_at)
             cursor = conn.execute(
@@ -309,7 +514,7 @@ def transition_message(
                 "updated_at = ? WHERE message_id = ? AND state = ?",
                 (new_state, due_at, last_error, timestamp, message_id, current.state),
             )
-        else:
+        else:  # inbox
             cursor = conn.execute(
                 "UPDATE persephone_inbox SET state = ?, updated_at = ? "
                 "WHERE message_id = ? AND state = ?",
@@ -429,6 +634,7 @@ __all__ = [
     "get_cursor",
     "get_message",
     "pending_human_requests",
+    "persist_response_for_request",
     "record_cursor",
     "record_inbox",
     "recover_abandoned_outbox",
