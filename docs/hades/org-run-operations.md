@@ -12,6 +12,14 @@ An OrgRun is a local Kanban DAG for executing a validated Hades portfolio. The b
 
 `mirror` is opt-in. It must not be enabled until backend capability and profile routing are verified. Local-only cards are never uploaded merely because sync is enabled.
 
+### Remote mandate projection
+
+The project-manager Kanban is authoritative and may contain imperfect natural-language mandates. Hades stores only the stable remote task ID and observed version on the local OrgRun anchor; local execution/review cards are a derived organizational DAG, not replicated backend rows. Every observation is scoped by the backend project UUID. Work from another project must never be imported or correlated, even when another Hades instance is active there.
+
+When an accepted remote version changes, Hades marks that projection stale, invalidates its local evidence, and pauses only the dependent local subtree plus its integration products. It does not silently accept the new wording. A human must review the change, rebuild affected contracts when necessary, and explicitly accept the new version before work resumes.
+
+Clarification questions, local decisions, progress summaries, and verified completion proposals are bounded, append-only Persephone messages with stable idempotency IDs. They are information records only: Hades never rewrites a project-manager card. Automatic read-only information exchange is allowed; any proposal that would cause a remote change remains subject to human approval. Cursor/offline state is explicit, retries retain the stable message ID, and switching sync to `off` performs no network work.
+
 ## Delegation preflight
 
 Resolve local model routing before materializing or dispatching an OrgRun:

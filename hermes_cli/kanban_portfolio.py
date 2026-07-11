@@ -29,6 +29,123 @@ class OrgRunCreated:
     synthesis_id: str
 
 
+@dataclass(frozen=True)
+class RemoteMandateReconciliation:
+    """Outcome of comparing one local projection with its remote mandate."""
+
+    remote_id: str
+    previous_version: str | None
+    observed_version: str
+    status: str
+    affected_remote_ids: tuple[str, ...] = ()
+    affected_nodes: tuple[str, ...] = ()
+    evidence_valid: bool = True
+
+
+def _mandates(conn: sqlite3.Connection, topology: OrgRunCreated) -> dict[str, dict]:
+    raw = latest_blackboard(conn, topology.anchor_id).get("remote_mandates", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, dict)
+    }
+
+
+def import_remote_mandate(
+    conn: sqlite3.Connection,
+    *,
+    topology: OrgRunCreated,
+    remote_id: str,
+    version: str,
+    author: str = "hades-backend-sync",
+) -> None:
+    """Record an explicitly accepted remote ID/version as projection metadata."""
+    remote_id = str(remote_id).strip()
+    version = str(version).strip()
+    if remote_id not in topology.remote_tasks:
+        raise ValueError(f"unknown remote mandate: {remote_id}")
+    if not version:
+        raise ValueError("remote mandate version is required")
+    mandates = _mandates(conn, topology)
+    mandates[remote_id] = {"version": version, "status": "current", "evidence_valid": True}
+    post_blackboard_update(
+        conn, topology.anchor_id, author=author, key="remote_mandates", value=mandates
+    )
+
+
+def reconcile_remote_mandate(
+    conn: sqlite3.Connection,
+    *,
+    topology: OrgRunCreated,
+    dependencies: dict[str, tuple[str, ...]],
+    remote_id: str,
+    version: str,
+    author: str = "hades-backend-sync",
+) -> RemoteMandateReconciliation:
+    """Pause only the local subtree derived from a changed remote mandate.
+
+    This never accepts the new version.  A human/local reconciliation must call
+    :func:`import_remote_mandate` after reviewing the changed natural-language
+    mandate and rebuilding any affected task contracts.
+    """
+    remote_id = str(remote_id).strip()
+    version = str(version).strip()
+    if remote_id not in topology.remote_tasks:
+        raise ValueError(f"unknown remote mandate: {remote_id}")
+    if not version:
+        raise ValueError("remote mandate version is required")
+    mandates = _mandates(conn, topology)
+    previous = mandates.get(remote_id, {}).get("version")
+    if previous is None:
+        import_remote_mandate(
+            conn, topology=topology, remote_id=remote_id, version=version, author=author
+        )
+        return RemoteMandateReconciliation(remote_id, None, version, "imported")
+    if str(previous) == version:
+        return RemoteMandateReconciliation(remote_id, str(previous), version, "current")
+
+    affected = {remote_id}
+    changed = True
+    while changed:
+        changed = False
+        for candidate, parents in dependencies.items():
+            if candidate not in affected and any(parent in affected for parent in parents):
+                affected.add(candidate)
+                changed = True
+    node_ids: list[str] = []
+    for candidate in sorted(affected):
+        remote = topology.remote_tasks[candidate]
+        node_ids.extend((remote.execution_id, remote.review_id, remote.integration_ready_id, remote.completion_id))
+    # Integration products depend on every projected remote task.
+    node_ids.extend((topology.integration_id, topology.review_id, topology.synthesis_id))
+    for task_id in node_ids:
+        task = kb.get_task(conn, task_id)
+        if task is not None and task.status not in {"done", "archived", "blocked"}:
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', block_kind = 'needs_input' WHERE id = ?",
+                (task_id,),
+            )
+    conn.commit()
+    mandates[remote_id] = {
+        "version": str(previous), "observed_version": version,
+        "status": "stale", "evidence_valid": False,
+    }
+    post_blackboard_update(conn, topology.anchor_id, author=author, key="remote_mandates", value=mandates)
+    post_blackboard_update(
+        conn, topology.anchor_id, author=author, key=f"stale_projection:{remote_id}",
+        value={"schema": "hades.remote-projection-stale.v1", "remote_id": remote_id,
+               "accepted_version": str(previous), "observed_version": version,
+               "affected_remote_ids": sorted(affected), "evidence_valid": False,
+               "requires_human_reconciliation": True},
+    )
+    return RemoteMandateReconciliation(
+        remote_id, str(previous), version, "stale", tuple(sorted(affected)),
+        tuple(node_ids), False,
+    )
+
+
 def _protocol(org_run_id: str, remote_task_id: str, write_scope: tuple[str, ...]) -> str:
     scope = ", ".join(write_scope) or "(read-only)"
     return (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from copy import deepcopy
 from typing import Any, Callable, TypeVar
 
@@ -491,3 +492,89 @@ def claim_org_run_remote_task(
         work_item_id=remote.work_item_id,
         local_workspace_id=local_workspace_id,
     )
+
+
+_ORG_PROPOSAL_TYPES = frozenset(
+    {"clarification", "decision_proposal", "progress_summary", "completion_proposal"}
+)
+
+
+def publish_org_run_proposal(
+    *,
+    client: object,
+    project_id: str,
+    sender_agent_id: str,
+    target_agent_id: str,
+    remote_task_id: str,
+    remote_task_version: str,
+    proposal_type: str,
+    summary: str,
+    evidence_refs: _Iterable[str] = (),
+    idempotency_key: str,
+    target_workspace_binding_id: str | None = None,
+    now: int | None = None,
+) -> str:
+    """Append a bounded proposal to Persephone; never rewrite a PM card.
+
+    ``idempotency_key`` deterministically identifies the envelope.  The local
+    runtime suppresses an immediate duplicate and the stable message ID lets
+    the durable backend deduplicate retries after restart or connectivity loss.
+    """
+    values = {
+        "project_id": project_id, "sender_agent_id": sender_agent_id,
+        "target_agent_id": target_agent_id, "remote_task_id": remote_task_id,
+        "remote_task_version": remote_task_version, "idempotency_key": idempotency_key,
+    }
+    clean = {key: str(value or "").strip() for key, value in values.items()}
+    missing = [key for key, value in clean.items() if not value]
+    if missing:
+        raise ValueError(f"required proposal fields are blank: {', '.join(missing)}")
+    if proposal_type not in _ORG_PROPOSAL_TYPES:
+        raise ValueError(f"unsupported proposal_type: {proposal_type}")
+    summary = str(summary or "").strip()
+    if not summary or len(summary) > 1000:
+        raise ValueError("summary must contain 1..1000 characters")
+    refs = [str(value).strip() for value in evidence_refs if str(value).strip()]
+    if len(refs) > 16:
+        raise ValueError("evidence_refs exceeds 16 items")
+    message_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hades:{clean['project_id']}:{clean['idempotency_key']}",
+    ))
+    published = getattr(client, "_hades_org_proposal_ids", None)
+    if published is None:
+        published = set()
+        try:
+            setattr(client, "_hades_org_proposal_ids", published)
+        except Exception:
+            pass
+    if message_id in published:
+        return message_id
+    from hermes_cli.hades_persephone_messages import (
+        AGENT_MESSAGE_SCHEMA, EffectClass, MessageType, parse_envelope,
+    )
+    timestamp = int(time.time()) if now is None else int(now)
+    envelope = parse_envelope({
+        "schema": AGENT_MESSAGE_SCHEMA,
+        "message_id": message_id,
+        "correlation_id": message_id,
+        "causation_id": None,
+        "project_id": clean["project_id"],
+        "sender_agent_id": clean["sender_agent_id"],
+        "target_agent_id": clean["target_agent_id"],
+        "target_workspace_binding_id": str(target_workspace_binding_id or "").strip() or None,
+        "message_type": MessageType.LOCAL_DECISION.value,
+        "effect": EffectClass.INFORMATION_READ.value,
+        "capability": "org_run_projection",
+        "remote_task_id": clean["remote_task_id"],
+        "remote_task_version": clean["remote_task_version"],
+        "expires_at": timestamp + 86_400,
+        "payload": {
+            "schema": "hades.org-run-proposal.v1", "proposal_type": proposal_type,
+            "summary": summary, "evidence_refs": refs,
+            "requires_human_approval_for_remote_change": True,
+        },
+    }, now=timestamp)
+    client.create_inbox_message(**envelope.to_dict())
+    published.add(message_id)
+    return message_id

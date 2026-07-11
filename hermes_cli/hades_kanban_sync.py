@@ -27,6 +27,18 @@ class KanbanSyncResult:
 
 
 @dataclass(frozen=True)
+class RemoteMandateSyncResult:
+    """Operator-visible status for optional remote mandate observation."""
+
+    mode: str
+    project_id: str
+    cursor: str | None = None
+    observed: int = 0
+    status: str = "disabled"
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class RemoteLease:
     work_item_id: str
     lease_token: str
@@ -116,6 +128,70 @@ def sync_remote_kanban(
         created=created,
         existing=existing,
         skipped=skipped,
+    )
+
+
+def sync_remote_mandates(
+    conn,
+    client: object,
+    *,
+    project_id: str,
+    mode: str = "off",
+    cursor: str | None = None,
+    projection_anchor_id: str | None = None,
+    limit: int = 100,
+) -> RemoteMandateSyncResult:
+    """Observe project-scoped remote mandates without mutating remote cards.
+
+    The caller performs semantic reconciliation because it owns the OrgRun
+    topology.  This bounded primitive supplies an explicit cursor and offline
+    status; ``off`` is a true network-off switch.
+    """
+    if mode not in SYNC_MODES:
+        raise ValueError(f"mode must be one of {sorted(SYNC_MODES)}")
+    project_id = str(project_id).strip()
+    if not project_id:
+        raise ValueError("project_id is required")
+    if mode == "off":
+        return RemoteMandateSyncResult(mode, project_id)
+    if cursor is None and projection_anchor_id:
+        from hermes_cli.kanban_swarm import latest_blackboard
+        stored = latest_blackboard(conn, projection_anchor_id).get("remote_projection_sync")
+        if isinstance(stored, dict) and stored.get("project_id") == project_id:
+            cursor = str(stored.get("cursor") or "").strip() or None
+    try:
+        response = client.list_agent_work_items(
+            project_id=project_id,
+            status="queued",
+            limit=max(1, min(int(limit), 100)),
+            **({"cursor": cursor} if cursor else {}),
+        )
+    except Exception as exc:
+        result = RemoteMandateSyncResult(
+            mode, project_id, cursor, status="offline", error=str(exc)[:500]
+        )
+        if projection_anchor_id:
+            _persist_projection_sync(conn, projection_anchor_id, result)
+        return result
+    next_cursor = None
+    if isinstance(response, dict):
+        next_cursor = str(response.get("next_cursor") or "").strip() or None
+    result = RemoteMandateSyncResult(
+        mode, project_id, next_cursor, observed=len(_items(response)), status="observed"
+    )
+    if projection_anchor_id:
+        _persist_projection_sync(conn, projection_anchor_id, result)
+    return result
+
+
+def _persist_projection_sync(conn, anchor_id: str, result: RemoteMandateSyncResult) -> None:
+    from hermes_cli.kanban_swarm import post_blackboard_update
+    post_blackboard_update(
+        conn, anchor_id, author=LEASE_AUTHOR, key="remote_projection_sync",
+        value={"schema": "hades.remote-projection-sync.v1", "mode": result.mode,
+               "project_id": result.project_id, "cursor": result.cursor,
+               "observed": result.observed, "status": result.status,
+               "error": result.error},
     )
 
 
