@@ -2311,7 +2311,11 @@ def _format_backend_prefetch(response: dict[str, Any]) -> str:
     version = str(response.get("version") or response.get("etag") or "live")
     lines = [f"Shared Hades project memory (live search {version}):"]
     for item in items:
-        summary = _compact_text(_item_summary(item), max_chars=520)
+        summary_text = _item_summary(item)
+        excerpt = str(item.get("payload_excerpt") or "").strip()
+        if excerpt and excerpt not in summary_text:
+            summary_text = f"{summary_text} — {excerpt}"
+        summary = _compact_text(summary_text, max_chars=520)
         if not summary:
             continue
         domain = _item_domain(item)

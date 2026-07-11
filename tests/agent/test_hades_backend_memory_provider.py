@@ -1092,6 +1092,7 @@ def test_hades_backend_memory_provider_prefetch_falls_back_to_wiki_when_broad_se
 
     assert [call["domain"] for call in calls] == ["all", "wiki"]
     assert "Entity index" in context
+    assert "Workers and departments" in context
 
 
 def test_hades_backend_memory_provider_prefetch_does_not_query_wiki_when_broad_search_is_usable(
