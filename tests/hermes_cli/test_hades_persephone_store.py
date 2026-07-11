@@ -314,6 +314,28 @@ def test_recover_abandoned_legacy_processed_information_request(tmp_db):
     assert stored is not None and stored.state == "received"
 
 
+def test_abandoned_recovery_processes_one_deterministic_bounded_batch(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        recover_abandoned_information_requests,
+        record_inbox,
+        transition_message,
+    )
+
+    for index in range(5):
+        request = _envelope(message_id=f"batch_{index}")
+        record_inbox(tmp_db, request, now=100 + index)
+        transition_message(tmp_db, request.message_id, "processing", now=110 + index)
+
+    assert recover_abandoned_information_requests(
+        tmp_db, now=200, abandoned_before=150, limit=2
+    ) == 2
+    rows = tmp_db.execute(
+        "SELECT message_id, state FROM persephone_inbox ORDER BY updated_at, message_id"
+    ).fetchall()
+    recovered = [row["message_id"] for row in rows if row["state"] == "received"]
+    assert recovered == ["batch_0", "batch_1"]
+
+
 def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

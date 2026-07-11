@@ -54,13 +54,14 @@ MAX_SCAN_SECONDS = 2.0
 MAX_MEMORY_NODES = 2_000
 MAX_MEMORY_DEPTH = 8
 MAX_MEMORY_STRING = 4_096
+MAX_PENDING_DIRS = 128
 _LOCAL_PATH_RE = re.compile(
     r"(?<![\w])/(?:Users|home|private|tmp|var/folders)/[^\s,'\"}]+"
 )
-_SECRET_ASSIGN_RE = re.compile(
-    r"(?i)([\"']?\b(?:password|passphrase|secret|token|api[_-]?key|access[_-]?key|"
-    r"private[_-]?key|authorization|credential|cookie|session|aws_secret_access_key)"
-    r"\b[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\r\n,}\]]+)"
+_ASSIGNMENT_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*(?:export\s+)?)(?P<quote>[\"']?)"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*"
+    r"(?P<separator>[:=])(?P<value>.*)$"
 )
 _PEM_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----.*?"
@@ -72,17 +73,11 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-
 _KNOWN_TOKEN_RE = re.compile(
     r"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"AIza[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9._-]{20,}|"
     r"Bearer\s+[A-Za-z0-9._~+/-]{10,})\b"
 )
-_SENSITIVE_KEYS = frozenset(
-    {
-        "password", "passphrase", "secret", "token", "api_key", "apikey",
-        "access_key", "private_key", "authorization", "credential", "credentials",
-        "cookie", "session", "client_secret", "aws_secret_access_key",
-    }
-)
 _EXCLUDED_DIRS = frozenset(
-    {".git", ".hermes", ".hades", ".codex", ".ssh", "secrets", "credentials", ".venv", "venv", "node_modules", "dist", "build"}
+    {".git", ".hermes", ".hades", ".codex", ".ssh", ".docker", ".aws", ".azure", ".gcp", "secrets", "credentials", ".venv", "venv", "node_modules", "dist", "build"}
 )
 _SENSITIVE_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".crt", ".cer"})
 
@@ -187,11 +182,22 @@ def _is_sensitive_name(path: Path) -> bool:
     stem = Path(name).stem.casefold()
     stem_normalized = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")
     suffix = Path(name).suffix.casefold()
+    tokens = tuple(token for token in re.split(r"[^a-z0-9]+", stem) if token)
+    cloud_config_path = any(
+        parts[index : index + 2] == (".config", "gcloud")
+        for index in range(max(0, len(parts) - 1))
+    )
     return (
-        name == ".env"
+        cloud_config_path
+        or name == ".env"
         or name.startswith(".env.")
         or name == ".envrc"
+        or suffix == ".env"
         or name in {".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
+        or "service_account" in stem_normalized
+        or ("service" in tokens and "account" in tokens)
+        or stem_normalized == "application_default_credentials"
+        or any(token in {"credential", "credentials", "secret", "secrets", "token", "tokens"} for token in tokens)
         or stem in {"credential", "credentials", "secret", "secrets", "token", "tokens", "auth", "oauth", "providers"}
         or (
             any(marker in stem_normalized.split("_") for marker in ("auth", "oauth", "provider", "providers"))
@@ -234,6 +240,8 @@ def _safe_text(path: Path, budget: _ReadBudget | None = None) -> str | None:
             if size > MAX_FILE_BYTES or active.bytes_read + size > MAX_AGGREGATE_BYTES:
                 return None
             raw = handle.read(MAX_FILE_BYTES + 1)
+        if time.monotonic() > active.deadline:
+            return None
         if len(raw) > MAX_FILE_BYTES:
             return None
         active.files += 1
@@ -246,35 +254,47 @@ def _safe_text(path: Path, budget: _ReadBudget | None = None) -> str | None:
 
 
 def _source_files(root: Path, budget: _ReadBudget):
-    for current, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-        if not budget.available():
-            break
+    pending = [root]
+    while pending and budget.available():
+        current = pending.pop()
         budget.dirs += 1
-        safe_dirs: list[str] = []
-        for name in dirnames:
-            budget.entries += 1
-            candidate = Path(current) / name
-            if budget.entries >= MAX_ENTRIES_SCANNED:
-                break
-            if name.casefold() not in _EXCLUDED_DIRS and not candidate.is_symlink():
-                safe_dirs.append(name)
-        dirnames[:] = safe_dirs
-        for name in filenames:
-            budget.entries += 1
-            if not budget.available():
-                return
-            path = Path(current) / name
-            relative = path.relative_to(root)
-            if _is_sensitive_name(relative) or path.is_symlink():
-                continue
-            yield path, relative.as_posix(), budget
+        try:
+            scanner = os.scandir(current)
+            with scanner as entries:
+                iterator = iter(entries)
+                while budget.available():
+                    try:
+                        entry = next(iterator)
+                    except StopIteration:
+                        break
+                    budget.entries += 1
+                    relative = Path(entry.path).relative_to(root)
+                    if entry.is_symlink() or _is_sensitive_name(relative):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if (
+                            entry.name.casefold() not in _EXCLUDED_DIRS
+                            and len(pending) < MAX_PENDING_DIRS
+                        ):
+                            pending.append(Path(entry.path))
+                        continue
+                    if entry.is_file(follow_symlinks=False):
+                        yield Path(entry.path), relative.as_posix(), budget
+        except OSError:
+            continue
 
 
 def _source_slice(root: Path, payload: Mapping[str, Any]) -> InformationResponse:
     path, relative = _bounded_path(root, payload.get("path"))
-    text = _safe_text(path, _ReadBudget.start())
+    budget = _ReadBudget.start()
+    text = _safe_text(path, budget)
     if text is None:
-        return InformationResponse("Source file is unavailable.", (), False, ("file could not be read",))
+        return InformationResponse(
+            "Source file is unavailable.",
+            (),
+            not budget.available(),
+            ("file could not be read",),
+        )
     lines = text.splitlines()
     start = payload.get("start_line", 1)
     end = payload.get("end_line", min(len(lines), 200))
@@ -399,15 +419,27 @@ def _memory_search(
         return InformationResponse("Project memory has no cached matches.", (), False, ("local cache may be incomplete",))
     needle = query.casefold()
     evidence: list[dict[str, Any]] = []
-    work = {"nodes": 0, "deadline": time.monotonic() + MAX_SCAN_SECONDS}
+    work = {
+        "nodes": 0,
+        "deadline": time.monotonic() + MAX_SCAN_SECONDS,
+        "clipped": False,
+    }
     for index, item in enumerate(cache.items):
         if index >= MAX_MEMORY_NODES or time.monotonic() > work["deadline"]:
+            work["clipped"] = True
             break
         if _bounded_contains(item, needle, work=work, depth=0, seen=set()):
             evidence.append({"kind": "project_memory", "index": index, "item": item})
             if len(evidence) == MAX_EVIDENCE_ITEMS:
+                if index + 1 < len(cache.items):
+                    work["clipped"] = True
                 break
-    return InformationResponse(f"Found {len(evidence)} cached project-memory item(s).", tuple(evidence), False, ("results use the local synchronized cache",))
+    return InformationResponse(
+        f"Found {len(evidence)} cached project-memory item(s).",
+        tuple(evidence),
+        bool(work["clipped"]),
+        ("results use the local synchronized cache",),
+    )
 
 
 def _bounded_contains(
@@ -419,8 +451,10 @@ def _bounded_contains(
     seen: set[int],
 ) -> bool:
     if depth > MAX_MEMORY_DEPTH or work["nodes"] >= MAX_MEMORY_NODES:
+        work["clipped"] = True
         return False
     if time.monotonic() > work["deadline"]:
+        work["clipped"] = True
         return False
     work["nodes"] += 1
     if isinstance(value, str):
@@ -434,6 +468,7 @@ def _bounded_contains(
         seen.add(identity)
         for index, (key, item) in enumerate(value.items()):
             if index >= MAX_MEMORY_NODES:
+                work["clipped"] = True
                 break
             if _bounded_contains(str(key)[:MAX_MEMORY_STRING], needle, work=work, depth=depth + 1, seen=seen):
                 return True
@@ -442,6 +477,8 @@ def _bounded_contains(
         return False
     if isinstance(value, (list, tuple)):
         seen.add(identity)
+        if len(value) > MAX_MEMORY_NODES:
+            work["clipped"] = True
         return any(
             _bounded_contains(item, needle, work=work, depth=depth + 1, seen=seen)
             for item in value[:MAX_MEMORY_NODES]
@@ -449,58 +486,103 @@ def _bounded_contains(
     return False
 
 
+def _is_sensitive_key(value: Any) -> bool:
+    normalized = str(value).strip(" \"'").casefold()
+    tokens = tuple(token for token in re.split(r"[^a-z0-9]+", normalized) if token)
+    compact = "".join(tokens)
+    sensitive_tokens = {
+        "password", "passphrase", "secret", "token", "authorization",
+        "credential", "credentials", "cookie", "session", "jwt", "bearer",
+    }
+    sensitive_compounds = {
+        "apikey", "accesskey", "privatekey", "clientsecret",
+        "awssecretaccesskey", "applicationdefaultcredentials",
+    }
+    return (
+        any(token in sensitive_tokens for token in tokens)
+        or any(compound in compact for compound in sensitive_compounds)
+    )
+
+
+def _redact_assignment_lines(value: str) -> str:
+    cleaned: list[str] = []
+    for line in value.splitlines(keepends=True):
+        ending = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if ending else line
+        match = _ASSIGNMENT_LINE_RE.match(body)
+        if match is None or not _is_sensitive_key(match.group("key")):
+            cleaned.append(line)
+            continue
+        trailing = "," if match.group("value").rstrip().endswith(",") else ""
+        cleaned.append(
+            f"{match.group('prefix')}{match.group('quote')}{match.group('key')}"
+            f"{match.group('quote')}{match.group('separator')} ***{trailing}{ending}"
+        )
+    return "".join(cleaned)
+
+
 def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
     root_text = str(root)
     seen: set[int] = set()
     nodes = 0
+    clipped = False
+    deadline = time.monotonic() + MAX_SCAN_SECONDS
 
     def redact_text(value: str) -> str:
+        nonlocal clipped
         without_root = value.replace(root_text, "<workspace>")
         without_paths = _LOCAL_PATH_RE.sub("<redacted-path>", without_root)
         without_pem = _PEM_RE.sub("[REDACTED PRIVATE MATERIAL]", without_paths)
         without_keys = _AWS_KEY_RE.sub("[REDACTED ACCESS KEY]", without_pem)
         without_jwt = _JWT_RE.sub("[REDACTED TOKEN]", without_keys)
         without_tokens = _KNOWN_TOKEN_RE.sub("[REDACTED TOKEN]", without_jwt)
-        without_assignments = _SECRET_ASSIGN_RE.sub(r"\1***", without_tokens)
-        return redact_secret(without_assignments)[:2_000]
-
-    def sensitive_key(value: Any) -> bool:
-        normalized = str(value).strip(" \"'").casefold().replace("-", "_")
-        compact = re.sub(r"[^a-z0-9]", "", normalized)
-        sensitive_compact = {re.sub(r"[^a-z0-9]", "", key) for key in _SENSITIVE_KEYS}
-        return compact in sensitive_compact or normalized in _SENSITIVE_KEYS or any(
-            normalized.endswith(f"_{key}") for key in _SENSITIVE_KEYS
-        )
+        without_assignments = _redact_assignment_lines(without_tokens)
+        safe = redact_secret(without_assignments)
+        if len(safe) > 2_000:
+            clipped = True
+        return safe[:2_000]
 
     def clean(value: Any, *, depth: int = 0) -> Any:
-        nonlocal nodes
+        nonlocal nodes, clipped
         nodes += 1
-        if nodes > MAX_MEMORY_NODES or depth > MAX_MEMORY_DEPTH:
+        if (
+            nodes > MAX_MEMORY_NODES
+            or depth > MAX_MEMORY_DEPTH
+            or time.monotonic() > deadline
+        ):
+            clipped = True
             return "[TRUNCATED]"
         if isinstance(value, str):
             return redact_text(value)
         if isinstance(value, Mapping):
             identity = id(value)
             if identity in seen:
+                clipped = True
                 return "[CYCLE]"
             seen.add(identity)
             result: dict[str, Any] = {}
             for index, (key, item) in enumerate(value.items()):
                 if index >= 128:
+                    clipped = True
                     result["[TRUNCATED]"] = True
                     break
                 clean_key = redact_text(str(key))
-                result[clean_key] = "***" if sensitive_key(key) else clean(item, depth=depth + 1)
+                result[clean_key] = "***" if _is_sensitive_key(key) else clean(item, depth=depth + 1)
             return result
         if isinstance(value, (list, tuple)):
             identity = id(value)
             if identity in seen:
+                clipped = True
                 return "[CYCLE]"
             seen.add(identity)
+            if len(value) > 128:
+                clipped = True
             return [clean(item, depth=depth + 1) for item in value[:128]]
         return value
 
     summary = clean(response.answer_summary)
+    if len(response.residual_uncertainty) > 20:
+        clipped = True
     uncertainty = tuple(clean(item) for item in response.residual_uncertainty[:20])
     evidence: list[dict[str, Any]] = []
     truncated = response.truncated or len(response.evidence_refs) > MAX_EVIDENCE_ITEMS
@@ -516,7 +598,7 @@ def _redacted(response: InformationResponse, root: Path) -> InformationResponse:
             truncated = True
             break
         evidence.append(item)
-    return InformationResponse(summary, tuple(evidence), truncated, uncertainty)
+    return InformationResponse(summary, tuple(evidence), truncated or clipped, uncertainty)
 
 
 def run_information_request(

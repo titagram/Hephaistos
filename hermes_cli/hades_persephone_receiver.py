@@ -215,6 +215,7 @@ class PersephoneReceiver:
                     conn,
                     now=timestamp,
                     abandoned_before=timestamp - 30,
+                    limit=self.batch_size,
                 )
 
     def start(self) -> None:
@@ -353,11 +354,13 @@ class PersephoneReceiver:
     def run_once(self) -> int:
         """Poll a fair bounded subset of project queues and durably ingest it."""
         if self.information_executor is not None:
+            timestamp = self._now()
             with self.connection_factory() as conn:
                 recover_abandoned_information_requests(
                     conn,
-                    now=self._now(),
-                    abandoned_before=self._now() - 30,
+                    now=timestamp,
+                    abandoned_before=timestamp - 30,
+                    limit=self.batch_size,
                 )
         ingested = 0
         for worker in self._worker_batch():

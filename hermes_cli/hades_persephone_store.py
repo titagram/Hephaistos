@@ -489,17 +489,21 @@ def recover_abandoned_information_requests(
     now: int | None = None,
     abandoned_before: int | None = None,
     max_attempts: int = 3,
+    limit: int = 50,
 ) -> int:
     """Recover only stale, auto-eligible information workers after restart."""
     timestamp = _now(now)
     cutoff = timestamp if abandoned_before is None else int(abandoned_before)
     bounded_max = max(1, int(max_attempts))
+    bounded_limit = int(limit)
+    if not 1 <= bounded_limit <= 500:
+        raise ValueError("information recovery limit must be between 1 and 500")
     recovered = 0
     with write_txn(conn):
         rows = conn.execute(
             "SELECT * FROM persephone_inbox WHERE state IN ('processing', 'processed') "
-            "AND updated_at <= ?",
-            (cutoff,),
+            "AND updated_at <= ? ORDER BY updated_at ASC, message_id ASC LIMIT ?",
+            (cutoff, bounded_limit),
         ).fetchall()
         for row in rows:
             current = _inbox_from_row(row)

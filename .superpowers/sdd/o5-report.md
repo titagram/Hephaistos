@@ -137,3 +137,41 @@ request produces exactly one durable response.
 File reads use descriptor-level `O_NOFOLLOW` where available plus `fstat`
 regular-file and byte-budget checks, closing the symlink replacement TOCTOU
 window between traversal and content read.
+
+## Second adversarial re-review
+
+The exact follow-up corpus initially produced 15 expected RED failures. The
+final implementation replaces assignment-pattern guessing with whole-key
+classification for ENV, JSON, and YAML-style lines. Keys are normalized and
+tokenized, so provider-prefixed/suffixed forms such as `DATABASE_PASSWORD`,
+`AZURE_CLIENT_SECRET`, `PROVIDER_TOKEN`, `GCP_PRIVATE_KEY`, cloud credentials,
+API/access keys, JWT and authorization fields redact their entire scalar.
+Standalone AWS, GCP, GitHub, OpenAI/provider, Slack, JWT, Bearer and PEM forms
+are also covered.
+
+Sensitive path policy now covers suffix `.env` files, service-account and
+application-default credentials, Docker/AWS/Azure/GCP credential stores and
+compound cloud/provider conventions, while regression tests prove ordinary
+`environment.py`, `provider.py`, `authenticator.py`, `tokenizer.py`, and a
+normal `gcloud` source package remain readable.
+
+Recursive source discovery now uses a custom lazy `os.scandir` stack. Deadline,
+entry, directory, pending-directory, file and byte budgets are checked before
+requesting or retaining the next entry; a counting fake proves a three-entry
+budget does not consume a fourth entry. Recovery queries use deterministic
+`ORDER BY ... LIMIT ?`, and each receiver invocation passes one bounded
+`batch_size`.
+
+The redaction tracker propagates every node/depth/container/string/time/output
+clip into `InformationResponse.truncated`, including cycles and memory-search
+work budgets.
+
+Final verification after the exact adversarial corpus:
+
+```text
+Focused worker/store/receiver: 136 passed
+O1-O5 + full backend sync + DB: 269 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```

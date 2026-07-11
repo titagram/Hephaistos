@@ -269,6 +269,80 @@ def test_unterminated_private_key_block_is_redacted(tmp_path):
     assert "private-material" not in str(response.to_payload())
 
 
+@pytest.mark.parametrize(
+    ("line", "secret"),
+    [
+        ("DATABASE_PASSWORD=db-private", "db-private"),
+        ('"AZURE_CLIENT_SECRET": "azure-private",', "azure-private"),
+        ("PROVIDER_TOKEN: 'provider-private'", "provider-private"),
+        ('"GCP_PRIVATE_KEY" = "gcp-private"', "gcp-private"),
+        ("GOOGLE_APPLICATION_CREDENTIALS=google-private", "google-private"),
+        ("AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP", "AKIAABCDEFGHIJKLMNOP"),
+        ("OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456", "sk-abcdefghijklmnopqrstuvwxyz123456"),
+        ("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456", "ghp_abcdefghijklmnopqrstuvwxyz123456"),
+        ("authorization: Bearer abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnopqrstuvwxyz"),
+        ("jwt=eyJabcdefghijk.abcdefghijklmnop.abcdefghijklmnop", "eyJabcdefghijk"),
+        ("const gcp = 'AIzaabcdefghijklmnopqrstuvwxyz1234567890'", "AIzaabcdefghijklmnopqrstuvwxyz1234567890"),
+        ("const oauth = 'ya29.abcdefghijklmnopqrstuvwxyz123456'", "ya29.abcdefghijklmnopqrstuvwxyz123456"),
+        ("const provider = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz'", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"),
+    ],
+)
+def test_exact_adversarial_assignment_corpus_is_redacted(tmp_path, line, secret):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(line, encoding="utf-8")
+    response = run_information_request(
+        _request(
+            tmp_path,
+            capability="source_slice",
+            payload={"path": "safe_example.txt"},
+        ),
+        binding=_binding(tmp_path),
+    )
+    assert secret not in str(response.to_payload())
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "production.env",
+        "service-account-prod.json",
+        "service_account_dev.json",
+        "application_default_credentials.json",
+        "gcp/credentials.json",
+        "google/credentials.yaml",
+        ".docker/config.json",
+        ".aws/credentials",
+        ".config/gcloud/application_default_credentials.json",
+    ],
+)
+def test_cloud_and_provider_credential_paths_are_denied(tmp_path, relative):
+    from hermes_cli.hades_information_worker import PolicyDenied, run_information_request
+
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("needle", encoding="utf-8")
+    with pytest.raises(PolicyDenied):
+        run_information_request(
+            _request(tmp_path, capability="source_slice", payload={"path": relative}),
+            binding=_binding(tmp_path),
+        )
+
+
+@pytest.mark.parametrize("relative", ["environment.py", "provider.py", "authenticator.py", "tokenizer.py", "gcloud/module.py"])
+def test_normal_source_names_are_not_overblocked(tmp_path, relative):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("needle = True", encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": relative}),
+        binding=_binding(tmp_path),
+    )
+    assert response.evidence_refs
+
+
 def test_search_uses_top_down_bounded_walk_not_whole_tree_rglob(tmp_path, monkeypatch):
     from hermes_cli import hades_information_worker as worker
 
@@ -298,6 +372,43 @@ def test_search_stops_at_file_and_aggregate_read_budget(tmp_path, monkeypatch):
     )
 
     assert len(response.evidence_refs) <= 2
+    assert response.truncated is True
+
+
+def test_streaming_scandir_stops_before_consuming_all_entries(tmp_path, monkeypatch):
+    from hermes_cli import hades_information_worker as worker
+
+    real_scandir = worker.os.scandir
+    consumed = 0
+
+    class CountingIterator:
+        def __init__(self, iterator):
+            self.iterator = iterator
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            close = getattr(self.iterator, "close", None)
+            if close:
+                close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal consumed
+            consumed += 1
+            return next(self.iterator)
+
+    for index in range(20):
+        (tmp_path / f"file_{index}.py").write_text("needle = True", encoding="utf-8")
+    monkeypatch.setattr(worker, "MAX_ENTRIES_SCANNED", 3)
+    monkeypatch.setattr(worker.os, "scandir", lambda path: CountingIterator(real_scandir(path)))
+
+    response = worker.run_information_request(_request(tmp_path), binding=_binding(tmp_path))
+
+    assert consumed <= 3
     assert response.truncated is True
 
 
@@ -408,6 +519,23 @@ def test_memory_redaction_handles_nested_sensitive_keys_and_cycles(tmp_path):
     assert "private-password" not in rendered
     assert "Bearer private" not in rendered
     assert len(rendered) < 16_000
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        tuple({"value": index} for index in range(300)),
+        ({"deep": {"deep": {"deep": {"deep": {"deep": {"deep": {"deep": {"deep": {"deep": "value"}}}}}}}}},),
+        ({"value": "x" * 10_000},),
+    ],
+)
+def test_structural_redaction_clipping_sets_truncated(tmp_path, evidence):
+    from hermes_cli import hades_information_worker as worker
+
+    response = worker._redacted(
+        worker.InformationResponse("summary", evidence, False, ()), tmp_path
+    )
+    assert response.truncated is True
 
 
 def test_worker_persists_bounded_response_atomically(tmp_path):
