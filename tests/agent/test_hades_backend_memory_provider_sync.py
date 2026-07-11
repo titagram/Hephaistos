@@ -70,3 +70,80 @@ def test_hades_backend_memory_provider_does_not_sync_without_binding(monkeypatch
     provider.sync_turn("user", "assistant", session_id="session_1")
 
     assert calls == []
+
+
+def test_hades_backend_memory_provider_ignores_newer_more_specific_historical_binding(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "repo"
+    nested = workspace / "packages" / "current"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    from hermes_cli import hades_backend_db as db
+    import plugins.memory.hades_backend as provider_mod
+
+    monkeypatch.setattr(db, "_now", lambda: 1000)
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn,
+            agent_id="agent_historical",
+            project_id="project_historical",
+            base_url="https://backend.example",
+            label="historical",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_HISTORICAL",
+            capabilities={"memory": True},
+        )
+        db.save_agent(
+            conn,
+            agent_id="agent_current",
+            project_id="project_current",
+            base_url="https://backend.example",
+            label="current",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_CURRENT",
+            capabilities={"memory": True},
+        )
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_current",
+            agent_id="agent_current",
+            local_project_id="local_current",
+            workspace_fingerprint="fingerprint_current",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_current",
+        )
+        # Inserted later in the same second and rooted more specifically: both
+        # old selection tie-breakers favored this historical identity.
+        db.upsert_workspace_binding(
+            conn,
+            project_id="project_historical",
+            agent_id="agent_historical",
+            local_project_id="local_historical",
+            workspace_fingerprint="fingerprint_historical",
+            display_path="~/repo/packages",
+            repo_root=str(workspace / "packages"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_historical",
+        )
+
+    calls = []
+    monkeypatch.setattr(provider_mod, "run_backend_sync", lambda **kwargs: calls.append(kwargs))
+
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+    provider.sync_turn("user", "assistant", session_id="session_1")
+
+    assert calls == [
+        {
+            "quiet": True,
+            "project_id": "project_current",
+            "workspace_binding_ids": ["binding_current"],
+        }
+    ]

@@ -1572,7 +1572,15 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return None
         best: db.WorkspaceBinding | None = None
         with db.connect_closing() as conn:
+            current_agent = db.get_default_agent(conn)
+            if current_agent is None:
+                return None
             for binding in db.list_workspace_bindings(conn, status="linked"):
+                if (
+                    binding.agent_id != current_agent.agent_id
+                    or binding.project_id != current_agent.project_id
+                ):
+                    continue
                 root = Path(binding.repo_root)
                 try:
                     resolved.relative_to(root)
