@@ -356,3 +356,47 @@ def test_loaded_status_uses_all_linked_routes_but_keeps_default_identity(
     assert payload["persephone"]["agents"] == 2
     assert payload["persephone"]["projects"] == 2
     assert payload["persephone"]["unread"] == 1
+
+
+def test_loaded_status_reports_auth_quarantine_without_counting_receiver_routes(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_status import (
+        load_backend_status_payload,
+        support_report_payload,
+    )
+
+    with db.connect_closing() as conn:
+        db.save_agent(
+            conn, agent_id="agent", project_id="project",
+            base_url="https://example.invalid", label="agent",
+            token_env_key="TOKEN", capabilities={},
+        )
+        for suffix in ("a", "b"):
+            db.upsert_workspace_binding(
+                conn, project_id="project", agent_id="agent",
+                local_project_id=suffix, workspace_fingerprint=f"wf_{suffix}",
+                display_path=f"~/repo-{suffix}", repo_root=str(tmp_path / suffix),
+                git_remote_display="", git_remote_hash="", head_commit="",
+                backend_workspace_binding_id=f"wb_{suffix}",
+            )
+        for now in (100, 200, 300):
+            db.record_route_auth_cycle(
+                conn, project_id="project", agent_id="agent",
+                unauthorized=True, now=now,
+            )
+
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_status._load_remote_awarenesses",
+        lambda agent, bindings: {},
+    )
+    payload = load_backend_status_payload()
+    support = support_report_payload(payload)
+
+    assert payload["auth_quarantine"] == {"routes": 1, "bindings": 2}
+    assert support["auth_quarantine"] == {"routes": 1, "bindings": 2}
+    assert payload["persephone"]["routes"] == 0
+    assert any("bootstrap" in action.lower() for action in payload["actions"])

@@ -35,6 +35,16 @@ def load_backend_status_payload() -> dict[str, Any]:
     plugin_local_workspace_id = str(backend_config.get("plugin_local_workspace_id") or "").strip()
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
+        quarantined_bindings = db.list_workspace_bindings(
+            conn, status="auth_failed"
+        )
+        auth_quarantine = {
+            "routes": len({
+                (binding.project_id, binding.agent_id)
+                for binding in quarantined_bindings
+            }),
+            "bindings": len(quarantined_bindings),
+        }
         # The gateway receiver is profile-scoped, not default-agent-scoped: it
         # owns one worker for every exact (project_id, agent_id) route that has
         # at least one currently linked workspace.  Keep the ordinary status
@@ -114,6 +124,7 @@ def load_backend_status_payload() -> dict[str, Any]:
         plugin_work_items=plugin_work_items,
         plugin_local_workspace_id=plugin_local_workspace_id,
         persephone=persephone,
+        auth_quarantine=auth_quarantine,
     )
 
 
@@ -149,6 +160,9 @@ def support_report_payload(status: dict[str, Any] | None = None) -> dict[str, An
             if isinstance(payload.get("persephone"), dict)
             else None
         ),
+        "auth_quarantine": payload.get("auth_quarantine")
+        if isinstance(payload.get("auth_quarantine"), dict)
+        else {"routes": 0, "bindings": 0},
         "sync": {
             "last_summary": _numeric_summary(sync.get("last_summary")),
             "last_summary_updated_at": sync.get("last_summary_updated_at"),
@@ -232,6 +246,7 @@ def backend_status_payload(
     plugin_work_items: list[Any] | None = None,
     plugin_local_workspace_id: str = "",
     persephone: dict[str, Any] | None = None,
+    auth_quarantine: dict[str, int] | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     current_time = int(now if now is not None else time.time())
@@ -255,7 +270,16 @@ def backend_status_payload(
         plugin_local_workspace_id=plugin_local_workspace_id,
     )
     persephone_state = _persephone_payload(persephone)
+    auth_quarantine_state = {
+        "routes": _nonnegative_int((auth_quarantine or {}).get("routes")),
+        "bindings": _nonnegative_int((auth_quarantine or {}).get("bindings")),
+    }
     actions: list[str] = []
+    if auth_quarantine_state["routes"]:
+        actions.append(
+            "Re-authenticate quarantined Hades routes with `hades backend "
+            "bootstrap` from each affected checkout."
+        )
     if waiting:
         actions.append(f"Review {waiting} backend job(s) waiting for confirmation.")
     if refused:
@@ -336,6 +360,7 @@ def backend_status_payload(
             "background_updated_at": background_sync_updated_at,
         },
         "persephone": persephone_state,
+        "auth_quarantine": auth_quarantine_state,
         "degraded": bool(
             refused
             or last_error
