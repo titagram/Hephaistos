@@ -107,6 +107,17 @@ def test_request_must_match_exact_linked_project_agent_and_workspace(tmp_path):
         run_information_request(_request(tmp_path), binding=wrong, now=NOW)
 
 
+def test_expired_request_is_denied_at_worker_boundary(tmp_path):
+    from hermes_cli.hades_information_worker import PolicyDenied, run_information_request
+
+    with pytest.raises(PolicyDenied, match="expired"):
+        run_information_request(
+            _request(tmp_path),
+            binding=_binding(tmp_path),
+            now=NOW + 100,
+        )
+
+
 def test_source_slice_is_bounded_and_cannot_escape_workspace(tmp_path):
     from hermes_cli.hades_information_worker import PolicyDenied, run_information_request
 

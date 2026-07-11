@@ -42,6 +42,8 @@
 6. Atomicity RED/GREEN proved response-envelope construction failure leaves
    the request in `processing` instead of stranding it in `processed` without
    a durable response.
+7. Authority-boundary RED/GREEN proved the exported worker rejects expired
+   requests even when called outside the receiver path.
 
 ## Verification
 
@@ -52,7 +54,7 @@
   tests/hermes_cli/test_hades_persephone_transport.py \
   tests/hermes_cli/test_hades_persephone_receiver.py \
   tests/hermes_cli/test_hades_information_worker.py -q
-164 passed
+165 passed
 
 .venv/bin/python -m ruff check \
   hermes_cli/hades_information_worker.py \

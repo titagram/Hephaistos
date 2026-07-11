@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import json
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -312,7 +313,10 @@ def run_information_request(
     ``agent_factory`` is accepted for dependency compatibility but deliberately
     never invoked: all v1 capabilities have safer structured handlers.
     """
-    del agent_factory, now
+    del agent_factory
+    timestamp = int(time.time()) if now is None else int(now)
+    if envelope.expires_at <= timestamp:
+        raise PolicyDenied("information request has expired")
     root = _validate_authority(envelope, binding)
     request = InformationRequest(envelope=envelope, binding=binding)
     capability = envelope.capability
