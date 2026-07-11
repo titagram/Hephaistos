@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS inbox_events (
 CREATE TABLE IF NOT EXISTS persephone_outbox (
     message_id      TEXT PRIMARY KEY,
     project_id      TEXT NOT NULL,
+    sender_agent_id TEXT NOT NULL,
     target_agent_id TEXT NOT NULL,
     envelope        TEXT NOT NULL,
     state           TEXT NOT NULL,
@@ -283,6 +284,9 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
         add_column_if_missing(
             conn, "persephone_inbox", "last_error", "last_error TEXT"
         )
+        add_column_if_missing(
+            conn, "persephone_outbox", "sender_agent_id", "sender_agent_id TEXT"
+        )
         for table, direction in (
             ("persephone_inbox", "inbox"),
             ("persephone_outbox", "outbox"),
@@ -311,6 +315,13 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
                     raise PersephoneIdentityMigrationConflict(
                         f"row target_agent_id does not match envelope for {message_id!r}"
                     )
+                if table == "persephone_outbox":
+                    stored_sender = str(row["sender_agent_id"] or "").strip()
+                    if stored_sender and stored_sender != validated.sender_agent_id:
+                        raise PersephoneIdentityMigrationConflict(
+                            "denormalized sender_agent_id does not match envelope for "
+                            f"{message_id!r}"
+                        )
                 authority = (
                     validated.message_type.value,
                     validated.effect.value,
@@ -370,10 +381,21 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
                         "capability = ? WHERE message_id = ?",
                         (*authority, message_id),
                     )
+                else:
+                    conn.execute(
+                        "UPDATE persephone_outbox SET sender_agent_id = ? "
+                        "WHERE message_id = ?",
+                        (validated.sender_agent_id, message_id),
+                    )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_persephone_inbox_recovery_covering "
             "ON persephone_inbox(state, message_type, effect, capability, "
             "updated_at, message_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_persephone_outbox_sender_due "
+            "ON persephone_outbox(project_id, sender_agent_id, state, "
+            "next_attempt_at, created_at, message_id)"
         )
 
 

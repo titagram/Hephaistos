@@ -455,6 +455,37 @@ def test_successful_delivery_sends_exact_envelope_and_marks_sent(store):
     assert row is not None and row.state == "sent"
 
 
+def test_send_due_messages_filters_by_project_and_sender(store):
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+    from hermes_cli.hades_persephone_transport import send_due_messages
+
+    sent: list[str] = []
+
+    class FakeClient:
+        def create_inbox_message(self, **payload):
+            sent.append(payload["message_id"])
+            return {"ok": True}
+
+    enqueue_outbox(store, _envelope(message_id="sender_a"), now=100)
+    other = parse_envelope(
+        {**_envelope(message_id="sender_b").to_dict(), "sender_agent_id": "agent_other"},
+        now=100,
+    )
+    enqueue_outbox(store, other, now=100)
+
+    result = send_due_messages(
+        store,
+        FakeClient(),
+        now=100,
+        project_id="project_1",
+        sender_agent_id="agent_other",
+    )
+
+    assert result == {"sent": 1, "retry": 0, "dead_letter": 0}
+    assert sent == ["sender_b"]
+    assert get_message(store, "sender_a", queue="outbox").state == "outbox_pending"
+
+
 @pytest.mark.parametrize(
     "body",
     [

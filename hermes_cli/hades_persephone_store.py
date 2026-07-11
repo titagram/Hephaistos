@@ -52,6 +52,11 @@ class StoredMessage:
     human_decided_at: int | None = None
     response_message_id: str | None = None
 
+    @property
+    def sender_agent_id(self) -> str:
+        """Return the validated sender authority carried by the envelope."""
+        return self.envelope.sender_agent_id
+
 
 _OUTBOX_TRANSITIONS = {
     "outbox_pending": frozenset({"sending", "dead_letter"}),
@@ -108,6 +113,10 @@ def _parsed(raw: str) -> AgentMessageEnvelope:
 
 
 def _outbox_from_row(row: sqlite3.Row) -> StoredMessage:
+    if row["sender_agent_id"] != _parsed(row["envelope"]).sender_agent_id:
+        raise MessageConflict(
+            f"outbox message_id {row['message_id']!r} has inconsistent sender authority"
+        )
     return StoredMessage(
         message_id=row["message_id"],
         project_id=row["project_id"],
@@ -193,12 +202,13 @@ def _insert_outbox_in_txn(
         raise MessageConflict(f"outbox message_id {envelope.message_id!r} already has other data")
     conn.execute(
         "INSERT OR IGNORE INTO persephone_outbox "
-        "(message_id, project_id, target_agent_id, envelope, state, attempts, "
+        "(message_id, project_id, sender_agent_id, target_agent_id, envelope, state, attempts, "
         " next_attempt_at, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, 'outbox_pending', 0, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, 'outbox_pending', 0, ?, ?, ?)",
         (
             envelope.message_id,
             envelope.project_id,
+            envelope.sender_agent_id,
             envelope.target_agent_id,
             encoded,
             due_at,
@@ -249,23 +259,31 @@ def claim_due_outbox(
     now: int | None = None,
     limit: int = 50,
     project_id: str | None = None,
+    sender_agent_id: str | None = None,
 ) -> list[StoredMessage]:
     timestamp = _now(now)
     bounded_limit = max(0, int(limit))
     if bounded_limit == 0:
         return []
+    project = str(project_id or "").strip()
+    sender = str(sender_agent_id or "").strip()
+    if bool(project) != bool(sender):
+        raise ValueError(
+            "project_id and sender_agent_id must both be provided for scoped claims"
+        )
     with write_txn(conn):
-        project = str(project_id or "").strip()
-        project_clause = " AND project_id = ?" if project else ""
-        params: tuple[Any, ...] = (
-            (timestamp, project, bounded_limit)
+        authority_clause = (
+            " AND project_id = ? AND sender_agent_id = ?" if project else ""
+        )
+        params = (
+            (timestamp, project, sender, bounded_limit)
             if project
             else (timestamp, bounded_limit)
         )
         rows = conn.execute(
             "SELECT message_id FROM persephone_outbox "
             "WHERE state IN ('outbox_pending', 'retry') AND next_attempt_at <= ?"
-            f"{project_clause} "
+            f"{authority_clause} "
             "ORDER BY next_attempt_at ASC, created_at ASC, message_id ASC LIMIT ?",
             params,
         ).fetchall()
@@ -285,6 +303,37 @@ def claim_due_outbox(
             for message_id in message_ids
         ]
     return [_outbox_from_row(row) for row in claimed_rows if row is not None]
+
+
+def claim_information_request(
+    conn: sqlite3.Connection,
+    message_id: str,
+    *,
+    expected_states: tuple[str, ...] = ("received", "retry"),
+    now: int | None = None,
+) -> bool:
+    """Atomically claim one information request; only the state winner returns true."""
+    states = tuple(dict.fromkeys(str(state).strip() for state in expected_states))
+    if not states or any(state not in {"received", "retry"} for state in states):
+        raise ValueError("expected_states must contain only received and/or retry")
+    placeholders = ", ".join("?" for _ in states)
+    timestamp = _now(now)
+    with write_txn(conn):
+        cursor = conn.execute(
+            "UPDATE persephone_inbox SET state = 'processing', updated_at = ? "
+            f"WHERE message_id = ? AND state IN ({placeholders}) "
+            "AND message_type = ? AND effect = ? "
+            "AND capability IN (?, ?, ?, ?, ?, ?)",
+            (
+                timestamp,
+                str(message_id),
+                *states,
+                MessageType.INFORMATION_REQUEST.value,
+                EffectClass.INFORMATION_READ.value,
+                *sorted(_INFORMATION_CAPABILITIES),
+            ),
+        )
+        return cursor.rowcount == 1
 
 
 def recover_abandoned_outbox(
@@ -803,6 +852,7 @@ __all__ = [
     "MessageConflict",
     "StoredMessage",
     "approve_request",
+    "claim_information_request",
     "claim_due_outbox",
     "enqueue_outbox",
     "get_cursor",

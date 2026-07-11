@@ -216,6 +216,7 @@ def send_due_messages(
     retry: RetryPolicy | None = None,
     rng: random.Random | None = None,
     project_id: str | None = None,
+    sender_agent_id: str | None = None,
 ) -> dict[str, int]:
     """Claim and deliver due durable messages with bounded retry semantics."""
     policy = retry or RetryPolicy()
@@ -223,7 +224,11 @@ def send_due_messages(
     timestamp = int(time.time()) if now is None else int(now)
     counts = {"sent": 0, "retry": 0, "dead_letter": 0}
     for message in claim_due_outbox(
-        conn, now=timestamp, limit=limit, project_id=project_id
+        conn,
+        now=timestamp,
+        limit=limit,
+        project_id=project_id,
+        sender_agent_id=sender_agent_id,
     ):
         try:
             client.create_inbox_message(**message.envelope.to_dict())

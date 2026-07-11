@@ -72,14 +72,18 @@ def test_persist_before_send_and_deduplicate(tmp_db):
     assert claim_due_outbox(tmp_db, now=100, limit=10) == []
 
 
-def test_claim_due_outbox_can_be_scoped_to_one_project(tmp_db):
+def test_claim_due_outbox_can_be_scoped_to_one_project_and_sender(tmp_db):
     from hermes_cli.hades_persephone_store import claim_due_outbox, enqueue_outbox
 
     enqueue_outbox(tmp_db, _envelope(message_id="p1", project_id="project_1"), now=100)
     enqueue_outbox(tmp_db, _envelope(message_id="p2", project_id="project_2"), now=100)
 
     claimed = claim_due_outbox(
-        tmp_db, now=100, limit=10, project_id="project_2"
+        tmp_db,
+        now=100,
+        limit=10,
+        project_id="project_2",
+        sender_agent_id="agent_sender",
     )
 
     assert [item.message_id for item in claimed] == ["p2"]
@@ -87,6 +91,44 @@ def test_claim_due_outbox_can_be_scoped_to_one_project(tmp_db):
         "SELECT state FROM persephone_outbox WHERE message_id = 'p1'"
     ).fetchone()
     assert untouched["state"] == "outbox_pending"
+
+
+def test_claim_due_outbox_scopes_same_project_to_sender(tmp_db):
+    from hermes_cli.hades_persephone_store import claim_due_outbox, enqueue_outbox
+
+    enqueue_outbox(
+        tmp_db,
+        _envelope(message_id="sender_a", sender_agent_id="agent_a"),
+        now=100,
+    )
+    enqueue_outbox(
+        tmp_db,
+        _envelope(message_id="sender_b", sender_agent_id="agent_b"),
+        now=100,
+    )
+
+    claimed = claim_due_outbox(
+        tmp_db,
+        now=100,
+        limit=10,
+        project_id="project_1",
+        sender_agent_id="agent_b",
+    )
+
+    assert [item.message_id for item in claimed] == ["sender_b"]
+    assert claimed[0].sender_agent_id == "agent_b"
+    assert tmp_db.execute(
+        "SELECT state FROM persephone_outbox WHERE message_id = 'sender_a'"
+    ).fetchone()["state"] == "outbox_pending"
+
+
+def test_claim_due_outbox_rejects_partial_sender_scope(tmp_db):
+    from hermes_cli.hades_persephone_store import claim_due_outbox
+
+    with pytest.raises(ValueError, match="project_id and sender_agent_id"):
+        claim_due_outbox(tmp_db, project_id="project_1")
+    with pytest.raises(ValueError, match="project_id and sender_agent_id"):
+        claim_due_outbox(tmp_db, sender_agent_id="agent_a")
 
 
 def test_duplicate_message_id_with_different_envelope_is_rejected(tmp_db):
@@ -250,6 +292,50 @@ def test_information_failure_is_bounded_and_recoverable(tmp_db):
         assert stored.attempts == attempt
         assert stored.last_error == "information_handler_failed"
         assert stored.state == ("received" if attempt < 3 else "rejected")
+
+
+def test_claim_information_request_is_not_idempotent_for_same_state(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        claim_information_request,
+        get_message,
+        record_inbox,
+    )
+
+    record_inbox(tmp_db, _envelope(), now=100)
+
+    assert claim_information_request(tmp_db, "msg_1", now=101) is True
+    assert claim_information_request(tmp_db, "msg_1", now=102) is False
+    assert get_message(tmp_db, "msg_1").state == "processing"
+
+
+def test_claim_information_request_has_one_winner_across_connections(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_persephone_store import (
+        claim_information_request,
+        record_inbox,
+    )
+
+    path = tmp_path / "information-claim.db"
+    with db.connect_closing(path) as conn:
+        record_inbox(conn, _envelope(), now=100)
+    barrier = threading.Barrier(2)
+
+    def claim(_: int) -> bool:
+        with db.connect_closing(path) as conn:
+            barrier.wait(timeout=5)
+            return claim_information_request(conn, "msg_1", now=101)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim, range(2)))
+
+    assert sorted(results) == [False, True]
+
+
+def test_claim_information_request_accepts_only_received_or_retry(tmp_db):
+    from hermes_cli.hades_persephone_store import claim_information_request
+
+    with pytest.raises(ValueError, match="received.*retry"):
+        claim_information_request(tmp_db, "msg_1", expected_states=("processing",))
 
 
 def test_atomic_response_rolls_back_outbox_and_identity_when_link_fails(tmp_db):
@@ -948,6 +1034,94 @@ def test_existing_o2_rows_backfill_global_identity_and_response_link_column(tmp_
         "envelope": encoded,
     }
     assert "response_message_id" in columns
+
+
+def test_existing_outbox_backfills_canonical_sender_and_sender_due_index(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "pre-sender-outbox.db"
+    envelope = _envelope(sender_agent_id="legacy_sender")
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        "CREATE TABLE persephone_outbox (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+        "target_agent_id TEXT NOT NULL, envelope TEXT NOT NULL, state TEXT NOT NULL, "
+        "attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL, last_error TEXT, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO persephone_outbox VALUES (?, ?, ?, ?, 'outbox_pending', 0, 100, NULL, 100, 100)",
+        (
+            envelope.message_id,
+            envelope.project_id,
+            envelope.target_agent_id,
+            json.dumps(envelope.to_dict(), indent=2),
+        ),
+    )
+    legacy.commit()
+    legacy.close()
+
+    with db.connect_closing(path) as conn:
+        row = conn.execute(
+            "SELECT sender_agent_id, envelope FROM persephone_outbox WHERE message_id = ?",
+            (envelope.message_id,),
+        ).fetchone()
+        indexes = {
+            item["name"]
+            for item in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+
+    assert row["sender_agent_id"] == "legacy_sender"
+    assert row["envelope"] == json.dumps(
+        envelope.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    assert "idx_persephone_outbox_sender_due" in indexes
+
+
+def test_outbox_sender_migration_conflict_rolls_back_backfill_and_index(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "sender-conflict.db"
+    envelope = _envelope(sender_agent_id="canonical_sender")
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        "CREATE TABLE persephone_outbox (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+        "sender_agent_id TEXT, target_agent_id TEXT NOT NULL, envelope TEXT NOT NULL, "
+        "state TEXT NOT NULL, attempts INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL, "
+        "last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO persephone_outbox VALUES (?, ?, ?, ?, ?, 'outbox_pending', 0, 100, NULL, 100, 100)",
+        (
+            envelope.message_id,
+            envelope.project_id,
+            "wrong_sender",
+            envelope.target_agent_id,
+            json.dumps(envelope.to_dict(), sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    legacy.commit()
+    legacy.close()
+
+    with pytest.raises(db.PersephoneIdentityMigrationConflict, match="sender_agent_id"):
+        db.connect(path)
+
+    raw = sqlite3.connect(path)
+    sender = raw.execute(
+        "SELECT sender_agent_id FROM persephone_outbox WHERE message_id = ?",
+        (envelope.message_id,),
+    ).fetchone()[0]
+    index_count = raw.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_persephone_outbox_sender_due'"
+    ).fetchone()[0]
+    identity_count = raw.execute(
+        "SELECT COUNT(*) FROM persephone_message_identities"
+    ).fetchone()[0]
+    raw.close()
+
+    assert sender == "wrong_sender"
+    assert index_count == 0
+    assert identity_count == 0
 
 
 def test_existing_cross_queue_identity_conflict_aborts_migration_explicitly(tmp_path):
