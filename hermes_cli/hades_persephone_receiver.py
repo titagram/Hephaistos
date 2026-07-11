@@ -208,6 +208,14 @@ class PersephoneReceiver:
             else:
                 self._next_worker = 0
         self._close_detached_clients(clients_to_close)
+        if self.information_executor is not None:
+            timestamp = self._now()
+            with self.connection_factory() as conn:
+                recover_abandoned_information_requests(
+                    conn,
+                    now=timestamp,
+                    abandoned_before=timestamp - 30,
+                )
 
     def start(self) -> None:
         """Start the single owned coordinator thread; repeated calls are safe."""

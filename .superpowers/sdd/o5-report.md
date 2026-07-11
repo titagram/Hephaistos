@@ -130,3 +130,7 @@ and PEM token forms are redacted. Follow-up focused verification: `99 passed`.
 The final redaction audit also covers unterminated/truncated PEM blocks,
 `.envrc`, and compound auth/provider configuration filenames. Final focused
 verification after those guards: `103 passed`.
+Startup recovery is invoked during receiver binding refresh as well as
+`run_once()`, so synchronous backend sync also reclaims stale `processing` and
+legacy `processed` information rows before redelivery. Restart tests prove the
+request produces exactly one durable response.

@@ -294,6 +294,26 @@ def test_recover_abandoned_information_requests_is_scoped_and_bounded(tmp_db):
     ) == 0
 
 
+def test_recover_abandoned_legacy_processed_information_request(tmp_db):
+    from hermes_cli.hades_persephone_store import (
+        get_message,
+        record_inbox,
+        recover_abandoned_information_requests,
+        transition_message,
+    )
+
+    request = _envelope()
+    record_inbox(tmp_db, request, now=100)
+    transition_message(tmp_db, request.message_id, "processing", now=101)
+    transition_message(tmp_db, request.message_id, "processed", now=102)
+
+    assert recover_abandoned_information_requests(
+        tmp_db, now=200, abandoned_before=150
+    ) == 1
+    stored = get_message(tmp_db, request.message_id)
+    assert stored is not None and stored.state == "received"
+
+
 def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

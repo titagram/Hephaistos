@@ -315,6 +315,48 @@ def test_terminal_duplicate_repairs_cursor_without_reexecuting(tmp_path):
     assert cursor == "cursor_msg_1"
 
 
+def test_executor_refresh_recovers_abandoned_processing_before_redelivery(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_message
+
+    path = tmp_path / "startup-recovery.db"
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    binding = _binding()
+    object.__setattr__(binding, "repo_root", str(tmp_path))
+    crashed = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=lambda *args, **kwargs: None,
+        now=lambda: NOW,
+    )
+    crashed.refresh_bindings([binding])
+    assert crashed.ingest_event(_event()) == "retry_pending"
+
+    restarted = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=execute_stored_information_request,
+        now=lambda: NOW + 31,
+    )
+    restarted.refresh_bindings([binding])
+    assert restarted.ingest_event(_event()) == "accepted"
+    with connections() as conn:
+        stored = get_message(conn, "msg_1")
+        outbox_count = conn.execute("SELECT COUNT(*) FROM persephone_outbox").fetchone()[0]
+    assert stored is not None and stored.state == "responded"
+    assert outbox_count == 1
+
+
 def test_expired_event_is_durable_then_marked_expired(receiver):
     from hermes_cli.hades_persephone_store import get_message
 

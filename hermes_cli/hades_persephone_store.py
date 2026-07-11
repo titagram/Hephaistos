@@ -497,7 +497,8 @@ def recover_abandoned_information_requests(
     recovered = 0
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT * FROM persephone_inbox WHERE state = 'processing' AND updated_at <= ?",
+            "SELECT * FROM persephone_inbox WHERE state IN ('processing', 'processed') "
+            "AND updated_at <= ?",
             (cutoff,),
         ).fetchall()
         for row in rows:
@@ -514,8 +515,16 @@ def recover_abandoned_information_requests(
             cursor = conn.execute(
                 "UPDATE persephone_inbox SET state = ?, attempts = ?, next_attempt_at = ?, "
                 "last_error = 'information_worker_restarted', updated_at = ? "
-                "WHERE message_id = ? AND state = 'processing' AND updated_at <= ?",
-                (state, attempts, timestamp, timestamp, current.message_id, cutoff),
+                "WHERE message_id = ? AND state = ? AND updated_at <= ?",
+                (
+                    state,
+                    attempts,
+                    timestamp,
+                    timestamp,
+                    current.message_id,
+                    current.state,
+                    cutoff,
+                ),
             )
             recovered += max(0, int(cursor.rowcount))
     return recovered
