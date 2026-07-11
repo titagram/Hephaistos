@@ -99,7 +99,11 @@ def _compose_runtime_coordination(
     for delivery in deliveries:
         target = by_id.get(str(delivery.target_tool_call_id))
         block = delivery.rendered_block
-        if target is not None and isinstance(block, str):
+        if (
+            target is not None
+            and isinstance(target.get("content", ""), str)
+            and isinstance(block, str)
+        ):
             trusted.append((target, block))
     if not trusted:
         return False

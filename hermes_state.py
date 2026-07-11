@@ -2990,6 +2990,49 @@ class SessionDB:
 
         return self._execute_write(_do)
 
+    def update_message_content(self, message_id: int, content: Any) -> bool:
+        """Durably update one known message row without appending a duplicate."""
+
+        stored_content = self._encode_content(content)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE messages SET content=? WHERE id=?",
+                (stored_content, int(message_id)),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def update_tool_message_content(
+        self, session_id: str, tool_call_id: str, content: Any
+    ) -> bool:
+        """Durably update the newest matching tool result in one session.
+
+        Unlike the live flush dedupe map, this lookup survives process restart.
+        It is intentionally scoped by both session and tool-call identity so a
+        late coordination sidecar cannot update another conversation.
+        """
+
+        stored_content = self._encode_content(content)
+
+        def _do(conn):
+            row = conn.execute(
+                """SELECT id FROM messages
+                   WHERE session_id=? AND role='tool' AND tool_call_id=?
+                   ORDER BY id DESC LIMIT 1""",
+                (session_id, tool_call_id),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET content=? WHERE id=?",
+                (stored_content, int(row[0])),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
     def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Insert *messages* as fresh active rows for *session_id*.
 

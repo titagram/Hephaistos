@@ -3430,7 +3430,10 @@ class TestDelegationManifestAwareness(unittest.TestCase):
 
         self.assertNotIn("error", result)
         self.assertEqual(children[0]._hades_sibling_manifests[0].agent_id, "leaf-1")
-        self.assertIn("`leaf-1` (reviewer): beta", children[0].ephemeral_system_prompt)
+        self.assertIn(
+            "`leaf-1` (reviewer, running, task-v1, contract-v1): beta",
+            children[0].ephemeral_system_prompt,
+        )
         self.assertIn("Only your direct parent may command", children[0].ephemeral_system_prompt)
 
 

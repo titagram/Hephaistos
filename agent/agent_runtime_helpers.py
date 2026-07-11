@@ -2771,7 +2771,30 @@ def deliver_pending_coordination_before_model(agent, messages: list) -> bool:
         return False
     agent._hades_coordination_attached_generation = delivery.generation
     persisted = agent._flush_messages_to_session_db(messages)
-    if persisted == "durable":
+    durable_target = False
+    session_db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", None)
+    if persisted == "durable" and session_db is not None and session_id:
+        target = next(
+            (
+                message
+                for message in reversed(messages[-num_tool_msgs:])
+                if isinstance(message, dict)
+                and str(message.get("tool_call_id") or "")
+                == delivery.target_tool_call_id
+            ),
+            None,
+        )
+        if target is not None:
+            try:
+                durable_target = session_db.update_tool_message_content(
+                    session_id, delivery.target_tool_call_id, target.get("content")
+                )
+            except Exception as exc:
+                _ra().logger.warning(
+                    "Session DB coordination sidecar update failed: %s", exc
+                )
+    if durable_target:
         delivery.durably_persisted = True
         delivery.ack()
     return True
@@ -2795,7 +2818,10 @@ def finalize_hades_coordination_recipient(agent) -> bool:
     from hermes_cli.hades_agent_coordination import complete_and_handoff_pending
 
     return complete_and_handoff_pending(
-        recipient_id, db_path=authority.db_path
+        recipient_id,
+        root_id=authority.root_id,
+        project_id=authority.project_id,
+        db_path=authority.db_path,
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import fnmatch
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -41,6 +42,8 @@ class LeafManifest:
     status: str = "running"
     task_version: int = 1
     contract_version: int = 1
+    root_id: str = ""
+    project_id: str = ""
 
     def __post_init__(self) -> None:
         for name in ("agent_id", "parent_id", "role", "objective", "status"):
@@ -60,6 +63,8 @@ class LeafManifest:
 
 @dataclass(frozen=True)
 class CoordinationEvent:
+    root_id: str
+    project_id: str
     event_id: str
     sender_id: str
     recipients: tuple[str, ...]
@@ -75,6 +80,8 @@ class CoordinationEvent:
 
 @dataclass(frozen=True)
 class CoordinationState:
+    root_id: str
+    project_id: str
     recipient_id: str
     parent_id: str
     generation: int
@@ -86,6 +93,8 @@ class CoordinationState:
 
 @dataclass
 class PendingCoordinationDelivery:
+    root_id: str
+    project_id: str
     recipient_id: str
     generation: int
     through_sequence: int
@@ -99,6 +108,8 @@ class PendingCoordinationDelivery:
             return False
         return ack_coordination_events(
             self.recipient_id,
+            root_id=self.root_id,
+            project_id=self.project_id,
             through_sequence=self.through_sequence,
             through_generation=self.generation,
             db_path=self.db_path,
@@ -134,16 +145,21 @@ def _manifest_from_row(row: sqlite3.Row) -> LeafManifest:
         status=row["status"],
         task_version=int(row["task_version"]),
         contract_version=int(row["contract_version"]),
+        root_id=row["root_id"],
+        project_id=row["project_id"],
     )
 
 
 class DelegationAuthority:
     """Authoritative manifest registry persisted in the Hades local DB."""
 
-    def __init__(self, root_id: str, db_path: Path | None = None) -> None:
+    def __init__(
+        self, root_id: str, project_id: str = "local", db_path: Path | None = None
+    ) -> None:
         if not isinstance(root_id, str) or not root_id.strip():
             raise ValueError("root_id is required")
         self.root_id = root_id.strip()
+        self.project_id = _clean_text(project_id, "project_id", 200)
         self.db_path = _path(db_path)
         # Force normal schema initialization through the DB migration owner.
         with connect_closing(self.db_path):
@@ -152,14 +168,24 @@ class DelegationAuthority:
     def get(self, agent_id: str) -> LeafManifest:
         with connect_closing(self.db_path) as conn:
             row = conn.execute(
-                "SELECT * FROM agent_coordination_manifests WHERE agent_id = ?",
-                (agent_id,),
+                """SELECT * FROM agent_coordination_manifests
+                   WHERE root_id=? AND project_id=? AND agent_id = ?""",
+                (self.root_id, self.project_id, agent_id),
             ).fetchone()
         if row is None:
             raise KeyError(agent_id)
         return _manifest_from_row(row)
 
     def register(self, *, actor_id: str, manifest: LeafManifest) -> None:
+        if manifest.root_id and manifest.root_id != self.root_id:
+            raise AuthorityError("manifest root_id does not match authority namespace")
+        if manifest.project_id and manifest.project_id != self.project_id:
+            raise AuthorityError("manifest project_id does not match authority namespace")
+        manifest = replace(
+            manifest, root_id=self.root_id, project_id=self.project_id
+        )
+        if manifest.agent_id in {self.root_id, actor_id}:
+            raise AuthorityError("a child cannot replace the root or its direct parent")
         if actor_id != manifest.parent_id:
             raise AuthorityError("only the direct parent may register a manifest")
         if actor_id != self.root_id:
@@ -169,13 +195,27 @@ class DelegationAuthority:
         now = int(time.time())
         with connect_closing(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            existing_row = conn.execute(
+                """SELECT * FROM agent_coordination_manifests
+                   WHERE root_id=? AND project_id=? AND agent_id=?""",
+                (self.root_id, self.project_id, manifest.agent_id),
+            ).fetchone()
+            if existing_row is not None:
+                existing = _manifest_from_row(existing_row)
+                if existing == manifest:
+                    conn.commit()
+                    return
+                conn.rollback()
+                raise ValueError(
+                    "manifest already exists; use compare-and-swap contract update"
+                )
             conn.execute(
                 """INSERT INTO agent_coordination_manifests
-                   (agent_id, parent_id, role, objective, write_scope,
+                   (root_id, project_id, agent_id, parent_id, role, objective, write_scope,
                     dependencies, interfaces, produces, status, task_version,
                     contract_version, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(agent_id) DO UPDATE SET
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(root_id, project_id, agent_id) DO UPDATE SET
                      parent_id=excluded.parent_id, role=excluded.role,
                      objective=excluded.objective, write_scope=excluded.write_scope,
                      dependencies=excluded.dependencies, interfaces=excluded.interfaces,
@@ -184,6 +224,8 @@ class DelegationAuthority:
                      contract_version=excluded.contract_version,
                      updated_at=excluded.updated_at""",
                 (
+                    self.root_id,
+                    self.project_id,
                     manifest.agent_id,
                     manifest.parent_id,
                     manifest.role,
@@ -200,10 +242,11 @@ class DelegationAuthority:
             )
             conn.execute(
                 """INSERT INTO agent_coordination_state
-                   (recipient_id, parent_id, updated_at) VALUES (?, ?, ?)
-                   ON CONFLICT(recipient_id) DO UPDATE SET
+                   (root_id, project_id, recipient_id, parent_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(root_id, project_id, recipient_id) DO UPDATE SET
                      parent_id=excluded.parent_id, updated_at=excluded.updated_at""",
-                (manifest.agent_id, manifest.parent_id, now),
+                (self.root_id, self.project_id, manifest.agent_id, manifest.parent_id, now),
             )
             conn.commit()
 
@@ -214,11 +257,10 @@ class DelegationAuthority:
         raise AuthorityError("inspection is limited to root, self, or direct parent")
 
     def update_contract(
-        self, *, actor: str, target: str, patch: dict[str, Any]
+        self, *, actor: str, target: str, expected_task_version: int,
+        expected_contract_version: int,
+        patch: dict[str, Any]
     ) -> LeafManifest:
-        manifest = self.get(target)
-        if actor != manifest.parent_id:
-            raise AuthorityError("only the direct parent may change a contract")
         allowed = {
             "objective", "write_scope", "dependencies", "interfaces", "produces",
             "status", "task_version", "contract_version",
@@ -226,17 +268,63 @@ class DelegationAuthority:
         unknown = set(patch) - allowed
         if unknown:
             raise ValueError(f"unsupported contract fields: {', '.join(sorted(unknown))}")
-        updated = replace(manifest, **patch)
-        self.register(actor_id=actor, manifest=updated)
-        return updated
+        with connect_closing(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM agent_coordination_manifests
+                   WHERE root_id=? AND project_id=? AND agent_id=?""",
+                (self.root_id, self.project_id, target),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise KeyError(target)
+            manifest = _manifest_from_row(row)
+            if actor != manifest.parent_id:
+                conn.rollback()
+                raise AuthorityError("only the direct parent may change a contract")
+            if (
+                expected_task_version != manifest.task_version
+                or expected_contract_version != manifest.contract_version
+            ):
+                conn.rollback()
+                raise ValueError("task/contract version compare-and-swap failed")
+            updated = replace(manifest, **patch)
+            if updated == manifest:
+                conn.commit()
+                return manifest
+            if updated.contract_version == manifest.contract_version:
+                conn.rollback()
+                raise ValueError("conflicting same version manifest")
+            if (
+                updated.contract_version < manifest.contract_version
+                or updated.task_version < manifest.task_version
+            ):
+                conn.rollback()
+                raise ValueError("manifest version regression")
+            conn.execute(
+                """UPDATE agent_coordination_manifests SET objective=?, write_scope=?,
+                   dependencies=?, interfaces=?, produces=?, status=?, task_version=?,
+                   contract_version=?, updated_at=?
+                   WHERE root_id=? AND project_id=? AND agent_id=?""",
+                (
+                    updated.objective, json.dumps(updated.write_scope),
+                    json.dumps(updated.dependencies), json.dumps(updated.interfaces),
+                    json.dumps(updated.produces), updated.status, updated.task_version,
+                    updated.contract_version, int(time.time()), self.root_id,
+                    self.project_id, target,
+                ),
+            )
+            conn.commit()
+            return updated
 
     def siblings(self, agent_id: str) -> tuple[LeafManifest, ...]:
         current = self.get(agent_id)
         with connect_closing(self.db_path) as conn:
             rows = conn.execute(
                 """SELECT * FROM agent_coordination_manifests
-                   WHERE parent_id = ? AND agent_id != ? ORDER BY agent_id LIMIT ?""",
-                (current.parent_id, agent_id, _MAX_RECIPIENTS),
+                   WHERE root_id=? AND project_id=? AND parent_id = ? AND agent_id != ?
+                   ORDER BY agent_id LIMIT ?""",
+                (self.root_id, self.project_id, current.parent_id, agent_id, _MAX_RECIPIENTS),
             ).fetchall()
         return tuple(_manifest_from_row(row) for row in rows)
 
@@ -297,6 +385,7 @@ def _validate_evidence(refs: Sequence[str]) -> tuple[str, ...]:
 
 def _event_from_row(row: sqlite3.Row, recipients: Sequence[str]) -> CoordinationEvent:
     return CoordinationEvent(
+        root_id=row["root_id"], project_id=row["project_id"],
         event_id=row["event_id"], sender_id=row["sender_id"],
         recipients=tuple(recipients), parent_id=row["parent_id"],
         event_type=row["event_type"], summary=row["summary"],
@@ -308,17 +397,20 @@ def _event_from_row(row: sqlite3.Row, recipients: Sequence[str]) -> Coordination
 
 def _cleanup_expired(conn: sqlite3.Connection, now: int) -> None:
     rows = conn.execute(
-        "SELECT event_id FROM agent_coordination_events WHERE expires_at <= ? LIMIT ?",
+        """SELECT root_id, project_id, event_id FROM agent_coordination_events
+           WHERE expires_at <= ? LIMIT ?""",
         (now, _CLEANUP_BATCH),
     ).fetchall()
     if rows:
         conn.executemany(
-            "DELETE FROM agent_coordination_event_recipients WHERE event_id = ?",
-            [(row[0],) for row in rows],
+            """DELETE FROM agent_coordination_event_recipients
+               WHERE root_id=? AND project_id=? AND event_id = ?""",
+            [(row[0], row[1], row[2]) for row in rows],
         )
         conn.executemany(
-            "DELETE FROM agent_coordination_events WHERE event_id = ?",
-            [(row[0],) for row in rows],
+            """DELETE FROM agent_coordination_events
+               WHERE root_id=? AND project_id=? AND event_id = ?""",
+            [(row[0], row[1], row[2]) for row in rows],
         )
 
 
@@ -350,6 +442,46 @@ def post_addressed_event(
     if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
         raise ValueError("ttl_seconds must be positive")
     event_id = _clean_text(event_id or str(uuid.uuid4()), "event_id", 200)
+
+    canonical_request = json.dumps(
+        {
+            "root_id": authority.root_id,
+            "project_id": authority.project_id,
+            "event_id": event_id,
+            "actor_id": actor_id,
+            "recipient_id": recipient_id,
+            "event_type": event_type,
+            "summary": summary,
+            "evidence_refs": evidence,
+            "artifact": artifact,
+            "blocker": blocker,
+            "ttl_seconds": ttl_seconds,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request_fingerprint = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+
+    # Claim/check the immutable request identity before consulting mutable DAG
+    # state (for example, child completion). A retry must return the originally
+    # committed delivery even if routing state changed after the first post.
+    with connect_closing(path) as conn:
+        existing = conn.execute(
+            """SELECT * FROM agent_coordination_events
+               WHERE root_id=? AND project_id=? AND event_id=?""",
+            (authority.root_id, authority.project_id, event_id),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_fingerprint"] != request_fingerprint:
+                raise ValueError("event_id was already used for a different event")
+            recipients = conn.execute(
+                """SELECT recipient_id FROM agent_coordination_event_recipients
+                   WHERE root_id=? AND project_id=? AND event_id=?
+                   ORDER BY recipient_id""",
+                (authority.root_id, authority.project_id, event_id),
+            ).fetchall()
+            return _event_from_row(existing, [row[0] for row in recipients])
 
     broadcast = recipient_id == "*"
     if broadcast and event_type not in _BROADCAST_TYPES:
@@ -384,33 +516,14 @@ def post_addressed_event(
     with connect_closing(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         _cleanup_expired(conn, timestamp)
-        existing = conn.execute(
-            "SELECT * FROM agent_coordination_events WHERE event_id = ?", (event_id,)
-        ).fetchone()
-        if existing is not None:
-            if (
-                existing["sender_id"] != actor_id
-                or existing["summary"] not in {summary, f"Pending event for completed child {recipient_id}: {summary}"}
-                or existing["artifact"] != artifact
-                or _json_tuple(existing["evidence_refs"]) != evidence
-            ):
-                conn.rollback()
-                raise ValueError("event_id was already used for a different event")
-            recipients = conn.execute(
-                """SELECT recipient_id FROM agent_coordination_event_recipients
-                   WHERE event_id = ? ORDER BY recipient_id""",
-                (event_id,),
-            ).fetchall()
-            conn.commit()
-            return _event_from_row(existing, [row[0] for row in recipients])
-
         actual_recipients: list[str] = []
         actual_type = event_type
         actual_summary = summary
         for resolved_recipient in resolved_recipients[:_MAX_RECIPIENTS]:
             target_state = conn.execute(
-                "SELECT completed, parent_id FROM agent_coordination_state WHERE recipient_id = ?",
-                (resolved_recipient,),
+                """SELECT completed, parent_id FROM agent_coordination_state
+                   WHERE root_id=? AND project_id=? AND recipient_id = ?""",
+                (authority.root_id, authority.project_id, resolved_recipient),
             ).fetchone()
             actual_recipient = resolved_recipient
             if target_state is not None and bool(target_state["completed"]):
@@ -422,39 +535,62 @@ def post_addressed_event(
                     )
             if actual_recipient not in actual_recipients:
                 actual_recipients.append(actual_recipient)
+        existing = conn.execute(
+            """SELECT * FROM agent_coordination_events
+               WHERE root_id=? AND project_id=? AND event_id = ?""",
+            (authority.root_id, authority.project_id, event_id),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_fingerprint"] != request_fingerprint:
+                conn.rollback()
+                raise ValueError("event_id was already used for a different event")
+            recipients = conn.execute(
+                """SELECT recipient_id FROM agent_coordination_event_recipients
+                   WHERE root_id=? AND project_id=? AND event_id = ?
+                   ORDER BY recipient_id""",
+                (authority.root_id, authority.project_id, event_id),
+            ).fetchall()
+            conn.commit()
+            return _event_from_row(existing, [row[0] for row in recipients])
 
         cursor = conn.execute(
             """INSERT INTO agent_coordination_events
-               (event_id, sender_id, parent_id, event_type, summary, evidence_refs,
-                artifact, created_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (root_id, project_id, event_id, sender_id, parent_id, event_type,
+                summary, evidence_refs, artifact, created_at, expires_at, ttl_seconds,
+                request_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                event_id, actor_id, sender_parent, actual_type, actual_summary,
-                json.dumps(evidence), artifact, timestamp, timestamp + ttl_seconds,
+                authority.root_id, authority.project_id, event_id, actor_id,
+                sender_parent, actual_type, actual_summary, json.dumps(evidence),
+                artifact, timestamp, timestamp + ttl_seconds, ttl_seconds,
+                request_fingerprint,
             ),
         )
         sequence = int(cursor.lastrowid)
         for actual_recipient in actual_recipients:
             conn.execute(
                 """INSERT INTO agent_coordination_event_recipients
-                   (event_id, recipient_id, sequence) VALUES (?, ?, ?)""",
-                (event_id, actual_recipient, sequence),
+                   (root_id, project_id, event_id, recipient_id, sequence)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (authority.root_id, authority.project_id, event_id, actual_recipient, sequence),
             )
             parent_row = conn.execute(
-                "SELECT parent_id FROM agent_coordination_manifests WHERE agent_id = ?",
-                (actual_recipient,),
+                """SELECT parent_id FROM agent_coordination_manifests
+                   WHERE root_id=? AND project_id=? AND agent_id = ?""",
+                (authority.root_id, authority.project_id, actual_recipient),
             ).fetchone()
             parent = parent_row[0] if parent_row is not None else authority.root_id
             conn.execute(
                 """INSERT INTO agent_coordination_state
-                   (recipient_id, parent_id, generation, dirty, updated_at)
-                   VALUES (?, ?, 1, 1, ?)
-                   ON CONFLICT(recipient_id) DO UPDATE SET
+                   (root_id, project_id, recipient_id, parent_id, generation, dirty, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 1, ?)
+                   ON CONFLICT(root_id, project_id, recipient_id) DO UPDATE SET
                      generation=generation+1, dirty=1, updated_at=excluded.updated_at""",
-                (actual_recipient, parent, timestamp),
+                (authority.root_id, authority.project_id, actual_recipient, parent, timestamp),
             )
         conn.commit()
     return CoordinationEvent(
+        root_id=authority.root_id, project_id=authority.project_id,
         event_id=event_id, sender_id=actor_id, recipients=tuple(actual_recipients),
         parent_id=sender_parent, event_type=actual_type, summary=actual_summary,
         evidence_refs=evidence, sequence=sequence, created_at=timestamp,
@@ -463,17 +599,19 @@ def post_addressed_event(
 
 
 def coordination_state(
-    recipient_id: str, *, db_path: Path | None = None
+    recipient_id: str, *, root_id: str, project_id: str, db_path: Path | None = None
 ) -> CoordinationState:
     path = _path(db_path)
     with connect_closing(path) as conn:
         row = conn.execute(
-            "SELECT * FROM agent_coordination_state WHERE recipient_id = ?",
-            (recipient_id,),
+            """SELECT * FROM agent_coordination_state
+               WHERE root_id=? AND project_id=? AND recipient_id = ?""",
+            (root_id, project_id, recipient_id),
         ).fetchone()
     if row is None:
-        return CoordinationState(recipient_id, "", 0, 0, 0, False, False)
+        return CoordinationState("", "", recipient_id, "", 0, 0, 0, False, False)
     return CoordinationState(
+        root_id=row["root_id"], project_id=row["project_id"],
         recipient_id=row["recipient_id"], parent_id=row["parent_id"],
         generation=int(row["generation"]), ack_generation=int(row["ack_generation"]),
         ack_sequence=int(row["ack_sequence"]), dirty=bool(row["dirty"]),
@@ -484,6 +622,8 @@ def coordination_state(
 def drain_addressed_events(
     recipient_id: str,
     *,
+    root_id: str,
+    project_id: str,
     db_path: Path | None = None,
     limit: int = MAX_RENDERED_COORDINATION_EVENTS,
     now: int | None = None,
@@ -494,16 +634,20 @@ def drain_addressed_events(
     path = _path(db_path)
     with connect_closing(path) as conn:
         state = conn.execute(
-            "SELECT ack_sequence FROM agent_coordination_state WHERE recipient_id = ?",
-            (recipient_id,),
+            """SELECT ack_sequence FROM agent_coordination_state
+               WHERE root_id=? AND project_id=? AND recipient_id = ?""",
+            (root_id, project_id, recipient_id),
         ).fetchone()
         after = int(state[0]) if state else 0
         rows = conn.execute(
             """SELECT e.* FROM agent_coordination_event_recipients r
-               JOIN agent_coordination_events e ON e.event_id = r.event_id
-               WHERE r.recipient_id = ? AND r.sequence > ? AND e.expires_at > ?
+               JOIN agent_coordination_events e
+                 ON e.root_id=r.root_id AND e.project_id=r.project_id
+                AND e.event_id = r.event_id
+               WHERE r.root_id=? AND r.project_id=? AND r.recipient_id = ?
+                 AND r.sequence > ? AND e.expires_at > ?
                ORDER BY r.sequence ASC LIMIT ?""",
-            (recipient_id, after, timestamp, limit),
+            (root_id, project_id, recipient_id, after, timestamp, limit),
         ).fetchall()
     return [_event_from_row(row, (recipient_id,)) for row in rows]
 
@@ -511,6 +655,8 @@ def drain_addressed_events(
 def ack_coordination_events(
     recipient_id: str,
     *,
+    root_id: str,
+    project_id: str,
     through_sequence: int,
     through_generation: int,
     db_path: Path | None = None,
@@ -524,32 +670,38 @@ def ack_coordination_events(
                  ack_sequence=MAX(ack_sequence, ?),
                  ack_generation=MAX(ack_generation, ?),
                  dirty=CASE WHEN generation <= ? THEN 0 ELSE 1 END,
-                 updated_at=? WHERE recipient_id=?""",
-            (through_sequence, through_generation, through_generation, now, recipient_id),
+                 updated_at=? WHERE root_id=? AND project_id=? AND recipient_id=?""",
+            (
+                through_sequence, through_generation, through_generation, now,
+                root_id, project_id, recipient_id,
+            ),
         )
         conn.commit()
     return True
 
 
 def mark_coordination_recipient_completed(
-    recipient_id: str, *, db_path: Path | None = None
+    recipient_id: str, *, root_id: str, project_id: str, db_path: Path | None = None
 ) -> None:
     path = _path(db_path)
     with connect_closing(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "UPDATE agent_coordination_state SET completed=1, updated_at=? WHERE recipient_id=?",
-            (int(time.time()), recipient_id),
+            """UPDATE agent_coordination_state SET completed=1, updated_at=?
+               WHERE root_id=? AND project_id=? AND recipient_id=?""",
+            (int(time.time()), root_id, project_id, recipient_id),
         )
         conn.execute(
-            "UPDATE agent_coordination_manifests SET status='completed', updated_at=? WHERE agent_id=?",
-            (int(time.time()), recipient_id),
+            """UPDATE agent_coordination_manifests SET status='completed', updated_at=?
+               WHERE root_id=? AND project_id=? AND agent_id=?""",
+            (int(time.time()), root_id, project_id, recipient_id),
         )
         conn.commit()
 
 
 def complete_and_handoff_pending(
-    recipient_id: str, *, db_path: Path | None = None, now: int | None = None
+    recipient_id: str, *, root_id: str, project_id: str,
+    db_path: Path | None = None, now: int | None = None
 ) -> bool:
     """CAS-like completion and one coalesced parent handoff for pending work."""
 
@@ -558,8 +710,9 @@ def complete_and_handoff_pending(
     with connect_closing(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         state = conn.execute(
-            "SELECT * FROM agent_coordination_state WHERE recipient_id = ?",
-            (recipient_id,),
+            """SELECT * FROM agent_coordination_state
+               WHERE root_id=? AND project_id=? AND recipient_id = ?""",
+            (root_id, project_id, recipient_id),
         ).fetchone()
         if state is None:
             conn.commit()
@@ -568,44 +721,50 @@ def complete_and_handoff_pending(
         pending = bool(state["dirty"]) and generation > int(state["ack_generation"])
         parent_id = state["parent_id"]
         conn.execute(
-            "UPDATE agent_coordination_state SET completed=1, updated_at=? WHERE recipient_id=?",
-            (timestamp, recipient_id),
+            """UPDATE agent_coordination_state SET completed=1, updated_at=?
+               WHERE root_id=? AND project_id=? AND recipient_id=?""",
+            (timestamp, root_id, project_id, recipient_id),
         )
         conn.execute(
-            "UPDATE agent_coordination_manifests SET status='completed', updated_at=? WHERE agent_id=?",
-            (timestamp, recipient_id),
+            """UPDATE agent_coordination_manifests SET status='completed', updated_at=?
+               WHERE root_id=? AND project_id=? AND agent_id=?""",
+            (timestamp, root_id, project_id, recipient_id),
         )
         if pending and parent_id:
             handoff_id = f"handoff:{recipient_id}:{generation}"
             existing = conn.execute(
-                "SELECT sequence FROM agent_coordination_events WHERE event_id = ?",
-                (handoff_id,),
+                """SELECT sequence FROM agent_coordination_events
+                   WHERE root_id=? AND project_id=? AND event_id = ?""",
+                (root_id, project_id, handoff_id),
             ).fetchone()
             if existing is None:
                 cursor = conn.execute(
                     """INSERT INTO agent_coordination_events
-                       (event_id, sender_id, parent_id, event_type, summary,
-                        evidence_refs, artifact, created_at, expires_at)
-                       VALUES (?, ?, ?, 'pending_child_event', ?, '[]', NULL, ?, ?)""",
+                       (root_id, project_id, event_id, sender_id, parent_id,
+                        event_type, summary, evidence_refs, artifact, created_at,
+                        expires_at, ttl_seconds, request_fingerprint)
+                       VALUES (?, ?, ?, ?, ?, 'pending_child_event', ?, '[]', NULL, ?, ?, ?, ?)""",
                     (
-                        handoff_id, recipient_id, parent_id,
+                        root_id, project_id, handoff_id, recipient_id, parent_id,
                         f"Completed child {recipient_id} has pending coordination generation {generation}",
-                        timestamp, timestamp + _DEFAULT_TTL_SECONDS,
+                        timestamp, timestamp + _DEFAULT_TTL_SECONDS, _DEFAULT_TTL_SECONDS,
+                        hashlib.sha256(handoff_id.encode("utf-8")).hexdigest(),
                     ),
                 )
                 sequence = int(cursor.lastrowid)
                 conn.execute(
                     """INSERT INTO agent_coordination_event_recipients
-                       (event_id, recipient_id, sequence) VALUES (?, ?, ?)""",
-                    (handoff_id, parent_id, sequence),
+                       (root_id, project_id, event_id, recipient_id, sequence)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (root_id, project_id, handoff_id, parent_id, sequence),
                 )
                 conn.execute(
                     """INSERT INTO agent_coordination_state
-                       (recipient_id, parent_id, generation, dirty, updated_at)
-                       VALUES (?, ?, 1, 1, ?)
-                       ON CONFLICT(recipient_id) DO UPDATE SET
+                       (root_id, project_id, recipient_id, parent_id, generation, dirty, updated_at)
+                       VALUES (?, ?, ?, ?, 1, 1, ?)
+                       ON CONFLICT(root_id, project_id, recipient_id) DO UPDATE SET
                          generation=generation+1, dirty=1, updated_at=excluded.updated_at""",
-                    (parent_id, parent_id, timestamp),
+                    (root_id, project_id, parent_id, parent_id, timestamp),
                 )
         conn.commit()
     return pending
@@ -667,13 +826,22 @@ def prepare_pending_coordination(agent, messages: list, num_tool_msgs: int):
     authority = getattr(agent, "_hades_delegation_authority", None)
     if not recipient_id or not isinstance(authority, DelegationAuthority):
         return None
-    state = coordination_state(recipient_id, db_path=authority.db_path)
+    state = coordination_state(
+        recipient_id,
+        root_id=authority.root_id,
+        project_id=authority.project_id,
+        db_path=authority.db_path,
+    )
     if not state.dirty or state.generation <= state.ack_generation:
         return None
     if getattr(agent, "_hades_coordination_attached_generation", 0) >= state.generation:
         return None
     events = drain_addressed_events(
-        recipient_id, db_path=authority.db_path, limit=MAX_RENDERED_COORDINATION_EVENTS
+        recipient_id,
+        root_id=authority.root_id,
+        project_id=authority.project_id,
+        db_path=authority.db_path,
+        limit=MAX_RENDERED_COORDINATION_EVENTS,
     )
     if not events:
         return None
@@ -691,6 +859,8 @@ def prepare_pending_coordination(agent, messages: list, num_tool_msgs: int):
     if target is None:
         return None
     return PendingCoordinationDelivery(
+        root_id=authority.root_id,
+        project_id=authority.project_id,
         recipient_id=recipient_id,
         generation=state.generation,
         through_sequence=events[-1].sequence,

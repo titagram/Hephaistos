@@ -129,3 +129,45 @@ Final post-review evidence:
   pre-existing skip.
 - Hades backend DB migration suite: 5 passed.
 - Run-agent conversation regression plus coordination hardening: exit 0.
+
+## Final namespace and late-arrival remediation
+
+The follow-up review found that the first hardening pass still treated agent
+IDs as globally unique and relied on process-local message identity after an
+early SessionDB flush. The final pass closes those gaps:
+
+- Every manifest, event, recipient row, cursor/state row, dirty generation,
+  completion handoff, and delivery is scoped by the composite
+  `(root_id, project_id)` namespace. Identical agent/event IDs can coexist in
+  independent trees without observation, routing, or acknowledgement leakage.
+- Unnamespaced or partially upgraded coordination tables are quarantined before
+  the normal schema/index pass. No ambiguous legacy row is silently assigned to
+  a project or delegation root.
+- Registration cannot replace a root/parent or mutate an existing manifest.
+  Contract changes use a single SQLite transaction with task+contract version
+  compare-and-swap; both versions are monotonic and stale writers fail closed.
+- The canonical event request includes namespace, event ID, actor, requested
+  recipient, type, summary, evidence, artifact, blocker, and TTL. Its durable
+  fingerprint makes retries immutable and preserves the originally committed
+  route even if child-completion state changes before a retry.
+- Root inspection and questions remain namespace-scoped and information-only;
+  mutation is direct-parent-only. Existing ancestry cannot be hijacked through
+  re-registration.
+- Runtime composition refuses non-string/multimodal targets instead of coercing
+  or corrupting content. The stale sibling-awareness assertion now checks the
+  versioned manifest format actually placed in the byte-stable prompt.
+- Late coordination arriving after the base tool result was flushed is written
+  back to the exact durable SessionDB row by `(session_id, tool_call_id)` before
+  acknowledgement. This lookup survives process restart; the in-memory object
+  identity map is only a flush optimization and is no longer accepted as proof
+  of persistence. If no durable target exists, the event remains dirty for
+  replay.
+
+Final evidence:
+
+- Focused O7/DB/tool/delegate suite: `196 passed`.
+- O1-O7, delegation, prompt-cache, and role-alternation suite:
+  `753 passed, 1 skipped`.
+- Ruff: all checks passed (the pre-existing malformed `# noqa` warning at
+  `run_agent.py:107` remains non-blocking).
+- `py_compile` and `git diff --check`: passed.

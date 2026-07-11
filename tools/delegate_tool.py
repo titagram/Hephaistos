@@ -2627,8 +2627,13 @@ def delegate_task(
             root_id = f"root:{parent_session_id}"
         authority = getattr(parent_agent, "_hades_delegation_authority", None)
         if not isinstance(authority, DelegationAuthority):
-            authority = DelegationAuthority(root_id=root_id)
+            project_id = getattr(parent_agent, "_hades_project_id", None)
+            if not isinstance(project_id, str) or not project_id:
+                workspace_hint = _resolve_workspace_hint(parent_agent)
+                project_id = f"local:{workspace_hint or root_id}"
+            authority = DelegationAuthority(root_id=root_id, project_id=project_id)
             parent_agent._hades_delegation_authority = authority
+            parent_agent._hades_project_id = project_id
         parent_agent._hades_coordination_id = root_id
         manifests = []
         for child_index, task, child in children:
@@ -2655,6 +2660,8 @@ def delegate_task(
                 contract_version=(
                     getattr(contract, "contract_version", 1) if contract is not None else 1
                 ),
+                root_id=authority.root_id,
+                project_id=authority.project_id,
             )
             authority.register(actor_id=root_id, manifest=manifest)
             manifests.append((child, manifest))
@@ -2662,6 +2669,7 @@ def delegate_task(
             siblings = tuple(item for _, item in manifests if item.agent_id != manifest.agent_id)
             child._hades_manifest = manifest
             child._hades_coordination_id = manifest.agent_id
+            child._hades_project_id = authority.project_id
             child._hades_sibling_manifests = siblings
             child._hades_delegation_authority = authority
             awareness = format_manifest_awareness(manifest, siblings)

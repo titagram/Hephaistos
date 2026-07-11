@@ -55,11 +55,17 @@ def test_relevance_requires_explicit_relationship() -> None:
 def test_only_direct_parent_updates_contract(tmp_path) -> None:
     registry = authority(tmp_path)
     updated = registry.update_contract(
-        actor="parent", target="b", patch={"objective": "bounded change"}
+        actor="parent", target="b", expected_task_version=1,
+        expected_contract_version=1,
+        patch={"objective": "bounded change", "contract_version": 2}
     )
     assert updated.objective == "bounded change"
     with pytest.raises(AuthorityError):
-        registry.update_contract(actor="a", target="b", patch={"objective": "bad"})
+        registry.update_contract(
+            actor="a", target="b", expected_task_version=1,
+            expected_contract_version=2,
+            patch={"objective": "bad", "contract_version": 3}
+        )
 
 
 def test_irrelevant_sibling_is_parent_routed(tmp_path) -> None:
@@ -90,16 +96,30 @@ def test_ack_is_replay_safe_and_generation_aware(tmp_path) -> None:
         summary="consume schema",
         artifact="schema.json",
     )
-    state = coordination_state("b", db_path=registry.db_path)
-    assert drain_addressed_events("b", db_path=registry.db_path) == [event]
+    state = coordination_state(
+        "b", root_id=registry.root_id, project_id=registry.project_id,
+        db_path=registry.db_path
+    )
+    assert drain_addressed_events(
+        "b", root_id=registry.root_id, project_id=registry.project_id,
+        db_path=registry.db_path
+    ) == [event]
     ack_coordination_events(
         "b",
+        root_id=registry.root_id,
+        project_id=registry.project_id,
         through_sequence=event.sequence,
         through_generation=state.generation,
         db_path=registry.db_path,
     )
-    assert drain_addressed_events("b", db_path=registry.db_path) == []
-    assert not coordination_state("b", db_path=registry.db_path).dirty
+    assert drain_addressed_events(
+        "b", root_id=registry.root_id, project_id=registry.project_id,
+        db_path=registry.db_path
+    ) == []
+    assert not coordination_state(
+        "b", root_id=registry.root_id, project_id=registry.project_id,
+        db_path=registry.db_path
+    ).dirty
 
 
 def test_render_has_hard_utf8_budget(tmp_path) -> None:

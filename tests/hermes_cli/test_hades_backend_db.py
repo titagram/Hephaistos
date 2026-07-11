@@ -255,7 +255,7 @@ def test_cleanup_terminal_plugin_work_items_keeps_active_and_fresh_items(tmp_pat
     assert {item.work_item_id for item in remaining} == {"awi_failed_fresh", "awi_queued_old"}
 
 
-def test_legacy_coordination_rows_migrate_without_loss(tmp_path):
+def test_unnamespaced_legacy_coordination_rows_are_quarantined(tmp_path):
     import json
     import sqlite3
 
@@ -279,9 +279,54 @@ def test_legacy_coordination_rows_migrate_without_loss(tmp_path):
     conn.close()
 
     with db.connect_closing(path) as migrated:
-        event = migrated.execute("SELECT event_id FROM agent_coordination_events").fetchone()
-        recipient = migrated.execute(
-            "SELECT recipient_id FROM agent_coordination_event_recipients"
+        event_count = migrated.execute(
+            "SELECT COUNT(*) FROM agent_coordination_events"
+        ).fetchone()[0]
+        quarantined = migrated.execute(
+            """SELECT source_table, reason FROM agent_coordination_quarantine
+               WHERE source_table='agent_coordination_events'"""
         ).fetchone()
-    assert event[0] == "legacy:1"
-    assert recipient[0] == "b"
+    assert event_count == 0
+    assert quarantined[0] == "agent_coordination_events"
+    assert "namespace" in quarantined[1]
+
+
+def test_partial_legacy_coordination_schema_migrates_before_new_indexes(tmp_path):
+    import sqlite3
+
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "partial-legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE agent_coordination_manifests (
+               agent_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL,
+               role TEXT NOT NULL, objective TEXT NOT NULL,
+               write_scope TEXT NOT NULL, dependencies TEXT NOT NULL,
+               interfaces TEXT NOT NULL, produces TEXT NOT NULL,
+               status TEXT NOT NULL, task_version INTEGER NOT NULL,
+               contract_version INTEGER NOT NULL, updated_at INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO agent_coordination_manifests VALUES
+           ('leaf', 'root', 'leaf', 'legacy', '[]', '[]', '[]', '[]',
+            'running', 1, 1, 1)"""
+    )
+    conn.commit()
+    conn.close()
+
+    with db.connect_closing(path) as migrated:
+        columns = {
+            row[1]
+            for row in migrated.execute(
+                "PRAGMA table_info(agent_coordination_manifests)"
+            ).fetchall()
+        }
+        quarantined = migrated.execute(
+            """SELECT COUNT(*) FROM agent_coordination_quarantine
+               WHERE source_table='agent_coordination_manifests'"""
+        ).fetchone()[0]
+
+    assert {"root_id", "project_id"}.issubset(columns)
+    assert quarantined == 1

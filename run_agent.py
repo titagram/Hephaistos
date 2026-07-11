@@ -1665,11 +1665,16 @@ class AIAgent:
             flushed_session_id = getattr(self, "_flushed_db_message_session_id", None)
             if flushed_session_id != current_session_id or self._last_flushed_db_idx == 0:
                 self._flushed_db_message_ids = set()
+                self._flushed_db_message_records = {}
                 self._flushed_db_message_session_id = current_session_id
             flushed_ids = getattr(self, "_flushed_db_message_ids", None)
             if not isinstance(flushed_ids, set):
                 flushed_ids = set()
                 self._flushed_db_message_ids = flushed_ids
+            flushed_records = getattr(self, "_flushed_db_message_records", None)
+            if not isinstance(flushed_records, dict):
+                flushed_records = {}
+                self._flushed_db_message_records = flushed_records
             history_ids = {
                 id(item) for item in (conversation_history or [])
                 if isinstance(item, dict)
@@ -1679,8 +1684,6 @@ class AIAgent:
                 if not isinstance(msg, dict):
                     continue
                 msg_id = id(msg)
-                if msg_id in flushed_ids:
-                    continue
                 if msg_id in history_ids:
                     flushed_ids.add(msg_id)
                     continue
@@ -1700,6 +1703,16 @@ class AIAgent:
                         elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
                             _txt.append("[screenshot]")
                     content = "\n".join(_txt) if _txt else None
+                content_fingerprint = hashlib.sha256(
+                    repr(content).encode("utf-8", "surrogatepass")
+                ).hexdigest()
+                if msg_id in flushed_ids:
+                    record = flushed_records.get(msg_id)
+                    if record and record[1] != content_fingerprint:
+                        if not self._session_db.update_message_content(record[0], content):
+                            raise RuntimeError("SessionDB message content update missed its row")
+                        flushed_records[msg_id] = (record[0], content_fingerprint)
+                    continue
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
@@ -1708,7 +1721,7 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                self._session_db.append_message(
+                persisted_row_id = self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
                     content=content,
@@ -1724,6 +1737,7 @@ class AIAgent:
                     timestamp=msg.get("timestamp"),
                 )
                 flushed_ids.add(msg_id)
+                flushed_records[msg_id] = (persisted_row_id, content_fingerprint)
             self._last_flushed_db_idx = len(messages)
             return "durable"
         except Exception as e:
