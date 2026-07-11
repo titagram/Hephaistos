@@ -235,7 +235,9 @@ def test_plugin_client_signs_device_bound_requests_with_the_bootstrap_secret():
         assert request.headers["x-devboard-device-id"] == "dev_1"
         assert request.headers["x-devboard-content-sha256"] == body_hash
         assert request.headers["x-devboard-signature"] == "v1=" + hmac.new(
-            device_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
+            hashlib.sha256(device_secret.encode("utf-8")).hexdigest().encode("utf-8"),
+            canonical.encode("utf-8"),
+            hashlib.sha256,
         ).hexdigest()
         return httpx.Response(200, json={"items": []})
 

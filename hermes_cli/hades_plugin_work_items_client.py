@@ -119,7 +119,7 @@ class HadesPluginWorkItemsClient:
         body_hash = hashlib.sha256(request.content).hexdigest()
         canonical = "\n".join((request.method, request.url.raw_path.decode("utf-8"), timestamp, body_hash))
         signature = hmac.new(
-            self._device_secret.encode("utf-8"),
+            hashlib.sha256(self._device_secret.encode("utf-8")).hexdigest().encode("utf-8"),
             canonical.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()

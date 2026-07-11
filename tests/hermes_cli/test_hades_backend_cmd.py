@@ -1417,8 +1417,8 @@ def test_backend_bootstrap_sets_up_project_links_workspace_and_syncs(monkeypatch
     assert "bootstrap-token" not in env_text
     assert bindings[0].backend_workspace_binding_id == "wb_bootstrap_1"
     assert operational.bound
-    assert operational.pulled
-    assert summary["pulled"] == 0
+    assert not operational.pulled
+    assert summary is None
 
 
 def test_backend_status_json_exposes_actionable_degraded_state(monkeypatch, tmp_path, capsys):

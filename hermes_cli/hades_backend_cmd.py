@@ -800,13 +800,12 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"backend bootstrap: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
 
-    sync_rc = _cmd_sync(SimpleNamespace(backend_action="sync"))
     print("Hades backend bootstrap complete")
     print(f"  Local project: {project.slug} ({project.name})")
     print(f"  Workspace:     {Path(args.workspace or '.').expanduser().resolve()}")
     print(f"  Binding:       {binding_id}")
-    print("  Next:          run `hades doctor` or start Hades from this workspace")
-    return sync_rc
+    print("  Next:          run `hades backend sync` when ready to upload pending memory")
+    return 0
 
 
 def _current_workspace_scoped_agent_binding() -> tuple[db.BackendAgent, db.WorkspaceBinding]:
