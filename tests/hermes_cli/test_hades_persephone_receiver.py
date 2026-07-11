@@ -144,6 +144,77 @@ def test_only_information_requests_are_auto_accepted(receiver):
     assert result == "waiting_human_approval"
 
 
+def test_receiver_dispatches_only_auto_accepted_information_requests(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    path = tmp_path / "dispatch.db"
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    calls = []
+
+    def execute(conn, message_id, *, binding, now, response_message_id):
+        calls.append((message_id, binding.backend_workspace_binding_id, now, response_message_id))
+
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=execute,
+        response_id_factory=lambda: "response_1",
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()])
+
+    assert receiver.ingest_event(_event()) == "accepted"
+    assert calls == [("msg_1", "wb_a", NOW, "response_1")]
+
+    assert receiver.ingest_event(_event(message_id="mutating", capability="run_tests")) == "waiting_human_approval"
+    assert len(calls) == 1
+
+
+def test_receiver_worker_atomically_enqueues_information_response(tmp_path):
+    from contextlib import contextmanager
+
+    from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_message
+
+    path = tmp_path / "integrated.db"
+    (tmp_path / "module.py").write_text("needle = True\n", encoding="utf-8")
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    binding = _binding()
+    object.__setattr__(binding, "repo_root", str(tmp_path))
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        information_executor=execute_stored_information_request,
+        response_id_factory=lambda: "response_integrated",
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([binding])
+
+    assert receiver.ingest_event(_event()) == "accepted"
+    with connections() as conn:
+        request = get_message(conn, "msg_1")
+        response = get_message(conn, "response_integrated", queue="outbox")
+    assert request is not None and request.state == "responded"
+    assert response is not None and response.envelope.message_type.value == "information_response"
+
+
 def test_expired_event_is_durable_then_marked_expired(receiver):
     from hermes_cli.hades_persephone_store import get_message
 

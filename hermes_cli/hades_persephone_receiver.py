@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from typing import Any, Callable, ContextManager, Iterable, Mapping
+import uuid
 
 from hermes_cli import hades_backend_db as db
 from hermes_cli.hades_persephone_messages import (
@@ -78,6 +79,7 @@ class _ReceiverWorker:
 ConnectionFactory = Callable[[], ContextManager[sqlite3.Connection]]
 ClientFactory = Callable[[db.BackendAgent], object]
 EventReader = Callable[..., Iterable[dict[str, Any]]]
+InformationExecutor = Callable[..., object]
 
 
 class PersephoneReceiver:
@@ -92,6 +94,8 @@ class PersephoneReceiver:
         poll_interval: float = 5.0,
         batch_size: int = 50,
         max_projects_per_cycle: int = 8,
+        information_executor: InformationExecutor | None = None,
+        response_id_factory: Callable[[], str] | None = None,
         now: Callable[[], int] | None = None,
     ) -> None:
         if not 1 <= int(batch_size) <= 100:
@@ -106,6 +110,8 @@ class PersephoneReceiver:
         self.poll_interval = float(poll_interval)
         self.batch_size = int(batch_size)
         self.max_projects_per_cycle = int(max_projects_per_cycle)
+        self.information_executor = information_executor
+        self.response_id_factory = response_id_factory or (lambda: uuid.uuid4().hex)
         self._now = now or (lambda: int(time.time()))
         self._bindings: dict[str, db.WorkspaceBinding] = {}
         self._workers: dict[tuple[str, str], _ReceiverWorker] = {}
@@ -525,6 +531,27 @@ class PersephoneReceiver:
                         else "waiting_human_approval",
                         now=timestamp,
                     )
+                    if disposition == "accepted" and self.information_executor is not None:
+                        with self._lock:
+                            binding = self._bindings.get(
+                                durable.target_workspace_binding_id or ""
+                            )
+                        # _route_disposition already established the exact
+                        # project/agent/workspace binding.  Never infer or
+                        # fall back to another workspace here.
+                        if binding is None:
+                            transition_message(
+                                conn, envelope.message_id, "rejected", now=timestamp
+                            )
+                            disposition = "target_binding_unavailable"
+                        else:
+                            self.information_executor(
+                                conn,
+                                durable.message_id,
+                                binding=binding,
+                                now=timestamp,
+                                response_message_id=self.response_id_factory(),
+                            )
             if cursor and disposition != "agent_queue_unsupported":
                 record_cursor(
                     conn,
