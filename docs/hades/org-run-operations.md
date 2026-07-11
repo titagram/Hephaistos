@@ -30,6 +30,8 @@ Replacement contracts are canonical parsed orchestrator contracts, not caller-su
 
 Human acceptance authority comes only from an approved durable Persephone/O2 inbox row whose project, OrgRun anchor, remote mandate, observed version, and action all match exactly. The audited actor is read from that row. Reconciliation consumes its message ID once in the same local transaction as contract installation and node resumption, so forged dictionaries, replay, and concurrent stale acceptance cannot authorize work. Direct mandate import is limited to the first observation or an identical still-current observation; it cannot bypass an awaiting or completed reconciliation.
 
+Standalone contract installation and human reconciliation share one transaction-aware CAS primitive. A replacement must match the exact stored contract version, increase `contract_version`, and change the canonical contract hash before the approval can be consumed or any node resumed. Supplying the old contract, an identical hash, or a same/lower version rolls back the entire attempt and leaves the mandate awaiting human action.
+
 ## Delegation preflight
 
 Resolve local model routing before materializing or dispatching an OrgRun:

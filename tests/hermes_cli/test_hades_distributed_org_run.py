@@ -137,8 +137,15 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
             import_remote_mandate(conn, topology=org, remote_id="r1", version="2")
         from hermes_cli import hades_backend_db
         approval_conn = hades_backend_db.connect(tmp_path / "approvals.db")
+        for node_id in stale.affected_nodes:
+            owner = next((candidate for candidate in stale.affected_remote_ids if node_id in {
+                org.remote_tasks[candidate].execution_id, org.remote_tasks[candidate].review_id,
+                org.remote_tasks[candidate].integration_ready_id, org.remote_tasks[candidate].completion_id,
+            }), "r1")
+            persist_org_run_contract(conn, topology=org, remote_id=owner, node_id=node_id,
+                                     mandate_version="1", contract=_contract(1))
         replacements = {
-                node_id: {"expected_contract_version": None, "contract": _contract(2)}
+                node_id: {"expected_contract_version": 1, "contract": _contract(2)}
                 for node_id in stale.affected_nodes
         }
         with pytest.raises(ValueError, match="durable approval"):
@@ -146,6 +153,18 @@ def test_reconciliation_requires_human_evidence_and_is_single_accept(tmp_path):
                                                  approval_conn=approval_conn, approval_message_id="forged",
                                                  replacement_contracts=replacements)
         approval_id = _approved_row(approval_conn, org)
+        old_replacements = {
+            node_id: {"expected_contract_version": 1, "contract": _contract(1)}
+            for node_id in stale.affected_nodes
+        }
+        with pytest.raises(ValueError, match="increase monotonically"):
+            accept_remote_mandate_reconciliation(
+                conn, topology=org, remote_id="r1", observed_version="2",
+                approval_conn=approval_conn, approval_message_id=approval_id,
+                replacement_contracts=old_replacements,
+            )
+        assert conn.execute("SELECT COUNT(*) FROM hades_org_approval_consumptions").fetchone()[0] == 0
+        assert all(kb.get_task(conn, node_id).status == "blocked" for node_id in stale.affected_nodes)
         accepted = accept_remote_mandate_reconciliation(
             conn, topology=org, remote_id="r1", observed_version="2",
             approval_conn=approval_conn, approval_message_id=approval_id,
