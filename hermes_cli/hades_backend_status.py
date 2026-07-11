@@ -461,12 +461,13 @@ def _persephone_payload(value: dict[str, Any] | None) -> dict[str, Any]:
         "restart_streak": _nonnegative_int(raw.get("restart_streak")),
         "next_retry_at": (
             _nonnegative_int(raw.get("next_retry_at"))
-            if state == "backoff" and raw.get("next_retry_at") is not None
+            if state in {"backoff", "failed"}
+            and raw.get("next_retry_at") is not None
             else None
         ),
         "stable_since": (
             _nonnegative_int(raw.get("stable_since"))
-            if raw.get("stable_since") is not None
+            if state == "connected" and raw.get("stable_since") is not None
             else None
         ),
     }

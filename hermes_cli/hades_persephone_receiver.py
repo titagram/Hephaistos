@@ -130,6 +130,7 @@ class PersephoneReceiver:
         self._stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self._flush_thread: threading.Thread | None = None
+        self._flush_succeeded = True
         self._fatal_error = False
         self._draining = False
         self._stopped = False
@@ -277,9 +278,12 @@ class PersephoneReceiver:
             flush_workers = tuple(self._workers.values())
             flush_thread = self._flush_thread
             if flush_thread is None or not flush_thread.is_alive():
+                total_timeout = 5.0 if timeout is None else max(0.0, float(timeout))
+                flush_deadline = time.monotonic() + min(1.0, total_timeout / 2)
+                self._flush_succeeded = False
                 flush_thread = threading.Thread(
                     target=self._flush_owned_outbox,
-                    args=(flush_workers,),
+                    args=(flush_workers, flush_deadline),
                     name="hades-persephone-outbox-flush",
                     daemon=True,
                 )
@@ -297,7 +301,7 @@ class PersephoneReceiver:
         flush_thread.join(timeout=0.1)
         with self._lock:
             joined = thread is None or not thread.is_alive()
-            flushed = not flush_thread.is_alive()
+            flushed = not flush_thread.is_alive() and self._flush_succeeded
             if joined and flushed:
                 self.thread = None
                 self._flush_thread = None
@@ -308,20 +312,56 @@ class PersephoneReceiver:
                 return True
             return False
 
-    def _flush_owned_outbox(self, flush_workers: tuple[_ReceiverWorker, ...]) -> None:
+    def _flush_owned_outbox(
+        self,
+        flush_workers: tuple[_ReceiverWorker, ...],
+        deadline: float,
+    ) -> None:
         """Attempt a bounded sender-scoped flush after intake is quiesced."""
         remaining = self.batch_size
         flushed_scopes: set[tuple[str, str]] = set()
+        succeeded = True
         for worker in flush_workers:
             scope = (worker.project_id, worker.agent_id)
-            if remaining <= 0 or scope in flushed_scopes or worker.client is None:
+            if remaining <= 0 or scope in flushed_scopes:
                 continue
             flushed_scopes.add(scope)
+            client = worker.client
+            temporary_client = False
             try:
+                with self.connection_factory() as conn:
+                    due = conn.execute(
+                        "SELECT 1 FROM persephone_outbox "
+                        "WHERE project_id = ? AND sender_agent_id = ? "
+                        "AND state IN ('outbox_pending', 'retry') "
+                        "AND next_attempt_at <= ? LIMIT 1",
+                        (worker.project_id, worker.agent_id, int(self._now())),
+                    ).fetchone()
+                if due is None:
+                    continue
+                if time.monotonic() >= deadline:
+                    succeeded = False
+                    break
+                if client is None:
+                    if worker.agent is None or self.client_factory is None:
+                        succeeded = False
+                        continue
+                    client = self.client_factory(worker.agent)
+                    temporary_client = True
+                    capabilities = client.capabilities()
+                    if not (
+                        isinstance(capabilities, dict)
+                        and capabilities.get(BACKEND_CAPABILITY) is True
+                    ):
+                        succeeded = False
+                        continue
+                    if time.monotonic() >= deadline:
+                        succeeded = False
+                        continue
                 with self.connection_factory() as conn:
                     counts = send_due_messages(
                         conn,
-                        worker.client,
+                        client,
                         now=self._now(),
                         limit=remaining,
                         project_id=worker.project_id,
@@ -329,6 +369,7 @@ class PersephoneReceiver:
                     )
                 remaining -= sum(int(value) for value in counts.values())
             except Exception:
+                succeeded = False
                 logger.exception(
                     "hades_persephone.receiver_shutdown_flush_failed",
                     extra={
@@ -337,6 +378,11 @@ class PersephoneReceiver:
                         "hades_agent_id": worker.agent_id,
                     },
                 )
+            finally:
+                if temporary_client and client is not None:
+                    self._close_detached_clients([client])
+        with self._lock:
+            self._flush_succeeded = succeeded
 
     @staticmethod
     def _unique_clients(clients: Iterable[object]) -> list[object]:
@@ -530,7 +576,7 @@ class PersephoneReceiver:
                 abandoned_before=timestamp - 30,
             )
         ingested = 0
-        delivered_projects: set[str] = set()
+        delivered_scopes: set[tuple[str, str]] = set()
         for worker in self._worker_batch():
             timestamp = self._now()
             if (
@@ -543,7 +589,8 @@ class PersephoneReceiver:
                 if client is None:
                     continue
                 with self.connection_factory() as conn:
-                    if worker.project_id not in delivered_projects:
+                    delivery_scope = (worker.project_id, worker.agent_id)
+                    if delivery_scope not in delivered_scopes:
                         send_due_messages(
                             conn,
                             client,
@@ -552,7 +599,7 @@ class PersephoneReceiver:
                             project_id=worker.project_id,
                             sender_agent_id=worker.agent_id,
                         )
-                        delivered_projects.add(worker.project_id)
+                        delivered_scopes.add(delivery_scope)
                     cursor = get_cursor(
                         conn,
                         project_id=worker.project_id,

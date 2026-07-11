@@ -2852,6 +2852,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._hades_persephone_lifecycle_lock = asyncio.Lock()
         self._hades_persephone_generation = 0
         self._hades_persephone_draining = False
+        self._hades_persephone_supervisor_task = None
+        self._hades_persephone_restart_streak = 0
+        self._hades_persephone_next_retry_at = None
+        self._hades_persephone_stable_since = None
+        self._hades_persephone_failure_generation = None
 
         # scale-to-zero (Phase 0, F13): gateway-scoped "last inbound seen" clock.
         # There is no such clock today (only a per-agent _last_activity_ts), so the
@@ -6389,6 +6394,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Hades peer delivery is a service feature, not an agent tool.  Start
         # it only after local backend bindings are available and keep it wholly
         # outside conversation prompt/tool construction.
+        GatewayRunner._ensure_hades_persephone_supervisor(self)
         await GatewayRunner._start_hades_persephone_receiver(self)
         
         # Emit gateway:startup hook
@@ -7040,15 +7046,142 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "state": state,
                         "active": state in {"connected", "polling", "backoff"},
                         "failure_count": failure_count,
-                        "next_retry_at": previous.get("next_retry_at")
-                        if state == "backoff"
+                        "next_retry_at": getattr(
+                            self, "_hades_persephone_next_retry_at", None
+                        )
+                        if state in {"backoff", "failed"}
                         else None,
+                        "restart_streak": int(
+                            getattr(self, "_hades_persephone_restart_streak", 0)
+                        ),
+                        "stable_since": getattr(
+                            self, "_hades_persephone_stable_since", None
+                        ),
                     },
                 )
         except Exception:
             logger.debug(
                 "could not persist Persephone receiver lifecycle", exc_info=True
             )
+
+    def _ensure_hades_persephone_supervisor(self) -> None:
+        """Keep one lightweight cold-state supervisor alive with the service."""
+        task = getattr(self, "_hades_persephone_supervisor_task", None)
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(
+            GatewayRunner._hades_persephone_service_supervisor(self)
+        )
+        self._hades_persephone_supervisor_task = task
+        background = getattr(self, "_background_tasks", None)
+        if isinstance(background, set):
+            background.add(task)
+            task.add_done_callback(background.discard)
+
+    async def _hades_persephone_service_supervisor(self) -> None:
+        """Observe cold config/binding revisions and activate only gated receivers."""
+        previous = None
+        try:
+            while getattr(self, "_running", False) and not getattr(
+                self, "_hades_persephone_draining", False
+            ):
+                try:
+                    revision = await asyncio.to_thread(
+                        self._hades_persephone_runtime_revision
+                    )
+                    changed = revision != previous
+                    if revision != previous:
+                        previous = revision
+                        self._hades_persephone_revision = revision
+                    enabled = bool(revision and revision[0] is True)
+                    has_routes = bool(
+                        len(revision) >= 3 and isinstance(revision[2], tuple)
+                        and revision[2]
+                    )
+                    retry_at = getattr(
+                        self, "_hades_persephone_next_retry_at", None
+                    )
+                    retry_due = retry_at is not None and time.time() >= float(retry_at)
+                    if (
+                        enabled
+                        and has_routes
+                        and getattr(self, "_hades_persephone_receiver", None)
+                        is None
+                        and (changed or retry_due)
+                    ):
+                        await GatewayRunner._start_hades_persephone_receiver(self)
+                    elif not enabled and getattr(
+                            self, "_hades_persephone_receiver", None
+                    ) is not None:
+                        receiver = self._hades_persephone_receiver
+                        await asyncio.to_thread(
+                            receiver.refresh_bindings,
+                            [],
+                            agents={},
+                            queue_capability=False,
+                        )
+                    interval = max(
+                        0.0,
+                        float(
+                            getattr(
+                                self,
+                                "_hades_persephone_supervisor_interval_seconds",
+                                5.0,
+                            )
+                        ),
+                    )
+                    await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "Hades Persephone service supervisor cycle failed",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(5.0)
+        finally:
+            if getattr(self, "_hades_persephone_supervisor_task", None) is asyncio.current_task():
+                self._hades_persephone_supervisor_task = None
+
+    def _update_hades_persephone_restart_health(
+        self, state: str, *, generation: int, now: float | None = None
+    ) -> float:
+        """Update crash streak across generations and return restart delay."""
+        current = float(time.time() if now is None else now)
+        streak = int(getattr(self, "_hades_persephone_restart_streak", 0))
+        if state == "connected":
+            self._hades_persephone_next_retry_at = None
+            stable_since = getattr(self, "_hades_persephone_stable_since", None)
+            if stable_since is None:
+                self._hades_persephone_stable_since = current
+            elif current - float(stable_since) >= max(
+                0.0,
+                float(
+                    getattr(self, "_hades_persephone_stable_window_seconds", 60.0)
+                ),
+            ):
+                self._hades_persephone_restart_streak = 0
+                self._hades_persephone_next_retry_at = None
+                self._hades_persephone_failure_generation = None
+            return 0.0
+        self._hades_persephone_stable_since = None
+        if state != "failed":
+            return 0.0
+        if getattr(self, "_hades_persephone_failure_generation", None) != generation:
+            streak += 1
+            self._hades_persephone_restart_streak = streak
+            self._hades_persephone_failure_generation = generation
+        base = max(
+            0.0,
+            float(getattr(self, "_hades_persephone_restart_base_seconds", 2.0)),
+        )
+        maximum = max(
+            base,
+            float(getattr(self, "_hades_persephone_restart_max_seconds", 30.0)),
+        )
+        delay = min(maximum, base * float(2 ** max(0, streak - 1)))
+        self._hades_persephone_next_retry_at = current + delay
+        return delay
 
     async def _start_hades_persephone_receiver(self) -> None:
         """Start exactly one receiver owned by this gateway instance."""
@@ -7139,6 +7272,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     safe_error = redact_secret(str(exc))
                 except Exception:
                     safe_error = type(exc).__name__
+                self._update_hades_persephone_restart_health(
+                    "failed", generation=generation
+                )
                 self._record_hades_persephone_lifecycle("failed", error=safe_error)
                 logger.warning(
                     "Hades Persephone receiver could not start; gateway remains active: %s",
@@ -7165,6 +7301,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             lock = asyncio.Lock()
             self._hades_persephone_lifecycle_lock = lock
         async with lock:
+            supervisor = getattr(self, "_hades_persephone_supervisor_task", None)
+            self._hades_persephone_supervisor_task = None
+            if supervisor is not None and supervisor is not asyncio.current_task():
+                supervisor.cancel()
+                try:
+                    await supervisor
+                except asyncio.CancelledError:
+                    pass
             receiver = getattr(self, "_hades_persephone_receiver", None)
             if receiver is None:
                 return
@@ -7214,7 +7358,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> None:
         """Mirror receiver health into the profile DB while ownership holds."""
         previous: tuple[Any, ...] | None = None
-        restart_attempt = 0
         try:
             while self._hades_persephone_receiver is receiver:
                 if generation is not None and generation != int(
@@ -7222,10 +7365,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ) and not getattr(self, "_hades_persephone_draining", False):
                     return
                 snapshot = receiver.health_snapshot()
+                current_time = float(time.time())
+                restart_delay = self._update_hades_persephone_restart_health(
+                    str(snapshot.get("state") or "failed"),
+                    generation=(
+                        int(generation)
+                        if generation is not None
+                        else int(getattr(self, "_hades_persephone_generation", 0))
+                    ),
+                    now=current_time,
+                )
+                snapshot = dict(snapshot)
+                snapshot.update(
+                    {
+                        "restart_streak": int(
+                            getattr(self, "_hades_persephone_restart_streak", 0)
+                        ),
+                        "next_retry_at": getattr(
+                            self, "_hades_persephone_next_retry_at", None
+                        ),
+                        "stable_since": getattr(
+                            self, "_hades_persephone_stable_since", None
+                        ),
+                    }
+                )
                 marker = (
                     snapshot.get("state"),
                     snapshot.get("failure_count"),
                     snapshot.get("next_retry_at"),
+                    snapshot.get("restart_streak"),
+                    snapshot.get("stable_since"),
                 )
                 if marker != previous:
                     self._record_hades_persephone_health(snapshot)
@@ -7234,17 +7403,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if state == "failed" and not getattr(
                     self, "_hades_persephone_draining", False
                 ):
-                    restart_attempt += 1
-                    base = max(
-                        0.0,
-                        float(
-                            getattr(
-                                self, "_hades_persephone_restart_base_seconds", 2.0
-                            )
-                        ),
-                    )
-                    delay = min(30.0, base * float(2 ** max(0, restart_attempt - 1)))
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(restart_delay)
                     if self._hades_persephone_receiver is not receiver:
                         return
                     joined = await asyncio.to_thread(receiver.stop, timeout=1.0)
@@ -7343,6 +7502,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             0, int(snapshot.get("failure_count") or 0)
                         ),
                         "next_retry_at": snapshot.get("next_retry_at"),
+                        "restart_streak": max(
+                            0, int(snapshot.get("restart_streak") or 0)
+                        ),
+                        "stable_since": snapshot.get("stable_since"),
                     },
                 )
         except Exception:

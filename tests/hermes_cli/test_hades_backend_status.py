@@ -182,6 +182,32 @@ def test_queue_counts_are_scoped_to_current_project_and_agent(tmp_path) -> None:
     assert health["pending_approval"] == 1
 
 
+def test_supervisor_timestamps_follow_state_invariants() -> None:
+    from hermes_cli.hades_backend_status import _persephone_payload
+
+    failed = _persephone_payload(
+        {
+            "state": "failed",
+            "next_retry_at": 123,
+            "stable_since": 99,
+            "restart_streak": 4,
+        }
+    )
+    connected = _persephone_payload(
+        {
+            "state": "connected",
+            "next_retry_at": 123,
+            "stable_since": 99,
+            "restart_streak": 4,
+        }
+    )
+
+    assert failed["next_retry_at"] == 123
+    assert failed["stable_since"] is None
+    assert connected["next_retry_at"] is None
+    assert connected["stable_since"] == 99
+
+
 def test_queue_health_aggregates_exact_profile_linked_routes(tmp_path) -> None:
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_backend_status import _load_persephone_status

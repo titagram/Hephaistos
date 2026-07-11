@@ -784,6 +784,173 @@ def test_shutdown_flushes_only_owned_sender_outbox(tmp_path):
     assert untouched is not None and untouched.state == "outbox_pending"
 
 
+def test_same_project_workers_each_deliver_their_sender_scope(tmp_path):
+    from hermes_cli.hades_persephone_messages import parse_envelope
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import enqueue_outbox, get_message
+
+    path = tmp_path / "same-project.db"
+    sent: dict[str, list[str]] = {"agent_a": [], "agent_b": []}
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def __init__(self, sender):
+            self.sender = sender
+
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def create_inbox_message(self, **payload):
+            sent[self.sender].append(payload["message_id"])
+
+    agents = {
+        name: db.BackendAgent(name, "shared", "https://example.invalid", name, "TOKEN", {})
+        for name in ("agent_a", "agent_b")
+    }
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda agent: Client(agent.agent_id),
+        event_reader=lambda *args, **kwargs: [],
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings(
+        [
+            _binding(project="shared", agent="agent_a", binding="wb_a"),
+            _binding(project="shared", agent="agent_b", binding="wb_b"),
+        ],
+        agents=agents,
+    )
+    with connections() as conn:
+        for sender in agents:
+            enqueue_outbox(
+                conn,
+                parse_envelope(
+                    {
+                        **_envelope(
+                            message_id=f"msg_{sender}", project="shared",
+                            agent="remote", binding=None,
+                            message_type="information_response",
+                            capability="project_memory_search",
+                        ),
+                        "sender_agent_id": sender,
+                    },
+                    now=NOW,
+                ),
+                now=NOW,
+            )
+
+    receiver.run_once()
+
+    assert sent == {"agent_a": ["msg_agent_a"], "agent_b": ["msg_agent_b"]}
+    with connections() as conn:
+        assert get_message(conn, "msg_agent_a", queue="outbox").state == "sent"
+        assert get_message(conn, "msg_agent_b", queue="outbox").state == "sent"
+
+
+def test_shutdown_acquires_exact_client_for_unprobed_pending_sender(tmp_path):
+    from hermes_cli.hades_persephone_messages import parse_envelope
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import enqueue_outbox
+
+    path = tmp_path / "cold-flush.db"
+    sent = []
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def create_inbox_message(self, **payload):
+            sent.append(payload["message_id"])
+
+        def close(self):
+            pass
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: Client(),
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+    with connections() as conn:
+        enqueue_outbox(
+            conn,
+            parse_envelope(
+                {
+                    **_envelope(
+                        message_id="cold", project="project_a", agent="remote",
+                        binding=None, message_type="information_response",
+                        capability="project_memory_search",
+                    ),
+                    "sender_agent_id": "agent_a",
+                },
+                now=NOW,
+            ),
+            now=NOW,
+        )
+
+    assert receiver.stop(timeout=1) is True
+    assert sent == ["cold"]
+
+
+def test_shutdown_client_acquisition_failure_keeps_ownership_incomplete(tmp_path):
+    from hermes_cli.hades_persephone_messages import parse_envelope
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import enqueue_outbox
+
+    path = tmp_path / "cold-fail.db"
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    agent = db.BackendAgent("agent_a", "project_a", "https://example.invalid", "a", "TOKEN", {})
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda item: (_ for _ in ()).throw(RuntimeError("offline")),
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": agent})
+    with connections() as conn:
+        enqueue_outbox(
+            conn,
+            parse_envelope(
+                {
+                    **_envelope(
+                        message_id="cold_fail", project="project_a", agent="remote",
+                        binding=None, message_type="information_response",
+                        capability="project_memory_search",
+                    ),
+                    "sender_agent_id": "agent_a",
+                },
+                now=NOW,
+            ),
+            now=NOW,
+        )
+
+    assert receiver.stop(timeout=0.2) is False
+    assert receiver.health_snapshot()["state"] == "draining"
+
+
 def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_path):
     from hermes_cli.hades_persephone_receiver import PersephoneReceiver
     from hermes_cli.hades_persephone_store import get_cursor, get_message

@@ -189,3 +189,62 @@ async def test_revision_change_refreshes_routes_without_duplicate_receiver() -> 
     await runner._monitor_hades_persephone_receiver(receiver, generation=1)
 
     receiver.refresh_bindings.assert_called_once_with(queue_capability=True)
+
+
+def test_restart_streak_persists_across_generations_and_resets_only_when_stable() -> None:
+    runner = object.__new__(GatewayRunner)
+    runner._hades_persephone_restart_base_seconds = 2
+    runner._hades_persephone_restart_max_seconds = 30
+    runner._hades_persephone_stable_window_seconds = 60
+
+    assert runner._update_hades_persephone_restart_health("failed", generation=1, now=100) == 2
+    assert runner._update_hades_persephone_restart_health("failed", generation=2, now=101) == 4
+    assert runner._update_hades_persephone_restart_health("failed", generation=3, now=102) == 8
+    assert runner._hades_persephone_restart_streak == 3
+    assert runner._hades_persephone_next_retry_at == 110
+    for generation in range(4, 20):
+        delay = runner._update_hades_persephone_restart_health(
+            "failed", generation=generation, now=100 + generation
+        )
+    assert delay == 30
+    assert runner._hades_persephone_next_retry_at == 149
+
+    runner._update_hades_persephone_restart_health("connected", generation=4, now=120)
+    runner._update_hades_persephone_restart_health("connected", generation=4, now=179)
+    assert runner._hades_persephone_restart_streak == 19
+    runner._update_hades_persephone_restart_health("connected", generation=4, now=180)
+    assert runner._hades_persephone_restart_streak == 0
+    assert runner._hades_persephone_next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_service_supervisor_cold_starts_only_after_enabled_binding_revision() -> None:
+    receiver = Mock(spec=["start", "stop"])
+    runner = _runner(receiver)
+    runner._hades_persephone_receiver = None
+    runner._hades_persephone_generation = 0
+    runner._hades_persephone_draining = False
+    runner._hades_persephone_supervisor_interval_seconds = 0
+    runner._running = True
+    revisions = iter(
+        [
+            (False, "default", ()),
+            (True, "default", ()),
+            (True, "default", (("project", "agent", "binding"),)),
+        ]
+    )
+
+    def revision():
+        value = next(revisions)
+        if value[2]:
+            receiver.start.side_effect = lambda: setattr(runner, "_running", False)
+        return value
+
+    runner._hades_persephone_runtime_revision = revision
+    runner._hades_persephone_receiver_factory = lambda: receiver
+    runner._record_hades_persephone_lifecycle = lambda state, error=None: None
+
+    await runner._hades_persephone_service_supervisor()
+
+    receiver.start.assert_called_once_with()
+    assert runner._hades_persephone_receiver is receiver
