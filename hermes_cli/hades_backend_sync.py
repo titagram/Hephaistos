@@ -228,6 +228,9 @@ def run_backend_sync(
                     inbox,
                     binding.project_id,
                     receiver=receiver if queue_supported else None,
+                    target_agent_id=(
+                        binding_agent.agent_id if queue_supported else None
+                    ),
                 )
                 inbox_events += saved
             except AttributeError:
@@ -1046,6 +1049,8 @@ def _sync_inbox(
     project_id: str,
     *,
     receiver: object | None = None,
+    target_agent_id: str | None = None,
+    workspace_binding_id: str | None = None,
 ) -> int:
     events = response.get("events") if isinstance(response, dict) else None
     if not isinstance(events, list):
@@ -1059,7 +1064,12 @@ def _sync_inbox(
                 receiver is not None
                 and getattr(receiver, "is_agent_event")(event)
             ):
-                disposition = getattr(receiver, "ingest_event")(event)
+                disposition = getattr(receiver, "ingest_event")(
+                    event,
+                    expected_project_id=project_id,
+                    expected_target_agent_id=target_agent_id,
+                    expected_workspace_binding_id=workspace_binding_id,
+                )
                 if disposition not in {"invalid_agent_message", "not_agent_message"}:
                     saved += 1
                 continue

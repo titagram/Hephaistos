@@ -20,7 +20,7 @@ def test_sync_inbox_routes_agent_messages_and_preserves_legacy_events(
         def is_agent_event(event):
             return event.get("payload", {}).get("schema") == agent_message["schema"]
 
-        def ingest_event(self, event):
+        def ingest_event(self, event, **context):
             routed.append(event)
             return "accepted"
 
@@ -37,6 +37,7 @@ def test_sync_inbox_routes_agent_messages_and_preserves_legacy_events(
         },
         "project_1",
         receiver=FakeReceiver(),
+        target_agent_id="agent_1",
     )
 
     with hdb.connect_closing() as conn:
@@ -44,6 +45,36 @@ def test_sync_inbox_routes_agent_messages_and_preserves_legacy_events(
     assert saved == 2
     assert [event["id"] for event in routed] == ["cursor_1"]
     assert [event.event_id for event in legacy] == ["legacy_1"]
+
+
+def test_sync_inbox_passes_authenticated_subscription_context_to_receiver():
+    from hermes_cli.hades_backend_sync import _sync_inbox
+
+    calls = []
+
+    class FakeReceiver:
+        @staticmethod
+        def is_agent_event(event):
+            return True
+
+        def ingest_event(self, event, **context):
+            calls.append(context)
+            return "subscription_route_mismatch"
+
+    assert _sync_inbox(
+        {"events": [{"id": "cursor_a", "payload": {"schema": "any"}}]},
+        "project_a",
+        receiver=FakeReceiver(),
+        target_agent_id="agent_a",
+        workspace_binding_id="wb_a",
+    ) == 1
+    assert calls == [
+        {
+            "expected_project_id": "project_a",
+            "expected_target_agent_id": "agent_a",
+            "expected_workspace_binding_id": "wb_a",
+        }
+    ]
 
 
 def _decode_compressed_artifact_payload(payload):

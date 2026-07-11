@@ -271,6 +271,269 @@ def test_bounded_round_robin_does_not_starve_later_projects(tmp_path):
     assert calls == ["project_0", "project_1", "project_2"]
 
 
+def test_worker_a_rejects_worker_b_envelope_without_contaminating_b_cursor(tmp_path):
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+    from hermes_cli.hades_persephone_store import get_cursor, get_message
+
+    path = tmp_path / "subscription.db"
+
+    @contextmanager
+    def connections():
+        conn = db.connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    agents = {
+        f"agent_{name}": db.BackendAgent(
+            agent_id=f"agent_{name}",
+            project_id=f"project_{name}",
+            base_url="https://example.invalid",
+            label=name,
+            token_env_key=f"TOKEN_{name}",
+            capabilities={},
+        )
+        for name in ("a", "b")
+    }
+
+    class Client:
+        def capabilities(self):
+            return {"persephone_agent_queue_v1": True}
+
+        def close(self):
+            pass
+
+    receiver = PersephoneReceiver(
+        connection_factory=connections,
+        client_factory=lambda agent: Client(),
+        event_reader=lambda client, **kwargs: (
+            [_event(message_id="from_a_claiming_b", project="project_b", agent="agent_b", binding="wb_b")]
+            if kwargs["project_id"] == "project_a"
+            else []
+        ),
+        max_projects_per_cycle=1,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings(
+        [
+            _binding(project="project_a", agent="agent_a", binding="wb_a"),
+            _binding(project="project_b", agent="agent_b", binding="wb_b"),
+        ],
+        agents=agents,
+    )
+
+    receiver.run_once()
+
+    with connections() as conn:
+        stored = get_message(conn, "from_a_claiming_b")
+        cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
+    assert stored is not None and stored.state == "rejected"
+    assert cursor_a == "cursor_from_a_claiming_b"
+    assert cursor_b is None
+
+
+def test_binding_scoped_subscription_rejects_other_binding(receiver):
+    receiver.refresh_bindings([_binding(), _binding(binding="wb_other")])
+
+    result = receiver.ingest_event(
+        _event(binding="wb_other"),
+        expected_project_id="project_a",
+        expected_target_agent_id="agent_a",
+        expected_workspace_binding_id="wb_a",
+    )
+
+    assert result == "subscription_route_mismatch"
+
+
+def test_manual_poll_a_rejects_b_envelope_and_advances_only_a_cursor(receiver):
+    from hermes_cli.hades_backend_sync import _sync_inbox
+    from hermes_cli.hades_persephone_store import get_cursor, get_message
+
+    receiver.refresh_bindings(
+        [
+            _binding(project="project_a", agent="agent_a", binding="wb_a"),
+            _binding(project="project_b", agent="agent_b", binding="wb_b"),
+        ]
+    )
+    response = {
+        "events": [
+            _event(
+                message_id="manual_b",
+                project="project_b",
+                agent="agent_b",
+                binding="wb_b",
+            )
+        ]
+    }
+
+    assert _sync_inbox(
+        response,
+        "project_a",
+        receiver=receiver,
+        target_agent_id="agent_a",
+    ) == 1
+    with receiver.connection_factory() as conn:
+        stored = get_message(conn, "manual_b")
+        cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
+    assert stored is not None and stored.state == "rejected"
+    assert cursor_a == "cursor_manual_b"
+    assert cursor_b is None
+
+
+def test_cross_subscription_duplicate_is_still_rejected_without_rewriting_b(receiver):
+    from hermes_cli.hades_persephone_store import get_cursor, get_message
+
+    receiver.refresh_bindings(
+        [
+            _binding(project="project_a", agent="agent_a", binding="wb_a"),
+            _binding(project="project_b", agent="agent_b", binding="wb_b"),
+        ]
+    )
+    event = _event(
+        message_id="already_b",
+        project="project_b",
+        agent="agent_b",
+        binding="wb_b",
+    )
+    assert receiver.ingest_event(event) == "accepted"
+
+    assert receiver.ingest_event(
+        event,
+        expected_project_id="project_a",
+        expected_target_agent_id="agent_a",
+    ) == "subscription_route_mismatch"
+
+    with receiver.connection_factory() as conn:
+        stored = get_message(conn, "already_b")
+        cursor_a = get_cursor(conn, project_id="project_a", target_agent_id="agent_a")
+        cursor_b = get_cursor(conn, project_id="project_b", target_agent_id="agent_b")
+    assert stored is not None and stored.state == "processing"
+    assert cursor_a == "cursor_already_b"
+    assert cursor_b == "cursor_already_b"
+
+
+class _CloseCountingClient:
+    def __init__(self):
+        self.close_count = 0
+
+    def capabilities(self):
+        return {"persephone_agent_queue_v1": True}
+
+    def close(self):
+        self.close_count += 1
+
+
+def _agent(*, token: str = "TOKEN", base_url: str = "https://one.invalid"):
+    return db.BackendAgent(
+        agent_id="agent_a",
+        project_id="project_a",
+        base_url=base_url,
+        label="test",
+        token_env_key=token,
+        capabilities={},
+    )
+
+
+def test_refresh_reuses_only_identical_worker_descriptor(receiver):
+    first = _CloseCountingClient()
+    receiver.client_factory = lambda agent: first
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+    receiver.run_once()
+
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+
+    assert receiver._workers[("project_a", "agent_a")].client is first
+    assert first.close_count == 0
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        _agent(token="TOKEN_CHANGED"),
+        _agent(base_url="https://two.invalid"),
+    ],
+)
+def test_refresh_closes_client_once_when_agent_descriptor_changes(receiver, replacement):
+    first = _CloseCountingClient()
+    second = _CloseCountingClient()
+    receiver.client_factory = lambda agent: first if agent.token_env_key == "TOKEN" else second
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+    receiver.run_once()
+
+    receiver.refresh_bindings([_binding()], agents={"agent_a": replacement})
+    receiver.refresh_bindings([_binding()], agents={"agent_a": replacement})
+
+    assert first.close_count == 1
+    assert receiver._workers[("project_a", "agent_a")].client is None
+
+
+def test_refresh_closes_removed_worker_client_exactly_once(receiver):
+    client = _CloseCountingClient()
+    receiver.client_factory = lambda agent: client
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+    receiver.run_once()
+
+    receiver.refresh_bindings([], agents={})
+    receiver.refresh_bindings([], agents={})
+    receiver.stop(timeout=1)
+
+    assert client.close_count == 1
+
+
+def test_refresh_closes_client_when_binding_descriptor_changes(receiver):
+    client = _CloseCountingClient()
+    receiver.client_factory = lambda agent: client
+    original = _binding()
+    changed = _binding()
+    object.__setattr__(changed, "repo_root", "/different/workspace")
+    receiver.refresh_bindings([original], agents={"agent_a": _agent()})
+    receiver.run_once()
+
+    receiver.refresh_bindings([changed], agents={"agent_a": _agent()})
+
+    assert client.close_count == 1
+    assert receiver._workers[("project_a", "agent_a")].client is None
+
+
+def test_stop_closes_client_to_unblock_reader_and_eventually_joins(tmp_path):
+    from threading import Event
+
+    from hermes_cli.hades_persephone_receiver import PersephoneReceiver
+
+    entered = Event()
+    released = Event()
+
+    class BlockingClient(_CloseCountingClient):
+        def close(self):
+            super().close()
+            released.set()
+
+    client = BlockingClient()
+
+    def blocking_reader(active_client, **kwargs):
+        entered.set()
+        assert released.wait(timeout=2)
+        return []
+
+    receiver = PersephoneReceiver(
+        client_factory=lambda agent: client,
+        event_reader=blocking_reader,
+        poll_interval=30,
+        now=lambda: NOW,
+    )
+    receiver.refresh_bindings([_binding()], agents={"agent_a": _agent()})
+    receiver.start()
+    assert entered.wait(timeout=1)
+
+    receiver.stop(timeout=1)
+
+    assert receiver.thread is None
+    assert client.close_count == 1
+
+
 def test_start_stop_are_owned_and_idempotent(receiver):
     receiver.refresh_bindings([_binding()])
     receiver.poll_interval = 0.001

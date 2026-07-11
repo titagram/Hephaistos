@@ -71,6 +71,7 @@ class _ReceiverWorker:
     agent: db.BackendAgent | None
     client: object | None = None
     queue_supported: bool | None = None
+    descriptor: tuple[Any, ...] = ()
 
 
 ConnectionFactory = Callable[[], ContextManager[sqlite3.Connection]]
@@ -112,6 +113,7 @@ class PersephoneReceiver:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self._closed_clients: list[object] = []
 
     @property
     def workers(self) -> tuple[tuple[str, str], ...]:
@@ -141,6 +143,7 @@ class PersephoneReceiver:
         routes: dict[str, db.WorkspaceBinding] = {}
         ambiguous_routes: set[str] = set()
         worker_keys: set[tuple[str, str]] = set()
+        bindings_by_worker: dict[tuple[str, str], list[db.WorkspaceBinding]] = {}
         for binding in linked:
             if binding.status != "linked":
                 continue
@@ -152,10 +155,13 @@ class PersephoneReceiver:
                 routes[binding_id] = binding
             elif existing != binding:
                 ambiguous_routes.add(binding_id)
-            worker_keys.add((binding.project_id, binding.agent_id))
+            key = (binding.project_id, binding.agent_id)
+            worker_keys.add(key)
+            bindings_by_worker.setdefault(key, []).append(binding)
         for binding_id in ambiguous_routes:
             routes.pop(binding_id, None)
 
+        clients_to_close: list[object] = []
         with self._lock:
             previous = self._workers
             self._bindings = routes
@@ -164,17 +170,38 @@ class PersephoneReceiver:
             self._workers = {}
             for key in sorted(worker_keys):
                 old = previous.get(key)
+                agent = loaded_agents.get(key[1]) or (old.agent if old else None)
+                worker_bindings = tuple(
+                    sorted(
+                        bindings_by_worker.get(key, []),
+                        key=lambda item: (
+                            item.backend_workspace_binding_id,
+                            item.workspace_fingerprint,
+                            item.repo_root,
+                        ),
+                    )
+                )
+                descriptor = (agent, worker_bindings)
+                reusable = old is not None and old.descriptor == descriptor
                 self._workers[key] = _ReceiverWorker(
                     project_id=key[0],
                     agent_id=key[1],
-                    agent=loaded_agents.get(key[1]) or (old.agent if old else None),
-                    client=old.client if old else None,
-                    queue_supported=(old.queue_supported if old else None),
+                    agent=agent,
+                    client=old.client if reusable else None,
+                    queue_supported=(old.queue_supported if reusable else None),
+                    descriptor=descriptor,
                 )
+                if old is not None and not reusable and old.client is not None:
+                    clients_to_close.append(old.client)
+            for key, old in previous.items():
+                if key not in self._workers and old.client is not None:
+                    clients_to_close.append(old.client)
             if self._workers:
                 self._next_worker %= len(self._workers)
             else:
                 self._next_worker = 0
+        for client in clients_to_close:
+            self._close_client_once(client)
 
     def start(self) -> None:
         """Start the single owned coordinator thread; repeated calls are safe."""
@@ -206,35 +233,61 @@ class PersephoneReceiver:
         with self._lock:
             thread = self.thread
             self._stop_event.set()
+            clients = [
+                worker.client
+                for worker in self._workers.values()
+                if worker.client is not None
+            ]
+        # Closing the active httpx client tears down a blocked streaming read.
+        # This occurs outside the receiver lock so reader cleanup cannot
+        # deadlock against lifecycle state.
+        for client in clients:
+            self._close_client_once(client)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
         with self._lock:
             if thread is None or not thread.is_alive():
                 self.thread = None
-                clients = {
-                    id(worker.client): worker.client
-                    for worker in self._workers.values()
-                    if worker.client is not None
-                }
                 for worker in self._workers.values():
                     worker.client = None
-            else:
-                clients = {}
-        for client in clients.values():
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+
+    def _close_client_once(self, client: object) -> None:
+        with self._lock:
+            if any(closed is client for closed in self._closed_clients):
+                return
+            self._closed_clients.append(client)
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    def _release_worker_clients(self) -> None:
+        with self._lock:
+            clients = [
+                worker.client
+                for worker in self._workers.values()
+                if worker.client is not None
+            ]
+            for worker in self._workers.values():
+                worker.client = None
+        for client in clients:
+            self._close_client_once(client)
 
     def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.run_once()
-            except Exception:
-                logger.exception(
-                    "hades_persephone.receiver_cycle_failed",
-                    extra={"hades_event": "persephone.receiver_cycle_failed"},
-                )
-            self._stop_event.wait(self.poll_interval)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.run_once()
+                except Exception:
+                    logger.exception(
+                        "hades_persephone.receiver_cycle_failed",
+                        extra={"hades_event": "persephone.receiver_cycle_failed"},
+                    )
+                self._stop_event.wait(self.poll_interval)
+        finally:
+            self._release_worker_clients()
+            with self._lock:
+                if self.thread is threading.current_thread():
+                    self.thread = None
 
     def _worker_batch(self) -> list[_ReceiverWorker]:
         with self._lock:
@@ -282,7 +335,11 @@ class PersephoneReceiver:
                 for event in events:
                     if self._stop_event.is_set():
                         break
-                    self.ingest_event(event)
+                    self.ingest_event(
+                        event,
+                        expected_project_id=worker.project_id,
+                        expected_target_agent_id=worker.agent_id,
+                    )
                     ingested += 1
             except Exception:
                 # One broken project must not starve the following project in
@@ -349,7 +406,14 @@ class PersephoneReceiver:
             "acknowledged": "accepted",
         }.get(state, state)
 
-    def ingest_event(self, event: Mapping[str, Any]) -> str:
+    def ingest_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        expected_project_id: str | None = None,
+        expected_target_agent_id: str | None = None,
+        expected_workspace_binding_id: str | None = None,
+    ) -> str:
         """Persist, independently revalidate, classify, and advance one event."""
         if not self._queue_capability:
             return "agent_queue_unsupported"
@@ -366,18 +430,25 @@ class PersephoneReceiver:
 
         cursor = str(event.get("id") or event.get("cursor") or "").strip()
         timestamp = int(self._now())
+        expected_project = str(expected_project_id or "").strip() or None
+        expected_agent = str(expected_target_agent_id or "").strip() or None
+        expected_binding = (
+            str(expected_workspace_binding_id or "").strip() or None
+        )
+        if (expected_project is None) != (expected_agent is None):
+            raise ValueError(
+                "expected_project_id and expected_target_agent_id must be provided together"
+            )
+        cursor_project = expected_project or envelope.project_id
+        cursor_agent = expected_agent or envelope.target_agent_id
         with self.connection_factory() as conn:
             stored = record_inbox(conn, envelope, now=timestamp)
-            if stored.state != "received":
-                # Its first durable delivery already advanced the opaque
-                # cursor.  Rewriting it from a later duplicate could rewind a
-                # newer cursor because opaque values have no local ordering.
-                return self._duplicate_disposition(stored.state)
-
             # Reparse the detached durable representation using current time.
             try:
                 durable = parse_envelope(stored.envelope.to_dict(), now=timestamp)
             except ValueError as exc:
+                if stored.state != "received":
+                    return self._duplicate_disposition(stored.state)
                 if "expired" in str(exc):
                     transition_message(conn, envelope.message_id, "expired", now=timestamp)
                     disposition = "expired"
@@ -385,6 +456,35 @@ class PersephoneReceiver:
                     transition_message(conn, envelope.message_id, "rejected", now=timestamp)
                     disposition = "invalid_agent_message"
             else:
+                subscription_mismatch = bool(
+                    expected_project is not None
+                    and (
+                        durable.project_id != expected_project
+                        or durable.target_agent_id != expected_agent
+                        or (
+                            expected_binding is not None
+                            and durable.target_workspace_binding_id != expected_binding
+                        )
+                    )
+                )
+                if subscription_mismatch:
+                    if stored.state == "received":
+                        transition_message(
+                            conn, envelope.message_id, "rejected", now=timestamp
+                        )
+                    if cursor:
+                        record_cursor(
+                            conn,
+                            project_id=cursor_project,
+                            target_agent_id=cursor_agent,
+                            cursor=cursor,
+                            now=timestamp,
+                        )
+                    return "subscription_route_mismatch"
+                if stored.state != "received":
+                    # Its first delivery already advanced its own opaque
+                    # cursor. A same-subscription duplicate must not rewind it.
+                    return self._duplicate_disposition(stored.state)
                 route_error = self._route_disposition(durable)
                 if route_error is not None:
                     # Capability absence is a deployment gate, not a policy
@@ -407,8 +507,8 @@ class PersephoneReceiver:
             if cursor and disposition != "agent_queue_unsupported":
                 record_cursor(
                     conn,
-                    project_id=envelope.project_id,
-                    target_agent_id=envelope.target_agent_id,
+                    project_id=cursor_project,
+                    target_agent_id=cursor_agent,
                     cursor=cursor,
                     now=timestamp,
                 )
