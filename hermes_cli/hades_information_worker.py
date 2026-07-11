@@ -70,6 +70,11 @@ _XML_ATTRIBUTE_RE = re.compile(
     r"(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
     re.IGNORECASE | re.DOTALL,
 )
+_XML_TAG_RE = re.compile(
+    r"<(?P<tag>(?:[A-Za-z_][A-Za-z0-9_.-]*:)?[A-Za-z_][A-Za-z0-9_.-]*)"
+    r"(?P<attrs>\s[^<>]*?)(?P<close>/?)>",
+    re.IGNORECASE | re.DOTALL,
+)
 _PEM_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)-----.*?"
     r"(?:-----END [A-Z0-9 ]+-----|\Z)",
@@ -525,6 +530,7 @@ def _is_sensitive_key(value: Any) -> bool:
     password_metadata = {
         "policy", "policies", "rule", "rules", "requirement", "requirements",
         "validation", "validator", "length", "minimum", "maximum", "min", "max",
+        "count", "counts",
     }
     credential_qualifiers = {
         "api", "access", "refresh", "auth", "authorization", "provider", "client",
@@ -533,16 +539,35 @@ def _is_sensitive_key(value: Any) -> bool:
     if compact.startswith("tokenizer"):
         return False
     if (
-        "token" in tokens
+        any(token in {"token", "tokens"} for token in tokens)
         and any(token in token_metadata for token in tokens)
         and not any(token in credential_qualifiers for token in tokens)
     ):
         return False
-    if "password" in tokens and any(token in password_metadata for token in tokens):
+    password_qualifiers = {
+        "secret", "token", "key", "keys", "api", "access", "private",
+        "credential", "credentials", "auth", "authorization",
+    }
+    if (
+        "password" in tokens
+        and any(token in password_metadata for token in tokens)
+        and not any(token in password_qualifiers for token in tokens)
+    ):
+        return False
+    session_cookie_qualifiers = {
+        "token", "value", "secret", "key", "keys", "auth", "authorization",
+        "credential", "credentials", "api", "access", "private",
+    }
+    if (
+        any(token in {"session", "cookie"} for token in tokens)
+        and any(token in token_metadata for token in tokens)
+        and not any(token in session_cookie_qualifiers for token in tokens)
+    ):
         return False
     sensitive_tokens = {
         "password", "passphrase", "secret", "token", "authorization",
         "credential", "credentials", "cookie", "session", "jwt", "bearer",
+        "passwords", "passphrases", "secrets", "tokens", "keys",
     }
     sensitive_compounds = {
         "apikey", "accesskey", "privatekey", "clientsecret",
@@ -616,7 +641,24 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
                 clipped = True
                 return
             char = value[cursor]
-            if char in "\"'":
+            if char == "[":
+                probe = cursor + 1
+                while probe < end and value[probe].isspace():
+                    probe += 1
+                if probe >= end or value[probe] not in "\"'":
+                    cursor += 1
+                    continue
+                quoted_key_end = quoted_end(probe, end)
+                key = value[probe + 1 : max(probe + 1, quoted_key_end - 1)]
+                after = quoted_key_end
+                while after < end and value[after].isspace():
+                    after += 1
+                if after >= end or value[after] != "]":
+                    cursor = quoted_key_end
+                    continue
+                key_end = after + 1
+                after = key_end
+            elif char in "\"'":
                 key_end = quoted_end(cursor, end)
                 key = value[cursor + 1 : max(cursor + 1, key_end - 1)]
                 after = key_end
@@ -644,12 +686,15 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
                 return
             if value[scalar_start] in "[{":
                 close = container_end(scalar_start, end)
-                scan(
-                    scalar_start + 1,
-                    max(scalar_start + 1, close - 1),
-                    force=sensitive,
-                    depth=depth + 1,
-                )
+                if sensitive:
+                    replacements.append((scalar_start, close, '"***"'))
+                else:
+                    scan(
+                        scalar_start + 1,
+                        max(scalar_start + 1, close - 1),
+                        force=False,
+                        depth=depth + 1,
+                    )
                 cursor = close
                 continue
             if not sensitive:
@@ -677,16 +722,45 @@ def _redact_key_value_pairs(value: str) -> tuple[str, bool]:
 
 
 def _redact_xml_elements(value: str) -> str:
+    def semantic_attribute(attrs: str) -> bool:
+        for attribute in _XML_ATTRIBUTE_RE.finditer(attrs):
+            local_name = attribute.group("key").casefold()
+            if local_name in {"name", "key", "id"} and _is_sensitive_key(
+                attribute.group("value")
+            ):
+                return True
+        return False
+
     def replace(match: re.Match[str]) -> str:
-        if not _is_sensitive_key(match.group("key")):
-            return match.group(0)
         attrs = match.group("attrs") or ""
+        if not (
+            _is_sensitive_key(match.group("key"))
+            or semantic_attribute(attrs)
+        ):
+            return match.group(0)
         tag = match.group("tag")
         content = match.group("value")
         replacement = "<![CDATA[***]]>" if content.startswith("<![CDATA[") else "***"
         return f"<{tag}{attrs}>{replacement}</{tag}>"
 
     elements = _XML_ELEMENT_RE.sub(replace, value)
+
+    def replace_semantic_tag(match: re.Match[str]) -> str:
+        attrs = match.group("attrs") or ""
+        if not semantic_attribute(attrs):
+            return match.group(0)
+
+        def redact_value(attribute: re.Match[str]) -> str:
+            local_name = attribute.group("key").casefold()
+            if local_name not in {"value", "text", "content"}:
+                return attribute.group(0)
+            quote = attribute.group("quote")
+            return f"{attribute.group('name')}={quote}***{quote}"
+
+        cleaned_attrs = _XML_ATTRIBUTE_RE.sub(redact_value, attrs)
+        return f"<{match.group('tag')}{cleaned_attrs}{match.group('close')}>"
+
+    elements = _XML_TAG_RE.sub(replace_semantic_tag, elements)
 
     def replace_attribute(match: re.Match[str]) -> str:
         if not _is_sensitive_key(match.group("key")):

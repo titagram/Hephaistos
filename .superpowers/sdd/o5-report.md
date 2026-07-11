@@ -123,6 +123,42 @@ py_compile: passed
 git diff --check: passed
 ```
 
+## Fifth adversarial re-review
+
+The fifth exact corpus initially exposed 11 security/classification failures;
+all 11 migration/rollback guards were already green. Sensitive plural
+containers (`passwords`, `credentials`, `secrets`, `tokens`, `keys`) now replace
+their entire bounded object/array value with a marker, preventing unkeyed array
+scalars from escaping. The lexical scanner recognizes JS computed string keys
+such as `["password"]` and `['accessToken']`.
+
+XML processing correlates semantic `name`, `key`, or `id` attributes with
+`value`/`text` attributes or element text, covering property/credential forms.
+Metadata exemptions apply only without additional credential qualifiers:
+password policies/rules/counts and session/cookie counts stay visible, while
+secret/token/key-qualified password metadata, session tokens, cookie values,
+and auth cookies remain redacted. Known secret formats are still redacted even
+under an exempt metadata key.
+
+Persephone migration is now one DDL+DML transaction. Every inbox, outbox, and
+existing global identity envelope is parsed through O1 and checked against row
+message/project/target authority before identity insertion, denormalized
+backfill, or covering-index publication. Existing nonblank denormalized fields
+must match. Inbox/outbox mismatch tests prove rollback leaves zero identity
+rows, no covering index, and no partially added inbox authority columns; a
+valid legacy migration remains green.
+
+Final fifth-review verification:
+
+```text
+Exact fifth-review corpus + migration rollback: 22 passed
+Focused worker/store/receiver: 202 passed
+O1-O5 + sync + DB + quality: 363 passed
+Ruff: All checks passed!
+py_compile: passed
+git diff --check: passed
+```
+
 ## Fourth adversarial re-review
 
 The fourth corpus began with 14 expected functional RED failures; six existing

@@ -460,6 +460,104 @@ def test_legacy_inbox_authority_is_validated_and_backfilled(tmp_path):
     )
 
 
+def _create_mismatched_legacy_queue(
+    path, *, queue: str, request, row_message_id: str, target_agent_id: str
+):
+    conn = sqlite3.connect(path)
+    if queue == "inbox":
+        conn.execute(
+            "CREATE TABLE persephone_inbox ("
+            "message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+            "target_agent_id TEXT NOT NULL, envelope TEXT NOT NULL, state TEXT NOT NULL, "
+            "received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+            "human_decision TEXT, human_decided_by TEXT, human_reason TEXT, "
+            "human_decided_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO persephone_inbox VALUES (?, ?, ?, ?, 'received', 100, 100, "
+            "NULL, NULL, NULL, NULL)",
+            (
+                row_message_id,
+                request.project_id,
+                target_agent_id,
+                json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":")),
+            ),
+        )
+    else:
+        conn.execute(
+            "CREATE TABLE persephone_outbox ("
+            "message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+            "target_agent_id TEXT NOT NULL, envelope TEXT NOT NULL, state TEXT NOT NULL, "
+            "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, "
+            "last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO persephone_outbox VALUES (?, ?, ?, ?, 'outbox_pending', 0, "
+            "100, NULL, 100, 100)",
+            (
+                row_message_id,
+                request.project_id,
+                target_agent_id,
+                json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":")),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("queue", ["inbox", "outbox"])
+def test_migration_mismatch_rolls_back_registry_columns_and_covering_index(
+    tmp_path, queue
+):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / f"legacy-{queue}.db"
+    request = _envelope(message_id=f"envelope_{queue}")
+    _create_mismatched_legacy_queue(
+        path,
+        queue=queue,
+        request=request,
+        row_message_id=(f"row_{queue}" if queue == "inbox" else request.message_id),
+        target_agent_id=(request.target_agent_id if queue == "inbox" else "wrong_target"),
+    )
+
+    with pytest.raises(db.PersephoneIdentityMigrationConflict):
+        db.connect(path)
+
+    raw = sqlite3.connect(path)
+    identity_count = raw.execute(
+        "SELECT COUNT(*) FROM persephone_message_identities"
+    ).fetchone()[0]
+    covering_index = raw.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_persephone_inbox_recovery_covering'"
+    ).fetchone()[0]
+    if queue == "inbox":
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(persephone_inbox)")}
+        assert "message_type" not in columns
+    raw.close()
+    assert identity_count == 0
+    assert covering_index == 0
+
+
+def test_existing_denormalized_authority_mismatch_is_rejected(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_persephone_store import record_inbox
+
+    path = tmp_path / "denormalized-mismatch.db"
+    with db.connect_closing(path) as conn:
+        record_inbox(conn, _envelope(message_id="denorm_mismatch"), now=100)
+        conn.execute(
+            "UPDATE persephone_inbox SET capability = 'source_search' "
+            "WHERE message_id = 'denorm_mismatch'"
+        )
+        conn.commit()
+    db._INITIALIZED_PATHS.discard(str(path.resolve()))
+
+    with pytest.raises(db.PersephoneIdentityMigrationConflict, match="denormalized"):
+        db.connect(path)
+
+
 def test_information_failure_api_refuses_non_information_processing_work(tmp_db):
     from hermes_cli.hades_persephone_store import (
         InvalidTransition,

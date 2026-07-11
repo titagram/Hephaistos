@@ -417,6 +417,74 @@ def test_semantic_credential_keys_remain_sensitive(tmp_path, key):
 
 
 @pytest.mark.parametrize(
+    ("content", "secrets"),
+    [
+        ('passwords = ["one-private", "two-private"]', ("one-private", "two-private")),
+        ('credentials = {primary: "primary-private"}', ("primary-private",)),
+        ('const x = {["password"]: "computed-private"}', ("computed-private",)),
+        ("const x = {['accessToken']: 'computed-token-private'}", ("computed-token-private",)),
+        (
+            '<property name="databasePassword" value="xml-property-private"/>',
+            ("xml-property-private",),
+        ),
+        (
+            '<credential key="accessToken" value="xml-credential-private"/>',
+            ("xml-credential-private",),
+        ),
+        (
+            '<property id="apiToken">xml-semantic-text-private</property>',
+            ("xml-semantic-text-private",),
+        ),
+    ],
+)
+def test_fifth_review_sensitive_containers_computed_keys_and_xml_pairs(
+    tmp_path, content, secrets
+):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    (tmp_path / "safe_example.txt").write_text(content, encoding="utf-8")
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert all(secret not in rendered for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("key", "should_redact"),
+    [
+        ("password_policy", False),
+        ("password_rules", False),
+        ("password_count", False),
+        ("password_policy_secret", True),
+        ("password_rules_token", True),
+        ("password_count_key", True),
+        ("session_count", False),
+        ("cookie_count", False),
+        ("session_token", True),
+        ("cookie_value", True),
+        ("auth_cookie", True),
+    ],
+)
+def test_fifth_review_metadata_exemptions_require_no_sensitive_qualifier(
+    tmp_path, key, should_redact
+):
+    from hermes_cli.hades_information_worker import run_information_request
+
+    secret = "semantic-private"
+    (tmp_path / "safe_example.txt").write_text(
+        f'{key} = "{secret}"', encoding="utf-8"
+    )
+    response = run_information_request(
+        _request(tmp_path, capability="source_slice", payload={"path": "safe_example.txt"}),
+        binding=_binding(tmp_path),
+    )
+    rendered = str(response.to_payload())
+    assert (secret not in rendered) is should_redact
+
+
+@pytest.mark.parametrize(
     "relative",
     [
         "production.env",
