@@ -501,8 +501,8 @@ _ORG_PROPOSAL_TYPES = frozenset(
 
 def publish_org_run_proposal(
     *,
-    client: object,
-    project_id: str,
+    outbox_conn,
+    topology: _OrgRunCreated,
     sender_agent_id: str,
     target_agent_id: str,
     remote_task_id: str,
@@ -513,15 +513,20 @@ def publish_org_run_proposal(
     idempotency_key: str,
     target_workspace_binding_id: str | None = None,
     now: int | None = None,
+    expected_project_id: str | None = None,
 ) -> str:
     """Append a bounded proposal to Persephone; never rewrite a PM card.
 
-    ``idempotency_key`` deterministically identifies the envelope.  The local
-    runtime suppresses an immediate duplicate and the stable message ID lets
-    the durable backend deduplicate retries after restart or connectivity loss.
+    ``idempotency_key`` deterministically identifies the envelope.  It is
+    durably enqueued before the capability-gated sender performs network I/O;
+    the stable message ID deduplicates retries across restart/offline recovery.
     """
+    if not topology.project_id:
+        raise ValueError("OrgRun topology has no authoritative project_id")
+    if expected_project_id is not None and str(expected_project_id).strip() != topology.project_id:
+        raise ValueError("proposal project does not match authoritative OrgRun project")
     values = {
-        "project_id": project_id, "sender_agent_id": sender_agent_id,
+        "project_id": topology.project_id, "sender_agent_id": sender_agent_id,
         "target_agent_id": target_agent_id, "remote_task_id": remote_task_id,
         "remote_task_version": remote_task_version, "idempotency_key": idempotency_key,
     }
@@ -541,15 +546,6 @@ def publish_org_run_proposal(
         uuid.NAMESPACE_URL,
         f"hades:{clean['project_id']}:{clean['idempotency_key']}",
     ))
-    published = getattr(client, "_hades_org_proposal_ids", None)
-    if published is None:
-        published = set()
-        try:
-            setattr(client, "_hades_org_proposal_ids", published)
-        except Exception:
-            pass
-    if message_id in published:
-        return message_id
     from hermes_cli.hades_persephone_messages import (
         AGENT_MESSAGE_SCHEMA, EffectClass, MessageType, parse_envelope,
     )
@@ -575,6 +571,6 @@ def publish_org_run_proposal(
             "requires_human_approval_for_remote_change": True,
         },
     }, now=timestamp)
-    client.create_inbox_message(**envelope.to_dict())
-    published.add(message_id)
+    from hermes_cli.hades_persephone_store import enqueue_outbox
+    enqueue_outbox(outbox_conn, envelope, now=timestamp)
     return message_id

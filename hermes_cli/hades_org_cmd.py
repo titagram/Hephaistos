@@ -70,6 +70,7 @@ def materialize_portfolio_file(
                 "integration_id": created.integration_id,
                 "review_id": created.review_id,
                 "synthesis_id": created.synthesis_id,
+                "project_id": created.project_id,
             }
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         return _error("invalid_portfolio", exc), 2
@@ -110,6 +111,7 @@ def show_org_run(
                 integration_id=str(topology["integration_id"]),
                 review_id=str(topology["review_id"]),
                 synthesis_id=str(topology["synthesis_id"]),
+                project_id=str(topology.get("project_id") or ""),
             )
             snapshot = snapshot_org_run(conn, org_run_id, created)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary

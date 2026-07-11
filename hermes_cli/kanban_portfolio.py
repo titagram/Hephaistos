@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import sqlite3
+import hashlib
+import json
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.hierarchical_execution import ExecutionPortfolio, PortfolioValidation
@@ -27,6 +29,7 @@ class OrgRunCreated:
     integration_id: str
     review_id: str
     synthesis_id: str
+    project_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,71 @@ class RemoteMandateReconciliation:
     affected_remote_ids: tuple[str, ...] = ()
     affected_nodes: tuple[str, ...] = ()
     evidence_valid: bool = True
+
+
+@dataclass(frozen=True)
+class MandateAcceptance:
+    status: str
+    remote_id: str
+    version: str
+    resumed_nodes: tuple[str, ...] = ()
+
+
+def _ensure_projection_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hades_org_evidence (
+            evidence_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+            anchor_id TEXT NOT NULL, remote_id TEXT NOT NULL, node_id TEXT NOT NULL,
+            packet TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('current','stale')),
+            mandate_version TEXT NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hades_org_evidence_scope
+            ON hades_org_evidence(anchor_id, remote_id, state);
+    """)
+
+
+def register_org_run_evidence(
+    conn: sqlite3.Connection, *, topology: OrgRunCreated, remote_id: str,
+    node_id: str, mandate_version: str, packet: dict,
+) -> str:
+    """Persist a validated D4 packet with immutable OrgRun provenance."""
+    if not topology.project_id or remote_id not in topology.remote_tasks:
+        raise ValueError("evidence is outside the authoritative OrgRun project/topology")
+    remote = topology.remote_tasks[remote_id]
+    allowed = {remote.execution_id, remote.review_id, remote.integration_ready_id,
+               remote.completion_id, topology.integration_id, topology.review_id,
+               topology.synthesis_id}
+    if node_id not in allowed:
+        raise ValueError("evidence node is outside the mandate-derived subtree")
+    from tools.delegation_evidence import validate_evidence_packet
+    validate_evidence_packet(packet)
+    encoded = json.dumps(packet, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    evidence_id = "packet:" + hashlib.sha256(
+        f"{topology.project_id}:{topology.anchor_id}:{remote_id}:{node_id}:{mandate_version}:{encoded}".encode()
+    ).hexdigest()
+    _ensure_projection_tables(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO hades_org_evidence VALUES (?, ?, ?, ?, ?, ?, 'current', ?, strftime('%s','now'))",
+        (evidence_id, topology.project_id, topology.anchor_id, remote_id, node_id,
+         encoded, str(mandate_version)),
+    )
+    conn.commit()
+    return evidence_id
+
+
+def require_current_org_run_evidence(
+    conn: sqlite3.Connection, *, topology: OrgRunCreated, evidence_refs: tuple[str, ...] | list[str],
+) -> None:
+    _ensure_projection_tables(conn)
+    for evidence_id in evidence_refs:
+        row = conn.execute(
+            "SELECT project_id, anchor_id, state FROM hades_org_evidence WHERE evidence_id = ?",
+            (str(evidence_id),),
+        ).fetchone()
+        if row is None or row["project_id"] != topology.project_id or row["anchor_id"] != topology.anchor_id:
+            raise ValueError(f"unknown or cross-project OrgRun evidence: {evidence_id}")
+        if row["state"] != "current":
+            raise ValueError(f"stale OrgRun evidence rejected: {evidence_id}")
 
 
 def _mandates(conn: sqlite3.Connection, topology: OrgRunCreated) -> dict[str, dict]:
@@ -120,6 +188,13 @@ def reconcile_remote_mandate(
         node_ids.extend((remote.execution_id, remote.review_id, remote.integration_ready_id, remote.completion_id))
     # Integration products depend on every projected remote task.
     node_ids.extend((topology.integration_id, topology.review_id, topology.synthesis_id))
+    _ensure_projection_tables(conn)
+    placeholders = ",".join("?" for _ in affected)
+    conn.execute(
+        f"UPDATE hades_org_evidence SET state = 'stale', updated_at = strftime('%s','now') "
+        f"WHERE project_id = ? AND anchor_id = ? AND remote_id IN ({placeholders})",
+        (topology.project_id, topology.anchor_id, *sorted(affected)),
+    )
     for task_id in node_ids:
         task = kb.get_task(conn, task_id)
         if task is not None and task.status not in {"done", "archived", "blocked"}:
@@ -130,7 +205,7 @@ def reconcile_remote_mandate(
     conn.commit()
     mandates[remote_id] = {
         "version": str(previous), "observed_version": version,
-        "status": "stale", "evidence_valid": False,
+        "status": "awaiting_human", "evidence_valid": False,
     }
     post_blackboard_update(conn, topology.anchor_id, author=author, key="remote_mandates", value=mandates)
     post_blackboard_update(
@@ -144,6 +219,80 @@ def reconcile_remote_mandate(
         remote_id, str(previous), version, "stale", tuple(sorted(affected)),
         tuple(node_ids), False,
     )
+
+
+def accept_remote_mandate_reconciliation(
+    conn: sqlite3.Connection, *, topology: OrgRunCreated, remote_id: str,
+    observed_version: str, approval: dict,
+) -> MandateAcceptance:
+    """Atomically accept a stale mandate only with explicit human evidence."""
+    if not isinstance(approval, dict) or approval.get("decision") != "accepted":
+        raise ValueError("accepted human approval is required")
+    approver = str(approval.get("approved_by") or "").strip()
+    evidence_ref = str(approval.get("evidence_ref") or "").strip()
+    if not approver or not evidence_ref:
+        raise ValueError("human approval requires approved_by and evidence_ref")
+    remote_id = str(remote_id).strip(); observed_version = str(observed_version).strip()
+    from hermes_cli.kanban_swarm import BLACKBOARD_PREFIX
+    with kb.write_txn(conn):
+        mandates = _mandates(conn, topology)
+        state = mandates.get(remote_id, {})
+        if state.get("status") != "awaiting_human" or state.get("observed_version") != observed_version:
+            raise ValueError("mandate is not awaiting this human reconciliation")
+        stale = latest_blackboard(conn, topology.anchor_id).get(f"stale_projection:{remote_id}")
+        affected_remote = tuple(stale.get("affected_remote_ids", ())) if isinstance(stale, dict) else (remote_id,)
+        contracts = approval.get("replacement_contracts")
+        if not isinstance(contracts, dict) or set(contracts) != set(affected_remote):
+            raise ValueError("replacement_contracts must cover the complete affected subtree")
+        normalized_contracts: dict[str, dict[str, str]] = {}
+        for candidate in affected_remote:
+            contract = contracts.get(candidate)
+            if not isinstance(contract, dict):
+                raise ValueError("each replacement contract must be structured")
+            contract_hash = str(contract.get("contract_hash") or "").strip()
+            mandate_version = str(contract.get("mandate_version") or "").strip()
+            if not contract_hash or mandate_version != observed_version:
+                raise ValueError("replacement contract hash/version is invalid")
+            normalized_contracts[candidate] = {
+                "contract_hash": contract_hash, "mandate_version": mandate_version,
+                "evidence_required": "regenerate",
+            }
+        resumed: list[str] = []
+        for candidate in affected_remote:
+            remote = topology.remote_tasks.get(str(candidate))
+            if remote is None:
+                continue
+            for node_id in (remote.execution_id, remote.review_id, remote.integration_ready_id, remote.completion_id):
+                row = conn.execute("SELECT status FROM tasks WHERE id = ?", (node_id,)).fetchone()
+                if row is not None and row["status"] == "blocked":
+                    parents = conn.execute(
+                        "SELECT p.status FROM task_links l JOIN tasks p ON p.id=l.parent_id WHERE l.child_id=?",
+                        (node_id,),
+                    ).fetchall()
+                    status = "ready" if all(p["status"] in {"done", "archived"} for p in parents) else "todo"
+                    conn.execute("UPDATE tasks SET status=?, block_kind=NULL WHERE id=?", (status, node_id))
+                    resumed.append(node_id)
+        mandates[remote_id] = {
+            "version": observed_version, "status": "accepted", "evidence_valid": False,
+            "approval": {"approved_by": approver, "evidence_ref": evidence_ref},
+        }
+        now = int(__import__("time").time())
+        for key, value in (
+            ("remote_mandates", mandates),
+            (f"stale_projection:{remote_id}", {
+                "schema": "hades.remote-projection-stale.v1", "remote_id": remote_id,
+                "status": "accepted", "accepted_version": observed_version,
+                "approval_evidence_ref": evidence_ref, "evidence_valid": False,
+                "requires_evidence_regeneration": True,
+            }),
+            (f"reconciled_contracts:{remote_id}", normalized_contracts),
+        ):
+            body = BLACKBOARD_PREFIX + json.dumps({"key": key, "value": value}, sort_keys=True)
+            conn.execute(
+                "INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)",
+                (topology.anchor_id, approver, body, now),
+            )
+    return MandateAcceptance("accepted", remote_id, observed_version, tuple(resumed))
 
 
 def _protocol(org_run_id: str, remote_task_id: str, write_scope: tuple[str, ...]) -> str:
@@ -162,7 +311,8 @@ def _protocol(org_run_id: str, remote_task_id: str, write_scope: tuple[str, ...]
 def _topology_from_blackboard(
     conn: sqlite3.Connection, anchor_id: str
 ) -> OrgRunCreated | None:
-    value = latest_blackboard(conn, anchor_id).get("topology")
+    blackboard = latest_blackboard(conn, anchor_id)
+    value = blackboard.get("topology")
     if not isinstance(value, dict):
         return None
     try:
@@ -176,6 +326,7 @@ def _topology_from_blackboard(
             integration_id=str(value["integration_id"]),
             review_id=str(value["review_id"]),
             synthesis_id=str(value["synthesis_id"]),
+            project_id=str(value.get("project_id") or (blackboard.get("portfolio") or {}).get("project_id") or ""),
         )
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
@@ -376,6 +527,7 @@ def create_org_run(
         integration_id=integration_id,
         review_id=review_id,
         synthesis_id=synthesis_id,
+        project_id=plan.project_id,
     )
     post_blackboard_update(
         conn,
@@ -403,6 +555,7 @@ def create_org_run(
             "integration_id": created.integration_id,
             "review_id": created.review_id,
             "synthesis_id": created.synthesis_id,
+            "project_id": created.project_id,
         },
     )
     post_blackboard_update(

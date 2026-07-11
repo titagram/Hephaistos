@@ -20,6 +20,12 @@ When an accepted remote version changes, Hades marks that projection stale, inva
 
 Clarification questions, local decisions, progress summaries, and verified completion proposals are bounded, append-only Persephone messages with stable idempotency IDs. They are information records only: Hades never rewrites a project-manager card. Automatic read-only information exchange is allowed; any proposal that would cause a remote change remains subject to human approval. Cursor/offline state is explicit, retries retain the stable message ID, and switching sync to `off` performs no network work.
 
+Proposal publication always derives the backend project UUID from the durable OrgRun topology. A caller-supplied expected project may only narrow this authority; a mismatch is rejected before persistence. Proposals enter the durable Persephone outbox before any network attempt, then use the normal capability-gated retry/dead-letter sender. This preserves offline and restart recovery without bypassing queue policy.
+
+Evidence packets used by projected execution are registered with project, OrgRun anchor, remote mandate, node and mandate-version provenance. A mandate version change marks matching packets stale in the evidence store; stale or cross-project packet references are rejected by the consumption/publication validator. Accepting new wording does not revive old evidence.
+
+Reconciliation follows `current → awaiting_human → accepted`. Acceptance requires an identified human, approval evidence, and replacement contract hashes/version entries for the complete affected subtree. The transition is single-use and atomic: partial or rejected approval leaves the subtree blocked. Eligible nodes resume according to their dependency gates, while evidence remains invalid until regenerated against the accepted contracts.
+
 ## Delegation preflight
 
 Resolve local model routing before materializing or dispatching an OrgRun:

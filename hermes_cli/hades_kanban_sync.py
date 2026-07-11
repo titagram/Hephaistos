@@ -135,10 +135,10 @@ def sync_remote_mandates(
     conn,
     client: object,
     *,
-    project_id: str,
+    topology,
     mode: str = "off",
     cursor: str | None = None,
-    projection_anchor_id: str | None = None,
+    expected_project_id: str | None = None,
     limit: int = 100,
 ) -> RemoteMandateSyncResult:
     """Observe project-scoped remote mandates without mutating remote cards.
@@ -149,9 +149,12 @@ def sync_remote_mandates(
     """
     if mode not in SYNC_MODES:
         raise ValueError(f"mode must be one of {sorted(SYNC_MODES)}")
-    project_id = str(project_id).strip()
+    project_id = str(getattr(topology, "project_id", "") or "").strip()
     if not project_id:
-        raise ValueError("project_id is required")
+        raise ValueError("OrgRun topology has no authoritative project_id")
+    if expected_project_id is not None and str(expected_project_id).strip() != project_id:
+        raise ValueError("sync project does not match authoritative OrgRun project")
+    projection_anchor_id = str(getattr(topology, "anchor_id", "") or "").strip()
     if mode == "off":
         return RemoteMandateSyncResult(mode, project_id)
     if cursor is None and projection_anchor_id:
