@@ -38,6 +38,17 @@ _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
 
+def _credential_fingerprint(secret: str) -> str | None:
+    value = str(secret or "")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
+
+
+def _persisted_credential_fingerprint(agent: db.BackendAgent) -> str | None:
+    from hermes_cli.config import load_env
+
+    return _credential_fingerprint(load_env().get(agent.token_env_key, ""))
+
+
 def run_backend_sync(
     *,
     client_factory: Callable[[], object] | None = None,
@@ -120,7 +131,8 @@ def run_backend_sync(
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
     polled_agent_queues: set[tuple[str, str]] = set()
-    route_auth: dict[tuple[str, str], dict[str, bool]] = {}
+    route_auth: dict[tuple[str, str], dict[str, bool | int]] = {}
+    used_credential_fingerprints: dict[str, str | None] = {}
     receiver = PersephoneReceiver(
         information_executor=execute_stored_information_request,
         now=(lambda: int(time.time()) if now is None else int(now)),
@@ -128,6 +140,10 @@ def run_backend_sync(
     receiver.refresh_bindings(bindings, agents=agents)
 
     def client_for_agent(sync_agent: db.BackendAgent) -> object:
+        if sync_agent.agent_id not in used_credential_fingerprints:
+            used_credential_fingerprints[sync_agent.agent_id] = (
+                _credential_fingerprint(runtime.agent_token(sync_agent))
+            )
         if client_factory is not None:
             return client_factory()
         existing = clients.get(sync_agent.agent_id)
@@ -177,13 +193,16 @@ def run_backend_sync(
 
         route_key = (binding.project_id, binding_agent.agent_id)
         auth_observation = route_auth.setdefault(
-            route_key, {"success": False, "unauthorized": False}
+            route_key,
+            {"success": False, "unauthorized": False, "unauthorized_errors": 0},
         )
 
         try:
             client = client_for_agent(binding_agent)
         except Exception as exc:
-            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
+            if _is_unauthorized_error(exc):
+                auth_observation["unauthorized"] = True
+                auth_observation["unauthorized_errors"] += 1
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -195,7 +214,9 @@ def run_backend_sync(
                 advertised = client.capabilities()
                 auth_observation["success"] = True
             except Exception as exc:
-                auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
+                if _is_unauthorized_error(exc):
+                    auth_observation["unauthorized"] = True
+                    auth_observation["unauthorized_errors"] += 1
                 advertised = {}
             queue_capabilities[binding_agent.agent_id] = bool(
                 isinstance(advertised, dict)
@@ -216,7 +237,9 @@ def run_backend_sync(
             proposal_errors += errors
             sync_errors += errors
         except Exception as exc:
-            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
+            if _is_unauthorized_error(exc):
+                auth_observation["unauthorized"] = True
+                auth_observation["unauthorized_errors"] += 1
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -252,7 +275,9 @@ def run_backend_sync(
             except AttributeError:
                 pass
             except Exception as exc:
-                auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
+                if _is_unauthorized_error(exc):
+                    auth_observation["unauthorized"] = True
+                    auth_observation["unauthorized_errors"] += 1
                 sync_errors += 1
                 _record_sync_error(binding, str(exc))
                 if not quiet:
@@ -267,7 +292,9 @@ def run_backend_sync(
             )
             auth_observation["success"] = True
         except Exception as exc:
-            auth_observation["unauthorized"] |= _is_unauthorized_error(exc)
+            if _is_unauthorized_error(exc):
+                auth_observation["unauthorized"] = True
+                auth_observation["unauthorized_errors"] += 1
             sync_errors += 1
             _record_sync_error(binding, str(exc))
             if not quiet:
@@ -396,12 +423,32 @@ def run_backend_sync(
             ),
         )
 
-    auth_failed_routes = auth_quarantined_routes = 0
+    auth_failed_routes = auth_quarantined_routes = stale_auth_routes = 0
     with db.connect_closing() as conn:
         for (route_project_id, route_agent_id), observation in route_auth.items():
             unauthorized_cycle = bool(
                 observation["unauthorized"] and not observation["success"]
             )
+            route_agent = agents.get(route_agent_id)
+            used_fingerprint = used_credential_fingerprints.get(route_agent_id)
+            persisted_fingerprint = (
+                _persisted_credential_fingerprint(route_agent)
+                if route_agent is not None
+                else None
+            )
+            stale_credential = bool(
+                unauthorized_cycle
+                and used_fingerprint
+                and persisted_fingerprint
+                and used_fingerprint != persisted_fingerprint
+            )
+            if stale_credential:
+                stale_auth_routes += 1
+                sync_errors = max(
+                    0,
+                    sync_errors - int(observation["unauthorized_errors"]),
+                )
+                continue
             if unauthorized_cycle:
                 auth_failed_routes += 1
             elif not observation["success"]:
@@ -436,6 +483,7 @@ def run_backend_sync(
         "inbox_events": inbox_events,
         "auth_failed_routes": auth_failed_routes,
         "auth_quarantined_routes": auth_quarantined_routes,
+        "stale_auth_routes": stale_auth_routes,
         "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }
     with db.connect_closing() as conn:

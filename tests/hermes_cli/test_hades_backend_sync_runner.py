@@ -2557,6 +2557,86 @@ def test_sync_auth_quarantine_counts_one_401_per_route_cycle(monkeypatch, tmp_pa
     assert binding is not None and binding.status == "auth_failed"
 
 
+def test_sync_does_not_quarantine_binding_after_persisted_token_rotation(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import hades_backend_runtime as runtime
+    from hermes_cli import hades_backend_sync
+    from hermes_cli.hades_backend_client import HadesBackendError
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_auth",
+            project_id="project_auth",
+            base_url="https://backend.invalid",
+            label="auth",
+            token_env_key="TOKEN_AUTH",
+            capabilities={"sync_git_tree": False, "populate_backend_ast": False},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="project_auth",
+            agent_id="agent_auth",
+            local_project_id="local_auth",
+            workspace_fingerprint="wf_auth",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="binding_auth",
+        )
+
+    class UnauthorizedClient:
+        @staticmethod
+        def _fail():
+            raise HadesBackendError("unauthorized", status_code=401)
+
+        def capabilities(self):
+            return self._fail()
+
+        def memory_snapshot(self, **payload):
+            return self._fail()
+
+        def list_inbox(self, **payload):
+            return self._fail()
+
+        def pull_jobs(self, **payload):
+            return self._fail()
+
+    monkeypatch.setattr(runtime, "agent_token", lambda selected: "old-token")
+    monkeypatch.setattr(
+        hades_backend_sync,
+        "_persisted_credential_fingerprint",
+        lambda selected: hades_backend_sync._credential_fingerprint("new-token"),
+        raising=False,
+    )
+
+    result = hades_backend_sync.run_backend_sync(
+        client_factory=UnauthorizedClient, quiet=True
+    )
+
+    with hdb.connect_closing() as conn:
+        health = hdb.get_route_auth_health(
+            conn, project_id="project_auth", agent_id="agent_auth"
+        )
+        binding = hdb.get_binding_for_fingerprint(conn, "wf_auth")
+        last_error = hdb.get_sync_state(conn, "last_sync_error")
+
+    assert result.exit_code == 0
+    assert result.summary["stale_auth_routes"] == 1
+    assert result.summary["auth_failed_routes"] == 0
+    assert binding is not None and binding.status == "linked"
+    assert health is None
+    assert last_error is None
+
+
 def test_sync_auth_quarantine_resets_on_authenticated_success(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
