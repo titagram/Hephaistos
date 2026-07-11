@@ -42,6 +42,10 @@ loss.
 - Backlog Triage is implemented, but the inspected project had no tasks or
   previous suggestion. The UI did not distinguish an empty backlog from a
   never-run, unconfigured, running, failed, or stale analysis.
+- Wiki content is already persisted as Markdown, but the frontend uses a small
+  custom line renderer that understands only a subset of Markdown and injects
+  transformed inline HTML. Real pages can therefore still expose Markdown
+  syntax or render it inconsistently.
 
 ## 3. Architectural principles
 
@@ -276,6 +280,29 @@ Canonical page blocks include summary, concepts, components,
 responsibilities, workflows, decisions, risks, references, and linked graph
 nodes. The two views must not drift into separately generated wikis.
 
+Markdown is the canonical persisted body format. Normal read mode renders the
+Markdown as sanitized semantic HTML; it never presents the source syntax as
+the primary content. The renderer supports the agreed Markdown profile,
+including headings, paragraphs, emphasis, links, ordered/unordered lists,
+blockquotes, inline code, fenced code blocks, tables, and task lists.
+
+Pressing `Edit` switches an authorized user to a Markdown source editor. Edit
+mode loads the exact canonical source and provides a rendered preview before
+save. Saving updates the Markdown source, then returns to rendered read mode.
+The server never stores rendered client HTML as the canonical body.
+
+Rendering must sanitize raw HTML, reject unsafe URL schemes, and render code
+without executing it. Links to external sites are visibly distinguishable and
+follow the product's safe-link policy.
+
+Edits use optimistic concurrency through a page version, ETag, or equivalent
+`updated_at` precondition. If the page changed after the editor opened, the
+save fails with a conflict and preserves both the current server version and
+the user's unsaved Markdown for reconciliation.
+
+Read mode, editor, preview, and the structured machine representation all
+display the same page version and provenance metadata.
+
 ### 7.3 Cross-links
 
 - Wiki sections may link to verified graph nodes and graph versions.
@@ -462,6 +489,12 @@ ready.
 - Tests proving backlog analysis remains read-only without a separately
   authorized and human-approved mutation.
 - Human/structured wiki rendering from the same canonical page.
+- Markdown round-trip tests proving the exact source remains canonical across
+  read, edit, preview, save, and reload.
+- Rendering tests for the supported Markdown profile, sanitization, unsafe
+  links/HTML, fenced code, tables, and task lists.
+- Concurrent wiki edit tests that preserve unsaved user input and reject stale
+  writes instead of overwriting a newer page.
 - Raw-to-curated provenance and state transition tests.
 - Cross-link authorization and version tests.
 - Platon retrieval, conflict, question-ranking, and evaluation-corpus tests.
