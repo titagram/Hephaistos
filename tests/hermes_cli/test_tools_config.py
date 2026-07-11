@@ -1695,7 +1695,7 @@ def test_save_platform_tools_clears_newly_enabled_from_disabled_toolsets():
     """
     config = {
         "platform_toolsets": {"cli": ["file", "terminal"]},
-        "agent": {"disabled_toolsets": ["todo", "memory", "browser"]},
+        "agent": {"disabled_toolsets": ["coding", "todo", "memory", "browser"]},
     }
 
     with patch("hermes_cli.tools_config.save_config"):
@@ -1703,6 +1703,9 @@ def test_save_platform_tools_clears_newly_enabled_from_disabled_toolsets():
 
     # The toolset the user just enabled is cleared from the block-list...
     assert "todo" not in config["agent"]["disabled_toolsets"]
+    # ...as is the coding posture, which would otherwise mask the explicitly
+    # selected terminal and file toolsets.
+    assert "coding" not in config["agent"]["disabled_toolsets"]
     # ...but toolsets the user did NOT touch stay disabled (no over-reach).
     assert "memory" in config["agent"]["disabled_toolsets"]
     assert "browser" in config["agent"]["disabled_toolsets"]

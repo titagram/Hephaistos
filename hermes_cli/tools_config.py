@@ -1743,9 +1743,24 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
         if isinstance(disabled_toolsets, list) and disabled_toolsets:
             newly_enabled = enabled_toolset_keys - preserved_entries
             if newly_enabled:
+                from toolsets import get_toolset, resolve_toolset
+
+                newly_enabled_tools = set()
+                for toolset_name in newly_enabled:
+                    newly_enabled_tools.update(resolve_toolset(toolset_name))
+
+                def masks_newly_enabled_toolset(toolset_name: str) -> bool:
+                    definition = get_toolset(toolset_name)
+                    return bool(
+                        definition
+                        and definition.get("posture")
+                        and newly_enabled_tools & set(resolve_toolset(toolset_name))
+                    )
+
                 remaining = [
                     ts for ts in disabled_toolsets
                     if str(ts) not in newly_enabled
+                    and not masks_newly_enabled_toolset(str(ts))
                 ]
                 if remaining != disabled_toolsets:
                     agent_cfg["disabled_toolsets"] = remaining
