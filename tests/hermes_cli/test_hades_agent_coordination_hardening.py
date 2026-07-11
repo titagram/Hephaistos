@@ -124,6 +124,39 @@ def test_manifest_and_awareness_have_hard_secret_safe_bounds(tmp_path, monkeypat
     assert "SECRET-" not in awareness
     assert "additional siblings omitted" in awareness
 
+    max_values = tuple(f"metadata-{index}-" + "x" * 240 for index in range(64))
+    artifact_source = LeafManifest(
+        "artifact-source", "parent", "leaf", "SOURCE-OBJECTIVE-SECRET"
+    )
+    artifact_target = LeafManifest(
+        "artifact-target", "parent", "leaf", "TARGET-OBJECTIVE-SECRET",
+        write_scope=max_values,
+        interfaces=max_values,
+        dependencies=max_values,
+        produces=("artifact-only",) + max_values[:63],
+    )
+    artifact_awareness = format_manifest_awareness(
+        artifact_source, (artifact_target,)
+    )
+    assert len(artifact_awareness.encode("utf-8")) <= MAX_MANIFEST_AWARENESS_BYTES
+    assert "id=`artifact-target`" in artifact_awareness
+    assert "relevance=target_produces:artifact-only" in artifact_awareness
+    assert "artifact-only" in artifact_awareness
+    assert "[details omitted/truncated]" in artifact_awareness
+    assert "OBJECTIVE-SECRET" not in artifact_awareness
+    artifact_entry = next(
+        line for line in artifact_awareness.splitlines() if "id=`artifact-target`" in line
+    )
+    assert len(artifact_entry.encode("utf-8")) <= 384
+
+    source_producer = LeafManifest(
+        "source-producer", "parent", "leaf", "private", produces=("source-art",)
+    )
+    consumer = LeafManifest("consumer", "parent", "leaf", "private")
+    assert "relevance=source_produces:source-art" in format_manifest_awareness(
+        source_producer, (consumer,)
+    )
+
     import hermes_cli.hades_agent_coordination as coordination
 
     monkeypatch.setattr(coordination, "_MAX_MANIFESTS_PER_NAMESPACE", 2)
@@ -165,13 +198,43 @@ def test_supported_coordination_surface_routes_two_children_safely(tmp_path) -> 
         event_type="question",
         summary="Which schema should I consume?",
         artifact="schema.json",
+        _trusted_operation_id="tool-call-a-1",
         parent_agent=leaf_a,
     )
     assert __import__("json").loads(posted)["recipients"] == ["leaf-b"]
+    first_state = coordination_state(
+        "leaf-b", root_id=authority.root_id, project_id=authority.project_id,
+        db_path=path,
+    )
+    assert first_state.dirty
+    retried = delegate_task(
+        action="coordination_post",
+        recipient_id="leaf-b",
+        event_type="question",
+        summary="Which schema should I consume?",
+        artifact="schema.json",
+        _trusted_operation_id="tool-call-a-1",
+        parent_agent=leaf_a,
+    )
+    assert __import__("json").loads(retried)["sequence"] == __import__("json").loads(posted)["sequence"]
     assert coordination_state(
         "leaf-b", root_id=authority.root_id, project_id=authority.project_id,
         db_path=path,
-    ).dirty
+    ).generation == first_state.generation
+    distinct = delegate_task(
+        action="coordination_post",
+        recipient_id="leaf-b",
+        event_type="question",
+        summary="Confirm the version too",
+        artifact="schema.json",
+        _trusted_operation_id="tool-call-a-2",
+        parent_agent=leaf_a,
+    )
+    assert __import__("json").loads(distinct)["sequence"] != __import__("json").loads(posted)["sequence"]
+    assert coordination_state(
+        "leaf-b", root_id=authority.root_id, project_id=authority.project_id,
+        db_path=path,
+    ).generation == first_state.generation + 1
 
     messages = [{"role": "tool", "tool_call_id": "call-b", "content": "work"}]
     delivery = prepare_pending_coordination(leaf_b, messages, 1)
@@ -187,6 +250,7 @@ def test_supported_coordination_surface_routes_two_children_safely(tmp_path) -> 
         event_type="answer",
         summary="Use schema.json v1",
         artifact="schema.json",
+        _trusted_operation_id="tool-call-b-1",
         parent_agent=leaf_b,
     )
     assert __import__("json").loads(response)["recipients"] == ["leaf-a"]
@@ -210,6 +274,7 @@ def test_supported_coordination_surface_routes_two_children_safely(tmp_path) -> 
         summary="bad evidence shape",
         evidence_refs="not-an-array",
         artifact="schema.json",
+        _trusted_operation_id="tool-call-a-malformed",
         parent_agent=leaf_a,
     )
     assert "evidence_refs must be an array" in malformed_evidence

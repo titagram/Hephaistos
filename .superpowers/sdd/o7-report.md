@@ -203,3 +203,31 @@ Final integration evidence:
 - Focused coordination/delegation/dispatch suite: `210 passed`.
 - Broad O1-O7/delegation/cache/role suite: `775 passed, 1 skipped`.
 - Ruff, `py_compile`, and `git diff --check`: passed.
+
+## Awareness parity and retry-id remediation
+
+The last audit aligned the human/model awareness view with the exact runtime
+router and made the supported posting surface retry-idempotent:
+
+- Relevance now reports an artifact path whenever either side produces the
+  named class of artifact, distinguishing `target_produces` from
+  `source_produces`. Artifact-only sibling relevance is therefore visible
+  before a post and agrees with `is_relevant_request`.
+- Relevant siblings are ordered first and always receive a bounded entry.
+  Identity/reason values have UTF-8 byte slices; every metadata class has a
+  fixed item/value slice; each entry has a hard byte cap. Oversized valid
+  manifests retain identity and relevance with an explicit
+  `[details omitted/truncated]` marker rather than disappearing. A bounded
+  global marker reports every sibling omitted by count or byte budget.
+- `coordination_post` no longer generates a fresh UUID on each supported call.
+  The dispatcher threads the trusted runtime tool-call ID outside the model
+  schema, and the action derives its event ID from that operation ID plus the
+  bound root/project/actor namespace. Replaying the same tool call after a
+  retry/restart produces one event and one dirty generation; a distinct tool
+  call produces a distinct event. Missing trusted identity fails closed.
+
+Evidence:
+
+- Focused awareness/dispatcher tests: `31 passed`.
+- Broad O1-O7/delegation/cache/role suite: `775 passed, 1 skipped`.
+- Ruff, `py_compile`, and `git diff --check`: passed.

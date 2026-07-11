@@ -25,6 +25,9 @@ _MAX_MANIFEST_ITEM_CHARS = 256
 _MAX_OBJECTIVE_CHARS = 1_000
 _MAX_AWARENESS_SIBLINGS = 32
 MAX_MANIFEST_AWARENESS_BYTES = 8_192
+_MAX_AWARENESS_ENTRY_BYTES = 384
+_MAX_AWARENESS_METADATA_ITEMS = 2
+_MAX_AWARENESS_VALUE_BYTES = 48
 _MAX_SUMMARY_CHARS = 2_000
 _MAX_EVIDENCE_REFS = 16
 _MAX_EVIDENCE_REF_CHARS = 512
@@ -85,6 +88,8 @@ class LeafManifest:
                 object.__setattr__(self, name, _clean_text(value, name, 200))
         if self.task_version < 1 or self.contract_version < 1:
             raise ValueError("manifest versions must be positive")
+        if self.task_version > 2_147_483_647 or self.contract_version > 2_147_483_647:
+            raise ValueError("manifest versions exceed supported range")
 
 
 @dataclass(frozen=True)
@@ -818,33 +823,26 @@ def format_manifest_awareness(
         "  artifact, scope, or blocker relevance; otherwise ask your parent.",
         "- Known siblings:",
     ]
-    for item in siblings[:_MAX_AWARENESS_SIBLINGS]:
-        reasons = _relevance_reasons(current, item)
-        if reasons:
-            candidate = (
-                f"  - id=`{item.agent_id}` role={item.role} status={item.status} "
-                f"task-v={item.task_version} contract-v={item.contract_version} "
-                f"relevance={','.join(reasons)} "
-                f"write_scope={list(item.write_scope)!r} "
-                f"interfaces={list(item.interfaces)!r} "
-                f"dependencies={list(item.dependencies)!r} "
-                f"produces={list(item.produces)!r}"
-            )
-        else:
-            candidate = (
-                f"  - id=`{item.agent_id}` role={item.role} status={item.status} "
-                f"task-v={item.task_version} contract-v={item.contract_version} "
-                "relevance=none; details hidden"
-            )
-        trial = "\n".join(lines + [candidate])
-        if len(trial.encode("utf-8")) > MAX_MANIFEST_AWARENESS_BYTES:
+    ordered = sorted(
+        siblings,
+        key=lambda item: (not bool(_relevance_reasons(current, item)), item.agent_id),
+    )
+    rendered = 0
+    for item in ordered[:_MAX_AWARENESS_SIBLINGS]:
+        candidate = _render_awareness_entry(current, item)
+        # Reserve room for a global omission marker whenever entries remain.
+        remaining = len(siblings) - rendered - 1
+        reserve = 64 if remaining > 0 else 0
+        trial_bytes = len("\n".join(lines + [candidate]).encode("utf-8"))
+        if trial_bytes + reserve > MAX_MANIFEST_AWARENESS_BYTES:
             break
         lines.append(candidate)
+        rendered += 1
     if not siblings:
         lines.append("  - (none)")
-    elif len(siblings) > _MAX_AWARENESS_SIBLINGS:
+    elif len(siblings) > rendered:
         omission = (
-            f"  - ({len(siblings) - _MAX_AWARENESS_SIBLINGS} "
+            f"  - ({len(siblings) - rendered} "
             "additional siblings omitted)"
         )
         if len("\n".join(lines + [omission]).encode("utf-8")) <= MAX_MANIFEST_AWARENESS_BYTES:
@@ -867,10 +865,65 @@ def _relevance_reasons(source: LeafManifest, target: LeafManifest) -> tuple[str,
         reasons.append(f"interface:{shared_interfaces[0]}")
     if _scope_overlaps(source.write_scope, target.write_scope):
         reasons.append("scope-overlap")
-    shared_artifacts = sorted(set(source.produces) & set(target.produces))
-    if shared_artifacts:
-        reasons.append(f"artifact:{shared_artifacts[0]}")
-    return tuple(reasons[:4])
+    if target.produces:
+        reasons.append(f"target_produces:{target.produces[0]}")
+    if source.produces:
+        reasons.append(f"source_produces:{source.produces[0]}")
+    return tuple(reasons[:6])
+
+
+def _awareness_values(values: Sequence[str]) -> tuple[str, bool]:
+    shown = [
+        _bounded_awareness_value(value)
+        for value in values[:_MAX_AWARENESS_METADATA_ITEMS]
+    ]
+    truncated = len(values) > len(shown) or any(
+        value != shown[index] for index, value in enumerate(values[: len(shown)])
+    )
+    return repr(shown), truncated
+
+
+def _bounded_awareness_value(value: str) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= _MAX_AWARENESS_VALUE_BYTES:
+        return value
+    return encoded[:_MAX_AWARENESS_VALUE_BYTES].decode("utf-8", errors="ignore")
+
+
+def _render_awareness_entry(source: LeafManifest, target: LeafManifest) -> str:
+    reasons = _relevance_reasons(source, target)
+    agent_id = _bounded_awareness_value(target.agent_id)
+    shown_reasons = tuple(
+        _bounded_awareness_value(reason) for reason in reasons[:2]
+    )
+    core = (
+        f"  - id=`{agent_id}` role={target.role} status={target.status} "
+        f"task-v={target.task_version} contract-v={target.contract_version} "
+        f"relevance={','.join(shown_reasons) if shown_reasons else 'none'}"
+    )
+    if not reasons:
+        return f"{core}; details hidden"
+
+    fragments: list[str] = []
+    truncated = (
+        len(target.agent_id) > len(agent_id)
+        or len(reasons) > len(shown_reasons)
+        or any(reason != shown_reasons[index] for index, reason in enumerate(reasons[:2]))
+    )
+    for name in ("write_scope", "interfaces", "dependencies", "produces"):
+        rendered, field_truncated = _awareness_values(getattr(target, name))
+        fragment = f" {name}={rendered}"
+        if len((core + "".join(fragments) + fragment).encode("utf-8")) <= (
+            _MAX_AWARENESS_ENTRY_BYTES - 30
+        ):
+            fragments.append(fragment)
+        else:
+            field_truncated = True
+        truncated = truncated or field_truncated
+    candidate = core + "".join(fragments)
+    if truncated:
+        candidate += " [details omitted/truncated]"
+    return candidate
 
 
 def render_coordination_block(events: Sequence[CoordinationEvent]) -> str:

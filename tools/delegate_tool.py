@@ -17,6 +17,7 @@ never the child's intermediate tool calls or reasoning.
 """
 
 import enum
+import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -2358,6 +2359,7 @@ def delegate_task(
     artifact: Optional[str] = None,
     blocker: Optional[str] = None,
     target_agent_id: Optional[str] = None,
+    _trusted_operation_id: Optional[str] = None,
     background: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
@@ -2390,6 +2392,7 @@ def delegate_task(
             artifact=artifact,
             blocker=blocker,
             target_agent_id=target_agent_id,
+            trusted_operation_id=_trusted_operation_id,
         )
 
     active_role = getattr(parent_agent, "_delegate_role", None)
@@ -3110,6 +3113,7 @@ def _delegation_coordination_action(
     artifact: Optional[str],
     blocker: Optional[str],
     target_agent_id: Optional[str],
+    trusted_operation_id: Optional[str],
 ) -> str:
     """Perform bounded DAG coordination under the runtime-bound identity."""
 
@@ -3125,6 +3129,21 @@ def _delegation_coordination_action(
         return tool_error("coordination action requires an active delegated task")
     try:
         if action == "coordination_post":
+            operation_id = str(trusted_operation_id or "").strip()
+            if not operation_id:
+                return tool_error(
+                    "coordination_post requires a trusted runtime operation id"
+                )
+            event_id = "runtime:" + hashlib.sha256(
+                "\0".join(
+                    (
+                        authority.root_id,
+                        authority.project_id,
+                        actor_id,
+                        operation_id,
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
             event = post_addressed_event(
                 authority=authority,
                 actor_id=actor_id,
@@ -3134,6 +3153,7 @@ def _delegation_coordination_action(
                 evidence_refs=evidence_refs,
                 artifact=artifact,
                 blocker=blocker,
+                event_id=event_id,
             )
             return json.dumps(
                 {
@@ -3838,6 +3858,7 @@ registry.register(
         artifact=args.get("artifact"),
         blocker=args.get("blocker"),
         target_agent_id=args.get("target_agent_id"),
+        _trusted_operation_id=kw.get("tool_call_id"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),

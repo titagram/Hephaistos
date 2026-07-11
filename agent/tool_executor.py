@@ -1313,7 +1313,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             _delegate_result = None
             try:
                 def _execute(next_args: dict) -> Any:
-                    return agent._dispatch_delegate_task(next_args)
+                    return agent._dispatch_delegate_task(
+                        next_args,
+                        trusted_operation_id=getattr(tool_call, "id", "") or "",
+                    )
                 function_result, function_args = _run_agent_tool_execution_middleware(
                     agent,
                     function_name=function_name,

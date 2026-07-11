@@ -410,10 +410,13 @@ def test_run_agent_dispatch_forces_background():
         agent = _FakeAgent()
         contract = {"objective": "coordinate"}
         run_agent.AIAgent._dispatch_delegate_task(
-            agent, {"goal": "x", "task_contract": contract}
+            agent,
+            {"goal": "x", "task_contract": contract},
+            trusted_operation_id="tool-call-stable",
         )
         assert captured["background"] is True
         assert captured["task_contract"] is contract
+        assert captured["_trusted_operation_id"] == "tool-call-stable"
 
         run_agent.AIAgent._dispatch_delegate_task(
             agent, {"tasks": [{"goal": "a"}, {"goal": "b"}]}
@@ -591,4 +594,3 @@ def test_gateway_cli_origin_event_left_unrouted():
     evt = _make_async_evt(session_key="")
     runner._enrich_async_delegation_routing(evt)
     assert "platform" not in evt
-

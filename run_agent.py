@@ -5347,7 +5347,9 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
+    def _dispatch_delegate_task(
+        self, function_args: dict, trusted_operation_id: str | None = None
+    ) -> str:
         """Single call site for delegate_task dispatch.
 
         New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
@@ -5384,6 +5386,7 @@ class AIAgent:
             artifact=function_args.get("artifact"),
             blocker=function_args.get("blocker"),
             target_agent_id=function_args.get("target_agent_id"),
+            _trusted_operation_id=trusted_operation_id,
             background=(not _is_subagent),
             parent_agent=self,
         )
