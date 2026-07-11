@@ -98,6 +98,8 @@ def test_publish_requires_completed_integration_and_org_review(tmp_path):
 
 
 def test_publish_uses_execution_lease_only_after_gate(tmp_path):
+    from tools.delegation_evidence import build_evidence_packet
+    from hermes_cli.kanban_portfolio import register_org_run_evidence
     class Client:
         def claim_agent_work_item(self, work_item_id, *, local_workspace_id):
             assert (work_item_id, local_workspace_id) == ("awi-1", "lw-1")
@@ -125,6 +127,15 @@ def test_publish_uses_execution_lease_only_after_gate(tmp_path):
             remote.completion_id,
         ]:
             assert kb.complete_task(conn, task_id, summary="verified")
+        evidence_ref = register_org_run_evidence(
+            conn, topology=created, remote_id="HD-1", node_id=remote.execution_id,
+            mandate_version="1",
+            packet=build_evidence_packet(
+                contract_hash="contract", base_commit="a" * 40, diff_hash="diff",
+                result_ref="b" * 40, covered_files=["src/a.py"],
+                verification=[{"command": "pytest", "passed": True}],
+            ).to_dict(),
+        )
         assert publish_org_run_completion(
             conn,
             client=client,
@@ -132,6 +143,7 @@ def test_publish_uses_execution_lease_only_after_gate(tmp_path):
             topology=created,
             remote_task_id="HD-1",
             message="bounded result",
+            evidence_refs=[evidence_ref],
         ) == (True, "published")
         assert client.completed == ("awi-1", "lease-1", "bounded result")
     finally:

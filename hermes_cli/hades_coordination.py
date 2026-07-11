@@ -435,6 +435,7 @@ def publish_org_run_completion(
     topology: _OrgRunCreated,
     remote_task_id: str,
     message: str,
+    evidence_refs: _Iterable[str] = (),
 ) -> tuple[bool, str]:
     """Publish one remote result only after the global integration gate.
 
@@ -449,6 +450,14 @@ def publish_org_run_completion(
         return False, "unknown remote task"
     if _org_status(conn, remote.completion_id) != "done":
         return False, "local completion evidence is not complete"
+    refs = tuple(str(value).strip() for value in evidence_refs if str(value).strip())
+    if not refs:
+        return False, "current OrgRun evidence is required"
+    from hermes_cli.kanban_portfolio import require_current_org_run_evidence
+    try:
+        require_current_org_run_evidence(conn, topology=topology, evidence_refs=refs)
+    except ValueError as exc:
+        return False, str(exc)
     from hermes_cli.hades_kanban_sync import publish_remote_result
 
     published = publish_remote_result(
