@@ -12,6 +12,11 @@ import httpx
 
 
 API_PREFIX = "/api/hades/v1"
+# The envelope permits a 64 KiB payload.  SSE adds bounded metadata around it,
+# but no single line or unfinished event block may grow without limit.
+PERSEPHONE_SSE_MAX_EVENT_BYTES = 65_536 + 16_384
+PERSEPHONE_SSE_MAX_LINE_BYTES = PERSEPHONE_SSE_MAX_EVENT_BYTES
+PERSEPHONE_SSE_MAX_FIELD_BYTES = 4_096
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_\-]{6,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}"),
@@ -370,10 +375,17 @@ class HadesBackendClient:
                 headers={"Accept": "text/event-stream"},
             ) as response:
                 if response.status_code >= 400:
+                    status = response.status_code
+                    if status in {404, 405, 406, 415, 501}:
+                        error_code = "stream_unavailable"
+                    elif status in {408, 425, 429} or status >= 500:
+                        error_code = "stream_transient"
+                    else:
+                        error_code = "stream_rejected"
                     raise HadesBackendError(
-                        f"Persephone stream unavailable (HTTP {response.status_code})",
-                        status_code=response.status_code,
-                        code="stream_unavailable",
+                        f"Persephone stream failed (HTTP {status})",
+                        status_code=status,
+                        code=error_code,
                     )
                 content_type = (
                     response.headers
@@ -392,6 +404,7 @@ class HadesBackendClient:
                 event_name = "message"
                 data_lines: list[str] = []
                 yielded = 0
+                block_bytes = 0
 
                 def dispatch() -> tuple[dict[str, Any] | None, bool]:
                     nonlocal event_id, event_name, data_lines
@@ -436,8 +449,21 @@ class HadesBackendClient:
                     return parsed, False
 
                 for line in response.iter_lines():
+                    encoded_size = len(line.encode("utf-8"))
+                    if encoded_size > PERSEPHONE_SSE_MAX_LINE_BYTES:
+                        raise HadesBackendError(
+                            "Persephone stream line exceeds the size limit",
+                            code="stream_malformed",
+                        )
+                    block_bytes += encoded_size + 1
+                    if block_bytes > PERSEPHONE_SSE_MAX_EVENT_BYTES:
+                        raise HadesBackendError(
+                            "Persephone stream event exceeds the size limit",
+                            code="stream_malformed",
+                        )
                     if line == "":
                         event, should_stop = dispatch()
+                        block_bytes = 0
                         if should_stop:
                             return
                         if event is not None:
@@ -452,6 +478,11 @@ class HadesBackendClient:
                     if separator and value.startswith(" "):
                         value = value[1:]
                     if field == "id":
+                        if len(value.encode("utf-8")) > PERSEPHONE_SSE_MAX_FIELD_BYTES:
+                            raise HadesBackendError(
+                                "Persephone stream ID exceeds the size limit",
+                                code="stream_malformed",
+                            )
                         if "\x00" in value:
                             raise HadesBackendError(
                                 "Persephone stream contains a malformed event ID",
@@ -459,6 +490,11 @@ class HadesBackendClient:
                             )
                         event_id = value
                     elif field == "event":
+                        if len(value.encode("utf-8")) > PERSEPHONE_SSE_MAX_FIELD_BYTES:
+                            raise HadesBackendError(
+                                "Persephone stream event name exceeds the size limit",
+                                code="stream_malformed",
+                            )
                         event_name = value or "message"
                     elif field == "data":
                         data_lines.append(value)

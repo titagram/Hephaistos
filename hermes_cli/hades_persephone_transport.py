@@ -8,6 +8,7 @@ retry, or dead-letter states.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import random
 import re
 import sqlite3
@@ -32,6 +33,17 @@ class RetryPolicy:
     max_attempts: int = 5
 
     def __post_init__(self) -> None:
+        for field, value in (
+            ("base", self.base),
+            ("maximum", self.maximum),
+            ("jitter", self.jitter),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"retry {field} must be a finite number")
         if self.base <= 0:
             raise ValueError("retry base must be positive")
         if self.maximum < self.base:
@@ -43,8 +55,21 @@ class RetryPolicy:
 
     def delay(self, attempt: int, *, rng: random.Random) -> int:
         exponent = max(0, int(attempt) - 1)
-        nominal = min(self.maximum, self.base * (2**exponent))
-        varied = rng.uniform(nominal * (1 - self.jitter), nominal * (1 + self.jitter))
+        saturation_exponent = max(
+            0,
+            math.ceil(math.log2(self.maximum) - math.log2(self.base)),
+        )
+        nominal = (
+            self.maximum
+            if exponent >= saturation_exponent
+            else self.base * (2**exponent)
+        )
+        spread = nominal * self.jitter
+        lower = nominal - spread
+        # Express the capped upper bound without multiplying two large finite
+        # floats into infinity.
+        upper = nominal + min(self.maximum - nominal, spread)
+        varied = rng.uniform(lower, upper)
         return max(1, int(round(min(self.maximum, varied))))
 
 
@@ -94,15 +119,18 @@ def poll_persephone_events(
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Poll one bounded page and return only structurally valid event objects."""
-    result = client.list_inbox(
-        **_queue_params(
-            project_id=project_id,
-            target_agent_id=target_agent_id,
-            target_workspace_binding_id=target_workspace_binding_id,
-            cursor=cursor,
-            limit=limit,
+    try:
+        result = client.list_inbox(
+            **_queue_params(
+                project_id=project_id,
+                target_agent_id=target_agent_id,
+                target_workspace_binding_id=target_workspace_binding_id,
+                cursor=cursor,
+                limit=limit,
+            )
         )
-    )
+    except HadesBackendError as exc:
+        raise _sanitized_backend_error(exc, context="Persephone polling") from exc
     events = result.get("events") if isinstance(result, dict) else None
     if not isinstance(events, list) or not all(
         isinstance(event, dict) for event in events
@@ -138,12 +166,12 @@ def iter_persephone_events(
         # batch before fallback replays the same cursor.
         streamed = list(client.iter_persephone_events(**params))
     except HadesBackendError as exc:
-        # Authentication/authorization failures cannot be repaired by changing
-        # transport and must not create a second credential-bearing request.
-        if exc.status_code in {401, 403}:
-            raise
-        if exc.code not in {"stream_unavailable", "stream_malformed"}:
-            raise
+        if exc.code not in {
+            "stream_unavailable",
+            "stream_transient",
+            "stream_malformed",
+        }:
+            raise _sanitized_backend_error(exc, context="Persephone streaming") from exc
         streamed = poll_persephone_events(client, **params)
     yield from streamed
 
@@ -159,6 +187,24 @@ def _error_label(exc: HadesBackendError, *, max_attempts: bool = False) -> str:
         )
     )
     return f"http_{exc.status_code}:{suffix}"
+
+
+def _sanitized_backend_error(
+    exc: HadesBackendError,
+    *,
+    context: str,
+) -> HadesBackendError:
+    """Retain routing metadata without retaining an untrusted response body."""
+    safe_code = (
+        exc.code if exc.code and _SAFE_CODE.fullmatch(exc.code) else None
+    )
+    status = exc.status_code
+    qualifier = f" (HTTP {status})" if status is not None else ""
+    return HadesBackendError(
+        f"{context} failed{qualifier}",
+        status_code=status,
+        code=safe_code,
+    )
 
 
 def send_due_messages(

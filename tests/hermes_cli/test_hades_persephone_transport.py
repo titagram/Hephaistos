@@ -179,6 +179,65 @@ def test_stream_wrapper_falls_back_to_polling_with_the_same_cursor():
         }
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 409, 410, 422])
+def test_terminal_stream_http_errors_never_fall_back_to_polling(status):
+    from hermes_cli.hades_persephone_transport import iter_persephone_events
+
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(status, text="raw-rejected-body-must-not-escape")
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(HadesBackendError) as caught:
+        list(
+            iter_persephone_events(
+                client,
+                project_id="project_1",
+                target_agent_id="agent_target",
+                cursor="42",
+                limit=2,
+            )
+        )
+
+    assert caught.value.status_code == status
+    assert "raw-rejected-body-must-not-escape" not in str(caught.value)
+    assert requests == ["/api/hades/v1/persephone/events"]
+
+
+@pytest.mark.parametrize("status", [404, 405, 406, 408, 415, 425, 429, 500, 501, 503])
+def test_unavailable_or_transient_stream_http_errors_fall_back_once(status):
+    from hermes_cli.hades_persephone_transport import iter_persephone_events
+
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(status, text="raw-stream-body")
+        return httpx.Response(200, json={"events": [{"id": "43"}]})
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    assert list(
+        iter_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            cursor="42",
+            limit=2,
+        )
+    ) == [{"id": "43"}]
+    assert requests == [
+        "/api/hades/v1/persephone/events",
+        "/api/hades/v1/persephone/inbox",
+    ]
+
+
 def test_malformed_stream_after_an_event_falls_back_without_partial_duplicates():
     from hermes_cli.hades_persephone_transport import iter_persephone_events
 
@@ -233,6 +292,43 @@ def test_poll_rejects_malformed_backend_shape_without_echoing_payload():
             limit=2,
         )
     assert secret_payload not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            500,
+            json={"error": {"code": "temporary_failure", "message": "unguessable-body-secret"}},
+        ),
+        httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            text="unguessable-invalid-json-secret",
+        ),
+    ],
+)
+def test_poll_sanitizes_backend_error_and_invalid_json_bodies(response):
+    from hermes_cli.hades_persephone_transport import poll_persephone_events
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(lambda request: response),
+    )
+    with pytest.raises(HadesBackendError) as caught:
+        poll_persephone_events(
+            client,
+            project_id="project_1",
+            target_agent_id="agent_target",
+            cursor="42",
+            limit=2,
+        )
+
+    assert "unguessable" not in str(caught.value)
+    if response.status_code == 500:
+        assert caught.value.status_code == 500
+        assert caught.value.code == "temporary_failure"
 
 
 @pytest.mark.parametrize("limit", [0, 101, True])
@@ -357,3 +453,60 @@ def test_successful_delivery_sends_exact_envelope_and_marks_sent(store):
     assert result == {"sent": 1, "retry": 0, "dead_letter": 0}
     assert sent == [envelope.to_dict()]
     assert row is not None and row.state == "sent"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "data: " + ("x" * 1_000_000) + "\n\n",
+        ("data: " + ("x" * 40_000) + "\n") * 3,
+        "id: " + ("x" * 10_000) + '\ndata: {"id":"43"}\n\n',
+        "event: " + ("x" * 10_000) + '\ndata: {"id":"43"}\n\n',
+    ],
+)
+def test_oversized_or_never_terminated_sse_blocks_are_rejected_safely(body):
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, text=body
+            )
+        ),
+    )
+    with pytest.raises(HadesBackendError, match="size limit") as caught:
+        list(
+            client.iter_persephone_events(
+                project_id="project_1", target_agent_id="agent_target", limit=2
+            )
+        )
+    assert "x" * 100 not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("base", float("nan")),
+        ("base", float("inf")),
+        ("maximum", float("-inf")),
+        ("jitter", float("nan")),
+        ("jitter", float("inf")),
+    ],
+)
+def test_retry_policy_rejects_non_finite_float_configuration(field, value):
+    from hermes_cli.hades_persephone_transport import RetryPolicy
+
+    kwargs = {field: value}
+    with pytest.raises(ValueError, match="finite"):
+        RetryPolicy(**kwargs)
+
+
+def test_retry_policy_keeps_extreme_finite_values_bounded_and_deterministic():
+    from hermes_cli.hades_persephone_transport import RetryPolicy
+
+    policy = RetryPolicy(base=1e300, maximum=1e300, jitter=1.0, max_attempts=2)
+    first = policy.delay(1, rng=random.Random(11))
+    second = policy.delay(1, rng=random.Random(11))
+
+    assert first == second
+    assert 1 <= first <= int(policy.maximum)
