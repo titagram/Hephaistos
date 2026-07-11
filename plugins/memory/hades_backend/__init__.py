@@ -738,7 +738,11 @@ class HadesBackendMemoryProvider(MemoryProvider):
         ):
             return None
         self._last_sync_at = now
-        run_backend_sync(quiet=True)
+        run_backend_sync(
+            quiet=True,
+            project_id=self._binding.project_id,
+            workspace_binding_ids=[self._binding.backend_workspace_binding_id],
+        )
         return None
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:

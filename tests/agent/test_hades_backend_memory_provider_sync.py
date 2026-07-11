@@ -47,4 +47,26 @@ def test_hades_backend_memory_provider_piggybacks_sync_once_per_interval(monkeyp
     provider.sync_turn("user again", "assistant again", session_id="session_1")
 
     assert len(calls) == 1
-    assert calls[0]["quiet"] is True
+    assert calls[0] == {
+        "quiet": True,
+        "project_id": "proj_1",
+        "workspace_binding_ids": ["wb_1"],
+    }
+
+
+def test_hades_backend_memory_provider_does_not_sync_without_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "unlinked"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    import plugins.memory.hades_backend as provider_mod
+
+    calls = []
+    monkeypatch.setattr(provider_mod, "run_backend_sync", lambda **kwargs: calls.append(kwargs))
+
+    provider = provider_mod.HadesBackendMemoryProvider()
+    provider.initialize("session_1", hermes_home=str(tmp_path / "home"), platform="cli")
+    provider.sync_turn("user", "assistant", session_id="session_1")
+
+    assert calls == []
