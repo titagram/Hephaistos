@@ -243,6 +243,104 @@ edges before traversal. When live backend calls are unavailable, both provider
 tools can fall back to synced local graph artifacts; fallback responses are
 explicitly marked as cached and should not be treated as fresh/live evidence.
 
+### Canonical graph artifact contract
+
+New `hades.php_graph.v1` and `hades.code_graph.v1` artifacts carry additive
+`graph_contract` metadata. The existing schema names and payload fields remain
+valid; consumers must not replace them with the contract version. The current
+contract is `hades.graph_artifact.v1` and contains:
+
+- `extractor.name`, `extractor.version`, and `extractor.mode` (`native`,
+  `graphify`, `fallback`, or `legacy_adapter`);
+- `extractor.quality`: `full`, `partial`, or `inventory_only`;
+- `extractor.fallback_reason`, which is null on the preferred path and otherwise
+  a bounded machine-readable value such as `no_relationships_extracted`,
+  `bounded_or_omitted_input`, `graphify_unavailable`,
+  `graphify_failed:<ExceptionClass>`, or `missing_contract_metadata`;
+- `coverage.languages`, `coverage.files_total`,
+  `coverage.files_analyzed`, and `coverage.files_failed`;
+- `source.branch` and `source.head_commit`.
+
+Native Hades extractors use names such as `hades-native-php`; the legacy
+analyzer reports `graphify` when Graphify succeeds and an explicit fallback
+extractor otherwise. Raw exception text and absolute workspace paths are not
+valid fallback metadata. Stored artifacts created before the contract are
+adapted during trusted backend reads without rewriting their payload.
+
+### Source-scoped projection and queries
+
+Canonical artifacts are authoritative. Neo4j is an idempotent, rebuildable
+projection isolated by `graph_version`. Every lookup resolves one exact
+`project_id` plus either `workspace_binding`/binding id or
+`repository`/repository id. It never falls back from one source type to another.
+Clients may select the source scope, but cannot submit or select a
+`graph_version`; the backend chooses the latest verified `ready` projection for
+that scope.
+
+Projection lifecycle states are `queued`, `projecting`, `ready`, `failed`, and
+`stale`. Queue workers and synchronous rebuilds use conditional ownership, so a
+retry or concurrent reconciler cannot steal an active projection. A replacement
+becomes current only after its node and relationship counts verify; until then,
+the previous `ready` version remains queryable. Failure codes are bounded and
+never contain raw exception messages.
+
+The Hades traversal response preserves its existing envelope and adds
+`projection_id`, `artifact_id`, `schema`, `graph_version`, `head_commit`,
+`quality`, and matching values under `provenance`. When the exact scope has no
+ready projection, the error code is `graph_projection_not_ready`; callers must
+not interpret it as an empty graph. Legacy plugin graph responses retain their
+existing fields and add `source_scope_type`, `source_scope_id`, `graph_version`,
+`quality`, `edges`, and canonical `metadata`. For backward compatibility, the
+legacy compatibility service maps the not-ready condition to its historical
+`graph_snapshot_not_found` reason.
+
+Dashboard graph previews are deliberately data-minimized. Multi-source projects
+return bounded scope summaries and require an explicit scope for graph detail.
+Preview identifiers are deterministic pseudonyms that preserve node-edge
+coherence; local paths and path-derived identifiers, labels, source references,
+or edge endpoints must never be rendered. These aliases are presentation-only
+and must not be used as canonical graph identities.
+
+### Reconciliation and recovery
+
+Run reconciliation from the backend checkout, first as a read-only preview:
+
+```bash
+php artisan devboard:neo4j-rebuild --reconcile --project=<project_uuid> --dry-run
+php artisan devboard:neo4j-rebuild --reconcile --project=<project_uuid>
+```
+
+To limit either command to one source, pass both options together:
+
+```bash
+php artisan devboard:neo4j-rebuild --reconcile --project=<project_uuid> \
+  --scope-type=workspace_binding --scope-id=<binding_uuid> --dry-run
+```
+
+`--scope-type` accepts `workspace_binding` or `repository`. Canonical options
+are rejected without `--reconcile`; `--scope-type` and `--scope-id` are rejected
+unless both are present. The command emits a bounded JSON summary containing
+`scanned`, `queued`, `ready`, `failed`, `skipped`, and `dry_run`. A dry run does
+not write projection rows, dispatch jobs, or modify Neo4j. A real reconciliation
+queues missing and final-failed projections; it does not steal `queued` or
+`projecting` work. The older `--repository`, `--snapshot`, and `--mode` options
+belong only to the legacy rebuild path and cannot be mixed with `--reconcile`.
+
+Before applying the projection migration or running a non-dry reconciliation,
+create and verify a PostgreSQL backup and record the current project/artifact
+counts. Apply migrations before queue workers consume canonical jobs, then run
+the dry run, the scoped or project-wide reconciliation, drain the queue, and
+verify `ready` counts plus plugin/Hades reads for the same backend-selected
+`graph_version`. Do not restore a backup merely because an additive migration
+succeeds: restore is reserved for an authorized rollback after destructive or
+data-loss behavior. Neo4j itself may be discarded and rebuilt from canonical
+artifacts; PostgreSQL artifacts and projection lifecycle rows are the recovery
+source of truth.
+
+The separate React frontend cutover, including complete removal of Inertia, is
+not part of this graph-foundation tranche and must not be inferred from these
+backend contracts.
+
 ## Status
 
 Use:
