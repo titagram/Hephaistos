@@ -27,7 +27,7 @@ _LOCATION_ONLY_KEYS = {
     "column_start",
     "column_end",
 }
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/#+-]*$")
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@#+-]*$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _FQCN_RE = re.compile(r"^\\?[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)+$")
 _DOTTED_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
@@ -36,11 +36,20 @@ _METHOD_RE = re.compile(
     r"^(?:\\?[A-Za-z_][A-Za-z0-9_]*(?:[\\.][A-Za-z_][A-Za-z0-9_]*)*)"
     r"(?:::|@)[A-Za-z_][A-Za-z0-9_]*$"
 )
-_ROUTE_RE = re.compile(r"^route(?:_name)?:[A-Za-z0-9_.:/{}-]+$", re.IGNORECASE)
-_ROUTE_METHOD_RE = re.compile(
-    r"^route:(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|ANY) /[A-Za-z0-9_./{}-]*$",
-    re.IGNORECASE,
+_ROUTE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$")
+_ROUTE_PATH_RE = re.compile(
+    r"^/(?:[A-Za-z0-9._~:@%+\-]+|\{[A-Za-z_][A-Za-z0-9_]*\??\}|/)*$"
 )
+_ROUTE_METHODS = frozenset({
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+    "HEAD",
+    "ANY",
+})
 _DATA_REF_RE = re.compile(
     r"^(?:table|model|entity|column|schema|collection|class|symbol):[A-Za-z0-9_.:-]+$",
     re.IGNORECASE,
@@ -74,23 +83,63 @@ def _has_control(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
-def _is_unsafe_path(value: str) -> bool:
+def _has_dot_segment(value: str) -> bool:
+    return bool(re.search(r"(?:^|[/:\\])\.{1,2}(?:$|[/:\\])", value))
+
+
+def _unsafe_path_like_reason(
+    value: str,
+    *,
+    max_bytes: int,
+    reject_separators: bool,
+) -> str | None:
+    """Classify unsafe identifier/locator text before semantic parsing.
+
+    Explicit IDs use ``reject_separators=True`` because they are opaque
+    identifiers, never filesystem or route locators. Endpoint locators allow
+    separators only so their dedicated route/file grammar can validate them.
+    Traversal, file URIs, absolute filesystem paths, controls, and oversized
+    values are rejected consistently in both modes.
+    """
+
+    if not value or value != value.strip():
+        return "empty_or_whitespace"
+    if _utf8_size(value) > max_bytes:
+        return "too_large"
+    if _has_control(value):
+        return "control_character"
     lowered = value.lower()
-    return bool(
-        value.startswith(("/", "//", "\\\\"))
-        or lowered.startswith("file://")
-        or _WINDOWS_DRIVE_RE.match(value)
+    if lowered.startswith("file:/"):
+        return "file_uri"
+    if _has_dot_segment(value):
+        return "dot_segment"
+    if reject_separators and ("/" in value or "\\" in value):
+        return "path_separator"
+    if value.startswith(("/", "//", "\\\\")) or _WINDOWS_DRIVE_RE.match(value):
+        return "absolute_path"
+    return None
+
+
+def _is_unsafe_path(value: str) -> bool:
+    return (
+        _unsafe_path_like_reason(
+            value,
+            max_bytes=MAX_ENDPOINT_LOCATOR_BYTES,
+            reject_separators=False,
+        )
+        is not None
     )
 
 
 def _valid_explicit_id(value: object) -> bool:
     return bool(
         isinstance(value, str)
-        and value == value.strip()
-        and value
-        and _utf8_size(value) <= MAX_EXPLICIT_ID_BYTES
-        and not _has_control(value)
-        and not _is_unsafe_path(value)
+        and _unsafe_path_like_reason(
+            value,
+            max_bytes=MAX_EXPLICIT_ID_BYTES,
+            reject_separators=True,
+        )
+        is None
         and _ID_RE.fullmatch(value)
     )
 
@@ -102,18 +151,65 @@ def _bounded_label(value: str) -> str:
     return encoded[:MAX_PLACEHOLDER_LABEL_BYTES].decode("utf-8", errors="ignore")
 
 
+def _canonical_full_path(value: object) -> str:
+    """Normalize a full path/URI for private hashing, never for publication."""
+
+    raw = _clean_text(value).replace("\\", "/")
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    is_file_uri = lowered.startswith("file:/")
+    if is_file_uri:
+        raw = raw[5:]
+    is_unc = not is_file_uri and raw.startswith("//")
+    drive = ""
+    if re.match(r"^[A-Za-z]:/", raw):
+        drive, raw = raw[:2].lower(), raw[2:]
+    absolute = raw.startswith("/")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            elif not absolute:
+                parts.append(part)
+            continue
+        parts.append(part)
+    normalized = "/".join(parts)
+    if absolute:
+        normalized = "/" + normalized
+    if drive:
+        normalized = drive + normalized
+    if is_unc:
+        normalized = "unc://" + normalized.lstrip("/")
+    if is_file_uri:
+        normalized = (
+            "file://" + ("" if normalized.startswith("/") else "/") + normalized
+        )
+    return normalized or ("/" if absolute else "")
+
+
+def _path_identity_token(value: object) -> str:
+    normalized = _canonical_full_path(value)
+    if not normalized:
+        return ""
+    digest = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _safe_path_basename(value: object) -> str:
+    normalized = _canonical_full_path(value)
+    basename = PurePosixPath(normalized).name if normalized else ""
+    basename = re.sub(r"[^A-Za-z0-9._@+ -]", "_", basename)
+    return _bounded_label(basename)
+
+
 def _normalized_path(value: object) -> str:
-    path = _clean_text(value).replace("\\", "/")
-    path = re.sub(r"/{2,}", "/", path)
-    while path.startswith("./"):
-        path = path[2:]
-    if _is_unsafe_path(_clean_text(value)):
-        path = PurePosixPath(path).name
-    if _utf8_size(path) > MAX_ENDPOINT_LOCATOR_BYTES:
-        path = PurePosixPath(path).name
-    return (
-        _bounded_label(path) if _utf8_size(path) > MAX_ENDPOINT_LOCATOR_BYTES else path
-    )
+    """Return the bounded display basename, not a filesystem locator."""
+
+    return _safe_path_basename(value)
 
 
 def _first_text(node: dict[str, Any], *keys: str) -> str:
@@ -134,7 +230,7 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
     route_method = _first_text(node, "http_method", "verb")
     route_uri = _first_text(node, "uri", "route", "route_path")
     table = _first_text(node, "table", "table_name")
-    path = _normalized_path(
+    path = _clean_text(node.get("_private_path_identity")) or _path_identity_token(
         node.get("path") or node.get("source_path") or node.get("file")
     )
 
@@ -159,7 +255,9 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
 
 
 def _canonical_node(raw_node: dict[str, Any], canonical_id: str) -> dict[str, Any]:
-    node = dict(raw_node)
+    node = {
+        key: value for key, value in raw_node.items() if not key.startswith("_private_")
+    }
     node["id"] = canonical_id
     for key in ("path", "source_path", "file"):
         if key in node and node[key] not in (None, ""):
@@ -172,7 +270,14 @@ def _safe_alias(value: object) -> str:
         return ""
     if _utf8_size(value) > MAX_ENDPOINT_LOCATOR_BYTES or _has_control(value):
         return ""
-    if _is_unsafe_path(value):
+    if (
+        _unsafe_path_like_reason(
+            value,
+            max_bytes=MAX_ENDPOINT_LOCATOR_BYTES,
+            reject_separators=False,
+        )
+        is not None
+    ):
         return ""
     return value
 
@@ -207,7 +312,7 @@ def _node_aliases(node: dict[str, Any], canonical_id: str) -> set[str]:
         aliases.add(f"table:{table}")
     if kind in {"file", "source_file", "module"}:
         path = _safe_alias(
-            _normalized_path(
+            _canonical_full_path(
                 node.get("path") or node.get("source_path") or node.get("file")
             )
         )
@@ -223,10 +328,33 @@ def _raw_endpoint(edge: dict[str, Any], keys: tuple[str, ...]) -> object:
     return ""
 
 
+def _classify_route_locator(locator: str) -> tuple[str, str, str] | None:
+    lowered = locator.lower()
+    if lowered.startswith("route_name:"):
+        route_name = locator.split(":", 1)[1]
+        return ("route", locator, "") if _ROUTE_NAME_RE.fullmatch(route_name) else None
+    if not lowered.startswith("route:"):
+        return None
+    route_value = locator.split(":", 1)[1]
+    method, separator, possible_path = route_value.partition(" ")
+    if separator:
+        if method.upper() not in _ROUTE_METHODS:
+            return None
+        route_path = possible_path
+    elif route_value.startswith("/"):
+        route_path = route_value
+    else:
+        return ("route", locator, "") if _ROUTE_NAME_RE.fullmatch(route_value) else None
+    if not route_path.startswith("/") or not _ROUTE_PATH_RE.fullmatch(route_path):
+        return None
+    return "route", locator, ""
+
+
 def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
     lowered = locator.lower()
-    if _ROUTE_RE.fullmatch(locator) or _ROUTE_METHOD_RE.fullmatch(locator):
-        return "route", locator, ""
+    route = _classify_route_locator(locator)
+    if route is not None:
+        return route
     if _DATA_REF_RE.fullmatch(locator):
         return lowered.split(":", 1)[0], locator, ""
     if _METHOD_RE.fullmatch(locator):
@@ -238,21 +366,24 @@ def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
     if _BARE_SYMBOL_RE.fullmatch(locator):
         return "external_symbol", locator, ""
     if lowered.endswith(_SOURCE_SUFFIXES):
-        normalized = _normalized_path(locator)
+        normalized = _safe_path_basename(locator)
         if normalized and not _is_unsafe_path(locator):
-            return "file", PurePosixPath(normalized).name, normalized
+            return "file", normalized, normalized
     return None
 
 
 def _external_node(locator: str, classified: tuple[str, str, str]) -> dict[str, Any]:
     kind, label, path = classified
-    return {
+    node = {
         "kind": kind,
         "name": _bounded_label(label),
         "path": _bounded_label(path),
         "external": True,
         "inferred_from_edge": True,
     }
+    if kind == "file":
+        node["_private_path_identity"] = _path_identity_token(locator)
+    return node
 
 
 def _explicit_values(
@@ -332,8 +463,12 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
         node_groups[canonical_id].append({
             "id": canonical_id,
             "node": node,
-            "semantic_key": _stable_json(comparable),
+            "semantic_key": _stable_json({
+                "semantic": semantic,
+                "node": comparable,
+            }),
             "semantic": semantic,
+            "aliases": _node_aliases(raw_node, canonical_id),
             "synthetic": False,
         })
 
@@ -347,7 +482,9 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             continue
         selected = min(group, key=lambda candidate: _stable_json(candidate["node"]))
         nodes_deduplicated += len(group) - 1
-        selected["aliases"] = _node_aliases(selected["node"], canonical_id)
+        selected["aliases"] = set().union(
+            *(candidate["aliases"] for candidate in group)
+        )
         candidates_by_id[canonical_id] = selected
 
     alias_ids: dict[str, set[str]] = defaultdict(set)
@@ -445,7 +582,7 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
         else:
             candidates_by_id[canonical_id] = {
                 "id": canonical_id,
-                "node": {**node, "id": canonical_id},
+                "node": _canonical_node(node, canonical_id),
                 "semantic_key": semantic_key,
                 "semantic": semantic,
                 "aliases": {locator, canonical_id},
@@ -643,22 +780,25 @@ def finalize_graph_artifact(
         max_nodes=int(payload.get("max_graph_nodes") or DEFAULT_MAX_GRAPH_NODES),
     )
     language = str(graph.get("language") or "unknown").strip().lower() or "unknown"
-    canonicalization_omitted = bool(
+    canonicalization_loss = bool(
         canonicalization["nodes_omitted"]
         or canonicalization["external_nodes_omitted"]
         or canonicalization["edges_omitted"]
+        or canonicalization["issues_count"]
     )
+    bounded_input_loss = bool(graph.get("truncated")) or bool(omitted)
     if canonicalization["edges_emitted"] == 0:
         quality = "inventory_only"
-        reason = (
-            "no_relationships_extracted"
-            if canonicalization["edges_input"] == 0
-            else "canonicalization_omissions"
-        )
-    elif bool(graph.get("truncated")) or omitted:
-        quality, reason = "partial", "bounded_or_omitted_input"
-    elif canonicalization_omitted:
+        if canonicalization_loss:
+            reason = "canonicalization_omissions"
+        elif bounded_input_loss:
+            reason = "bounded_or_omitted_input"
+        else:
+            reason = "no_relationships_extracted"
+    elif canonicalization_loss:
         quality, reason = "partial", "canonicalization_omissions"
+    elif bounded_input_loss:
+        quality, reason = "partial", "bounded_or_omitted_input"
     else:
         quality, reason = "full", None
     head = str(

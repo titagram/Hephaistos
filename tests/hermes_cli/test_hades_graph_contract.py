@@ -58,12 +58,17 @@ def test_finalize_graph_artifact_exposes_inventory_fallback(tmp_path: Path):
     assert result["graph_contract"]["extractor"]["quality"] == "inventory_only"
     assert (
         result["graph_contract"]["extractor"]["fallback_reason"]
-        == "no_relationships_extracted"
+        == "bounded_or_omitted_input"
     )
     assert result["graph_contract"]["coverage"]["files_failed"] == 1
 
 
-def _finalize(graph: dict, *, max_symbols: int = 5_000) -> dict:
+def _finalize(
+    graph: dict,
+    *,
+    max_symbols: int = 5_000,
+    omitted: list[dict] | None = None,
+) -> dict:
     return finalize_graph_artifact(
         deepcopy(graph),
         payload={
@@ -72,7 +77,7 @@ def _finalize(graph: dict, *, max_symbols: int = 5_000) -> dict:
             "max_graph_nodes": max_symbols,
         },
         candidates=[],
-        omitted=[],
+        omitted=omitted or [],
     )
 
 
@@ -590,7 +595,7 @@ def test_synthetic_path_placeholder_is_bounded_and_never_exposes_absolute_path()
         else:
             assert len(external) == 1
             assert external[0]["name"] == "Order.py"
-            assert external[0]["path"] == "src/domain/Order.py"
+            assert external[0]["path"] == "Order.py"
             assert len(json.dumps(external[0]).encode()) < 1_024
 
 
@@ -643,3 +648,212 @@ def test_more_than_five_thousand_inputs_are_bounded_without_dropping_legacy_evid
     assert report["issues_count"] == 250
     assert len(report["issues"]) == 50
     assert report["issues_truncated"] is True
+
+
+def test_explicit_ids_reject_every_path_form_but_allow_own_reserved_hash_replay():
+    unsafe_ids = [
+        "src/Order.py",
+        r"src\Order.py",
+        "file:/home/alice/Order.py",
+        "opaque:.",
+        "opaque:..",
+        "opaque:../secret",
+        "opaque:part/../secret",
+        "route:../../",
+    ]
+    for unsafe_id in unsafe_ids:
+        result = _finalize({
+            "symbols": [
+                {"id": unsafe_id, "kind": "class", "name": "Order"},
+                {"id": "class:Safe", "kind": "class", "name": "Safe"},
+            ],
+            "edges": [
+                {
+                    "id": unsafe_id,
+                    "kind": "calls",
+                    "source": "Safe",
+                    "target": "Safe",
+                }
+            ],
+        })
+        assert [node["id"] for node in result["nodes"]] == ["class:Safe"]
+        assert result["relationships"] == []
+        assert result["canonicalization"]["issue_reasons"] == {
+            "invalid_edge_id": 1,
+            "invalid_node_id": 1,
+        }
+        assert unsafe_id not in json.dumps(result["canonicalization"])
+
+    opaque = _finalize({
+        "symbols": [{"id": "opaque:domain:Order", "kind": "class", "name": "Order"}],
+        "edges": [],
+    })
+    assert [node["id"] for node in opaque["nodes"]] == ["opaque:domain:Order"]
+
+    source = {"kind": "class", "name": "Order", "path": "/srv/a/Order.php"}
+    derived = _finalize({"symbols": [source], "edges": []})["nodes"][0]["id"]
+    replay = _finalize({"symbols": [{**source, "id": derived}], "edges": []})
+    assert [node["id"] for node in replay["nodes"]] == [derived]
+    assert replay["canonicalization"]["nodes_omitted"] == 0
+
+
+def test_endpoint_locator_rejects_traversal_file_uri_and_malformed_routes():
+    unsafe_locators = [
+        "/etc/passwd",
+        "src/../../etc/passwd",
+        "file:/home/alice/private.php",
+        "route:../../",
+        "route:/api/../private",
+        "route:GET orders/{id}",
+        "route:GET /orders/{id",
+        "route:/orders/}id{",
+    ]
+    result = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {"kind": "uses", "source": "A", "target": locator}
+            for locator in unsafe_locators
+        ],
+    })
+
+    assert result["relationships"] == []
+    assert not any(node.get("external") for node in result["nodes"])
+    assert result["canonicalization"]["edges_omitted"] == len(unsafe_locators)
+    serialized_report = json.dumps(result["canonicalization"])
+    assert not any(locator in serialized_report for locator in unsafe_locators)
+
+
+def test_route_names_and_absolute_route_paths_use_separate_safe_grammars():
+    locators = [
+        "route:orders.show",
+        "route:_bulk_delete",
+        "route_name:admin.orders.show",
+        "route:/api/orders/{order}",
+        "route:GET /orders/{order}",
+    ]
+    result = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {"kind": "routes", "source": "A", "target": locator} for locator in locators
+        ],
+    })
+
+    assert len(result["relationships"]) == len(locators)
+    assert result["canonicalization"]["edges_omitted"] == 0
+    assert {node["name"] for node in result["nodes"] if node.get("external")} == set(
+        locators
+    )
+
+
+def test_distinct_full_paths_have_distinct_private_identity_and_safe_display():
+    paths = [
+        "/Users/alice/secret-one/src/Order.php",
+        "/Users/alice/secret-two/src/Order.php",
+        r"\\server\share\Order.php",
+        "/server/share/Order.php",
+    ]
+    nodes = [{"kind": "class", "name": "Order", "path": path} for path in paths]
+
+    first = _finalize({"symbols": nodes, "edges": []})
+    second = _finalize({"symbols": list(reversed(nodes)), "edges": []})
+
+    assert len(first["nodes"]) == len(paths)
+    assert len({node["id"] for node in first["nodes"]}) == len(paths)
+    assert [node["id"] for node in first["nodes"]] == [
+        node["id"] for node in second["nodes"]
+    ]
+    assert {node["path"] for node in first["nodes"]} == {"Order.php"}
+    public = json.dumps({
+        "nodes": first["nodes"],
+        "canonicalization": first["canonicalization"],
+    })
+    assert all(path not in public for path in paths)
+
+
+def test_exact_same_full_path_deduplicates_and_oversize_paths_stay_bounded():
+    shared = {"kind": "class", "name": "Order", "path": "/srv/a/Order.php"}
+    duplicate = _finalize({"symbols": [shared, deepcopy(shared)], "edges": []})
+    assert len(duplicate["nodes"]) == 1
+    assert duplicate["canonicalization"]["nodes_deduplicated"] == 1
+
+    huge_paths = [
+        "/srv/" + character * 100_000 + "/Order.php" for character in ("a", "b")
+    ]
+    huge = _finalize({
+        "symbols": [
+            {"kind": "class", "name": "Order", "path": path} for path in huge_paths
+        ],
+        "edges": [],
+    })
+    assert len({node["id"] for node in huge["nodes"]}) == 2
+    assert {node["path"] for node in huge["nodes"]} == {"Order.php"}
+    canonical_output = json.dumps({
+        "nodes": huge["nodes"],
+        "canonicalization": huge["canonicalization"],
+    })
+    assert len(canonical_output) < 10_000
+    assert "a" * 1_000 not in canonical_output
+    assert "b" * 1_000 not in canonical_output
+
+    unsafe_label = _finalize({
+        "symbols": [
+            {
+                "kind": "class",
+                "name": "Order",
+                "path": "/srv/private/Order<script>.php",
+            }
+        ],
+        "edges": [],
+    })
+    assert unsafe_label["nodes"][0]["path"] == "Order_script_.php"
+
+
+def test_zero_relationship_fallback_reason_uses_truthful_loss_priority():
+    invalid_nodes = _finalize({"symbols": [{"kind": "unknown"}], "edges": []})
+    assert invalid_nodes["graph_contract"]["extractor"] == {
+        "name": "hades-native-unknown",
+        "version": "1",
+        "mode": "native",
+        "quality": "inventory_only",
+        "fallback_reason": "canonicalization_omissions",
+    }
+
+    truncated = _finalize({"symbols": [], "edges": [], "truncated": True})
+    assert (
+        truncated["graph_contract"]["extractor"]["fallback_reason"]
+        == "bounded_or_omitted_input"
+    )
+
+    files_failed = _finalize(
+        {"symbols": [], "edges": []},
+        omitted=[{"path": "private.php", "reason": "read_failed"}],
+    )
+    assert (
+        files_failed["graph_contract"]["extractor"]["fallback_reason"]
+        == "bounded_or_omitted_input"
+    )
+
+    genuinely_empty = _finalize({"symbols": [], "edges": []})
+    assert (
+        genuinely_empty["graph_contract"]["extractor"]["fallback_reason"]
+        == "no_relationships_extracted"
+    )
+
+
+def test_canonical_loss_precedes_bounded_loss_when_relationships_are_emitted():
+    result = _finalize({
+        "symbols": [
+            {"id": "class:A", "kind": "class", "name": "A"},
+            {"id": "class:B", "kind": "class", "name": "B"},
+            {"kind": "unknown"},
+        ],
+        "edges": [{"kind": "calls", "source": "A", "target": "B"}],
+        "truncated": True,
+    })
+
+    assert len(result["relationships"]) == 1
+    assert result["graph_contract"]["extractor"]["quality"] == "partial"
+    assert (
+        result["graph_contract"]["extractor"]["fallback_reason"]
+        == "canonicalization_omissions"
+    )
