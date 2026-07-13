@@ -319,7 +319,6 @@ Run reconciliation from the backend checkout, first as a read-only preview:
 
 ```bash
 php artisan devboard:neo4j-rebuild --reconcile --project=<project_uuid> --dry-run
-php artisan devboard:neo4j-rebuild --reconcile --project=<project_uuid>
 ```
 
 To limit either command to one source, pass both options together:
@@ -341,26 +340,43 @@ The legacy path has no dry-run and forcefully rebuilds selected snapshots—even
 with `--mode=fake`—so it requires the same safety evidence and explicit human
 authorization as a non-dry canonical reconciliation.
 
-Before applying the projection migration, running a non-dry reconciliation, or
-running the legacy command: create and verify a PostgreSQL backup; record the
-current project/artifact/projection counts; run tests, formatting, and migration
-status; then present that evidence plus the exact command and scope to a human.
-Do not proceed without explicit authorization. After authorization, apply only
-the required additive migration, run the canonical dry-run (the legacy path has
-none), execute the approved command, drain the queue, and verify `ready` counts
-plus plugin/Hades reads for the same backend-selected `graph_version`. Do not
-restore a backup merely because an additive migration succeeds: restore is
-reserved for an authorized rollback after destructive or data-loss behavior.
-Neo4j itself may be discarded and rebuilt from canonical artifacts; PostgreSQL
-artifacts and projection lifecycle rows are the recovery source of truth.
+The operational order is mandatory. No executable migration, non-dry
+reconciliation, legacy rebuild, or deployment command belongs before the human
+gate:
 
-For deployment, retain both `docker-compose.devboard.yaml` and
-`docker-compose.devboard.traefik.yaml` (and the architecture override when
-needed). Never recreate the app with only a minimal/base Compose file: preserve
-`traefik_default`, router priorities, redirect and Basic Auth middleware, and
-the separate frontend/API/Hades/plugin routes. Smoke the unauthenticated root
-Basic Auth challenge, authenticated root, login flow, Hades health/auth, and a
-plugin endpoint before declaring the deployment healthy.
+1. Create a PostgreSQL custom-format backup outside the mutable application
+   path and verify it with `pg_restore -l`; record the backup path and current
+   project, user, artifact, and projection counts.
+2. Run the selected SQLite suites, canonical graph tests, Pint, and read-only
+   `php artisan migrate:status`.
+3. Run the exact project/scope canonical `--dry-run` shown above and stop on a
+   nonzero `failed` count.
+4. Present the backup path, successful archive listing, counts, test results,
+   migration status, dry-run JSON, exact mutating command, and affected scope
+   to a human. Stop until that human explicitly authorizes it.
+5. Only after authorization, apply a pending additive migration with
+   `php artisan migrate --force`, then run the approved canonical command
+   `php artisan devboard:neo4j-rebuild --reconcile
+   --project=<project_uuid>` or the approved legacy command `php artisan
+   devboard:neo4j-rebuild --repository=<repository_uuid>
+   --snapshot=<snapshot_uuid> --mode=fake`.
+6. Drain the queue and verify `ready` counts plus plugin/Hades reads for the
+   same backend-selected `graph_version` and confirm there is no 401 regression.
+
+Do not restore a backup merely because an additive migration succeeds: restore
+is reserved for an authorized rollback after destructive or data-loss
+behavior. Neo4j itself may be discarded and rebuilt from canonical artifacts;
+PostgreSQL artifacts and projection lifecycle rows are the recovery source of
+truth.
+
+After separate human authorization, deployment must use both
+`docker-compose.devboard.yaml` and `docker-compose.devboard.traefik.yaml` (and
+the architecture override when needed). Never recreate the app with only a
+minimal/base Compose file: preserve `traefik_default`, router priorities,
+redirect and Basic Auth middleware, and the separate frontend/API/Hades/plugin
+routes. Smoke the unauthenticated root Basic Auth challenge, authenticated
+root, login flow, Hades health/auth, and a plugin endpoint before declaring the
+deployment healthy.
 
 The separate React frontend cutover, including complete removal of Inertia, is
 not part of this graph-foundation tranche and must not be inferred from these

@@ -7853,3 +7853,26 @@ reconcile non-dry o rebuild legacy; quest'ultimo e' forceful anche in fake mode.
 Un deploy deve usare insieme i compose base e Traefik e verificare Basic Auth,
 root, login, Hades e plugin. Nessuna operazione live e' stata eseguita in questa
 remediation.
+
+# 2026-07-13 — Task 10 upload e runbook final blockers (non-live)
+
+Il backend valida e normalizza gli upload `hades.php_graph.v1` e
+`hades.code_graph.v1` prima di dedupe, insert, indicizzazione, ingest dei
+candidate source-slice e coda della proiezione. Il controller usa la stessa API
+side-effect-free del `CanonicalGraphRepository`, quindi adapter legacy e
+normalizzatore canonico non hanno regole duplicate. Un contratto esplicito
+malformato restituisce sempre `422 invalid_graph_contract`, anche ripetendo lo
+stesso hash, senza esporre il dettaglio dell'eccezione. Anche un grafo canonico
+malformato restituisce un `422 invalid_graph_artifact` bounded.
+
+Il runbook operativo remoto e questa guida locale non mostrano piu' comandi
+eseguibili di migration, reconcile non-dry, legacy rebuild o deploy prima del
+gate. L'ordine obbligatorio e': creazione backup PostgreSQL, verifica effettiva
+con `pg_restore -l`, conteggi read-only, test/Pint/migration status, dry-run,
+presentazione delle evidenze e autorizzazione umana esplicita. Soltanto dopo il
+gate compaiono i comandi reali; il deploy conserva sempre entrambi i compose
+base e Traefik.
+
+Verifica remota non-live: 11 file di test selezionati, 2171 assertion e zero
+failure; Pint sui tre file PHP modificati, OpenAPI JSON e diff check passati.
+PostgreSQL e Neo4j live non sono stati modificati.
