@@ -4,13 +4,15 @@ import hashlib
 import json
 import re
 from collections import Counter, defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v1"
 MAX_CANONICALIZATION_ISSUES = 50
 DEFAULT_MAX_GRAPH_NODES = 5_000
-MAX_EXPLICIT_ID_LENGTH = 512
+MAX_EXPLICIT_ID_BYTES = 512
+MAX_ENDPOINT_LOCATOR_BYTES = 512
+MAX_PLACEHOLDER_LABEL_BYTES = 256
 
 _NODE_ID_PREFIX = "hades:node:v1:"
 _EDGE_ID_PREFIX = "hades:edge:v1:"
@@ -25,6 +27,25 @@ _LOCATION_ONLY_KEYS = {
     "column_start",
     "column_end",
 }
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/#+-]*$")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_FQCN_RE = re.compile(r"^\\?[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)+$")
+_DOTTED_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+_BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_METHOD_RE = re.compile(
+    r"^(?:\\?[A-Za-z_][A-Za-z0-9_]*(?:[\\.][A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:::|@)[A-Za-z_][A-Za-z0-9_]*$"
+)
+_ROUTE_RE = re.compile(r"^route(?:_name)?:[A-Za-z0-9_.:/{}-]+$", re.IGNORECASE)
+_ROUTE_METHOD_RE = re.compile(
+    r"^route:(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|ANY) /[A-Za-z0-9_./{}-]*$",
+    re.IGNORECASE,
+)
+_DATA_REF_RE = re.compile(
+    r"^(?:table|model|entity|column|schema|collection|class|symbol):[A-Za-z0-9_.:-]+$",
+    re.IGNORECASE,
+)
+_SOURCE_SUFFIXES = (".php", ".py", ".ts", ".tsx", ".js", ".jsx", ".sql")
 
 
 def _stable_json(value: object) -> str:
@@ -45,15 +66,40 @@ def _clean_text(value: object) -> str:
     return str(value).strip() if value not in (None, "") else ""
 
 
+def _utf8_size(value: str) -> int:
+    return len(value.encode("utf-8", errors="replace"))
+
+
+def _has_control(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _is_unsafe_path(value: str) -> bool:
+    lowered = value.lower()
+    return bool(
+        value.startswith(("/", "//", "\\\\"))
+        or lowered.startswith("file://")
+        or _WINDOWS_DRIVE_RE.match(value)
+    )
+
+
 def _valid_explicit_id(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or value != value.strip()
-        or not value
-        or len(value) > MAX_EXPLICIT_ID_LENGTH
-    ):
-        return False
-    return not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    return bool(
+        isinstance(value, str)
+        and value == value.strip()
+        and value
+        and _utf8_size(value) <= MAX_EXPLICIT_ID_BYTES
+        and not _has_control(value)
+        and not _is_unsafe_path(value)
+        and _ID_RE.fullmatch(value)
+    )
+
+
+def _bounded_label(value: str) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= MAX_PLACEHOLDER_LABEL_BYTES:
+        return value
+    return encoded[:MAX_PLACEHOLDER_LABEL_BYTES].decode("utf-8", errors="ignore")
 
 
 def _normalized_path(value: object) -> str:
@@ -61,7 +107,13 @@ def _normalized_path(value: object) -> str:
     path = re.sub(r"/{2,}", "/", path)
     while path.startswith("./"):
         path = path[2:]
-    return path
+    if _is_unsafe_path(_clean_text(value)):
+        path = PurePosixPath(path).name
+    if _utf8_size(path) > MAX_ENDPOINT_LOCATOR_BYTES:
+        path = PurePosixPath(path).name
+    return (
+        _bounded_label(path) if _utf8_size(path) > MAX_ENDPOINT_LOCATOR_BYTES else path
+    )
 
 
 def _first_text(node: dict[str, Any], *keys: str) -> str:
@@ -86,6 +138,9 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
         node.get("path") or node.get("source_path") or node.get("file")
     )
 
+    identity_values = (kind, name, signature, namespace, class_name, method, route_uri)
+    if any(_utf8_size(value) > MAX_ENDPOINT_LOCATOR_BYTES for value in identity_values):
+        return None
     if not signature and class_name and method:
         signature = f"{class_name}::{method}"
     if not signature and route_uri:
@@ -103,17 +158,36 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
+def _canonical_node(raw_node: dict[str, Any], canonical_id: str) -> dict[str, Any]:
+    node = dict(raw_node)
+    node["id"] = canonical_id
+    for key in ("path", "source_path", "file"):
+        if key in node and node[key] not in (None, ""):
+            node[key] = _normalized_path(node[key])
+    return node
+
+
+def _safe_alias(value: object) -> str:
+    if not isinstance(value, str) or value != value.strip() or not value:
+        return ""
+    if _utf8_size(value) > MAX_ENDPOINT_LOCATOR_BYTES or _has_control(value):
+        return ""
+    if _is_unsafe_path(value):
+        return ""
+    return value
+
+
 def _node_aliases(node: dict[str, Any], canonical_id: str) -> set[str]:
     aliases = {canonical_id}
     for key in ("id", "symbol_id", "name", "qualified_name", "fqcn", "signature"):
-        value = _clean_text(node.get(key))
+        value = _safe_alias(node.get(key))
         if value:
             aliases.add(value)
             if "\\" in value:
                 aliases.add(value.lstrip("\\"))
 
-    class_name = _first_text(node, "class", "class_name")
-    method = _first_text(node, "method", "method_name")
+    class_name = _safe_alias(_first_text(node, "class", "class_name"))
+    method = _safe_alias(_first_text(node, "method", "method_name"))
     if class_name and method:
         class_name = class_name.lstrip("\\")
         short_name = class_name.split("\\")[-1]
@@ -125,56 +199,67 @@ def _node_aliases(node: dict[str, Any], canonical_id: str) -> set[str]:
         })
 
     kind = _first_text(node, "kind", "type").lower()
-    name = _first_text(node, "name")
+    name = _safe_alias(node.get("name"))
     if kind == "route" and name:
         aliases.update({f"route:{name}", f"route_name:{name}"})
-    table = _first_text(node, "table", "table_name")
+    table = _safe_alias(node.get("table") or node.get("table_name"))
     if table:
         aliases.add(f"table:{table}")
     if kind in {"file", "source_file", "module"}:
-        path = _normalized_path(
-            node.get("path") or node.get("source_path") or node.get("file")
+        path = _safe_alias(
+            _normalized_path(
+                node.get("path") or node.get("source_path") or node.get("file")
+            )
         )
         if path:
             aliases.add(path)
-    return {alias for alias in aliases if alias}
+    return {alias for alias in aliases if _safe_alias(alias)}
 
 
-def _edge_endpoint(edge: dict[str, Any], keys: tuple[str, ...]) -> str:
+def _raw_endpoint(edge: dict[str, Any], keys: tuple[str, ...]) -> object:
     for key in keys:
-        value = _clean_text(edge.get(key))
-        if value:
-            return value
+        if edge.get(key) not in (None, ""):
+            return edge[key]
     return ""
 
 
-def _external_kind(locator: str) -> str:
+def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
     lowered = locator.lower()
-    if lowered.startswith("table:"):
-        return "table"
-    if lowered.startswith(("route:", "route_name:")):
-        return "route"
-    if "@" in locator or "::" in locator:
-        return "method_reference"
-    if locator.endswith((".php", ".py", ".ts", ".tsx", ".js", ".jsx", ".sql")):
-        return "file"
-    if "\\" in locator:
-        return "external_class"
-    return "external_symbol"
+    if _ROUTE_RE.fullmatch(locator) or _ROUTE_METHOD_RE.fullmatch(locator):
+        return "route", locator, ""
+    if _DATA_REF_RE.fullmatch(locator):
+        return lowered.split(":", 1)[0], locator, ""
+    if _METHOD_RE.fullmatch(locator):
+        return "method_reference", locator.lstrip("\\"), ""
+    if _FQCN_RE.fullmatch(locator) or (
+        _DOTTED_NAME_RE.fullmatch(locator) and not lowered.endswith(_SOURCE_SUFFIXES)
+    ):
+        return "external_class", locator.lstrip("\\"), ""
+    if _BARE_SYMBOL_RE.fullmatch(locator):
+        return "external_symbol", locator, ""
+    if lowered.endswith(_SOURCE_SUFFIXES):
+        normalized = _normalized_path(locator)
+        if normalized and not _is_unsafe_path(locator):
+            return "file", PurePosixPath(normalized).name, normalized
+    return None
 
 
-def _external_node(locator: str) -> dict[str, Any]:
-    kind = _external_kind(locator)
-    node: dict[str, Any] = {
+def _external_node(locator: str, classified: tuple[str, str, str]) -> dict[str, Any]:
+    kind, label, path = classified
+    return {
         "kind": kind,
-        "name": locator,
-        "path": "",
+        "name": _bounded_label(label),
+        "path": _bounded_label(path),
         "external": True,
         "inferred_from_edge": True,
     }
-    if kind == "file":
-        node["path"] = locator
-    return node
+
+
+def _explicit_values(
+    entity: dict[str, Any], keys: tuple[str, ...]
+) -> tuple[bool, list[object]]:
+    values = [entity[key] for key in keys if key in entity and entity[key] is not None]
+    return bool(values), values
 
 
 def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, Any]:
@@ -188,8 +273,8 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
         if isinstance(graph.get("edges"), list)
         else graph.get("relationships", [])
     )
-    raw_nodes = [node for node in raw_nodes_value if isinstance(node, dict)]
-    raw_edges = [edge for edge in raw_edges_value if isinstance(edge, dict)]
+    raw_node_entries = raw_nodes_value if isinstance(raw_nodes_value, list) else []
+    raw_edge_entries = raw_edges_value if isinstance(raw_edges_value, list) else []
     issues: list[dict[str, Any]] = []
     issues_count = 0
     issue_reason_counts: Counter[str] = Counter()
@@ -205,71 +290,65 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             item["locator_sha256"] = _locator_fingerprint(value)
         issues.append(item)
 
-    explicit_counts = Counter(
-        value
-        for node in raw_nodes
-        for value in {_clean_text(node.get("id")), _clean_text(node.get("symbol_id"))}
-        if _valid_explicit_id(value)
-    )
-    candidates_by_id: dict[str, dict[str, Any]] = {}
-    invalid_nodes = 0
-    duplicate_nodes = 0
-    for raw_node in raw_nodes:
-        node = dict(raw_node)
-        explicit = next(
-            (
-                value
-                for value in (
-                    _clean_text(node.get("id")),
-                    _clean_text(node.get("symbol_id")),
-                )
-                if _valid_explicit_id(value) and explicit_counts[value] == 1
-            ),
-            "",
-        )
-        semantic = _node_semantic_identity(node)
-        if not explicit and semantic is None:
-            invalid_nodes += 1
+    node_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    nodes_omitted = 0
+    nodes_deduplicated = 0
+    for raw_node in raw_node_entries:
+        if not isinstance(raw_node, dict):
+            nodes_omitted += 1
+            issue("invalid_node_shape", "node")
+            continue
+        semantic = _node_semantic_identity(raw_node)
+        present, raw_explicit_values = _explicit_values(raw_node, ("id", "symbol_id"))
+        if present:
+            if any(not _valid_explicit_id(value) for value in raw_explicit_values):
+                nodes_omitted += 1
+                issue("invalid_node_id", "node", raw_explicit_values[0])
+                continue
+            explicit_values = {str(value) for value in raw_explicit_values}
+            if len(explicit_values) != 1:
+                nodes_omitted += 1
+                issue("conflicting_node_ids", "node")
+                continue
+            explicit = next(iter(explicit_values))
+        else:
+            explicit = ""
+        if semantic is None:
+            nodes_omitted += 1
             issue("missing_node_identity", "node")
             continue
-        canonical_id = explicit or _hashed_id(_NODE_ID_PREFIX, semantic)
-        node["id"] = canonical_id
-        existing = candidates_by_id.get(canonical_id)
-        if existing is not None:
-            comparable_existing = {
-                key: value
-                for key, value in existing["node"].items()
-                if key not in _LOCATION_ONLY_KEYS
-            }
-            comparable_node = {
-                key: value
-                for key, value in node.items()
-                if key not in _LOCATION_ONLY_KEYS
-            }
-            if comparable_existing == comparable_node:
-                duplicate_nodes += 1
-                issue("duplicate_node", "node", canonical_id)
-                continue
-            invalid_nodes += 1
-            issue("canonical_node_id_collision", "node", canonical_id)
-            existing["collided"] = True
+        derived_id = _hashed_id(_NODE_ID_PREFIX, semantic)
+        if explicit.startswith(_NODE_ID_PREFIX) and explicit != derived_id:
+            nodes_omitted += 1
+            issue("invalid_reserved_node_id", "node", explicit)
             continue
-        candidates_by_id[canonical_id] = {
+        canonical_id = explicit or derived_id
+        node = _canonical_node(raw_node, canonical_id)
+        comparable = {
+            key: value
+            for key, value in node.items()
+            if key not in {*_LOCATION_ONLY_KEYS, "symbol_id"}
+        }
+        node_groups[canonical_id].append({
             "id": canonical_id,
             "node": node,
-            "aliases": _node_aliases(node, canonical_id),
+            "semantic_key": _stable_json(comparable),
+            "semantic": semantic,
             "synthetic": False,
-            "collided": False,
-        }
+        })
 
-    collided_ids = {
-        candidate_id
-        for candidate_id, candidate in candidates_by_id.items()
-        if candidate["collided"]
-    }
-    for candidate_id in collided_ids:
-        candidates_by_id.pop(candidate_id, None)
-        invalid_nodes += 1
+    candidates_by_id: dict[str, dict[str, Any]] = {}
+    for canonical_id, group in sorted(node_groups.items()):
+        semantic_keys = {candidate["semantic_key"] for candidate in group}
+        if len(semantic_keys) > 1:
+            nodes_omitted += len(group)
+            for _candidate in group:
+                issue("canonical_node_id_collision", "node", canonical_id)
+            continue
+        selected = min(group, key=lambda candidate: _stable_json(candidate["node"]))
+        nodes_deduplicated += len(group) - 1
+        selected["aliases"] = _node_aliases(selected["node"], canonical_id)
+        candidates_by_id[canonical_id] = selected
 
     alias_ids: dict[str, set[str]] = defaultdict(set)
     for candidate in candidates_by_id.values():
@@ -283,48 +362,95 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
     }
 
     parsed_edges: list[dict[str, Any]] = []
-    unresolved_locators: Counter[str] = Counter()
+    external_locators: dict[str, tuple[str, str, str]] = {}
     endpoint_unresolved = 0
-    for edge in raw_edges:
-        source = _edge_endpoint(edge, _EDGE_SOURCE_KEYS)
-        target = _edge_endpoint(edge, _EDGE_TARGET_KEYS)
+    edges_omitted = 0
+    edges_deduplicated = 0
+    for raw_edge in raw_edge_entries:
+        if not isinstance(raw_edge, dict):
+            edges_omitted += 1
+            issue("invalid_edge_shape", "edge")
+            continue
         endpoint_states: list[tuple[str, str]] = []
-        for endpoint in (source, target):
-            if not endpoint:
+        endpoint_failed = False
+        for endpoint_value in (
+            _raw_endpoint(raw_edge, _EDGE_SOURCE_KEYS),
+            _raw_endpoint(raw_edge, _EDGE_TARGET_KEYS),
+        ):
+            if endpoint_value in (None, ""):
+                endpoint_states.append(("invalid", "missing_edge_endpoint"))
+                endpoint_failed = True
                 endpoint_unresolved += 1
-                endpoint_states.append(("missing", ""))
-            elif endpoint in ambiguous_aliases:
+                continue
+            if not isinstance(endpoint_value, str):
+                endpoint_states.append(("invalid", "unrecognized_endpoint_locator"))
+                endpoint_failed = True
+                endpoint_unresolved += 1
+                issue("unrecognized_endpoint_locator", "edge")
+                continue
+            if _utf8_size(endpoint_value) > MAX_ENDPOINT_LOCATOR_BYTES:
+                endpoint_states.append(("invalid", "endpoint_locator_too_large"))
+                endpoint_failed = True
+                endpoint_unresolved += 1
+                issue("endpoint_locator_too_large", "edge", endpoint_value)
+                continue
+            endpoint = endpoint_value.strip()
+            if (
+                endpoint != endpoint_value
+                or _has_control(endpoint)
+                or _is_unsafe_path(endpoint)
+            ):
+                endpoint_states.append(("invalid", "unsafe_endpoint_locator"))
+                endpoint_failed = True
+                endpoint_unresolved += 1
+                issue("unsafe_endpoint_locator", "edge", endpoint_value)
+                continue
+            if endpoint in ambiguous_aliases:
                 endpoint_states.append(("ambiguous", endpoint))
             elif endpoint in unique_aliases:
                 endpoint_states.append(("resolved", unique_aliases[endpoint]))
             else:
-                endpoint_unresolved += 1
-                unresolved_locators[endpoint] += 1
-                endpoint_states.append(("external", endpoint))
+                classified = _classify_external_locator(endpoint)
+                if classified is None:
+                    endpoint_states.append(("invalid", "unrecognized_endpoint_locator"))
+                    endpoint_failed = True
+                    endpoint_unresolved += 1
+                    issue("unrecognized_endpoint_locator", "edge", endpoint)
+                else:
+                    endpoint_unresolved += 1
+                    external_locators[endpoint] = classified
+                    endpoint_states.append(("external", endpoint))
         parsed_edges.append({
-            "edge": edge,
+            "edge": raw_edge,
             "source": endpoint_states[0],
             "target": endpoint_states[1],
+            "endpoint_failed": endpoint_failed,
         })
 
     external_id_by_locator: dict[str, str] = {}
-    for locator in sorted(unresolved_locators):
-        node = _external_node(locator)
+    for locator in sorted(external_locators):
+        node = _external_node(locator, external_locators[locator])
         semantic = _node_semantic_identity(node)
-        canonical_id = _hashed_id(_NODE_ID_PREFIX, semantic)
-        # A malicious explicit identifier must not make an absent endpoint
-        # alias an existing unrelated node.
-        if canonical_id in candidates_by_id:
-            issue("external_node_id_collision", "node", locator)
+        if semantic is None:
+            issue("invalid_external_node", "node", locator)
             continue
-        candidate = {
-            "id": canonical_id,
-            "node": {**node, "id": canonical_id},
-            "aliases": {locator, canonical_id},
-            "synthetic": True,
-            "collided": False,
-        }
-        candidates_by_id[canonical_id] = candidate
+        canonical_id = _hashed_id(_NODE_ID_PREFIX, semantic)
+        existing = candidates_by_id.get(canonical_id)
+        semantic_key = _stable_json(semantic)
+        if existing is not None:
+            if _stable_json(existing["semantic"]) != semantic_key:
+                issue("external_node_id_collision", "node", locator)
+                continue
+            existing["aliases"].add(locator)
+        else:
+            candidates_by_id[canonical_id] = {
+                "id": canonical_id,
+                "node": {**node, "id": canonical_id},
+                "semantic_key": semantic_key,
+                "semantic": semantic,
+                "aliases": {locator, canonical_id},
+                "synthetic": True,
+            }
         external_id_by_locator[locator] = canonical_id
 
     reference_counts: Counter[str] = Counter()
@@ -360,18 +486,13 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
     selected_external_ids = {
         candidate["id"] for candidate in selected if candidate["synthetic"]
     }
-    omitted_real = (
-        invalid_nodes
-        + duplicate_nodes
-        + sum(
-            1
-            for candidate in ranked_candidates[max_nodes:]
-            if not candidate["synthetic"]
-        )
+    capacity_real = sum(
+        1 for candidate in ranked_candidates[max_nodes:] if not candidate["synthetic"]
     )
     omitted_external = sum(
         1 for candidate in ranked_candidates[max_nodes:] if candidate["synthetic"]
     )
+    nodes_omitted += capacity_real
     for candidate in ranked_candidates[max_nodes:]:
         issue(
             "node_capacity_exceeded",
@@ -379,45 +500,39 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             candidate["id"],
         )
 
-    endpoint_after_resolved = endpoint_after_synthesized = endpoint_after_unresolved = (
-        endpoint_after_ambiguous
-    ) = 0
+    endpoint_after_resolved = 0
+    endpoint_after_synthesized = 0
+    endpoint_after_unresolved = 0
+    endpoint_after_ambiguous = 0
     for parsed in parsed_edges:
         for state, value in (parsed["source"], parsed["target"]):
             if state == "ambiguous":
                 endpoint_after_ambiguous += 1
-            elif state == "missing":
-                endpoint_after_unresolved += 1
             elif state == "resolved":
                 if value in selected_ids:
                     endpoint_after_resolved += 1
                 else:
                     endpoint_after_unresolved += 1
-            else:
+            elif state == "external":
                 candidate_id = external_id_by_locator.get(value, "")
                 if candidate_id in selected_ids:
                     endpoint_after_synthesized += 1
                 else:
                     endpoint_after_unresolved += 1
+            else:
+                endpoint_after_unresolved += 1
 
-    explicit_edge_counts = Counter(
-        _clean_text(parsed["edge"].get("id"))
-        for parsed in parsed_edges
-        if _valid_explicit_id(_clean_text(parsed["edge"].get("id")))
-    )
-    emitted_edges: list[dict[str, Any]] = []
-    emitted_edge_ids: set[str] = set()
-    edges_omitted = 0
+    edge_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for parsed in parsed_edges:
+        if parsed["endpoint_failed"]:
+            edges_omitted += 1
+            continue
         resolved: list[str] = []
         failed_reason = ""
         failed_value = ""
         for state, value in (parsed["source"], parsed["target"]):
             if state == "ambiguous":
                 failed_reason, failed_value = "ambiguous_endpoint_alias", value
-                break
-            if state == "missing":
-                failed_reason = "missing_edge_endpoint"
                 break
             candidate_id = (
                 value if state == "resolved" else external_id_by_locator.get(value, "")
@@ -431,54 +546,73 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             issue(failed_reason, "edge", failed_value)
             continue
 
-        edge = dict(parsed["edge"])
+        raw_edge = parsed["edge"]
         source_id, target_id = resolved
+        properties = {
+            key: value
+            for key, value in raw_edge.items()
+            if key not in {"id", *_EDGE_SOURCE_KEYS, *_EDGE_TARGET_KEYS}
+        }
+        semantic_edge = {
+            "kind": _first_text(raw_edge, "kind", "type").lower() or "relationship",
+            "source_id": source_id,
+            "target_id": target_id,
+            "properties": properties,
+        }
+        derived_id = _hashed_id(_EDGE_ID_PREFIX, semantic_edge)
+        present, raw_explicit_values = _explicit_values(raw_edge, ("id",))
+        if present:
+            explicit = raw_explicit_values[0]
+            if not _valid_explicit_id(explicit):
+                edges_omitted += 1
+                issue("invalid_edge_id", "edge", explicit)
+                continue
+            explicit_id = str(explicit)
+            if explicit_id.startswith(_EDGE_ID_PREFIX) and explicit_id != derived_id:
+                edges_omitted += 1
+                issue("invalid_reserved_edge_id", "edge", explicit_id)
+                continue
+            final_id = explicit_id
+        else:
+            final_id = derived_id
+        edge = dict(raw_edge)
         edge["source_id"] = source_id
         edge["target_id"] = target_id
-        explicit_id = _clean_text(edge.get("id"))
-        if not (
-            _valid_explicit_id(explicit_id) and explicit_edge_counts[explicit_id] == 1
-        ):
-            semantic_edge = {
-                "kind": _first_text(edge, "kind", "type").lower() or "relationship",
-                "source_id": source_id,
-                "target_id": target_id,
-                "properties": {
-                    key: value
-                    for key, value in edge.items()
-                    if key not in {"id", *_EDGE_SOURCE_KEYS, *_EDGE_TARGET_KEYS}
-                },
-            }
-            explicit_id = _hashed_id(_EDGE_ID_PREFIX, semantic_edge)
-        edge["id"] = explicit_id
-        if explicit_id in emitted_edge_ids:
-            issue("duplicate_edge", "edge", explicit_id)
-            continue
-        emitted_edge_ids.add(explicit_id)
-        emitted_edges.append(edge)
+        edge["id"] = final_id
+        edge_groups[final_id].append({
+            "edge": edge,
+            "semantic_key": _stable_json(semantic_edge),
+        })
 
-    if isinstance(graph.get("symbols"), list):
-        # `symbols/edges` are the long-standing local indexer contract. Keep
-        # their evidence fields and endpoint locators intact for local callers,
-        # while publishing the closed canonical projection in the additive
-        # `nodes/relationships` fields preferred by the backend normalizer.
-        graph["symbols"] = raw_nodes
-        graph["edges"] = raw_edges
-        graph["nodes"] = emitted_nodes
-        graph["relationships"] = emitted_edges
-    else:
-        graph["nodes"] = emitted_nodes
-        graph["relationships"] = emitted_edges
+    emitted_edges: list[dict[str, Any]] = []
+    for final_id, group in sorted(edge_groups.items()):
+        semantic_keys = {candidate["semantic_key"] for candidate in group}
+        if len(semantic_keys) > 1:
+            edges_omitted += len(group)
+            for _candidate in group:
+                issue("edge_id_collision", "edge", final_id)
+            continue
+        emitted_edges.append(
+            min(group, key=lambda candidate: _stable_json(candidate["edge"]))["edge"]
+        )
+        edges_deduplicated += len(group) - 1
+
+    # Never rewrite legacy evidence. In particular, invalid non-dict entries
+    # remain byte-for-byte representable for local callers and diagnostics.
+    graph["nodes"] = emitted_nodes
+    graph["relationships"] = emitted_edges
     return {
-        "nodes_input": len(raw_nodes),
+        "nodes_input": len(raw_node_entries),
         "nodes_emitted": len(emitted_nodes),
         "nodes_synthesized": len(selected_external_ids),
-        "nodes_omitted": omitted_real,
+        "nodes_omitted": nodes_omitted,
+        "nodes_deduplicated": nodes_deduplicated,
         "external_nodes_omitted": omitted_external,
-        "edges_input": len(raw_edges),
+        "edges_input": len(raw_edge_entries),
         "edges_emitted": len(emitted_edges),
         "edges_omitted": edges_omitted,
-        "duplicate_edges_omitted": len(raw_edges) - edges_omitted - len(emitted_edges),
+        "edges_deduplicated": edges_deduplicated,
+        "duplicate_edges_omitted": edges_deduplicated,
         "aliases_total": len(alias_ids),
         "aliases_resolved": len(unique_aliases),
         "ambiguous_aliases": len(ambiguous_aliases),
@@ -509,18 +643,18 @@ def finalize_graph_artifact(
         max_nodes=int(payload.get("max_graph_nodes") or DEFAULT_MAX_GRAPH_NODES),
     )
     language = str(graph.get("language") or "unknown").strip().lower() or "unknown"
-    edges = (
-        graph.get("relationships")
-        if isinstance(graph.get("relationships"), list)
-        else graph.get("edges", [])
-    )
     canonicalization_omitted = bool(
         canonicalization["nodes_omitted"]
         or canonicalization["external_nodes_omitted"]
         or canonicalization["edges_omitted"]
     )
-    if not edges:
-        quality, reason = "inventory_only", "no_relationships_extracted"
+    if canonicalization["edges_emitted"] == 0:
+        quality = "inventory_only"
+        reason = (
+            "no_relationships_extracted"
+            if canonicalization["edges_input"] == 0
+            else "canonicalization_omissions"
+        )
     elif bool(graph.get("truncated")) or omitted:
         quality, reason = "partial", "bounded_or_omitted_input"
     elif canonicalization_omitted:
