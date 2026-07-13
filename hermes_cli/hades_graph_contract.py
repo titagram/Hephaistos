@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v1"
 MAX_CANONICALIZATION_ISSUES = 50
@@ -28,7 +30,8 @@ _LOCATION_ONLY_KEYS = {
     "column_end",
 }
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@#+-]*$")
-_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_IDENTITY_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FQCN_RE = re.compile(r"^\\?[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)+$")
 _DOTTED_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
 _BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -55,6 +58,7 @@ _DATA_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_SUFFIXES = (".php", ".py", ".ts", ".tsx", ".js", ".jsx", ".sql")
+_SOURCE_REFERENCE_PREFIXES = frozenset({"test"})
 
 
 def _stable_json(value: object) -> str:
@@ -80,7 +84,7 @@ def _utf8_size(value: str) -> int:
 
 
 def _has_control(value: str) -> bool:
-    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+    return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
 
 
 def _has_dot_segment(value: str) -> bool:
@@ -109,13 +113,17 @@ def _unsafe_path_like_reason(
     if _has_control(value):
         return "control_character"
     lowered = value.lower()
-    if lowered.startswith("file:/"):
+    if lowered.startswith("file:"):
         return "file_uri"
     if _has_dot_segment(value):
         return "dot_segment"
     if reject_separators and ("/" in value or "\\" in value):
         return "path_separator"
-    if value.startswith(("/", "//", "\\\\")) or _WINDOWS_DRIVE_RE.match(value):
+    if (
+        value.startswith(("/", "//", "\\\\"))
+        or _WINDOWS_DRIVE_RE.match(value)
+        or (value.startswith("\\") and lowered.endswith(_SOURCE_SUFFIXES))
+    ):
         return "absolute_path"
     return None
 
@@ -212,6 +220,16 @@ def _normalized_path(value: object) -> str:
     return _safe_path_basename(value)
 
 
+def _identity_fingerprint(node: dict[str, Any]) -> tuple[bool, str]:
+    properties = node.get("properties")
+    if not isinstance(properties, dict) or "identity_fingerprint" not in properties:
+        return False, ""
+    value = properties["identity_fingerprint"]
+    if not isinstance(value, str) or not _IDENTITY_FINGERPRINT_RE.fullmatch(value):
+        return True, ""
+    return True, value
+
+
 def _first_text(node: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = _clean_text(node.get(key))
@@ -230,8 +248,15 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
     route_method = _first_text(node, "http_method", "verb")
     route_uri = _first_text(node, "uri", "route", "route_path")
     table = _first_text(node, "table", "table_name")
-    path = _clean_text(node.get("_private_path_identity")) or _path_identity_token(
-        node.get("path") or node.get("source_path") or node.get("file")
+    fingerprint_present, fingerprint = _identity_fingerprint(node)
+    if fingerprint_present and not fingerprint:
+        return None
+    path = (
+        fingerprint
+        or _clean_text(node.get("_private_path_identity"))
+        or _path_identity_token(
+            node.get("path") or node.get("source_path") or node.get("file")
+        )
     )
 
     identity_values = (kind, name, signature, namespace, class_name, method, route_uri)
@@ -254,11 +279,21 @@ def _node_semantic_identity(node: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
-def _canonical_node(raw_node: dict[str, Any], canonical_id: str) -> dict[str, Any]:
+def _canonical_node(
+    raw_node: dict[str, Any],
+    canonical_id: str,
+    *,
+    identity_fingerprint: str = "",
+) -> dict[str, Any]:
     node = {
         key: value for key, value in raw_node.items() if not key.startswith("_private_")
     }
     node["id"] = canonical_id
+    if identity_fingerprint:
+        properties = node.get("properties")
+        properties = dict(properties) if isinstance(properties, dict) else {}
+        properties["identity_fingerprint"] = identity_fingerprint
+        node["properties"] = properties
     for key in ("path", "source_path", "file"):
         if key in node and node[key] not in (None, ""):
             node[key] = _normalized_path(node[key])
@@ -345,9 +380,54 @@ def _classify_route_locator(locator: str) -> tuple[str, str, str] | None:
         route_path = route_value
     else:
         return ("route", locator, "") if _ROUTE_NAME_RE.fullmatch(route_value) else None
-    if not route_path.startswith("/") or not _ROUTE_PATH_RE.fullmatch(route_path):
+    if (
+        not route_path.startswith("/")
+        or not _ROUTE_PATH_RE.fullmatch(route_path)
+        or not _safe_route_path_encoding(route_path)
+    ):
         return None
     return "route", locator, ""
+
+
+def _safe_route_path_encoding(route_path: str) -> bool:
+    candidate = route_path
+    for depth in range(4):
+        if _has_control(candidate) or _has_dot_segment(candidate):
+            return False
+        if re.search(r"%(?:2f|5c)", candidate, re.IGNORECASE):
+            return False
+        if re.search(r"%(?![0-9A-Fa-f]{2})", candidate):
+            # A percent produced by decoding an explicit ``%25`` is data, not
+            # a second malformed wire encoding. The original wire form was
+            # already checked strictly at depth zero.
+            return depth > 0
+        try:
+            decoded = unquote_to_bytes(candidate).decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return False
+        if _has_control(decoded) or _has_dot_segment(decoded):
+            return False
+        if decoded == candidate:
+            return True
+        candidate = decoded
+    return "%" not in candidate
+
+
+def _valid_relative_source_path(locator: str) -> bool:
+    if _is_unsafe_path(locator) or _utf8_size(locator) > MAX_ENDPOINT_LOCATOR_BYTES:
+        return False
+    normalized = locator.replace("\\", "/")
+    if not normalized or ":" in normalized or normalized.startswith("/"):
+        return False
+    segments = normalized.split("/")
+    if not segments or any(
+        not segment
+        or segment in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9_@+ .-]+", segment)
+        for segment in segments
+    ):
+        return False
+    return normalized.lower().endswith(_SOURCE_SUFFIXES)
 
 
 def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
@@ -355,6 +435,14 @@ def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
     route = _classify_route_locator(locator)
     if route is not None:
         return route
+    source_prefix, separator, source_path = locator.partition(":")
+    if (
+        separator
+        and source_prefix.lower() in _SOURCE_REFERENCE_PREFIXES
+        and _valid_relative_source_path(source_path)
+    ):
+        label = _safe_path_basename(source_path)
+        return "file", label, label
     if _DATA_REF_RE.fullmatch(locator):
         return lowered.split(":", 1)[0], locator, ""
     if _METHOD_RE.fullmatch(locator):
@@ -367,7 +455,7 @@ def _classify_external_locator(locator: str) -> tuple[str, str, str] | None:
         return "external_symbol", locator, ""
     if lowered.endswith(_SOURCE_SUFFIXES):
         normalized = _safe_path_basename(locator)
-        if normalized and not _is_unsafe_path(locator):
+        if normalized and _valid_relative_source_path(locator):
             return "file", normalized, normalized
     return None
 
@@ -429,6 +517,19 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             nodes_omitted += 1
             issue("invalid_node_shape", "node")
             continue
+        fingerprint_present, fingerprint = _identity_fingerprint(raw_node)
+        if fingerprint_present and not fingerprint:
+            nodes_omitted += 1
+            issue("invalid_identity_fingerprint", "node")
+            continue
+        private_path = _clean_text(raw_node.get("_private_path_identity")) or (
+            fingerprint
+            or _path_identity_token(
+                raw_node.get("path")
+                or raw_node.get("source_path")
+                or raw_node.get("file")
+            )
+        )
         semantic = _node_semantic_identity(raw_node)
         present, raw_explicit_values = _explicit_values(raw_node, ("id", "symbol_id"))
         if present:
@@ -454,7 +555,11 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             issue("invalid_reserved_node_id", "node", explicit)
             continue
         canonical_id = explicit or derived_id
-        node = _canonical_node(raw_node, canonical_id)
+        node = _canonical_node(
+            raw_node,
+            canonical_id,
+            identity_fingerprint=private_path,
+        )
         comparable = {
             key: value
             for key, value in node.items()
@@ -582,7 +687,11 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
         else:
             candidates_by_id[canonical_id] = {
                 "id": canonical_id,
-                "node": _canonical_node(node, canonical_id),
+                "node": _canonical_node(
+                    node,
+                    canonical_id,
+                    identity_fingerprint=semantic["path"],
+                ),
                 "semantic_key": semantic_key,
                 "semantic": semantic,
                 "aliases": {locator, canonical_id},
@@ -784,7 +893,6 @@ def finalize_graph_artifact(
         canonicalization["nodes_omitted"]
         or canonicalization["external_nodes_omitted"]
         or canonicalization["edges_omitted"]
-        or canonicalization["issues_count"]
     )
     bounded_input_loss = bool(graph.get("truncated")) or bool(omitted)
     if canonicalization["edges_emitted"] == 0:

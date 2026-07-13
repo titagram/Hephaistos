@@ -857,3 +857,234 @@ def test_canonical_loss_precedes_bounded_loss_when_relationships_are_emitted():
         result["graph_contract"]["extractor"]["fallback_reason"]
         == "canonicalization_omissions"
     )
+
+
+def test_nodes_only_replay_preserves_private_path_identity_and_relationships():
+    graphs = [
+        {
+            "symbols": [
+                {"kind": "class", "name": "Absolute", "path": "/srv/a/Order.php"},
+                {"kind": "class", "name": "Relative", "path": "src/Order.php"},
+            ],
+            "edges": [],
+        },
+        {
+            "symbols": [{"kind": "class", "name": "Caller", "path": "src/Caller.php"}],
+            "edges": [
+                {
+                    "kind": "uses",
+                    "source": "Caller",
+                    "target": "src/domain/Order.php",
+                }
+            ],
+        },
+    ]
+
+    for graph in graphs:
+        first = _finalize(graph)
+        fingerprints = [
+            node.get("properties", {}).get("identity_fingerprint")
+            for node in first["nodes"]
+        ]
+        assert all(
+            isinstance(value, str) and value.startswith("sha256:") and len(value) == 71
+            for value in fingerprints
+        )
+
+        replay_input = {
+            "nodes": list(reversed(deepcopy(first["nodes"]))),
+            "relationships": list(reversed(deepcopy(first["relationships"]))),
+        }
+        second = _finalize(replay_input)
+
+        assert second["nodes"] == first["nodes"]
+        assert second["relationships"] == first["relationships"]
+        assert second["canonicalization"]["nodes_omitted"] == 0
+        assert second["canonicalization"]["edges_omitted"] == 0
+
+
+def test_identity_fingerprint_is_strict_and_bound_to_reserved_id_and_public_identity():
+    original = _finalize({
+        "symbols": [
+            {"kind": "class", "name": "Order", "path": "/srv/private/Order.php"}
+        ],
+        "edges": [],
+    })["nodes"][0]
+
+    malformed_values = [
+        "",
+        "sha256:abc",
+        "sha256:" + "A" * 64,
+        "sha1:" + "0" * 64,
+        "sha256:" + "0" * 65,
+        123,
+    ]
+    for malformed in malformed_values:
+        node = deepcopy(original)
+        node["properties"]["identity_fingerprint"] = malformed
+        replay = _finalize({"nodes": [node], "relationships": []})
+        assert replay["nodes"] == []
+        assert replay["canonicalization"]["issue_reasons"] == {
+            "invalid_identity_fingerprint": 1
+        }
+
+    mismatched = deepcopy(original)
+    mismatched["properties"]["identity_fingerprint"] = "sha256:" + "0" * 64
+    mismatch_result = _finalize({"nodes": [mismatched], "relationships": []})
+    assert mismatch_result["nodes"] == []
+    assert mismatch_result["canonicalization"]["issue_reasons"] == {
+        "invalid_reserved_node_id": 1
+    }
+
+    renamed = deepcopy(original)
+    renamed["name"] = "Invoice"
+    renamed_result = _finalize({"nodes": [renamed], "relationships": []})
+    assert renamed_result["nodes"] == []
+    assert renamed_result["canonicalization"]["issue_reasons"] == {
+        "invalid_reserved_node_id": 1
+    }
+
+
+def test_path_uri_and_unicode_controls_are_rejected_without_harming_semantic_locators():
+    unsafe_locators = [
+        r"C:private\Order.php",
+        "C:Order.php",
+        "file:Order.php",
+        "FILE:///etc/passwd",
+        r"FiLe:C:\private\Order.php",
+        r"\Windows\private.php",
+        "foo:bar.php",
+        "table:ord\u0085ers",
+        "route:/api/ord\u202eers",
+    ]
+    result = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {"kind": "uses", "source": "A", "target": locator}
+            for locator in unsafe_locators
+        ],
+    })
+
+    assert result["relationships"] == []
+    assert not any(node.get("external") for node in result["nodes"])
+    assert result["canonicalization"]["edges_omitted"] == len(unsafe_locators)
+    serialized = json.dumps(
+        {
+            "nodes": result["nodes"],
+            "relationships": result["relationships"],
+            "canonicalization": result["canonicalization"],
+        },
+        ensure_ascii=False,
+    )
+    assert all(locator not in serialized for locator in unsafe_locators)
+
+    unsafe_ids = ["class:Bad\u0085Id", "class:Bad\u202eId"]
+    for unsafe_id in unsafe_ids:
+        rejected = _finalize({
+            "symbols": [{"id": unsafe_id, "kind": "class", "name": "Bad"}],
+            "edges": [],
+        })
+        assert rejected["nodes"] == []
+        assert rejected["canonicalization"]["issue_reasons"] == {"invalid_node_id": 1}
+
+    positives = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {"kind": "uses", "source": "A", "target": r"\App\Service"},
+            {"kind": "routes", "source": "A", "target": "route:/api/orders"},
+            {
+                "kind": "routes",
+                "source": "A",
+                "target": "route:GET /orders/%7Border%7D",
+            },
+            {"kind": "reads", "source": "A", "target": "table:orders"},
+            {"kind": "uses", "source": "A", "target": "src/domain/Order.php"},
+            {
+                "kind": "tests",
+                "source": "A",
+                "target": "test:tests/Domain/OrderTest.php",
+            },
+        ],
+    })
+    assert len(positives["relationships"]) == 6
+    assert positives["canonicalization"]["edges_omitted"] == 0
+    file_node = next(
+        node for node in positives["nodes"] if node.get("name") == "Order.php"
+    )
+    assert file_node["name"] == "Order.php"
+    assert file_node["path"] == "Order.php"
+    assert "src/domain" not in json.dumps(file_node)
+
+
+def test_route_percent_decoding_rejects_hidden_path_syntax_and_controls():
+    unsafe_routes = [
+        "route:/api/%2e%2e/private",
+        "route:/api/%2E/private",
+        "route:/api/orders%2Fprivate",
+        "route:/api/orders%5Cprivate",
+        "route:/api/orders%252Fprivate",
+        "route:/api/%252e%252e/private",
+        "route:/api/orders%00private",
+        "route:/api/orders%C2%85private",
+        "route:/api/orders%E2%80%AEprivate",
+        "route:/api/orders%ZZ",
+    ]
+    result = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {"kind": "routes", "source": "A", "target": route}
+            for route in unsafe_routes
+        ],
+    })
+
+    assert result["relationships"] == []
+    assert result["canonicalization"]["edges_omitted"] == len(unsafe_routes)
+
+    safe = _finalize({
+        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
+        "edges": [
+            {
+                "kind": "routes",
+                "source": "A",
+                "target": "route:GET /orders/%7Border%7D/%20/%25",
+            }
+        ],
+    })
+    assert len(safe["relationships"]) == 1
+
+
+def test_unused_ambiguous_alias_is_warning_not_canonicalization_loss():
+    nodes = [
+        {
+            "kind": "method",
+            "name": "Worker@run",
+            "class": "App\\A\\Worker",
+            "method": "run",
+        },
+        {
+            "kind": "method",
+            "name": "Worker@run",
+            "class": "App\\B\\Worker",
+            "method": "run",
+        },
+    ]
+    unused = _finalize({"symbols": nodes, "edges": []})
+    assert unused["canonicalization"]["ambiguous_aliases"] > 0
+    assert unused["canonicalization"]["issues_count"] > 0
+    assert unused["canonicalization"]["nodes_omitted"] == 0
+    assert unused["graph_contract"]["extractor"] == {
+        "name": "hades-native-unknown",
+        "version": "1",
+        "mode": "native",
+        "quality": "inventory_only",
+        "fallback_reason": "no_relationships_extracted",
+    }
+
+    used = _finalize({
+        "symbols": nodes,
+        "edges": [{"kind": "calls", "source": "Worker@run", "target": "Worker@run"}],
+    })
+    assert used["canonicalization"]["edges_omitted"] == 1
+    assert used["graph_contract"]["extractor"]["fallback_reason"] == (
+        "canonicalization_omissions"
+    )
