@@ -266,6 +266,13 @@ analyzer reports `graphify` when Graphify succeeds and an explicit fallback
 extractor otherwise. Raw exception text and absolute workspace paths are not
 valid fallback metadata. Stored artifacts created before the contract are
 adapted during trusted backend reads without rewriting their payload.
+When `graph_contract` is present, the backend validates the complete explicit
+contract before projection: all documented objects and fields are required,
+unknown keys are rejected, names/versions/languages are non-empty strings,
+coverage counts are non-negative integers, branch/HEAD and fallback reason are
+nullable strings, and mode/quality must use the enums above. Only a genuinely
+absent contract enters the trusted legacy adapter; malformed explicit metadata
+never does.
 
 ### Source-scoped projection and queries
 
@@ -279,10 +286,13 @@ that scope.
 
 Projection lifecycle states are `queued`, `projecting`, `ready`, `failed`, and
 `stale`. Queue workers and synchronous rebuilds use conditional ownership, so a
-retry or concurrent reconciler cannot steal an active projection. A replacement
-becomes current only after its node and relationship counts verify; until then,
-the previous `ready` version remains queryable. Failure codes are bounded and
-never contain raw exception messages.
+retry or concurrent reconciler cannot steal an active projection. A forced
+attempt may transition its PostgreSQL lifecycle row from `ready` through
+`projecting` to `failed`; if verification fails, Neo4j keeps the previous
+verified current marker queryable and the failed row must be retried or
+reconciled. A successful replacement becomes current only after its node and
+relationship counts verify. Failure codes are bounded and never contain raw
+exception messages.
 
 The Hades traversal response preserves its existing envelope and adds
 `projection_id`, `artifact_id`, `schema`, `graph_version`, `head_commit`,
@@ -297,9 +307,11 @@ legacy compatibility service maps the not-ready condition to its historical
 Dashboard graph previews are deliberately data-minimized. Multi-source projects
 return bounded scope summaries and require an explicit scope for graph detail.
 Preview identifiers are deterministic pseudonyms that preserve node-edge
-coherence; local paths and path-derived identifiers, labels, source references,
-or edge endpoints must never be rendered. These aliases are presentation-only
-and must not be used as canonical graph identities.
+coherence. Raw/private identifiers, labels, source references, local paths, and
+raw edge endpoints must never be rendered. Schema-approved safe presentation
+labels may be returned, and edge endpoints use the same pseudonyms as returned
+nodes. These aliases are presentation-only and must not be used as canonical
+graph identities.
 
 ### Reconciliation and recovery
 
@@ -325,17 +337,30 @@ not write projection rows, dispatch jobs, or modify Neo4j. A real reconciliation
 queues missing and final-failed projections; it does not steal `queued` or
 `projecting` work. The older `--repository`, `--snapshot`, and `--mode` options
 belong only to the legacy rebuild path and cannot be mixed with `--reconcile`.
+The legacy path has no dry-run and forcefully rebuilds selected snapshots—even
+with `--mode=fake`—so it requires the same safety evidence and explicit human
+authorization as a non-dry canonical reconciliation.
 
-Before applying the projection migration or running a non-dry reconciliation,
-create and verify a PostgreSQL backup and record the current project/artifact
-counts. Apply migrations before queue workers consume canonical jobs, then run
-the dry run, the scoped or project-wide reconciliation, drain the queue, and
-verify `ready` counts plus plugin/Hades reads for the same backend-selected
-`graph_version`. Do not restore a backup merely because an additive migration
-succeeds: restore is reserved for an authorized rollback after destructive or
-data-loss behavior. Neo4j itself may be discarded and rebuilt from canonical
-artifacts; PostgreSQL artifacts and projection lifecycle rows are the recovery
-source of truth.
+Before applying the projection migration, running a non-dry reconciliation, or
+running the legacy command: create and verify a PostgreSQL backup; record the
+current project/artifact/projection counts; run tests, formatting, and migration
+status; then present that evidence plus the exact command and scope to a human.
+Do not proceed without explicit authorization. After authorization, apply only
+the required additive migration, run the canonical dry-run (the legacy path has
+none), execute the approved command, drain the queue, and verify `ready` counts
+plus plugin/Hades reads for the same backend-selected `graph_version`. Do not
+restore a backup merely because an additive migration succeeds: restore is
+reserved for an authorized rollback after destructive or data-loss behavior.
+Neo4j itself may be discarded and rebuilt from canonical artifacts; PostgreSQL
+artifacts and projection lifecycle rows are the recovery source of truth.
+
+For deployment, retain both `docker-compose.devboard.yaml` and
+`docker-compose.devboard.traefik.yaml` (and the architecture override when
+needed). Never recreate the app with only a minimal/base Compose file: preserve
+`traefik_default`, router priorities, redirect and Basic Auth middleware, and
+the separate frontend/API/Hades/plugin routes. Smoke the unauthenticated root
+Basic Auth challenge, authenticated root, login flow, Hades health/auth, and a
+plugin endpoint before declaring the deployment healthy.
 
 The separate React frontend cutover, including complete removal of Inertia, is
 not part of this graph-foundation tranche and must not be inferred from these

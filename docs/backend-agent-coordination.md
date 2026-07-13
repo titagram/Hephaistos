@@ -7835,3 +7835,21 @@ Migration, reconcile non-dry, seeder, deploy, restart, purge e sync Hades live
 restano esclusi fino al checkpoint operativo con backup verificato. Il backup
 gia' registrato resta
 `/home/ubuntu/backups/devboard/devboard-before-canonical-graph-20260712T101400Z.dump`.
+
+# 2026-07-13 — Task 10 contract e runbook remediation (non-live)
+
+La review ha rilevato che il normalizzatore remoto riconosceva soltanto la
+versione del contratto e accettava metadata espliciti incompleti o enum
+inventati. Il backend ora valida l'intera forma realmente emessa da Hades e
+dall'analyzer prima della proiezione. L'adapter `legacy_adapter` resta limitato
+ai payload in cui `graph_contract` e' assente; un contratto esplicito malformato
+viene rifiutato.
+
+I runbook chiariscono inoltre che la privacy del preview dashboard elimina
+identita', label, source ref ed endpoint raw/private, ma puo' restituire label
+di presentazione approvate e pseudonimi coerenti per nodi ed edge. Backup
+verificato, test, comando/scope esatti e gate umano precedono ogni migration,
+reconcile non-dry o rebuild legacy; quest'ultimo e' forceful anche in fake mode.
+Un deploy deve usare insieme i compose base e Traefik e verificare Basic Auth,
+root, login, Hades e plugin. Nessuna operazione live e' stata eseguita in questa
+remediation.
