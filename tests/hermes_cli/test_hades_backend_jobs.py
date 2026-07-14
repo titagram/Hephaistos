@@ -267,6 +267,9 @@ def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_p
     artifact = result["artifact"]
     assert result["status"] == "completed"
     assert artifact["schema"] == "hades.php_graph.v1"
+    assert artifact["graph_contract"]["version"] == "hades.graph_artifact.v1"
+    assert artifact["graph_contract"]["extractor"]["name"] == "hades-native-php"
+    assert artifact["graph_contract"]["source"]["head_commit"] == "abc123"
     assert artifact["source_slice_candidates"]
     assert {item["reason"] for item in artifact["source_slice_candidates"]} >= {"laravel_controller", "eloquent_model"}
     assert "source_slice_candidates:" in result["summary"]

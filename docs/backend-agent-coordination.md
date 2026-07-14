@@ -7794,3 +7794,85 @@ Le osservazioni future su leggibilita' della memoria, doppia vista wiki
 umana/macchina, architettura multi-azienda e miglioramento memory-first di
 Platon sono raccolte in `docs/hades-backend-product-backlog.md`. Restano temi
 di discovery separati e non sono ancora specifiche implementative approvate.
+
+# 2026-07-13 — Task 8 canonical dashboard follow-up
+
+Sul branch remoto `feature/canonical-graph-foundation-20260712`, il commit
+`94ccfcac868fa9c9a279df9eabd793fb535b3a3b` allinea i metadati multi-scope
+all'ultimo artefatto grafico reale e centralizza la sanitizzazione dei preview
+dashboard. Gli identificatori sensibili sono pseudonimizzati preservando la
+coerenza nodo-edge; scope senza artefatti mantengono metadati grafici null.
+Verifica post-commit: 646 assertion senza failure e Pint su tre file. Nessun
+accesso o modifica a PostgreSQL/Neo4j live; preservato il Pest temp file sporco.
+
+# 2026-07-13 — Task 10 canonical graph documentation (non-live)
+
+La documentazione Hades e DevBoard e' stata allineata alla foundation canonica
+implementata sul branch `feature/canonical-graph-foundation-20260712`. Il
+contratto additivo e' `hades.graph_artifact.v1`; `hades.php_graph.v1` e
+`hades.code_graph.v1` restano nomi schema validi. Sono documentati extractor,
+qualita', fallback bounded, coverage, branch/HEAD, risoluzione per progetto e
+scope esatto, lifecycle della proiezione e campi di risposta additivi. Il client
+puo' scegliere lo scope ma non `graph_version`, selezionata dal backend tra le
+proiezioni `ready` verificate.
+
+Il comando canonico verificato nel codice e':
+
+```text
+devboard:neo4j-rebuild --reconcile --project=<project_uuid> \
+  [--scope-type=<workspace_binding|repository> --scope-id=<uuid>] [--dry-run]
+```
+
+Le opzioni scope sono una coppia; le vecchie opzioni `--repository`,
+`--snapshot` e `--mode` appartengono soltanto al rebuild legacy. La preview
+dashboard e' bounded, minimizzata e pseudonimizzata, non una fonte di identita'
+canoniche. Il cutover React e la rimozione completa di Inertia restano una
+tranche frontend separata e non sono dichiarati implementati qui.
+
+Questa fase Task 10 e' intenzionalmente non-live: solo documentazione, fixture
+OpenAPI, logbook, test SQLite, Pint, `migrate:status` read-only e diff check.
+Migration, reconcile non-dry, seeder, deploy, restart, purge e sync Hades live
+restano esclusi fino al checkpoint operativo con backup verificato. Il backup
+gia' registrato resta
+`/home/ubuntu/backups/devboard/devboard-before-canonical-graph-20260712T101400Z.dump`.
+
+# 2026-07-13 — Task 10 contract e runbook remediation (non-live)
+
+La review ha rilevato che il normalizzatore remoto riconosceva soltanto la
+versione del contratto e accettava metadata espliciti incompleti o enum
+inventati. Il backend ora valida l'intera forma realmente emessa da Hades e
+dall'analyzer prima della proiezione. L'adapter `legacy_adapter` resta limitato
+ai payload in cui `graph_contract` e' assente; un contratto esplicito malformato
+viene rifiutato.
+
+I runbook chiariscono inoltre che la privacy del preview dashboard elimina
+identita', label, source ref ed endpoint raw/private, ma puo' restituire label
+di presentazione approvate e pseudonimi coerenti per nodi ed edge. Backup
+verificato, test, comando/scope esatti e gate umano precedono ogni migration,
+reconcile non-dry o rebuild legacy; quest'ultimo e' forceful anche in fake mode.
+Un deploy deve usare insieme i compose base e Traefik e verificare Basic Auth,
+root, login, Hades e plugin. Nessuna operazione live e' stata eseguita in questa
+remediation.
+
+# 2026-07-13 — Task 10 upload e runbook final blockers (non-live)
+
+Il backend valida e normalizza gli upload `hades.php_graph.v1` e
+`hades.code_graph.v1` prima di dedupe, insert, indicizzazione, ingest dei
+candidate source-slice e coda della proiezione. Il controller usa la stessa API
+side-effect-free del `CanonicalGraphRepository`, quindi adapter legacy e
+normalizzatore canonico non hanno regole duplicate. Un contratto esplicito
+malformato restituisce sempre `422 invalid_graph_contract`, anche ripetendo lo
+stesso hash, senza esporre il dettaglio dell'eccezione. Anche un grafo canonico
+malformato restituisce un `422 invalid_graph_artifact` bounded.
+
+Il runbook operativo remoto e questa guida locale non mostrano piu' comandi
+eseguibili di migration, reconcile non-dry, legacy rebuild o deploy prima del
+gate. L'ordine obbligatorio e': creazione backup PostgreSQL, verifica effettiva
+con `pg_restore -l`, conteggi read-only, test/Pint/migration status, dry-run,
+presentazione delle evidenze e autorizzazione umana esplicita. Soltanto dopo il
+gate compaiono i comandi reali; il deploy conserva sempre entrambi i compose
+base e Traefik.
+
+Verifica remota non-live: 11 file di test selezionati, 2171 assertion e zero
+failure; Pint sui tre file PHP modificati, OpenAPI JSON e diff check passati.
+PostgreSQL e Neo4j live non sono stati modificati.
