@@ -843,6 +843,8 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
         print(f"Hades backend bootstrap-awareness: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
 
+    effective_capabilities = agent.capabilities if isinstance(agent.capabilities, dict) else {}
+    wiki_blocked = not skip_wiki and effective_capabilities.get("populate_project_wiki") is not True
     result: dict[str, Any] = {
         "project_id": binding.project_id,
         "workspace_binding_id": binding.backend_workspace_binding_id,
@@ -853,6 +855,20 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
         "wiki_request": None,
         "quality_report": None,
     }
+    if wiki_blocked:
+        result["status"] = "partial"
+        result["wiki_request"] = {
+            "status": "missing_agent_capability",
+            "code": "missing_agent_capability",
+            "capability": "populate_project_wiki",
+            "summary": "The registered Hades agent cannot publish project wiki results.",
+            "next_step": (
+                "Obtain a new project-scoped bootstrap token for this project and re-register this "
+                "workspace with `hades backend bootstrap`. Do not paste the token into chat and do not reuse "
+                "the existing agent token as `--project-token`. If the capability is still absent, the backend "
+                "capability policy must be updated."
+            ),
+        }
 
     client = None
     try:
@@ -896,7 +912,7 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
                 "summary": "read_source_slice jobs require --yes for automatic approval",
             }
 
-        if not skip_wiki:
+        if not skip_wiki and not wiki_blocked:
             try:
                 wiki_response = client.bootstrap_project_awareness(
                     project_id=binding.project_id,
@@ -948,10 +964,13 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
 
     if json_mode:
         print(json.dumps(result, sort_keys=True))
-        return 0
+        return 1 if wiki_blocked else 0
 
     baseline = result["baseline"]
-    print("Hades backend bootstrap-awareness complete")
+    if wiki_blocked:
+        print("Hades backend bootstrap-awareness blocked after partial local preparation")
+    else:
+        print("Hades backend bootstrap-awareness complete")
     print(f"  Project:     {binding.project_id}")
     print(f"  Workspace:   {binding.display_path}")
     print(
@@ -965,13 +984,16 @@ def _cmd_bootstrap_awareness(args: argparse.Namespace) -> int:
     wiki_request = result.get("wiki_request") if isinstance(result.get("wiki_request"), dict) else {}
     if skip_wiki:
         print("  Wiki:         skipped")
+    elif wiki_blocked:
+        print("  Wiki:         blocked (missing_agent_capability)")
+        print(f"  Next:         {wiki_request.get('next_step')}")
     else:
         print(f"  Wiki:         {wiki_request.get('status') or wiki_request.get('id') or 'requested/processed'}")
     awareness = result.get("awareness") if isinstance(result.get("awareness"), dict) else {}
     print(f"  Awareness:    {awareness.get('overall_status') or awareness.get('status') or 'unknown'}")
     if not approve_slices:
         print("  Next:         rerun with `--yes` to approve source-slice jobs automatically")
-    return 0
+    return 1 if wiki_blocked else 0
 
 
 def _ensure_local_project(args: argparse.Namespace):
