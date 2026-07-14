@@ -4,6 +4,7 @@ import pytest
 
 from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
 from hermes_cli.gnothi.collectors.capabilities import CapabilityCollector
+from hermes_cli.gnothi.collectors.contracts import ContractCollector
 from hermes_cli.gnothi.collectors.dependencies import DependencyCollector
 from hermes_cli.gnothi.collectors.runtime import RuntimeCollector
 from hermes_cli.gnothi.collectors.source import SourceCollector
@@ -402,3 +403,29 @@ def test_dependency_collector_probes_only_declared_dependencies(
     assert "token=hidden" not in str(result)
     assert "node-secret" not in str(result)
     assert "node:../escape" not in labels
+
+
+def test_contract_collector_emits_versioned_invariants_with_real_evidence():
+    repo_root = Path(__file__).resolve().parents[2]
+
+    result = ContractCollector().collect(_context(repo_root))
+
+    assert result.status == "current"
+    invariant_ids = {
+        node["id"] for node in result.nodes if node["kind"] == "invariant"
+    }
+    assert invariant_ids == {
+        "invariant:prompt-cache-stability",
+        "invariant:message-role-alternation",
+        "invariant:approval-boundaries",
+        "invariant:profile-isolation",
+        "invariant:artifact-backward-compatibility",
+        "invariant:no-secret-artifacts",
+    }
+    for invariant_id in invariant_ids:
+        node = next(item for item in result.nodes if item["id"] == invariant_id)
+        assert node["evidence_refs"]
+        assert any(
+            edge["kind"] == "protected_by" and edge["from"] == invariant_id
+            for edge in result.edges
+        )
