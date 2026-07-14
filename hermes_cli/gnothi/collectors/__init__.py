@@ -6,6 +6,8 @@ from hermes_cli.gnothi.collectors.base import (
     CollectorResult,
 )
 from hermes_cli.gnothi.collectors.capabilities import CapabilityCollector
+from hermes_cli.gnothi.collectors.dependencies import DependencyCollector
+from hermes_cli.gnothi.collectors.runtime import RuntimeCollector
 from hermes_cli.gnothi.collectors.source import SourceCollector
 
 __all__ = [
@@ -13,5 +15,7 @@ __all__ = [
     "Collector",
     "CollectorContext",
     "CollectorResult",
+    "DependencyCollector",
+    "RuntimeCollector",
     "SourceCollector",
 ]

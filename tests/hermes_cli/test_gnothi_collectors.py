@@ -4,6 +4,8 @@ import pytest
 
 from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
 from hermes_cli.gnothi.collectors.capabilities import CapabilityCollector
+from hermes_cli.gnothi.collectors.dependencies import DependencyCollector
+from hermes_cli.gnothi.collectors.runtime import RuntimeCollector
 from hermes_cli.gnothi.collectors.source import SourceCollector
 
 
@@ -251,3 +253,152 @@ def test_capability_collector_inventories_providers_and_state_dimensions(
     assert "mcp-env-secret" not in serialized
     assert "header-secret" not in serialized
     assert "mcp-api-secret" not in serialized
+
+
+def test_runtime_collector_emits_effective_non_secret_runtime_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from hermes_cli.gnothi.collectors import runtime
+
+    monkeypatch.setattr(runtime, "_git_generation", lambda root: "git:deadbeef")
+    monkeypatch.setattr(runtime.profiles, "get_active_profile", lambda: "research")
+    monkeypatch.setattr(
+        runtime.config,
+        "load_config",
+        lambda: {
+            "model": {"default": "gpt-test", "temperature": 0.2},
+            "backend": {"token": "backend-secret"},
+            "api_key": "top-secret",
+        },
+    )
+    monkeypatch.setattr(
+        runtime.backend_status,
+        "load_backend_status_payload",
+        lambda: {
+            "configured": True,
+            "degraded": False,
+            "awareness": {"status": "ready", "private": "awareness-secret"},
+            "bindings": [{"token": "binding-secret"}, {}],
+            "base_url": "https://user:password@example.test/private",
+        },
+    )
+
+    result = RuntimeCollector().collect(_context(tmp_path))
+
+    assert result.status == "current"
+    labels = {node["label"] for node in result.nodes}
+    assert {
+        "runtime:python",
+        "runtime:platform",
+        "runtime:generation",
+        "runtime:profile",
+        "runtime:process",
+        "runtime:backend",
+        "config:model.default",
+        "config:model.temperature",
+        "config:backend.token",
+        "config:api_key",
+    } <= labels
+    generation = next(node for node in result.nodes if node["label"] == "runtime:generation")
+    assert generation["properties"]["generation_id"] == "git:deadbeef"
+    backend = next(node for node in result.nodes if node["label"] == "runtime:backend")
+    assert backend["properties"] == {
+        "collector": "runtime",
+        "configured": True,
+        "degraded": False,
+        "awareness_status": "ready",
+        "binding_count": 2,
+    }
+    serialized = str(result)
+    assert "backend-secret" not in serialized
+    assert "top-secret" not in serialized
+    assert "awareness-secret" not in serialized
+    assert "binding-secret" not in serialized
+    assert "user:password" not in serialized
+
+
+def test_dependency_collector_probes_only_declared_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        "name = 'fixture'\n"
+        "dependencies = ['demo-pkg==1.2']\n"
+        "[project.scripts]\n"
+        "demo-cli = 'fixture:main'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{'
+        '"left-pad":"https://user:node-secret@example.test/pkg.tgz?token=hidden",'
+        '"../escape":"1.0.0"'
+        "}}",
+        encoding="utf-8",
+    )
+
+    from hermes_cli.gnothi.collectors import dependencies
+
+    probed_packages = []
+
+    def package_version(name):
+        probed_packages.append(name)
+        return "1.2"
+
+    monkeypatch.setattr(dependencies.metadata, "version", package_version)
+    monkeypatch.setattr(
+        dependencies.shutil,
+        "which",
+        lambda name: "/private/bin/demo-cli" if name == "demo-cli" else None,
+    )
+    monkeypatch.setattr(
+        dependencies.config,
+        "load_config",
+        lambda: {
+            "mcp_servers": {
+                "github": {
+                    "enabled": True,
+                    "url": "https://user:secret@example.test/mcp?token=hidden",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(dependencies.plugins, "discover_plugins", lambda: None)
+    monkeypatch.setattr(
+        dependencies.plugins,
+        "get_plugin_manager",
+        lambda: type(
+            "PluginManagerFixture",
+            (),
+            {
+                "list_plugins": lambda self: [
+                    {
+                        "name": "remote-memory",
+                        "kind": "service",
+                        "enabled": True,
+                        "source": "pip",
+                    }
+                ]
+            },
+        )(),
+    )
+
+    result = DependencyCollector().collect(_context(tmp_path))
+
+    assert result.status == "current"
+    labels = {node["label"] for node in result.nodes}
+    assert {
+        "python:demo-pkg",
+        "node:left-pad",
+        "binary:demo-cli",
+        "service:mcp:github",
+        "service:plugin:remote-memory",
+    } <= labels
+    assert probed_packages == ["demo-pkg"]
+    assert any(edge["kind"] == "requires" for edge in result.edges)
+    assert "/private/bin" not in str(result)
+    assert "user:secret" not in str(result)
+    assert "token=hidden" not in str(result)
+    assert "node-secret" not in str(result)
+    assert "node:../escape" not in labels
