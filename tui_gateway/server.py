@@ -11122,6 +11122,8 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "moa",
         "undo",
         "learn",
+        "gnothi_seauton",
+        "know-thyself",
     }
 )
 
@@ -11399,6 +11401,10 @@ def _(rid, params: dict) -> dict:
         from agent.learn_prompt import build_learn_prompt
 
         return _ok(rid, {"type": "send", "message": build_learn_prompt(arg)})
+    if name == "gnothi_seauton":
+        from agent.gnothi_prompt import build_gnothi_prompt
+
+        return _ok(rid, {"type": "send", "message": build_gnothi_prompt(arg)})
     if name == "moa":
         # /moa is one-shot sugar only: run a single prompt through the default
         # MoA preset, then restore the prior model. To *switch* to a MoA preset
