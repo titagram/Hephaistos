@@ -1,0 +1,1 @@
+{"event":"bootstrap","target":"ubuntu@162.19.229.31","workspace":"/home/ubuntu/dev-sandbox","runtime":"tmux","runtime_session":"codex-peer-hades-dashboard-t2-20260714","codex":"/usr/local/bin/codex","version":"0.144.1","branch":"feature/canonical-graph-foundation-20260712","head":"984a1ad4","previous_task":"t1 approved"}

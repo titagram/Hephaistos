@@ -1,0 +1,17 @@
+{"event":"bootstrap","target":"ubuntu@162.19.229.31","workspace":"/home/ubuntu/dev-sandbox","runtime":"tmux","runtime_session":"codex-peer-hades-dashboard-20260714","codex":"/usr/local/bin/codex","version":"0.144.1","skill_hash":"cbb7d1b75221ea95cdebb112139504746db040684e0f5baa086c80f47e5aa24f","branch":"feature/canonical-graph-foundation-20260712","head":"8e66787f7561379d795771e3773f03d8ac15c0c7"}
+{"direction":"local_to_remote","frame":"H(1,0,[],ROLE(side=\"local\",mode=\"human-facing\"),M(codec=\"ipc-ast-v1\",session=\"hades-dashboard-20260714\"))"}
+{"direction":"local_to_remote","frame":"C(2,1,[],Q(\"contract\",\"workspace\",\"guardrails\"),M(workspace=\"/home/ubuntu/dev-sandbox\",autonomy=\"workspace\",approval=\"system-global-destructive\",verify=\"tests-diff-review\"))"}
+{"direction":"local_to_remote","frame":"K(3,2,[],V(\"max_len\",4096,\"max_depth\",32,\"max_nodes\",512),M(dict=True,fallback=\"ipc-ast-v1\"))"}
+{"direction":"local_to_remote","frame":"D(4,3,[],{\"p1\":\"docs/superpowers/plans/2026-07-14-frontend-resilience-graph-explorer.md\",\"t1\":\"plan1-task1\"},M(scope=\"session\"))"}
+{"direction":"local_to_remote","frame":"S(5,4,[],Q(\"checkpoint\",\"clean\",\"8e66787f\"),M(phase=\"plan1\",next=\"t1\",resume=\"tmux:codex-peer-hades-dashboard-20260714\"))"}
+{"event":"nack","reason":"remote used unsupported ACK nested call and wrong role mode","recovered":true}
+{"direction":"remote_to_local","frame":"H(1,1,[],ROLE(side=\"remote\",mode=\"worker-peer\"),M(codec=\"ipc-ast-v1\",session=\"hades-dashboard-20260714\"))"}
+{"direction":"remote_to_local","frame":"R(2,2,[],Q(\"ack\",\"C\"),M(status=\"accepted\"))"}
+{"direction":"remote_to_local","frame":"R(3,3,[],Q(\"ack\",\"K\"),M(status=\"accepted\"))"}
+{"direction":"remote_to_local","frame":"R(4,4,[],Q(\"ack\",\"D\"),M(status=\"accepted\"))"}
+{"direction":"remote_to_local","frame":"R(5,5,[],Q(\"ack\",\"S\"),M(status=\"accepted\"))"}
+{"direction":"local_to_remote","frame":"A(6,5,[F(\"brief1\",1,24,\"f27fc6f7d7ae485f\")],Q(\"implement\",\"t1\",\"read_brief_first\"),M(brief=\".superpowers/sdd/task-1-brief.md\",report=\".superpowers/sdd/task-1-report.md\",baseline=\"8e66787f\",tdd=\"red-green\",scope=\"task-only\",commit=True,deploy=False,push=False))"}
+{"event":"task_result","task":"t1","status":"DONE","commit":"7deb387a","tests":"2 suites, 3 tests","typecheck":"pass","review":"APPROVED"}
+{"event":"documentation_commit","commit":"984a1ad4","working_tree":"clean"}
+{"direction":"local_to_remote","frame":"Z(9,5,[],Q(\"close\",\"t1_complete\",\"984a1ad4\"),M(clean=True,resume=\"new_peer_t2\"))"}
+{"direction":"remote_to_local","frame":"R(10,9,[],Q(\"ack\",\"Z\"),M(status=\"accepted\"))"}
