@@ -415,6 +415,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
         def __init__(self):
             self.uploads = []
             self.pull_upload_counts = []
+            self.pull_payloads = []
 
         def memory_snapshot(self, **payload):
             return {"items": []}
@@ -431,6 +432,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
 
         def pull_jobs(self, **payload):
             self.pull_upload_counts.append(len(self.uploads))
+            self.pull_payloads.append(payload)
             return {"jobs": []}
 
     fake = FakeClient()
@@ -445,6 +447,8 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     assert {upload["job_id"] for upload in fake.uploads} == {None}
     assert all(upload["workspace_binding_id"] == "wb_1" for upload in fake.uploads)
     assert fake.pull_upload_counts == [0]
+    assert "read_source_slice" in fake.pull_payloads[0]["capabilities"]
+    assert "populate_project_wiki" in fake.pull_payloads[0]["capabilities"]
     graph_upload = next(upload for upload in fake.uploads if upload["schema"] == "hades.php_graph.v1")
     graph = graph_upload["artifact"]
     node_ids = {node["id"] for node in graph["nodes"]}
@@ -2336,7 +2340,12 @@ def test_backend_status_prefers_remote_awareness_over_last_sync_summary(monkeypa
                         "coverage_type": "code_graph",
                     },
                     "source_slices": {"status": "current", "count": 10},
-                    "source_slice_candidates": {"status": "pending", "count": 200, "waiting_jobs": 190},
+                    "source_slice_candidates": {
+                        "status": "pending",
+                        "count": 200,
+                        "pending_candidates": 10,
+                        "waiting_jobs": 190,
+                    },
                     "bug_evidence": {"status": "missing", "count": 0},
                     "causal_packs": {
                         "status": "none",
@@ -2365,10 +2374,69 @@ def test_backend_status_prefers_remote_awareness_over_last_sync_summary(monkeypa
     assert binding_awareness["coverage"]["code_graph"]["status"] == "current"
     assert binding_awareness["coverage"]["source_slices"]["status"] == "current"
     assert binding_awareness["coverage"]["source_slices"]["count"] == 10
+    assert binding_awareness["coverage"]["source_slice_candidates"]["pending_candidates"] == 10
     assert binding_awareness["coverage"]["source_slice_candidates"]["waiting_jobs"] == 190
     assert binding_awareness["quality"]["missing"] == ["bug_evidence"]
     assert binding_awareness["quality"]["summary_scope"] == "backend"
-    assert binding_awareness["quality"]["actions"] == ["approve_source_slice_jobs"]
+    assert binding_awareness["quality"]["actions"] == [
+        "poll_source_slice_candidates",
+        "approve_source_slice_jobs",
+    ]
+
+
+def test_remote_awareness_keeps_pending_candidates_distinct_from_waiting_jobs():
+    from hermes_cli.hades_backend_status import _remote_binding_awareness_payload
+
+    payload = _remote_binding_awareness_payload(
+        {
+            "overall_status": "partial",
+            "coverage": {
+                "source_slice_candidates": {
+                    "status": "pending",
+                    "count": 12,
+                    "pending_candidates": 12,
+                    "waiting_jobs": 0,
+                }
+            },
+        },
+        memory_cache=None,
+        last_error=None,
+        last_summary_updated_at=None,
+    )
+
+    assert payload["coverage"]["source_slice_candidates"] == {
+        "status": "pending",
+        "count": 12,
+        "pending_candidates": 12,
+        "waiting_jobs": 0,
+    }
+    assert payload["quality"]["actions"] == ["poll_source_slice_candidates"]
+
+
+def test_remote_awareness_derives_pending_candidates_for_legacy_payload():
+    from hermes_cli.hades_backend_status import _remote_binding_awareness_payload
+
+    payload = _remote_binding_awareness_payload(
+        {
+            "overall_status": "partial",
+            "coverage": {
+                "source_slice_candidates": {
+                    "status": "pending",
+                    "count": 12,
+                    "waiting_jobs": 7,
+                }
+            },
+        },
+        memory_cache=None,
+        last_error=None,
+        last_summary_updated_at=None,
+    )
+
+    assert payload["coverage"]["source_slice_candidates"]["pending_candidates"] == 5
+    assert payload["quality"]["actions"] == [
+        "poll_source_slice_candidates",
+        "approve_source_slice_jobs",
+    ]
 
 
 def test_backend_status_explains_new_device_without_current_workspace_binding(monkeypatch, tmp_path):

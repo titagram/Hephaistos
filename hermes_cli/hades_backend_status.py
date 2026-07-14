@@ -961,6 +961,11 @@ def _remote_binding_awareness_payload(
     bug_evidence_count = _remote_count(bug_evidence, "count")
     waiting_jobs = _remote_count(source_slice_candidates, "waiting_jobs")
     candidate_count = _remote_count(source_slice_candidates, "count")
+    pending_candidates = (
+        _remote_count(source_slice_candidates, "pending_candidates")
+        if "pending_candidates" in source_slice_candidates
+        else max(0, candidate_count - waiting_jobs)
+    )
     causal_packs_valid = _remote_count(causal_packs, "valid")
     causal_packs_invalid = _remote_count(causal_packs, "invalid")
     causal_packs_missing = _remote_count(causal_packs, "missing_for_open_bugs")
@@ -980,9 +985,11 @@ def _remote_binding_awareness_payload(
     has_errors = bool(last_error)
     diagnosable_without_source = bool(remote_awareness.get("diagnosable_without_source")) and not has_errors
     quality_actions: list[str] = []
+    if pending_candidates:
+        quality_actions.append("poll_source_slice_candidates")
     if waiting_jobs:
         quality_actions.append("approve_source_slice_jobs")
-    elif "source_slice_index" in missing:
+    elif not pending_candidates and "source_slice_index" in missing:
         quality_actions.append("sync_source_slices")
     if causal_packs_missing:
         quality_actions.append("create_causal_pack")
@@ -1024,6 +1031,7 @@ def _remote_binding_awareness_payload(
             "source_slice_candidates": {
                 "status": str(source_slice_candidates.get("status") or "none"),
                 "count": candidate_count,
+                "pending_candidates": pending_candidates,
                 "waiting_jobs": waiting_jobs,
             },
             "bug_evidence": {
