@@ -265,6 +265,13 @@ def test_runtime_collector_emits_effective_non_secret_runtime_state(
 ):
     from hermes_cli.gnothi.collectors import runtime
 
+    backend_db_path = tmp_path / "hades_backend.db"
+    backend_db_path.touch()
+    monkeypatch.setattr(
+        runtime.backend_db,
+        "hades_backend_db_path",
+        lambda: backend_db_path,
+    )
     monkeypatch.setattr(runtime, "_git_generation", lambda root: "git:deadbeef")
     monkeypatch.setattr(runtime.profiles, "get_active_profile", lambda: "research")
     monkeypatch.setattr(
@@ -301,9 +308,14 @@ def test_runtime_collector_emits_effective_non_secret_runtime_state(
         "runtime:backend",
         "config:model.default",
         "config:model.temperature",
-        "config:backend.token",
-        "config:api_key",
     } <= labels
+    secret_config = [
+        node
+        for node in result.nodes
+        if node.get("properties", {}).get("key_class") == "secret"
+    ]
+    assert len(secret_config) == 2
+    assert all(node["properties"]["value_present"] for node in secret_config)
     generation = next(node for node in result.nodes if node["label"] == "runtime:generation")
     assert generation["properties"]["generation_id"] == "git:deadbeef"
     backend = next(node for node in result.nodes if node["label"] == "runtime:backend")
@@ -320,6 +332,7 @@ def test_runtime_collector_emits_effective_non_secret_runtime_state(
     assert "awareness-secret" not in serialized
     assert "binding-secret" not in serialized
     assert "user:password" not in serialized
+    assert "api_key" not in serialized.lower()
     assert result.fingerprint == RuntimeCollector().probe_fingerprint(_context(tmp_path))
 
 

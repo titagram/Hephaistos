@@ -95,7 +95,37 @@ class OrganismQuery:
         quality_changes = []
         if left["organism_contract"].get("status") != right["organism_contract"].get("status"):
             quality_changes.append({"before": left["organism_contract"].get("status"), "after": right["organism_contract"].get("status")})
-        total = len(added) + len(removed) + len(changed) + len(dependency_changes)
+        left_coverage = left["organism_contract"].get("coverage", {})
+        right_coverage = right["organism_contract"].get("coverage", {})
+        coverage_changes = []
+        for domain in sorted(set(left_coverage) | set(right_coverage)):
+            before = left_coverage.get(domain, {})
+            after = right_coverage.get(domain, {})
+            before_semantic = (
+                before.get("status"),
+                before.get("fingerprint"),
+                before.get("error_code"),
+            )
+            after_semantic = (
+                after.get("status"),
+                after.get("fingerprint"),
+                after.get("error_code"),
+            )
+            if before_semantic != after_semantic:
+                coverage_changes.append(
+                    {
+                        "domain": domain,
+                        "before": before.get("status", "missing"),
+                        "after": after.get("status", "missing"),
+                    }
+                )
+        total = (
+            len(added)
+            + len(removed)
+            + len(changed)
+            + len(dependency_changes)
+            + len(coverage_changes)
+        )
         return {
             "added_capabilities": [n for n in added if n.get("kind") == "capability"][:MAX_RESULTS],
             "removed_capabilities": [n for n in removed if n.get("kind") == "capability"][:MAX_RESULTS],
@@ -104,5 +134,6 @@ class OrganismQuery:
             "invariant_impact": [n for n in added + removed if n.get("kind") == "invariant"][:MAX_RESULTS],
             "runtime_changes": [n for n in added + removed if n.get("kind") == "runtime"][:MAX_RESULTS],
             "quality_changes": quality_changes,
+            "coverage_changes": coverage_changes[:MAX_RESULTS],
             "truncated": total > MAX_RESULTS,
         }

@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hermes_cli import __version__, config, hades_backend_status as backend_status, profiles
+from hermes_cli import (
+    __version__,
+    config,
+    hades_backend_db as backend_db,
+    hades_backend_status as backend_status,
+    profiles,
+)
 from hermes_cli.gnothi.collectors.base import (
     CollectorContext,
     CollectorResult,
@@ -87,6 +93,11 @@ def _flatten_config(value: Any, prefix: str = ""):
         yield prefix, value
 
 
+def _secret_config_id(key_path: str) -> str:
+    digest = hashlib.sha256(key_path.encode("utf-8")).hexdigest()[:16]
+    return f"secret:{digest}"
+
+
 def _fingerprint(nodes: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> str:
     stable_nodes = [
         {key: value for key, value in node.items() if key != "verified_at"}
@@ -99,6 +110,23 @@ def _fingerprint(nodes: list[dict[str, Any]], evidence: list[dict[str, Any]]) ->
         ensure_ascii=False,
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _backend_status_read_only() -> dict[str, Any]:
+    """Read backend state only when its database already exists.
+
+    The canonical status loader initializes the SQLite schema on connect. That
+    is useful for operator commands, but organism inspection must not create a
+    backend database merely to report that no backend has been configured.
+    """
+    if not backend_db.hades_backend_db_path().is_file():
+        return {
+            "configured": False,
+            "degraded": False,
+            "awareness": None,
+            "bindings": [],
+        }
+    return backend_status.load_backend_status_payload()
 
 
 class RuntimeCollector:
@@ -118,7 +146,7 @@ class RuntimeCollector:
             else:
                 value, _ = redact_value(raw_value, workspace_root=context.workspace_root)
             config_rows.append((key_path, value))
-        status = backend_status.load_backend_status_payload()
+        status = _backend_status_read_only()
         awareness = status.get("awareness")
         bindings = status.get("bindings")
         backend = {
@@ -177,25 +205,34 @@ class RuntimeCollector:
                     SECRET_KEY_PATTERN.search(part) for part in key_path.split(".")
                 )
                 if secret_shaped:
-                    properties = {"key_path": key_path, "value_present": raw_value is not None}
+                    key_id = _secret_config_id(key_path)
+                    label = f"config:{key_id}"
+                    properties = {
+                        "key_class": "secret",
+                        "key_id": key_id,
+                        "value_present": raw_value is not None,
+                    }
+                    evidence_identity = {"key_class": "secret", "key_id": key_id}
                 else:
                     safe_value, _ = redact_value(
                         raw_value,
                         workspace_root=context.workspace_root,
                     )
+                    label = f"config:{key_path}"
                     properties = {"key_path": key_path, "value": safe_value}
-                evidence_row = _evidence("effective_config", {"key_path": key_path})
+                    evidence_identity = {"key_path": key_path}
+                evidence_row = _evidence("effective_config", evidence_identity)
                 evidence.append(evidence_row)
                 nodes.append(
                     _runtime_node(
                         context,
-                        label=f"config:{key_path}",
+                        label=label,
                         properties=properties,
                         evidence_ref=evidence_row["id"],
                     )
                 )
 
-            status = backend_status.load_backend_status_payload()
+            status = _backend_status_read_only()
             awareness = status.get("awareness")
             bindings = status.get("bindings")
             backend_properties = {

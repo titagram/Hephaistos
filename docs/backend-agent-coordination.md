@@ -7794,3 +7794,55 @@ Le osservazioni future su leggibilita' della memoria, doppia vista wiki
 umana/macchina, architettura multi-azienda e miglioramento memory-first di
 Platon sono raccolte in `docs/hades-backend-product-backlog.md`. Restano temi
 di discovery separati e non sono ancora specifiche implementative approvate.
+
+# 2026-07-14 — Gnothi Seauton locale e confine backend
+
+La slice locale `gnothi_seauton` e' stata sviluppata nel worktree isolato
+`Hephaistos-gnothi-seauton`, branch `codex/gnothi-seauton`, a partire da
+`faee5b9d9`. La serie implementativa registrata prima dell'E2E va da
+`b5eb8b50c` a `e0a60ca13`; il test reale e questa nota sono nel commit
+`test(gnothi): verify complete organism awareness`.
+
+Copertura locale completata:
+
+- contratto `hades.organism_graph.v1`, redazione e revisioni immutabili;
+- collector source, capability, runtime, contratti, dipendenze ed esperienza;
+- builder, query `status/inspect/explain/diff`, wiki derivata e CLI locale;
+- `/gnothi_seauton` read-only su CLI classica, gateway e TUI senza modificare
+  system prompt o tool schema a conversazione avviata;
+- fingerprint economici, drift per dominio e rebuild mirato;
+- E2E con checkout, skill, plugin, MCP, dipendenza ed evento temporanei.
+
+Verifiche locali registrate:
+
+- suite focalizzate dei task intermedi: tutte verdi;
+- regressione drift/collector/CLI: `23 passed`;
+- primo E2E rosso su lookup ambiguo per label, corretto usando l'ID stabile;
+- secondo E2E rosso per assenza di `coverage_changes` nel diff, corretto nel
+  query layer;
+- terzo E2E rosso per creazione involontaria di `hades_backend.db` durante una
+  lettura runtime, corretto evitando l'inizializzazione del DB assente;
+- E2E e query/collector dopo le correzioni: `10 passed`.
+
+Confine con il lavoro backend remoto:
+
+- il backend resta di proprieta' della task Codex
+  `019f5060-716e-7442-8e77-83461773249c`, branch remoto
+  `feature/canonical-graph-foundation-20260712`;
+- questa task locale non ha eseguito SSH, deploy, restart, migration o scritture
+  database e non ha modificato projector canonical graph, explorer/query
+  service, dashboard graph reader, `ImportGraphToNeo4j` o i relativi test;
+- il commit backend conclusivo non e' stato letto da questa task per non
+  interferire con il controllo indipendente e il commit in corso. Va aggiunto
+  qui dalla task backend quando diventa autoritativo;
+- nessuna nuova route backend e' richiesta per l'uso locale. La futura
+  pubblicazione deve riusare il canonical graph con `scope=organism`, mantenere
+  compatibilita' con gli handle pubblici opachi e non esporre nodi tecnici,
+  path locali o contenuti source;
+- i task di upload/provider backend restano intenzionalmente differiti fino a
+  quando il contratto remoto e il relativo commit saranno disponibili.
+
+Requisiti di rilascio: nessun deploy per la slice locale. L'integrazione remota
+futura richiedera' una verifica congiunta delle route Hades v1 e dei test
+canonical-graph, ma non autorizza automaticamente migrazioni o modifiche ai
+dati esistenti.
