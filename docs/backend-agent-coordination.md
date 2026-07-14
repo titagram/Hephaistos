@@ -28,6 +28,8 @@ Stato locale:
   `7547958e0`;
 - `scope=project|organism` sui due strumenti grafo esistenti, senza aggiungere
   tool universali, nel commit `c316c4b4d`;
+- compatibilita' del fallback `project` congelata dalla regressione
+  `2c7ac4d3a`;
 - scope omesso ancora byte-compatible con il grafo progetto; il fallback
   `organism` legge solo la revisione immutabile corrente;
 - nessuna operazione SSH, deploy, restart, migration o modifica database e'
@@ -38,7 +40,7 @@ Verifiche locali gia' superate:
 - contratto Canonical Graph locale: 38 test;
 - suite focalizzata Gnothi: 185 test e privacy smoke sull'artefatto reale;
 - sync artifact: 48 test;
-- provider Hades completo: 102 test, di cui 58 su graph/schema;
+- provider Hades completo: 103 test, di cui 59 su graph/schema;
 - parita' cache background review: 3 test;
 - Ruff sui file modificati: pulito.
 

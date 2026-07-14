@@ -20,7 +20,8 @@
   organism revision only when backend capabilities advertise support.
 - Task 15 is complete in `c316c4b4d`. Existing graph tools now accept
   `scope=organism`, while omitted scope preserves project behavior and tool
-  count.
+  count. Follow-up `2c7ac4d3a` adds an explicit regression protecting the
+  historical project-fallback shape.
 - Task 16 is complete in `e723aceb7` without changing the system prompt or
   universal tool schema.
 - Task 17 is complete in `e0a60ca13`, including domain-partitioned drift and
