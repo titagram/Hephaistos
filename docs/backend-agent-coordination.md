@@ -14,6 +14,43 @@ implementare in futuro.
 - `docs/SOURCE_OF_TRUTH.md`
 - `docs/hades-backend-laravel-prompt.md`
 
+## Gnothi Seauton: handoff locale - 2026-07-14
+
+La slice locale vive sul branch `codex/gnothi-seauton`. Il Canonical Graph
+Foundation arrivato su `main` con `f426a18f7` e' stato integrato nel branch dal
+merge `fd86b4305`.
+
+Stato locale:
+
+- implementazione `gnothi_seauton` completa nei commit `b5eb8b50c` -
+  `d8e8968ab`;
+- upload capability-gated e deduplicato della revisione corrente nel commit
+  `7547958e0`;
+- `scope=project|organism` sui due strumenti grafo esistenti, senza aggiungere
+  tool universali, nel commit `c316c4b4d`;
+- scope omesso ancora byte-compatible con il grafo progetto; il fallback
+  `organism` legge solo la revisione immutabile corrente;
+- nessuna operazione SSH, deploy, restart, migration o modifica database e'
+  stata eseguita da questa slice.
+
+Verifiche locali gia' superate:
+
+- contratto Canonical Graph locale: 38 test;
+- suite focalizzata Gnothi: 185 test e privacy smoke sull'artefatto reale;
+- sync artifact: 48 test;
+- provider Hades completo: 102 test, di cui 58 su graph/schema;
+- parita' cache background review: 3 test;
+- Ruff sui file modificati: pulito.
+
+Il solo Task 14 remoto resta assegnato alla task Codex
+`019f5060-716e-7442-8e77-83461773249c`. Il backend deve ancora registrare un
+commit che accetti e validi `hades.organism_graph.v1`, esponga
+`coverage.organism_graph`, indicizzi documenti bounded e implementi traversal
+`scope=organism`, preservando le route esistenti e il default `project`. Fino a
+quel momento il capability gate impedisce l'upload verso backend non
+compatibili; non c'e' alcun requisito di deployment per usare CLI, wiki e
+fallback locali.
+
 ## Nota operativa per dubbi backend
 
 Quando emergono dubbi sul contratto backend Laravel, si puo' riaprire in

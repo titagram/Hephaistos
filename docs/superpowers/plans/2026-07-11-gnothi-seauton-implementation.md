@@ -10,18 +10,27 @@
 
 ## Execution Status — 2026-07-14
 
+- The local half of Task 0 is satisfied: canonical graph foundation commit
+  `f426a18f7` was merged into this branch by `fd86b4305`. The remote contract
+  check remains owned by the backend task.
 - Tasks 1-12 are complete locally in commits `b5eb8b50c` through
   `06a889869`.
+- Task 13 is complete in `7547958e0`. Sync reuses the existing artifact path,
+  deduplicates by checksum, never builds implicitly, and uploads the current
+  organism revision only when backend capabilities advertise support.
+- Task 15 is complete in `c316c4b4d`. Existing graph tools now accept
+  `scope=organism`, while omitted scope preserves project behavior and tool
+  count.
 - Task 16 is complete in `e723aceb7` without changing the system prompt or
   universal tool schema.
 - Task 17 is complete in `e0a60ca13`, including domain-partitioned drift and
   targeted rebuild equivalence.
 - Task 18 is complete in `d8e8968ab`; the final focused run is `185 passed`,
   and the strict real-artifact privacy smoke passed.
-- Task 0 remains a backend/canonical-graph gate. Tasks 13-15 remain deferred
-  until the authoritative backend work on
-  `feature/canonical-graph-foundation-20260712` is committed and handed off by
-  Codex task `019f5060-716e-7442-8e77-83461773249c`.
+- Task 14 is the only implementation task still deferred. It remains owned by
+  backend Codex task `019f5060-716e-7442-8e77-83461773249c`; no remote
+  artifact validation, awareness coverage, search indexing, or
+  `scope=organism` traversal support is claimed here.
 - This local execution performed no SSH, deploy, restart, migration, or remote
   database mutation. The deferred tasks must be resumed from this boundary,
   not silently treated as complete.
@@ -1092,18 +1101,18 @@ Commit CLI module, main registration, and tests.
 - Consumes: hades.organism_graph.v1 from current local revision
 - Produces: existing _upload_job_artifact path accepts organism artifact
 
-- [ ] **Step 1: Add failing upload tests**
+- [x] **Step 1: Add failing upload tests**
 
 Assert organism schema uploads, artifact lookup uses its checksum, unchanged
 artifact skips, changed semantic fingerprint uploads, and file manifest derives
 paths from node.properties.path without absolute paths.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Expected: _upload_job_artifact returns zero uploads because schema is not
 allowlisted.
 
-- [ ] **Step 3: Extend the existing allowlist**
+- [x] **Step 3: Extend the existing allowlist**
 
 Add hades.organism_graph.v1 to the accepted schema set. Extend
 _artifact_file_manifest() to inspect nodes and relationships without removing
@@ -1114,14 +1123,14 @@ run_backend_sync for the current mapped workspace and passes it through the
 same upload path with job_id=None. Do not build a revision implicitly during
 sync.
 
-- [ ] **Step 4: Run GREEN and regressions**
+- [x] **Step 4: Run GREEN and regressions**
 
 ~~~bash
 pytest -q tests/hermes_cli/test_hades_backend_sync_runner.py tests/hermes_cli/test_gnothi_store.py
 ruff check hermes_cli/hades_backend_sync.py
 ~~~
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit with message feat(hades): sync organism graph artifacts.
 
@@ -1245,18 +1254,18 @@ Record the backend commit in docs/backend-agent-coordination.md during Task 18.
 - GRAPH_TRAVERSE_TOOL_SCHEMA gains the same enum
 - Existing calls default to project
 
-- [ ] **Step 1: Add failing schema and dispatch tests**
+- [x] **Step 1: Add failing schema and dispatch tests**
 
 Assert schemas expose scope with default project. Assert backend traversal sends
 scope=organism. Assert local fallback reads the current OrganismRevisionStore
 artifact when organism is selected. Assert project behavior remains byte-for-
 byte compatible in normalized results.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Expected: additionalProperties rejects scope or backend call omits it.
 
-- [ ] **Step 3: Implement scoped dispatch**
+- [x] **Step 3: Implement scoped dispatch**
 
 Add GRAPH_SCOPES = ("project", "organism"). Validate before backend calls.
 Pass scope through HadesBackendClient.graph_traverse(). For graph search,
@@ -1268,7 +1277,7 @@ Keep the same tool names and descriptions. This changes neither tool count nor
 mid-conversation schemas; updated schemas apply only when a new agent session
 is built.
 
-- [ ] **Step 4: Run GREEN and cache regressions**
+- [x] **Step 4: Run GREEN and cache regressions**
 
 ~~~bash
 pytest -q tests/agent/test_hades_backend_memory_provider.py -k "graph_search or graph_traverse or tool_schema"
@@ -1276,7 +1285,7 @@ pytest -q tests/run_agent/test_background_review_cache_parity.py
 ruff check plugins/memory/hades_backend/__init__.py
 ~~~
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit provider and tests with message feat(hades): query organism graph scope.
 

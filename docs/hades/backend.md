@@ -51,13 +51,23 @@ bounded `$HERMES_HOME/logs/organism-events.jsonl` stream. When the backend
 database does not already exist, runtime inspection reports the backend as
 unconfigured without creating that database.
 
-Backend publication is deliberately not automatic in this local slice. The
-canonical backend graph must accept the versioned organism contract and keep it
-separate under `scope=organism`; code-graph search remains under its existing
-scope. Until the matching backend contract is committed and verified, do not
-assume that ordinary `hades backend sync` uploads organism revisions. No new
-route, migration, deploy, restart, or database change is required to use the
-local commands.
+Ordinary `hades backend sync` may publish the already-current organism
+revision through the existing artifact channel. It never triggers an organism
+build. Publication is capability-gated: the agent uploads only when backend
+discovery advertises `organism_graph_schema=hades.organism_graph.v1` or the
+`organism` graph scope, and unchanged content is skipped by checksum. Older
+backends therefore keep their existing behavior and receive no organism
+artifact.
+
+The existing service-gated graph search and traversal tools accept
+`scope=project|organism`, defaulting to `project`. The default preserves prior
+payloads and normalized results. With `scope=organism`, live search is limited
+to `hades.organism_graph.v1`; if the backend is unavailable, both tools read
+the current immutable `OrganismRevisionStore` revision instead of the local
+project code-graph cache. Matching backend validation, awareness coverage,
+indexing, and traversal support are still required before live organism
+queries are available. No new route, migration, deploy, restart, or database
+change is required to use the local commands or fallback.
 
 Troubleshooting:
 
