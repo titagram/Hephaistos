@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from pathlib import Path
 from typing import Any
 
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import redact_value, safe_exception_class
 from hermes_cli.hades_backend_jobs import execute_job
@@ -13,6 +19,39 @@ MAX_FILES = 10_000
 MAX_BYTES = 2_000_000
 MAX_SYMBOLS = 5_000
 MAX_EDGES = 10_000
+_SOURCE_SUFFIXES = frozenset(
+    {
+        ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java",
+        ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".sh",
+        ".swift", ".ts", ".tsx",
+    }
+)
+_IGNORED_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "dist", "build"})
+
+
+def _source_path(path: str | Path) -> bool:
+    value = Path(path)
+    return value.suffix.lower() in _SOURCE_SUFFIXES and not any(
+        part in _IGNORED_DIRS for part in value.parts
+    )
+
+
+def _probe_source(context: CollectorContext) -> str:
+    rows = []
+    root = context.workspace_root
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name not in _IGNORED_DIRS)
+        directory_path = Path(directory)
+        for filename in sorted(filenames):
+            path = directory_path / filename
+            relative = path.relative_to(root)
+            if not _source_path(relative):
+                continue
+            stat = path.stat()
+            rows.append((relative.as_posix(), stat.st_size, stat.st_mtime_ns))
+            if len(rows) >= MAX_FILES:
+                return fingerprint_payload({"head": context.head_commit, "files": rows})
+    return fingerprint_payload({"head": context.head_commit, "files": rows})
 
 
 def _fingerprint(
@@ -130,6 +169,9 @@ def _edge(
 class SourceCollector:
     name = "source"
 
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        return _probe_source(context)
+
     def collect(self, context: CollectorContext) -> CollectorResult:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
@@ -192,13 +234,15 @@ class SourceCollector:
                 error_code=safe_exception_class(exc),
             )
 
-        return _result(
+        result = _result(
             context=context,
             status="current",
             nodes=nodes,
             edges=edges,
             evidence=evidence,
         )
+        result.fingerprint = self.probe_fingerprint(context)
+        return result
 
     @staticmethod
     def _adapt_tree(
@@ -209,11 +253,7 @@ class SourceCollector:
         evidence: list[dict[str, Any]],
     ) -> None:
         schema = str(tree.get("schema") or "hades.git_tree.v1")
-        workspace_checksum = str(
-            tree.get("workspace_fingerprint")
-            or (tree.get("workspace_state") or {}).get("content_fingerprint")
-            or "missing"
-        )
+        workspace_checksum = _probe_source(context)
         workspace_evidence = _evidence(
             schema=schema,
             path=".",
@@ -243,7 +283,7 @@ class SourceCollector:
                 continue
             path = str(row.get("path") or "")
             checksum = str(row.get("sha256") or "")
-            if not path or not checksum:
+            if not path or not checksum or not _source_path(path):
                 continue
             file_evidence = _evidence(
                 schema=schema,
@@ -314,7 +354,7 @@ class SourceCollector:
             source_kind = str(row.get("kind") or row.get("type") or "symbol")
             properties = row.get("properties") if isinstance(row.get("properties"), dict) else {}
             path = str(row.get("path") or properties.get("path") or "")
-            if not name:
+            if not name or (path and not _source_path(path)):
                 continue
             identity = {
                 "canonical_id": canonical_id or None,

@@ -41,6 +41,13 @@ def _default_collectors():
     ]
 
 
+def _ordered_collectors(collectors=None):
+    configured = list(collectors) if collectors is not None else _default_collectors()
+    order = {name: index for index, name in enumerate(COLLECTOR_ORDER)}
+    configured.sort(key=lambda item: (order.get(str(item.name), len(order)), str(item.name)))
+    return configured
+
+
 def _timestamp(value: str | datetime | None) -> tuple[str, str]:
     if value is None:
         moment = datetime.now(UTC)
@@ -154,6 +161,146 @@ def _synthesize_missing_endpoints(artifact: dict[str, Any]) -> None:
     artifact["nodes"].extend(additions)
 
 
+def _copy_collector_domain(
+    artifact: dict[str, Any],
+    current: dict[str, Any],
+    name: str,
+) -> None:
+    """Copy one collector's immutable rows without changing their freshness."""
+    copied_nodes = [
+        copy.deepcopy(node)
+        for node in current.get("nodes", [])
+        if isinstance(node, dict)
+        and node.get("properties", {}).get("collector") == name
+    ]
+    node_ids = {str(node.get("id")) for node in copied_nodes}
+    copied_edges = [
+        copy.deepcopy(edge)
+        for edge in current.get("edges", [])
+        if isinstance(edge, dict)
+        and (
+            edge.get("properties", {}).get("collector") == name
+            or (
+                not edge.get("properties", {}).get("collector")
+                and (
+                    str(edge.get("from")) in node_ids
+                    or str(edge.get("to")) in node_ids
+                )
+            )
+        )
+    ]
+    evidence_ids = {
+        str(ref)
+        for row in [*copied_nodes, *copied_edges]
+        for ref in row.get("evidence_refs", [])
+    }
+    copied_evidence = [
+        copy.deepcopy(row)
+        for row in current.get("evidence", [])
+        if isinstance(row, dict) and str(row.get("id")) in evidence_ids
+    ]
+    for node in copied_nodes:
+        properties = node.setdefault("properties", {})
+        properties.pop("carried_forward", None)
+        properties.pop("carried_from_revision", None)
+    existing_nodes = {str(row.get("id")) for row in artifact["nodes"]}
+    existing_edges = {str(row.get("id")) for row in artifact["edges"]}
+    existing_evidence = {str(row.get("id")) for row in artifact["evidence"]}
+    artifact["nodes"].extend(
+        row for row in copied_nodes if str(row.get("id")) not in existing_nodes
+    )
+    artifact["edges"].extend(
+        row for row in copied_edges if str(row.get("id")) not in existing_edges
+    )
+    artifact["evidence"].extend(
+        row for row in copied_evidence if str(row.get("id")) not in existing_evidence
+    )
+
+
+def _collector_context(
+    root: Path,
+    current: dict[str, Any] | None,
+    *,
+    collected_at: str,
+    generation_scope: str,
+) -> CollectorContext:
+    generation_id = _git_generation(root)
+    head_commit = generation_id.removeprefix("git:") if generation_id.startswith("git:") else None
+    return CollectorContext(
+        workspace_root=root,
+        generation_id=generation_id,
+        generation_scope=generation_scope,
+        head_commit=head_commit,
+        collected_at=collected_at,
+        previous_artifact=current,
+    )
+
+
+def drift_status(
+    workspace_root: str | Path,
+    current: dict[str, Any] | None,
+    *,
+    collectors=None,
+) -> dict[str, Any]:
+    """Compare cheap collector probes with a revision's stored fingerprints."""
+    if not current:
+        return {
+            "status": "missing",
+            "domains": {},
+            "invalidated_domains": [],
+            "actions": ["rebuild"],
+        }
+    root = Path(workspace_root).resolve()
+    contract = current.get("organism_contract", {})
+    scope = contract.get("generation", {}).get("scope", "stable")
+    context = _collector_context(
+        root,
+        current,
+        collected_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        generation_scope=str(scope),
+    )
+    coverage = contract.get("coverage", {})
+    domains: dict[str, dict[str, Any]] = {}
+    for collector in _ordered_collectors(collectors):
+        name = str(collector.name)
+        stored = coverage.get(name) if isinstance(coverage, dict) else None
+        try:
+            probe = collector.probe_fingerprint(context)
+        except Exception as exc:
+            domains[name] = {
+                "status": "unknown",
+                "error_code": safe_exception_class(exc),
+            }
+            continue
+        stored_fingerprint = stored.get("fingerprint") if isinstance(stored, dict) else None
+        stored_status = stored.get("status") if isinstance(stored, dict) else None
+        if not stored_fingerprint or stored_status != "current":
+            status = "unknown"
+        elif probe == stored_fingerprint:
+            status = "current"
+        else:
+            status = "stale"
+        domains[name] = {
+            "status": status,
+            "stored_fingerprint": stored_fingerprint,
+            "probe_fingerprint": probe,
+        }
+    invalidated = [
+        name for name in COLLECTOR_ORDER if domains.get(name, {}).get("status") == "stale"
+    ]
+    refresh = [
+        name
+        for name in COLLECTOR_ORDER
+        if domains.get(name, {}).get("status") in {"stale", "unknown"}
+    ]
+    return {
+        "status": "stale" if invalidated else ("unknown" if refresh else "current"),
+        "domains": domains,
+        "invalidated_domains": invalidated,
+        "actions": [f"rebuild --collector {name}" for name in refresh],
+    }
+
+
 def build_organism_revision(
     workspace_root: str | Path,
     generation_scope: str = "stable",
@@ -162,16 +309,29 @@ def build_organism_revision(
     now: str | datetime | None = None,
     *,
     force: bool = False,
+    collector_names: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     root = Path(workspace_root).resolve()
+    configured = _ordered_collectors(collectors)
+    by_name = {str(collector.name): collector for collector in configured}
+    selected_names = list(dict.fromkeys(collector_names or ()))
+    invalid_names = sorted(
+        (set(selected_names) - set(COLLECTOR_ORDER))
+        | (set(selected_names) - set(by_name))
+    )
+    if invalid_names:
+        invalid = ", ".join(invalid_names)
+        raise ValueError(f"unknown collector: {invalid}")
     collected_at, compact_time = _timestamp(now)
     generation_id = _git_generation(root)
     head_commit = generation_id.removeprefix("git:") if generation_id.startswith("git:") else None
     revision_store = store or OrganismRevisionStore()
+    current = revision_store.current()
+    if selected_names and current is None:
+        raise ValueError("targeted rebuild requires a current organism revision")
     previous = _prior_healthy(revision_store)
-    configured = list(collectors) if collectors is not None else _default_collectors()
-    order = {name: index for index, name in enumerate(COLLECTOR_ORDER)}
-    configured.sort(key=lambda item: (order.get(str(item.name), len(order)), str(item.name)))
+    if selected_names:
+        configured = [by_name[name] for name in COLLECTOR_ORDER if name in selected_names]
 
     artifact = new_artifact(
         revision_id="pending",
@@ -192,6 +352,15 @@ def build_organism_revision(
 
     statuses: dict[str, str] = {}
     total_redactions = 0
+    if selected_names and current:
+        current_coverage = current.get("organism_contract", {}).get("coverage", {})
+        for name in COLLECTOR_ORDER:
+            if name in selected_names or name not in current_coverage:
+                continue
+            _copy_collector_domain(artifact, current, name)
+            coverage_row = copy.deepcopy(current_coverage[name])
+            artifact["organism_contract"]["coverage"][name] = coverage_row
+            statuses[name] = str(coverage_row.get("status") or "missing")
     for collector in configured:
         try:
             result = collector.collect(context)
@@ -227,7 +396,6 @@ def build_organism_revision(
     artifact["organism_contract"]["semantic_fingerprint"] = semantic
     artifact["organism_contract"]["revision_id"] = f"rev:{compact_time}:{semantic[:12]}"
 
-    current = revision_store.current()
     if (
         not force
         and current

@@ -6,8 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from agent import skill_utils
+from hermes_constants import get_hermes_home
 from hermes_cli import commands, config, plugins
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import safe_exception_class
 from tools import registry as tool_registry
@@ -155,6 +160,76 @@ def _frontmatter_only(path: Path) -> dict[str, Any]:
 class CapabilityCollector:
     name = "capabilities"
 
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        """Fingerprint registrations and small capability manifests only."""
+        tool_registry.discover_builtin_tools()
+        registry = tool_registry.registry
+        toolsets = registry.check_toolset_requirements()
+        tools = [
+            (
+                name,
+                str(registry.get_toolset_for_tool(name) or "unknown"),
+                bool(toolsets.get(str(registry.get_toolset_for_tool(name) or "unknown"))),
+            )
+            for name in sorted(registry.get_all_tool_names())
+        ]
+        command_rows = [
+            (command.name, command.category) for command in commands.COMMAND_REGISTRY
+        ]
+        skill_rows = []
+        for root in skill_utils.get_all_skills_dirs():
+            if not root.is_dir():
+                continue
+            for path in skill_utils.iter_skill_index_files(root, "SKILL.md"):
+                skill_rows.append(_frontmatter_only(path))
+
+        plugins.discover_plugins()
+        plugin_rows = [
+            {
+                "name": str(row.get("name") or row.get("key") or ""),
+                "source_class": _plugin_owner(row.get("source")),
+                "kind": str(row.get("kind") or ""),
+                "enabled": bool(row.get("enabled")),
+                "degraded": bool(row.get("error")),
+            }
+            for row in plugins.get_plugin_manager().list_plugins()
+        ]
+        manifest_rows = []
+        plugin_roots = {
+            (context.workspace_root / "plugins").resolve(),
+            (context.workspace_root / ".hermes" / "plugins").resolve(),
+            plugins.get_bundled_plugins_dir().resolve(),
+            (get_hermes_home() / "plugins").resolve(),
+        }
+        for root in sorted(plugin_roots):
+            if not root.is_dir():
+                continue
+            for pattern in ("**/plugin.json", "**/plugin.yaml", "**/plugin.yml"):
+                for path in sorted(root.glob(pattern)):
+                    if path.is_file():
+                        content = path.read_bytes()[:262_144]
+                        manifest_rows.append(
+                            hashlib.sha256(content).hexdigest()
+                        )
+        raw_servers = config.load_config().get("mcp_servers", {})
+        mcp_rows = []
+        if isinstance(raw_servers, dict):
+            mcp_rows = [
+                (str(name), (entry if isinstance(entry, dict) else {}).get("enabled") is not False)
+                for name, entry in sorted(raw_servers.items())
+            ]
+        return fingerprint_payload(
+            {
+                "tools": tools,
+                "commands": command_rows,
+                "skills": skill_rows,
+                "disabled_skills": sorted(skill_utils.get_disabled_skill_names()),
+                "plugins": sorted(plugin_rows, key=lambda row: row["name"]),
+                "plugin_manifests": manifest_rows,
+                "mcp": mcp_rows,
+            }
+        )
+
     def collect(self, context: CollectorContext) -> CollectorResult:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
@@ -226,7 +301,7 @@ class CapabilityCollector:
             nodes=nodes,
             edges=edges,
             evidence=evidence,
-            fingerprint=_fingerprint(nodes, edges, evidence),
+            fingerprint=self.probe_fingerprint(context),
             verified_at=context.collected_at,
         )
 

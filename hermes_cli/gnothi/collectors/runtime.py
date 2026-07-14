@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import platform
 import subprocess
 import sys
@@ -10,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli import __version__, config, hades_backend_status as backend_status, profiles
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import (
     SECRET_KEY_PATTERN,
@@ -101,6 +104,44 @@ def _fingerprint(nodes: list[dict[str, Any]], evidence: list[dict[str, Any]]) ->
 class RuntimeCollector:
     name = "runtime"
 
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        loaded_config = config.load_config()
+        config_rows = []
+        for key_path, raw_value in _flatten_config(loaded_config):
+            if not key_path or key_path.split(".", 1)[0] == "mcp_servers":
+                continue
+            secret_shaped = any(
+                SECRET_KEY_PATTERN.search(part) for part in key_path.split(".")
+            )
+            if secret_shaped:
+                value = {"present": raw_value is not None}
+            else:
+                value, _ = redact_value(raw_value, workspace_root=context.workspace_root)
+            config_rows.append((key_path, value))
+        status = backend_status.load_backend_status_payload()
+        awareness = status.get("awareness")
+        bindings = status.get("bindings")
+        backend = {
+            "configured": bool(status.get("configured")),
+            "degraded": bool(status.get("degraded")),
+            "awareness_status": (
+                awareness.get("status") if isinstance(awareness, dict) else None
+            ),
+            "binding_count": len(bindings) if isinstance(bindings, list) else 0,
+        }
+        return fingerprint_payload(
+            {
+                "python": platform.python_version(),
+                "platform": (sys.platform, platform.machine()),
+                "generation": _git_generation(context.workspace_root),
+                "release": __version__,
+                "profile": profiles.get_active_profile(),
+                "executable": Path(sys.executable).name,
+                "config": config_rows,
+                "backend": backend,
+            }
+        )
+
     def collect(self, context: CollectorContext) -> CollectorResult:
         nodes: list[dict[str, Any]] = []
         evidence: list[dict[str, Any]] = []
@@ -113,7 +154,7 @@ class RuntimeCollector:
                 ("runtime:profile", {"name": profiles.get_active_profile()}),
                 (
                     "runtime:process",
-                    {"pid": os.getpid(), "executable": Path(sys.executable).name},
+                    {"executable": Path(sys.executable).name},
                 ),
             ]
             for label, properties in facts:
@@ -193,6 +234,6 @@ class RuntimeCollector:
             nodes=nodes,
             edges=[],
             evidence=evidence,
-            fingerprint=_fingerprint(nodes, evidence),
+            fingerprint=self.probe_fingerprint(context),
             verified_at=context.collected_at,
         )

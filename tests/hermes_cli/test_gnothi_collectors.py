@@ -6,6 +6,7 @@ from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
 from hermes_cli.gnothi.collectors.capabilities import CapabilityCollector
 from hermes_cli.gnothi.collectors.contracts import ContractCollector
 from hermes_cli.gnothi.collectors.dependencies import DependencyCollector
+from hermes_cli.gnothi.collectors.experience import ExperienceCollector
 from hermes_cli.gnothi.collectors.runtime import RuntimeCollector
 from hermes_cli.gnothi.collectors.source import SourceCollector
 
@@ -72,6 +73,7 @@ def test_source_collector_emits_source_anatomy_without_absolute_paths(tmp_path: 
 
     repeated = SourceCollector().collect(_context(workspace))
     assert repeated.fingerprint == result.fingerprint
+    assert result.fingerprint == SourceCollector().probe_fingerprint(_context(workspace))
 
 
 def test_source_collector_degrades_without_exposing_parser_error(
@@ -254,6 +256,7 @@ def test_capability_collector_inventories_providers_and_state_dimensions(
     assert "mcp-env-secret" not in serialized
     assert "header-secret" not in serialized
     assert "mcp-api-secret" not in serialized
+    assert result.fingerprint == CapabilityCollector().probe_fingerprint(_context(tmp_path))
 
 
 def test_runtime_collector_emits_effective_non_secret_runtime_state(
@@ -317,6 +320,7 @@ def test_runtime_collector_emits_effective_non_secret_runtime_state(
     assert "awareness-secret" not in serialized
     assert "binding-secret" not in serialized
     assert "user:password" not in serialized
+    assert result.fingerprint == RuntimeCollector().probe_fingerprint(_context(tmp_path))
 
 
 def test_dependency_collector_probes_only_declared_dependencies(
@@ -403,6 +407,7 @@ def test_dependency_collector_probes_only_declared_dependencies(
     assert "token=hidden" not in str(result)
     assert "node-secret" not in str(result)
     assert "node:../escape" not in labels
+    assert result.fingerprint == DependencyCollector().probe_fingerprint(_context(tmp_path))
 
 
 def test_contract_collector_emits_versioned_invariants_with_real_evidence():
@@ -429,3 +434,113 @@ def test_contract_collector_emits_versioned_invariants_with_real_evidence():
             edge["kind"] == "protected_by" and edge["from"] == invariant_id
             for edge in result.edges
         )
+    assert result.fingerprint == ContractCollector().probe_fingerprint(_context(repo_root))
+
+
+def test_probe_fingerprints_partition_source_manifests_config_and_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from hermes_cli.gnothi.collectors import capabilities, dependencies, runtime
+    from hermes_cli.commands import CommandDef
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (workspace / "pyproject.toml").write_text(
+        "[project]\nname='fixture'\nversion='1.0.0'\n",
+        encoding="utf-8",
+    )
+    skill_root = workspace / "skills" / "demo"
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: demo\ndescription: Demo.\n---\nbody one\n",
+        encoding="utf-8",
+    )
+    plugin_root = workspace / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    plugin_manifest = plugin_root / "plugin.json"
+    plugin_manifest.write_text('{"name":"demo","version":"1"}', encoding="utf-8")
+
+    config_state = {"mcp_servers": {"demo": {"enabled": True}}}
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(capabilities.tool_registry, "discover_builtin_tools", lambda: [])
+    monkeypatch.setattr(capabilities.tool_registry, "registry", _FakeToolRegistry())
+    monkeypatch.setattr(
+        capabilities.commands,
+        "COMMAND_REGISTRY",
+        [CommandDef("doctor", "Inspect", "Info")],
+    )
+    monkeypatch.setattr(capabilities.skill_utils, "get_all_skills_dirs", lambda: [workspace / "skills"])
+    monkeypatch.setattr(capabilities.skill_utils, "get_disabled_skill_names", lambda: set())
+    monkeypatch.setattr(capabilities.plugins, "discover_plugins", lambda: None)
+    monkeypatch.setattr(
+        capabilities.plugins,
+        "get_plugin_manager",
+        lambda: type("EmptyPlugins", (), {"list_plugins": lambda self: []})(),
+    )
+    monkeypatch.setattr(capabilities.config, "load_config", lambda: config_state)
+    monkeypatch.setattr(dependencies.config, "load_config", lambda: config_state)
+    monkeypatch.setattr(runtime.config, "load_config", lambda: config_state)
+    monkeypatch.setattr(runtime, "_git_generation", lambda root: "release:test")
+    monkeypatch.setattr(runtime.profiles, "get_active_profile", lambda: "default")
+    monkeypatch.setattr(
+        runtime.backend_status,
+        "load_backend_status_payload",
+        lambda: {"configured": False, "degraded": False, "bindings": []},
+    )
+
+    context = _context(workspace)
+    collectors = [
+        SourceCollector(),
+        CapabilityCollector(),
+        RuntimeCollector(),
+        ContractCollector(),
+        DependencyCollector(),
+        ExperienceCollector(),
+    ]
+
+    def probes():
+        return {collector.name: collector.probe_fingerprint(context) for collector in collectors}
+
+    def changed(before, after):
+        return {name for name in before if before[name] != after[name]}
+
+    baseline = probes()
+    (workspace / "app.py").write_text("VALUE = 100\n", encoding="utf-8")
+    current = probes()
+    assert changed(baseline, current) == {"source"}
+
+    baseline = current
+    (workspace / "pyproject.toml").write_text(
+        "[project]\nname='fixture'\nversion='2.0.0'\n",
+        encoding="utf-8",
+    )
+    current = probes()
+    assert changed(baseline, current) == {"dependencies"}
+
+    baseline = current
+    skill_file.write_text(
+        "---\nname: demo\ndescription: Changed.\n---\nbody two\n",
+        encoding="utf-8",
+    )
+    current = probes()
+    assert changed(baseline, current) == {"capabilities"}
+
+    baseline = current
+    plugin_manifest.write_text('{"name":"demo","version":"2"}', encoding="utf-8")
+    current = probes()
+    assert changed(baseline, current) == {"capabilities"}
+
+    baseline = current
+    config_state["mcp_servers"]["demo"]["enabled"] = False
+    current = probes()
+    assert changed(baseline, current) == {"capabilities"}
+
+    baseline = current
+    event_path = tmp_path / "home" / "logs" / "organism-events.jsonl"
+    event_path.parent.mkdir(parents=True)
+    event_path.write_text('{"bounded_signature":"sha256:event"}\n', encoding="utf-8")
+    current = probes()
+    assert changed(baseline, current) == {"experience"}

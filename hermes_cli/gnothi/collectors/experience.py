@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 
 MAX_EVENT_LINES = 10_000
@@ -41,6 +45,18 @@ def _fingerprint(nodes, edges, evidence) -> str:
 class ExperienceCollector:
     name = "experience"
 
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        path = get_hermes_home() / "logs" / "organism-events.jsonl"
+        if not path.is_file():
+            return fingerprint_payload({"events": "missing"})
+        lines, truncated = _read_tail(path)
+        return fingerprint_payload(
+            {
+                "tail_sha256": hashlib.sha256(b"\n".join(lines)).hexdigest(),
+                "truncated": truncated,
+            }
+        )
+
     def collect(self, context: CollectorContext) -> CollectorResult:
         path = get_hermes_home() / "logs" / "organism-events.jsonl"
         if not path.is_file():
@@ -50,7 +66,7 @@ class ExperienceCollector:
                 nodes=[],
                 edges=[],
                 evidence=[],
-                fingerprint=_fingerprint([], [], []),
+                fingerprint=self.probe_fingerprint(context),
                 verified_at=None,
             )
         lines, partial = _read_tail(path)
@@ -144,7 +160,7 @@ class ExperienceCollector:
             nodes=nodes,
             edges=edges,
             evidence=evidence,
-            fingerprint=_fingerprint(nodes, edges, evidence),
+            fingerprint=self.probe_fingerprint(context),
             verified_at=context.collected_at,
             error_code="MalformedOrTruncatedEvents" if partial else None,
         )

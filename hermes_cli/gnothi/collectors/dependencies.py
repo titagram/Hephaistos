@@ -12,7 +12,11 @@ from typing import Any
 from packaging.requirements import InvalidRequirement, Requirement
 
 from hermes_cli import config, plugins
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import safe_exception_class
 
@@ -109,6 +113,31 @@ def _fingerprint(
 class DependencyCollector:
     name = "dependencies"
 
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        manifests = []
+        for name in ("pyproject.toml", "package.json"):
+            path = context.workspace_root / name
+            if not path.is_file():
+                continue
+            content = path.read_bytes()[:2_000_000]
+            manifests.append((name, hashlib.sha256(content).hexdigest()))
+        loaded_config = config.load_config()
+        servers = loaded_config.get("mcp_servers")
+        service_names = sorted(str(name) for name in servers) if isinstance(servers, dict) else []
+        plugins.discover_plugins()
+        plugin_services = sorted(
+            str(row.get("name") or row.get("key") or "")
+            for row in plugins.get_plugin_manager().list_plugins()
+            if row.get("kind") == "service" and row.get("enabled")
+        )
+        return fingerprint_payload(
+            {
+                "manifests": manifests,
+                "mcp_services": service_names,
+                "plugin_services": plugin_services,
+            }
+        )
+
     def collect(self, context: CollectorContext) -> CollectorResult:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
@@ -148,7 +177,7 @@ class DependencyCollector:
             nodes=nodes,
             edges=edges,
             evidence=evidence,
-            fingerprint=_fingerprint(nodes, edges, evidence),
+            fingerprint=self.probe_fingerprint(context),
             verified_at=context.collected_at,
         )
 
@@ -272,10 +301,7 @@ class DependencyCollector:
         loaded_config = config.load_config()
         servers = loaded_config.get("mcp_servers")
         if isinstance(servers, dict):
-            for name, raw in sorted(servers.items()):
-                entry = raw if isinstance(raw, dict) else {}
-                if entry.get("enabled") is False:
-                    continue
+            for name in sorted(servers):
                 label = f"service:mcp:{name}"
                 evidence_row = _evidence("external_service", {"opaque_id": label})
                 evidence.append(evidence_row)
@@ -283,7 +309,9 @@ class DependencyCollector:
                     context,
                     label=label,
                     owner_class="external-service",
-                    state=_state(installed=True, active=True),
+                    # Activation belongs to the capabilities domain.  This
+                    # node records the declared service dependency only.
+                    state=_state(installed=True, active=False),
                     evidence_ref=evidence_row["id"],
                     properties={"opaque_id": label},
                     kind="service",

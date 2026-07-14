@@ -83,3 +83,4 @@ def test_experience_collector_aggregates_and_marks_malformed_input_partial(
     assert result.nodes[0]["properties"]["first_seen"] == "2026-07-14T12:00:00Z"
     assert result.nodes[0]["properties"]["last_seen"] == "2026-07-14T12:00:00Z"
     assert {edge["kind"] for edge in result.edges} == {"observed_on"}
+    assert result.fingerprint == ExperienceCollector().probe_fingerprint(context)

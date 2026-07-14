@@ -16,7 +16,11 @@ def test_parser_accepts_every_local_surface():
     parser = _parser()
     cases = [
         ["gnothi-seauton", "status", "--json"],
-        ["gnothi-seauton", "rebuild", "--json", "--force", "--workspace", "/tmp/demo"],
+        [
+            "gnothi-seauton", "rebuild", "--json", "--force",
+            "--workspace", "/tmp/demo", "--collector", "source",
+            "--collector", "runtime",
+        ],
         ["gnothi-seauton", "inspect", "component", "--json"],
         ["gnothi-seauton", "explain", "capability", "--json"],
         ["gnothi-seauton", "diff", "rev-a", "rev-b", "--json"],
@@ -25,6 +29,7 @@ def test_parser_accepts_every_local_surface():
     assert [parser.parse_args(case).gnothi_action for case in cases] == [
         "status", "rebuild", "inspect", "explain", "diff", "wiki"
     ]
+    assert parser.parse_args(cases[1]).collectors == ["source", "runtime"]
 
 
 def test_missing_status_is_actionable_and_returns_one(tmp_path, monkeypatch, capsys):
@@ -34,6 +39,33 @@ def test_missing_status_is_actionable_and_returns_one(tmp_path, monkeypatch, cap
     output = capsys.readouterr().out
     assert '"status": "missing"' in output
     assert "rebuild" in output
+
+
+def test_status_reports_drift_and_targeted_actions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_cli import hades_gnothi_cmd as command
+
+    artifact = new_artifact(
+        revision_id="rev-1", generation_id="git:abc", generation_scope="stable",
+        head_commit="abc", collected_at="2026-07-14T12:00:00Z",
+    )
+    artifact["organism_contract"]["status"] = "current"
+    OrganismRevisionStore().publish(artifact)
+    monkeypatch.setattr(
+        command,
+        "drift_status",
+        lambda workspace, current: {
+            "invalidated_domains": ["source"],
+            "domains": {"source": {"status": "stale"}},
+            "actions": ["rebuild --collector source"],
+        },
+    )
+
+    args = _parser().parse_args(["gnothi-seauton", "status", "--json"])
+    assert gnothi_command(args) == 0
+    output = capsys.readouterr().out
+    assert '"invalidated_domains": ["source"]' in output
+    assert "rebuild --collector source" in output
 
 
 def test_rebuild_accepts_partial_and_wiki_writes_stdout_or_file(

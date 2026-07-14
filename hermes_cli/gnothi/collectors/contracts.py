@@ -8,7 +8,11 @@ from typing import Any
 
 import yaml
 
-from hermes_cli.gnothi.collectors.base import CollectorContext, CollectorResult
+from hermes_cli.gnothi.collectors.base import (
+    CollectorContext,
+    CollectorResult,
+    fingerprint_payload,
+)
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import safe_exception_class
 
@@ -34,6 +38,22 @@ def _fingerprint(nodes, edges, evidence) -> str:
 
 class ContractCollector:
     name = "contracts"
+
+    def probe_fingerprint(self, context: CollectorContext) -> str:
+        manifest = _manifest()
+        markers = []
+        root = context.workspace_root.resolve()
+        for invariant in manifest.get("invariants", []):
+            if not isinstance(invariant, dict):
+                continue
+            for pattern in invariant.get("evidence_globs", []):
+                for path in sorted(root.glob(str(pattern))):
+                    if not path.is_file():
+                        continue
+                    relative = path.resolve().relative_to(root).as_posix()
+                    stat = path.stat()
+                    markers.append((relative, stat.st_size, stat.st_mtime_ns))
+        return fingerprint_payload({"manifest": manifest, "evidence": markers})
 
     def collect(self, context: CollectorContext) -> CollectorResult:
         nodes: list[dict[str, Any]] = []
@@ -142,7 +162,7 @@ class ContractCollector:
             nodes=nodes,
             edges=edges,
             evidence=evidence,
-            fingerprint=_fingerprint(nodes, edges, evidence),
+            fingerprint=self.probe_fingerprint(context),
             verified_at=None if missing else context.collected_at,
             error_code="MissingEvidence" if missing else None,
         )

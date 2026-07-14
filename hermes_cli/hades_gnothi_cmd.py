@@ -6,7 +6,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from hermes_cli.gnothi.builder import build_organism_revision
+from hermes_cli.gnothi.builder import (
+    COLLECTOR_ORDER,
+    build_organism_revision,
+    drift_status,
+)
 from hermes_cli.gnothi.query import OrganismQuery
 from hermes_cli.gnothi.store import OrganismRevisionStore
 from hermes_cli.gnothi.wiki import render_wiki
@@ -44,11 +48,22 @@ def gnothi_command(args) -> int:
     try:
         if action == "status":
             result = query.status()
+            current = store.current()
+            if current:
+                drift = drift_status(Path(args.workspace or Path.cwd()), current)
+                result["drift"] = drift["domains"]
+                result["invalidated_domains"] = drift["invalidated_domains"]
+                result["actions"] = sorted(
+                    set(result.get("actions", [])) | set(drift.get("actions", []))
+                )
             _emit(result, args.json)
             return 1 if result.get("status") == "missing" else 0
         if action == "rebuild":
             result = build_organism_revision(
-                Path(args.workspace or Path.cwd()), store=store, force=args.force
+                Path(args.workspace or Path.cwd()),
+                store=store,
+                force=args.force,
+                collector_names=args.collectors,
             )
             _emit(result if args.json else {
                 "revision_id": result["organism_contract"]["revision_id"],
@@ -87,10 +102,17 @@ def build_gnothi_parser(subparsers, cmd_gnothi):
     actions = parser.add_subparsers(dest="gnothi_action", required=True)
     status = actions.add_parser("status")
     status.add_argument("--json", action="store_true")
+    status.add_argument("--workspace")
     rebuild = actions.add_parser("rebuild")
     rebuild.add_argument("--json", action="store_true")
     rebuild.add_argument("--force", action="store_true")
     rebuild.add_argument("--workspace")
+    rebuild.add_argument(
+        "--collector",
+        dest="collectors",
+        action="append",
+        choices=COLLECTOR_ORDER,
+    )
     inspect_parser = actions.add_parser("inspect")
     inspect_parser.add_argument("component")
     inspect_parser.add_argument("--json", action="store_true")
