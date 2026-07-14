@@ -6157,6 +6157,56 @@ def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(monke
     assert [edge["kind"] for edge in traverse["edges"]] == ["requires"]
 
 
+def test_hades_backend_project_scope_ignores_canonical_node_enrichment(monkeypatch, tmp_path):
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        items=[
+            {
+                "id": "artifact_project_1",
+                "domain": "artifacts",
+                "schema": "hades.code_graph.v1",
+                "payload": {
+                    "schema": "hades.code_graph.v1",
+                    "nodes": [
+                        {"id": "node:a", "kind": "capability", "label": "Enriched A"},
+                        {"id": "node:b", "kind": "runtime", "label": "Enriched B"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge:a-b",
+                            "kind": "requires",
+                            "from": "node:a",
+                            "to": "node:b",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    import plugins.memory.hades_backend as hades_memory
+
+    def unavailable_client(*, timeout=None):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr(hades_memory.runtime, "client_from_config", unavailable_client)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "node:a", "direction": "out", "max_depth": 1, "limit": 10},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result.get("scope") is None
+    assert [(node["id"], node["label"]) for node in result["nodes"]] == [
+        ("node:a", "node:a"),
+        ("node:b", "node:b"),
+    ]
+
+
 def test_hades_backend_graph_traverse_falls_back_to_local_graph_cache(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,

@@ -2641,7 +2641,8 @@ def _graph_artifact_from_source(source: dict[str, Any]) -> dict[str, Any] | None
         schema = str(graph.get("schema") or item_schema or "").strip()
         if schema not in GRAPH_ARTIFACT_SCHEMAS:
             continue
-        if not any(isinstance(graph.get(key), list) for key in ("nodes", "routes", "symbols", "edges")):
+        graph_keys = ("nodes", "edges") if schema == ORGANISM_SCHEMA else ("routes", "symbols", "edges")
+        if not any(isinstance(graph.get(key), list) for key in graph_keys):
             continue
         graph["schema"] = schema
         return graph
@@ -2737,27 +2738,28 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
         schema = str(graph.get("schema") or "")
         artifact_id = str(artifact_source.get("artifact_id") or schema)
 
-        for graph_node in graph.get("nodes") or []:
-            if not isinstance(graph_node, dict):
-                continue
-            properties = graph_node.get("properties") if isinstance(graph_node.get("properties"), dict) else {}
-            _local_graph_add_node(
-                nodes,
-                graph_node.get("id"),
-                kind=str(graph_node.get("kind") or "graph_node"),
-                label=graph_node.get("label"),
-                path=properties.get("path"),
-                attributes={
-                    "owner": graph_node.get("owner"),
-                    "generation_scope": graph_node.get("generation_scope"),
-                    "state": graph_node.get("state"),
-                    "evidence_refs": graph_node.get("evidence_refs"),
-                    "properties": properties,
-                    "verified_at": graph_node.get("verified_at"),
-                    "schema": schema,
-                    "artifact_id": artifact_id,
-                },
-            )
+        if schema == ORGANISM_SCHEMA:
+            for graph_node in graph.get("nodes") or []:
+                if not isinstance(graph_node, dict):
+                    continue
+                properties = graph_node.get("properties") if isinstance(graph_node.get("properties"), dict) else {}
+                _local_graph_add_node(
+                    nodes,
+                    graph_node.get("id"),
+                    kind=str(graph_node.get("kind") or "graph_node"),
+                    label=graph_node.get("label"),
+                    path=properties.get("path"),
+                    attributes={
+                        "owner": graph_node.get("owner"),
+                        "generation_scope": graph_node.get("generation_scope"),
+                        "state": graph_node.get("state"),
+                        "evidence_refs": graph_node.get("evidence_refs"),
+                        "properties": properties,
+                        "verified_at": graph_node.get("verified_at"),
+                        "schema": schema,
+                        "artifact_id": artifact_id,
+                    },
+                )
 
         for route in graph.get("routes") or []:
             if not isinstance(route, dict):
