@@ -457,6 +457,154 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     )
 
 
+def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.gnothi.contract import add_node, new_artifact
+    from hermes_cli.gnothi.store import OrganismRevisionStore
+    from hermes_cli.hades_backend_sync import (
+        _artifact_upload_cache_key,
+        run_backend_sync,
+    )
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    head = "a" * 40
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_1",
+            project_id="proj_1",
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+            capabilities={
+                "artifacts": True,
+                "sync_git_tree": False,
+                "populate_backend_ast": False,
+            },
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="proj_1",
+            agent_id="agent_1",
+            local_project_id="p_local",
+            workspace_fingerprint="wf_1",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit=head,
+            backend_workspace_binding_id="wb_1",
+        )
+
+    def artifact(revision: str, semantic: str):
+        value = new_artifact(
+            revision_id=revision,
+            generation_id=f"git:{head}",
+            generation_scope="stable",
+            head_commit=head,
+            collected_at="2026-07-14T12:00:00Z",
+        )
+        value["organism_contract"].update(
+            status="current",
+            coverage={"source": {"status": "current", "fingerprint": semantic}},
+            semantic_fingerprint=semantic,
+        )
+        value["evidence"] = []
+        add_node(
+            value,
+            node_id="workspace:fixture",
+            kind="workspace",
+            label=workspace.name,
+            owner_class="workspace",
+            owner_id="workspace:fixture",
+            state={"verified": False},
+            properties={"collector": "source"},
+        )
+        add_node(
+            value,
+            node_id="source:relative",
+            kind="source_file",
+            label="src/demo.py",
+            owner_class="workspace",
+            owner_id="workspace:fixture",
+            state={"verified": False},
+            properties={"collector": "source", "path": "src/demo.py"},
+        )
+        add_node(
+            value,
+            node_id="source:absolute",
+            kind="source_file",
+            label="opaque",
+            owner_class="workspace",
+            owner_id="workspace:fixture",
+            state={"verified": False},
+            properties={"collector": "source", "path": "/private/secret.py"},
+        )
+        return value
+
+    store = OrganismRevisionStore()
+    store.publish(artifact("rev-org-1", "sha256:first"))
+
+    class FakeClient:
+        def __init__(self):
+            self.lookups = []
+            self.uploads = []
+
+        def capabilities(self):
+            return {
+                "organism_graph_schema": "hades.organism_graph.v1",
+                "graph_scopes": ["project", "organism"],
+            }
+
+        def memory_snapshot(self, **payload):
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            return {"events": []}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+        def artifact_lookup(self, **payload):
+            self.lookups.append(payload)
+            return {"exists": False}
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+            return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
+
+    fake = FakeClient()
+    first = run_backend_sync(client_factory=lambda: fake, quiet=True)
+    unchanged = run_backend_sync(client_factory=lambda: fake, quiet=True)
+    store.publish(artifact("rev-org-2", "sha256:changed"))
+    changed = run_backend_sync(client_factory=lambda: fake, quiet=True)
+
+    assert first.summary["artifacts_uploaded"] == 1
+    assert unchanged.summary["artifacts_skipped"] == 1
+    assert changed.summary["artifacts_uploaded"] == 1
+    assert [upload["schema"] for upload in fake.uploads] == [
+        "hades.organism_graph.v1",
+        "hades.organism_graph.v1",
+    ]
+    assert len(fake.lookups) == 2
+    assert all(len(lookup["sha256"]) == 64 for lookup in fake.lookups)
+
+    with hdb.connect_closing() as conn:
+        binding = hdb.get_binding_for_backend_id(conn, "wb_1")
+        cache = hdb.get_sync_state(
+            conn,
+            _artifact_upload_cache_key(binding, "hades.organism_graph.v1"),
+        )
+    assert cache["file_manifest"]["paths"].keys() == {"src/demo.py"}
+    assert "/private/secret.py" not in str(cache)
+
+
 def test_sync_runner_uses_binding_scoped_agent_for_each_project(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
