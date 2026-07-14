@@ -8,6 +8,24 @@
 
 **Tech Stack:** Python 3.11+, pytest, argparse, JSON/JSONL, existing Hermes registries and Hades backend client; Laravel/PHP 8.3, PostgreSQL/SQLite tests, Pest, existing Hades artifact/search/awareness APIs.
 
+## Execution Status — 2026-07-14
+
+- Tasks 1-12 are complete locally in commits `b5eb8b50c` through
+  `06a889869`.
+- Task 16 is complete in `e723aceb7` without changing the system prompt or
+  universal tool schema.
+- Task 17 is complete in `e0a60ca13`, including domain-partitioned drift and
+  targeted rebuild equivalence.
+- Task 18 is complete in `d8e8968ab`; the final focused run is `185 passed`,
+  and the strict real-artifact privacy smoke passed.
+- Task 0 remains a backend/canonical-graph gate. Tasks 13-15 remain deferred
+  until the authoritative backend work on
+  `feature/canonical-graph-foundation-20260712` is committed and handed off by
+  Codex task `019f5060-716e-7442-8e77-83461773249c`.
+- This local execution performed no SSH, deploy, restart, migration, or remote
+  database mutation. The deferred tasks must be resumed from this boundary,
+  not silently treated as complete.
+
 ## Global Constraints
 
 - Implement only gnothi_seauton. Do not implement Evolution Observer, /autopoiesis research, candidate generation, canary, promotion, or rollback.
