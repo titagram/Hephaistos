@@ -6157,7 +6157,7 @@ def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(monke
     assert [edge["kind"] for edge in traverse["edges"]] == ["requires"]
 
 
-def test_hades_backend_project_scope_ignores_canonical_node_enrichment(monkeypatch, tmp_path):
+def test_hades_backend_graph_traverse_project_scope_ignores_canonical_node_enrichment(monkeypatch, tmp_path):
     provider = _create_linked_provider(
         monkeypatch,
         tmp_path,
