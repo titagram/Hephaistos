@@ -1,95 +1,26 @@
-# Blocco D Coordinamento — Progress Ledger
+# Canonical graph foundation SDD ledger
 
-## Task Status
+Branch local: `feature/canonical-graph-foundation-20260712`
+Branch remote: `feature/canonical-graph-foundation-20260712`
+PostgreSQL backup: `/home/ubuntu/backups/devboard/devboard-before-canonical-graph-20260712T101400Z.dump` (archive verified)
+Baseline: local 76 passed; analyzer 14 passed; backend selected suite passed with 75 pre-existing warnings.
 
-- [ ] Task 1: Schema e Migrazione Presence (Backend) — BLOCKED: backend checkout missing
-- [ ] Task 2: Eloquent Model e Service Presence (Backend) — BLOCKED: backend checkout missing  
-- [ ] Task 3: Endpoint Presence Backend (Backend) — BLOCKED: backend checkout missing
-- [ ] Task 4: Schema e Migrazione Code Claims (Backend) — BLOCKED: backend checkout missing
-- [ ] Task 5: Service e Model Code Claims (Backend) — BLOCKED: backend checkout missing
-- [ ] Task 6: Endpoint Code Claims (Backend) — BLOCKED: backend checkout missing
-- [ ] Task 7: OpenAPI Schema (Backend) — BLOCKED: backend checkout missing
-- [x] Task 8: Client Presence e Code Claims (Locale) — ✅ DONE (a3695bcdb, review clean)
-- [x] Task 9: Heartbeat Non-Bloccante (Locale) — ✅ DONE (5b0f3987b, review clean)
-- [x] Task 10: Claim Automatico nel Worker (Locale) — ✅ DONE (e5993ccab, review clean)
-- [ ] Task 11: Validazione Messaggistica Persephone (Backend) — BLOCKED: backend checkout missing
-
-## Completed Tasks
-
-Task 8: complete (commits a3695bcdb, review clean)
-Task 9: complete (commits 5b0f3987b, review clean)
-Task 10: complete (commits e5993ccab, review clean)
-
-## Summary
-
-**All 3 local tasks (8-10) completed and reviewed clean.**
-
-### Blocco D Locale Summary
-
-**Task 8 — Client Methods (a3695bcdb)**
-- 5 nuovi metodi per presence e code-claims nel client Python
-- 50/50 test PASSED (client + OpenAPI coverage tests)
-- Zero breaking changes
-
-**Task 9 — Heartbeat Loop (5b0f3987b)**
-- HadesCoordination class con heartbeat non-bloccante background
-- 14 test cases: thread-safety, error handling, graceful shutdown
-- All PASSED — concurrency verified
-
-**Task 10 — Claim Wrapper (e5993ccab)**
-- claim_and_run() method with finally semantics
-- 6 test cases: CRITICAL finally-block test PASSED
-- Release guaranteed even if runner raises exception
-
-### Backend Tasks (1-7, 11) Status
-
-Backend Laravel non trovato nel repo locale. All 8 backend tasks marked BLOCKED.
-
-**Implementer can resume backend tasks when Laravel backend is available.**
-
----
-
-**Status:** ✅ All completable tasks (local layer 8-10) DONE, all reviews CLEAN
-**Next:** Final whole-branch review + finish-a-development-branch
-
----
-
-# Hades Delegation + Distributed Orchestration — Progress Ledger
-
-Plans:
-- `docs/superpowers/plans/2026-07-10-hades-delegation-onboarding.md`
-- `docs/superpowers/plans/2026-07-10-hades-distributed-orchestration.md`
-
-Start commit: `3ef5f91d848393bac5332926db44eba9a402c612`
-
-## Delegation onboarding
-
-- [x] D1: reviewer runtime role — `0dfd6e563`, review approved; Minor: public docstring still lists only leaf/orchestrator
-- [x] D2: orchestrator task contracts — `fbc3663be`, review approved; Minor: direct Python tuples accepted for list fields
-- [x] D3: adaptive capacity — `0453f5182` + `c205a3326`, re-review clean after batch/nesting fixes
-- [x] D4: evidence packets — `664fca494` + `0204f8d8a` + `81914d3fe` + `dbabeb077`, final review clean
-- [x] D5: model recommendations — `4861e5f0c` + `c41b99793`, re-review clean after metadata provenance/authentication fixes
-- [x] D6: delegation CLI onboarding — `fe663204d`, review clean; 206 delegation regressions passed
-- [x] D7: bundled skill guidance — `77e35f0b8` + `c1ea781e3`, re-review clean; 220 regressions passed
-
-## Distributed orchestration
-
-- [x] O1: Persephone envelope contract — `339354917` + `7c3657348` + `563a7d4d7`, final review clean; 85 regressions passed
-- [x] O2: durable queue store — `854d9fc4c` + `0836dfa1d`, re-review clean after atomic response/global identity fixes
-- [x] O3: SSE/poll transport — `857c5e4e4` + `2ddc0db17` + `3cf989f29` + `5ce7aaf2e`, final review clean; 170 scoped tests
-- [x] O4: multi-project receiver — `aa71c8b08` + `eac5251c0` + `f795ea6f2` + `e307e7f37`, final review clean
-- [x] O5: information-only worker — `8ded8da1d` through `fa67cd18b`, final adversarial review clean; 386 broad tests
-- [x] O6: service lifecycle — `d340e7c6e` through `1d3801810`, final review clean; 507 broad tests
-- [x] O7: DAG/blackboard wakeups — `d48653be1` through `72bff3451`, final adversarial review clean; 776 broad tests
-- [x] O8: remote Kanban projection — `fac303076` through `8e4e525d5`, final review clean; 593 broad tests
-- [x] O9: full verification and live Hades skill test — 586 focused tests; managed runtime refreshed; skill reload/invocation and non-mutating PTY prompt verified
-
-## Additional diagnosis
-
-- [x] B401: diagnose repeated backend sync HTTP 401 responses — three stale linked bindings × memory/inbox/jobs = nine 401s; current identity valid
-- [x] B401-FIX: all automatic sync paths scoped to current identity — `32d52cd0b` + `89b993626` + `1e725dceb`; live turn added zero sync errors
-
-## Final review
-
-- [x] Opaque Persephone cursor replay cannot rewind an existing cursor — `056e096f2`; 371 distributed tests passed
-- [x] Whole-branch review completed; no remaining critical/important findings after final fixes
+Task 1: complete (commit 1a9e0d103, spec PASS, quality PASS).
+Task 2: complete (remote commit ec1bea27, spec PASS, quality PASS).
+Task 3: complete (remote commit 0c98296e, spec PASS, quality PASS).
+Task 4: complete (remote commits b002f657, 3f740587; re-review spec PASS, quality PASS).
+Task 5: complete (remote commits 6a99f2d7, 92a7b8fa; concurrency re-review PASS).
+Task 6: complete (remote commits fa10e51e, 194e86fc, 0d145bad; final re-review PASS).
+Task 7: complete (remote commits 81aca5f4, 1ffd716e, faff3986; final re-review PASS; 29 tests, 191 assertions).
+Task 8: complete (remote commits c8731a8a, 1d4ee7d0, 94ccfcac, f49782e5, 0cfb80e7, 301cf00b, 007bf6fc, d17f658e, 95e77cfa; final re-review PASS; 894 assertions).
+Branch compatibility blocker: complete (remote commit a8fbb731; Hades CausalPack compatibility re-review PASS; 1,395 assertions).
+Task 9: complete (remote commits d8d83389, 87023e62, a1e70875, c530cf7b, 60a086dd, 879d694d; final re-review PASS; 1,391 assertions).
+Task 10 non-live: complete (local docs through 85fbca302; remote docs/code through 24c68a75; final review PASS; backend 2,755 assertions and local Hades 78 tests before final OpenAPI anti-drift passes).
+Live rollout recovery: complete (verified backup restored; DemoUsersSeeder rerun; app healthy; 5 users, 1 project, 20 artifacts, 1 ready projection; Neo4j 5000/6627; no queued or failed jobs).
+Hades canonical replay hardening: complete (local commits 6f37fb3d4..ecc8a7f5f; task review PASS; final fresh scope verification 115 tests).
+Backend live integration fixes: complete (remote commits 3566a402..94f16c2d; traversal review PASS/APPROVED; live authorized Hades traversal HTTP 200 with graph-version match and edge closure).
+Final live smoke: complete (app /up 200; no recent 401/405/query_error/Neo4j errors; public routing reaches Traefik/Laravel correctly; credential-bound plugin and authenticated BasicAuth smokes intentionally unclaimed because no existing plaintext credentials were available).
+Final review remediation: complete (remote commits b112c0c2, 617366a8, ff085a83, 353037b3, c1f694dd; durable ordinary/forced publication, bounded indexed adjacency traversal, contract hardening; final review PASS/APPROVED).
+Exact forced reconcile command: complete (remote commit f4edab3a; command review PASS/APPROVED; exact-scope dry-run and forced durable rebuild supported).
+Controlled live rollout: complete (backup devboard-before-canonical-graph-20260714T005548Z.dump verified SHA256 d7242540b988c5134932b2263344e15d64a24284da0e357a24de92d4ecebc750; migration applied; DemoUsersSeeder rerun; forced attempt ready/published; app online; PG 5/1/20 and projection 5000/6627; Neo4j schema1 5000/6627/13254; authorized traversal HTTP 200 with closure; recent suspicious logs 0).
+Independent final verification: complete (local Hades 115 tests; backend 51 tests/3160 assertions; Ruff/format/Pint/diff checks pass; direct live traversal/PG/Neo4j/health gates pass).
