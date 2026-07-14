@@ -445,6 +445,16 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     assert {upload["job_id"] for upload in fake.uploads} == {None}
     assert all(upload["workspace_binding_id"] == "wb_1" for upload in fake.uploads)
     assert fake.pull_upload_counts == [0]
+    graph_upload = next(upload for upload in fake.uploads if upload["schema"] == "hades.php_graph.v1")
+    graph = graph_upload["artifact"]
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert graph["graph_contract"]["version"] == "hades.graph_artifact.v1"
+    assert graph["symbols"] and "id" not in graph["symbols"][0]
+    assert node_ids and all(node_id.startswith("hades:node:v1:") for node_id in node_ids)
+    assert all(
+        relationship["source_id"] in node_ids and relationship["target_id"] in node_ids
+        for relationship in graph["relationships"]
+    )
 
 
 def test_sync_runner_uses_binding_scoped_agent_for_each_project(monkeypatch, tmp_path):

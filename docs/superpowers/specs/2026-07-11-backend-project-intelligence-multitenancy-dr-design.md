@@ -59,6 +59,38 @@ loss.
    provenance, freshness, and identifiers.
 7. Every tenant boundary is enforced server-side.
 8. A backup is successful only after a restore has been verified.
+9. The separate React application is the only canonical web frontend. Laravel
+   exposes APIs and backend services; Inertia is removed after verified parity
+   and is never retained as a parallel UI or fallback.
+
+### 3.1 Canonical frontend and Inertia removal
+
+The separately deployed React/TypeScript application owns all interactive web
+product routes. Laravel remains responsible for JSON APIs, session and CSRF
+endpoints, authentication/authorization, queues, jobs, audit, storage, and
+domain services.
+
+The migration is progressive only to control risk. Its terminal state is a
+complete Inertia removal, including:
+
+- Inertia page routes and controllers;
+- Inertia page components, layouts, middleware, and response helpers;
+- Laravel-side frontend assets and build entries used only by Inertia;
+- Inertia PHP/JavaScript packages and Vite configuration no longer required by
+  another backend concern;
+- duplicate navigation, page-state readers, and presentation-only DTOs;
+- fallback behavior that silently serves an old Laravel page when React or an
+  API contract is unavailable.
+
+Removal begins only after a route inventory proves React feature parity and
+the replacement passes contract, authorization, accessibility, responsive,
+visual-regression, and end-to-end tests. Each route is then switched once;
+there is no long-lived dual-write or dual-UI mode.
+
+Public routing sends product pages to the React nginx service and backend API,
+CSRF, authentication, storage, installer, and agent paths to Laravel according
+to explicit Traefik rules. A route not assigned by this inventory fails
+visibly; it must not fall through to Inertia.
 
 ## 4. Canonical graph pipeline
 
@@ -535,6 +567,10 @@ This design must not be implemented as one change. Recommended order:
 6. **Multi-tenancy foundation:** organization schema, memberships,
    authorization matrix, tenant-scoped tokens and jobs, followed by migration
    of existing data into a default organization.
+7. **Canonical frontend cutover:** complete React parity and quality gates,
+   switch every product route to React, then remove all Inertia-only routes,
+   controllers, components, assets, packages, build configuration, and
+   fallback behavior.
 
 Multi-tenancy changes the security boundary and requires its own detailed
 specification and migration plan before implementation. Disaster recovery must
@@ -549,3 +585,5 @@ be operational before migrating valuable production tenants.
 - Silent Graphify fallback.
 - Selective per-organization restore in the first backup release.
 - Combining all delivery tranches into one implementation branch.
+- Retaining Inertia as a secondary frontend, emergency fallback, or source for
+  new product pages after the React cutover.

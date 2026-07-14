@@ -100,4 +100,6 @@ def build_graph_for_workspace(
     # Attach source slice candidates (applies to all graph types)
     _attach_source_slice_candidates(workspace_root, graph, payload)
 
-    return graph
+    from hermes_cli.hades_graph_contract import finalize_graph_artifact
+
+    return finalize_graph_artifact(graph, payload=payload, candidates=candidates, omitted=omitted)
