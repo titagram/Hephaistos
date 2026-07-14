@@ -4276,6 +4276,12 @@ def cmd_backend(args):
     return hades_backend_command(args)
 
 
+def cmd_gnothi(args):
+    from hermes_cli.hades_gnothi_cmd import gnothi_command
+
+    raise SystemExit(gnothi_command(args))
+
+
 def cmd_org(args):
     """Validate and materialize local Hades OrgRuns."""
     from hermes_cli.hades_org_cmd import org_command
@@ -11951,7 +11957,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
-        "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
+        "gnothi-seauton", "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
@@ -12733,6 +12739,9 @@ def main():
     from hermes_cli.hades_backend_cmd import build_backend_parser
 
     build_backend_parser(subparsers, cmd_backend=cmd_backend)
+    from hermes_cli.hades_gnothi_cmd import build_gnothi_parser
+
+    build_gnothi_parser(subparsers, cmd_gnothi=cmd_gnothi)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,18 @@ def test_hades_slash_subcommand_dispatches_to_main(monkeypatch):
     assert captured["cmd"][-4] == "-m"
     assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
     assert captured["kwargs"]["capture_output"] is True
+
+
+def test_gnothi_slash_queues_read_only_prompt():
+    from agent.gnothi_prompt import build_gnothi_prompt
+    from cli import HermesCLI
+
+    cli = HermesCLI.__new__(HermesCLI)
+    cli._pending_input = queue.Queue()
+
+    cli._handle_gnothi_seauton_command("/gnothi_seauton explain runtime")
+
+    assert cli._pending_input.get_nowait() == build_gnothi_prompt("explain runtime")
 
 
 def test_hades_slash_uninstall_requires_noninteractive_confirmation(monkeypatch):

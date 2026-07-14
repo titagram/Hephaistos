@@ -1368,7 +1368,7 @@ def test_slash_exec_plugin_handler_error_returns_output(server):
     assert worker.calls == []
 
 
-@pytest.mark.parametrize("cmd", ["retry", "queue hello", "q hello", "steer fix the test", "plan", "learn create a skill from https://example.com/docs"])
+@pytest.mark.parametrize("cmd", ["retry", "queue hello", "q hello", "steer fix the test", "plan", "learn create a skill from https://example.com/docs", "gnothi_seauton explain runtime"])
 def test_slash_exec_routes_pending_input_commands_to_dispatch(server, cmd):
     """slash.exec must route _pending_input commands to command.dispatch
     internally instead of returning the old 4018 "use command.dispatch"
@@ -1472,6 +1472,31 @@ def test_pending_input_commands_includes_learn(server):
     routes /learn to the slash worker, which only prints the ack and drops the
     prompt onto the dead _pending_input queue (#51829)."""
     assert "learn" in server._PENDING_INPUT_COMMANDS
+
+
+def test_command_dispatch_gnothi_sends_read_only_prompt(server):
+    from agent.gnothi_prompt import build_gnothi_prompt
+
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid}
+    arg = "explain capability:browser"
+
+    response = server.handle_request({
+        "id": "r-gnothi",
+        "method": "command.dispatch",
+        "params": {"name": "gnothi_seauton", "arg": arg, "session_id": sid},
+    })
+
+    assert "error" not in response
+    assert response["result"] == {
+        "type": "send",
+        "message": build_gnothi_prompt(arg),
+    }
+
+
+def test_pending_input_commands_includes_gnothi(server):
+    assert "gnothi_seauton" in server._PENDING_INPUT_COMMANDS
+    assert "know-thyself" in server._PENDING_INPUT_COMMANDS
 
 
 def test_skills_manage_search_uses_tools_hub_sources(server):

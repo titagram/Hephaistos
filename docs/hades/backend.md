@@ -1,5 +1,88 @@
 # Hades Backend Setup
 
+## Gnothi Seauton: local organism awareness
+
+`gnothi_seauton` is the local, evidence-backed description of the installed
+Hades organism. It inventories source anatomy, capabilities, runtime state,
+protected contracts, declared dependencies, and bounded experience events into
+immutable `hades.organism_graph.v1` revisions under
+`$HERMES_HOME/gnothi_seauton/`.
+
+Operator commands:
+
+```bash
+hades gnothi-seauton status --json
+hades gnothi-seauton rebuild --workspace /path/to/workspace --json
+hades gnothi-seauton rebuild --workspace /path/to/workspace --collector capabilities
+hades gnothi-seauton inspect <component-id> --json
+hades gnothi-seauton explain <capability-id> --json
+hades gnothi-seauton diff <revision-a> <revision-b> --json
+hades gnothi-seauton wiki
+```
+
+The conversational `/gnothi_seauton` command is also available in the classic
+CLI, messaging gateway, and TUI. It submits a normal user turn, preserving the
+conversation's cached system-prompt prefix and tool schema. It is read-only:
+it may inspect the current revision and graph tools with `scope=organism`, but
+it does not rebuild, research, download, install, mutate configuration, or
+start an evolution.
+
+Each revision contains an `organism_contract` with generation identity,
+semantic fingerprint, per-collector coverage, and freshness. Coverage states
+are:
+
+- `current`: the collector completed and its cheap input fingerprint still
+  matches;
+- `stale`: the stored fingerprint differs from the current probe;
+- `partial`: collection completed with missing evidence or a bounded failure;
+- `missing`: the domain has no usable evidence;
+- `unknown`: status-time probing could not establish freshness.
+
+`status` reports invalidated domains and suggests targeted `--collector`
+refreshes. Targeted rebuilds preserve unselected domains and their original
+freshness, while immutable prior revisions remain available for `diff` and
+rollback analysis. The generated wiki is derived entirely from the artifact;
+its evidence links point to the artifact's bounded evidence index and manual
+wiki edits are not authoritative.
+
+The local collector never stores raw source bodies, skill bodies, secret
+values, or absolute local paths. Experience input is limited to the structured,
+bounded `$HERMES_HOME/logs/organism-events.jsonl` stream. When the backend
+database does not already exist, runtime inspection reports the backend as
+unconfigured without creating that database.
+
+Ordinary `hades backend sync` may publish the already-current organism
+revision through the existing artifact channel. It never triggers an organism
+build. Publication is capability-gated: the agent uploads only when backend
+discovery advertises `organism_graph_schema=hades.organism_graph.v1` or the
+`organism` graph scope, and unchanged content is skipped by checksum. Older
+backends therefore keep their existing behavior and receive no organism
+artifact.
+
+The existing service-gated graph search and traversal tools accept
+`scope=project|organism`, defaulting to `project`. The default preserves prior
+payloads and normalized results. With `scope=organism`, live search is limited
+to `hades.organism_graph.v1`; if the backend is unavailable, both tools read
+the current immutable `OrganismRevisionStore` revision instead of the local
+project code-graph cache. Matching backend validation, awareness coverage,
+indexing, and traversal support are still required before live organism
+queries are available. No new route, migration, deploy, restart, or database
+change is required to use the local commands or fallback.
+
+Troubleshooting:
+
+- `status=missing`: run a full local `rebuild` from the intended workspace;
+- one domain is `stale`: use the suggested targeted collector refresh;
+- `contracts=partial`: the installed checkout lacks one or more files named by
+  the versioned invariant manifest;
+- `experience=missing`: no bounded failure event has been recorded yet;
+- an `error_class` is shown: rerun the named collector and inspect local logs;
+  artifact errors never include raw exception messages.
+
+`gnothi_seauton` is a prerequisite for reasoning about future evolution. It
+does **not** implement `autopoiesis`, self-modification, external tool research,
+approval workflows for evolution, or self-versioned code rollback.
+
 ## Commands
 
 `hades backend bootstrap` is the preferred setup path. It registers the local

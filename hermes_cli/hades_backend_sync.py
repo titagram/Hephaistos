@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Callable
@@ -34,6 +35,7 @@ class BackgroundSyncDecision:
 BACKGROUND_SYNC_STATE_KEY = "background_sync"
 ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
 ARTIFACT_COMPRESSION_MIN_BYTES = 64 * 1024
+ORGANISM_GRAPH_SCHEMA = "hades.organism_graph.v1"
 _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
@@ -130,6 +132,7 @@ def run_backend_sync(
 
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
+    advertised_capabilities: dict[str, dict[str, object]] = {}
     polled_agent_queues: set[tuple[str, str]] = set()
     route_auth: dict[tuple[str, str], dict[str, bool | int]] = {}
     used_credential_fingerprints: dict[str, str | None] = {}
@@ -218,6 +221,9 @@ def run_backend_sync(
                     auth_observation["unauthorized"] = True
                     auth_observation["unauthorized_errors"] += 1
                 advertised = {}
+            advertised_capabilities[binding_agent.agent_id] = (
+                advertised if isinstance(advertised, dict) else {}
+            )
             queue_capabilities[binding_agent.agent_id] = bool(
                 isinstance(advertised, dict)
                 and advertised.get(BACKEND_CAPABILITY) is True
@@ -413,6 +419,17 @@ def run_backend_sync(
                         f"{redact_secret(str(exc))}"
                     )
 
+        if _supports_organism_graph(
+            advertised_capabilities.get(binding_agent.agent_id, {})
+        ):
+            organism_uploaded, organism_failed, organism_skipped = (
+                _sync_current_organism_artifact(client, binding_agent, binding)
+            )
+            artifacts_uploaded += organism_uploaded
+            artifact_errors += organism_failed
+            artifacts_skipped += organism_skipped
+            sync_errors += organism_failed
+
     with db.connect_closing() as conn:
         source_slice_jobs_waiting = max(
             source_slice_jobs_waiting,
@@ -549,6 +566,60 @@ def _sync_baseline_artifacts(
         failed += artifact_failed
         skipped += artifact_skipped
     return uploaded, failed, skipped, source_slice_candidates
+
+
+def _supports_organism_graph(advertised: dict[str, object]) -> bool:
+    if advertised.get("organism_graph_schema") == ORGANISM_GRAPH_SCHEMA:
+        return True
+    scopes = advertised.get("graph_scopes")
+    return isinstance(scopes, list) and "organism" in scopes
+
+
+def _sync_current_organism_artifact(
+    client: object,
+    agent: db.BackendAgent,
+    binding: db.WorkspaceBinding,
+) -> tuple[int, int, int]:
+    """Upload the current revision when it belongs to this binding.
+
+    Sync is intentionally non-constructive: absence or a workspace mismatch is
+    a clean skip and never triggers an implicit organism rebuild.
+    """
+    from hermes_cli.gnothi.store import OrganismRevisionStore
+
+    try:
+        artifact = OrganismRevisionStore().current()
+    except (OSError, ValueError):
+        return (0, 1, 0)
+    if not artifact or not _organism_artifact_matches_binding(artifact, binding):
+        return (0, 0, 0)
+    return _upload_job_artifact(
+        client,
+        agent,
+        binding,
+        None,
+        {"artifact": artifact},
+    )
+
+
+def _organism_artifact_matches_binding(
+    artifact: dict[str, object],
+    binding: db.WorkspaceBinding,
+) -> bool:
+    contract = artifact.get("organism_contract")
+    if not isinstance(contract, dict):
+        return False
+    source = contract.get("source")
+    artifact_head = str(source.get("head_commit") or "") if isinstance(source, dict) else ""
+    binding_head = str(binding.head_commit or "")
+    if artifact_head and binding_head and artifact_head != binding_head:
+        return False
+    workspace_labels = {
+        str(node.get("label") or "")
+        for node in artifact.get("nodes", [])
+        if isinstance(node, dict) and node.get("kind") == "workspace"
+    }
+    return not workspace_labels or Path(binding.repo_root).name in workspace_labels
 
 
 def _agent_has_capability(agent: db.BackendAgent, capability: str) -> bool:
@@ -876,11 +947,17 @@ def _artifact_upload_fields(artifact_payload: dict[str, object]) -> tuple[dict[s
 def _artifact_file_manifest(artifact_payload: dict[str, object]) -> dict[str, object]:
     path_items: dict[str, list[str]] = {}
 
-    def add_item(item: object) -> None:
+    def add_item(item: object, *, allow_route_path: bool = False) -> None:
         if not isinstance(item, dict):
             return
         path = str(item.get("path") or item.get("source_path") or "").strip()
-        if not path:
+        path = path.replace("\\", "/")
+        if (
+            not path
+            or (path.startswith("/") and not allow_route_path)
+            or re.match(r"^[A-Za-z]:/", path)
+            or any(part in {".", ".."} for part in path.split("/"))
+        ):
             return
         if "sha256" in item:
             item_hash = str(item.get("sha256") or "")
@@ -894,7 +971,15 @@ def _artifact_file_manifest(artifact_payload: dict[str, object]) -> dict[str, ob
         add_item(item)
     for section in ("routes", "symbols", "edges"):
         for item in artifact_payload.get(section) or []:
-            add_item(item)
+            add_item(item, allow_route_path=section == "routes")
+    for section in ("nodes", "relationships"):
+        for item in artifact_payload.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            properties = item.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            add_item({"path": properties.get("path"), "row": item})
     database = artifact_payload.get("database")
     if isinstance(database, dict):
         for table in database.get("tables") or []:
@@ -944,7 +1029,13 @@ def _upload_job_artifact(
     if not isinstance(artifact, dict):
         return (0, 0, 0)
     schema = str(artifact.get("schema") or "").strip()
-    if schema not in {"hades.git_tree.v1", "hades.symbols.v1", "hades.php_graph.v1", "hades.code_graph.v1"}:
+    if schema not in {
+        "hades.git_tree.v1",
+        "hades.symbols.v1",
+        "hades.php_graph.v1",
+        "hades.code_graph.v1",
+        ORGANISM_GRAPH_SCHEMA,
+    }:
         return (0, 0, 0)
     artifact_payload = dict(artifact)
     head_commit = str(binding.head_commit or "").strip()

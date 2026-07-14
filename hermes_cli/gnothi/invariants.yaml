@@ -1,0 +1,38 @@
+version: hades.gnothi_invariants.v1
+invariants:
+  - id: invariant:prompt-cache-stability
+    title: Prompt cache stability
+    description: The system prompt and tool schema remain stable for a conversation.
+    evidence_globs:
+      - AGENTS.md
+      - tests/run_agent/test_anthropic_prompt_cache_policy.py
+  - id: invariant:message-role-alternation
+    title: Message role alternation
+    description: Conversation messages preserve provider-safe role alternation.
+    evidence_globs:
+      - AGENTS.md
+      - tests/run_agent/test_message_sequence_repair.py
+  - id: invariant:approval-boundaries
+    title: Approval boundaries
+    description: Privileged operations remain inside explicit approval boundaries.
+    evidence_globs:
+      - AGENTS.md
+      - tests/acp/test_approval_isolation.py
+  - id: invariant:profile-isolation
+    title: Profile isolation
+    description: Profile-scoped configuration and state do not cross profile boundaries.
+    evidence_globs:
+      - AGENTS.md
+      - tests/cron/test_cron_profile_isolation.py
+  - id: invariant:artifact-backward-compatibility
+    title: Artifact backward compatibility
+    description: Versioned artifacts preserve compatible ingestion and replay behavior.
+    evidence_globs:
+      - AGENTS.md
+      - tests/hermes_cli/test_hades_backend_sync_runner.py
+  - id: invariant:no-secret-artifacts
+    title: No secret artifacts
+    description: Generated organism artifacts exclude secret values and unsafe paths.
+    evidence_globs:
+      - AGENTS.md
+      - tests/hermes_cli/test_gnothi_redaction.py

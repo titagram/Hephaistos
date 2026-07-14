@@ -1506,6 +1506,18 @@ class CLICommandsMixin:
         else:  # pragma: no cover - defensive (no live input loop)
             print("  /learn needs an active chat session to run.")
 
+    def _handle_gnothi_seauton_command(self, cmd: str):
+        """Queue a read-only, evidence-backed organism inspection turn."""
+        from agent.gnothi_prompt import build_gnothi_prompt
+
+        parts = cmd.strip().split(None, 1)
+        user_request = parts[1].strip() if len(parts) > 1 else ""
+        message = build_gnothi_prompt(user_request)
+        if hasattr(self, "_pending_input"):
+            self._pending_input.put(message)
+        else:  # pragma: no cover - defensive (no live input loop)
+            print("  /gnothi_seauton needs an active chat session to run.")
+
     def _handle_memory_command(self, cmd: str):
         """Handle /memory slash command — pending review + approval-gate toggle."""
         from hermes_cli.write_approval_commands import handle_pending_subcommand

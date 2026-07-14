@@ -14,6 +14,45 @@ implementare in futuro.
 - `docs/SOURCE_OF_TRUTH.md`
 - `docs/hades-backend-laravel-prompt.md`
 
+## Gnothi Seauton: handoff locale - 2026-07-14
+
+La slice locale vive sul branch `codex/gnothi-seauton`. Il Canonical Graph
+Foundation arrivato su `main` con `f426a18f7` e' stato integrato nel branch dal
+merge `fd86b4305`.
+
+Stato locale:
+
+- implementazione `gnothi_seauton` completa nei commit `b5eb8b50c` -
+  `d8e8968ab`;
+- upload capability-gated e deduplicato della revisione corrente nel commit
+  `7547958e0`;
+- `scope=project|organism` sui due strumenti grafo esistenti, senza aggiungere
+  tool universali, nel commit `c316c4b4d`;
+- compatibilita' del fallback `project` congelata dalla regressione
+  `2c7ac4d3a`;
+- scope omesso ancora byte-compatible con il grafo progetto; il fallback
+  `organism` legge solo la revisione immutabile corrente;
+- nessuna operazione SSH, deploy, restart, migration o modifica database e'
+  stata eseguita da questa slice.
+
+Verifiche locali gia' superate:
+
+- contratto Canonical Graph locale: 38 test;
+- suite focalizzata Gnothi: 185 test e privacy smoke sull'artefatto reale;
+- sync artifact: 48 test;
+- provider Hades completo: 103 test, di cui 59 su graph/schema;
+- parita' cache background review: 3 test;
+- Ruff sui file modificati: pulito.
+
+Il solo Task 14 remoto resta assegnato alla task Codex
+`019f5060-716e-7442-8e77-83461773249c`. Il backend deve ancora registrare un
+commit che accetti e validi `hades.organism_graph.v1`, esponga
+`coverage.organism_graph`, indicizzi documenti bounded e implementi traversal
+`scope=organism`, preservando le route esistenti e il default `project`. Fino a
+quel momento il capability gate impedisce l'upload verso backend non
+compatibili; non c'e' alcun requisito di deployment per usare CLI, wiki e
+fallback locali.
+
 ## Nota operativa per dubbi backend
 
 Quando emergono dubbi sul contratto backend Laravel, si puo' riaprire in
@@ -7794,6 +7833,58 @@ Le osservazioni future su leggibilita' della memoria, doppia vista wiki
 umana/macchina, architettura multi-azienda e miglioramento memory-first di
 Platon sono raccolte in `docs/hades-backend-product-backlog.md`. Restano temi
 di discovery separati e non sono ancora specifiche implementative approvate.
+
+# 2026-07-14 — Gnothi Seauton locale e confine backend
+
+La slice locale `gnothi_seauton` e' stata sviluppata nel worktree isolato
+`Hephaistos-gnothi-seauton`, branch `codex/gnothi-seauton`, a partire da
+`faee5b9d9`. La serie implementativa registrata prima dell'E2E va da
+`b5eb8b50c` a `e0a60ca13`; il test reale e questa nota sono nel commit
+`test(gnothi): verify complete organism awareness`.
+
+Copertura locale completata:
+
+- contratto `hades.organism_graph.v1`, redazione e revisioni immutabili;
+- collector source, capability, runtime, contratti, dipendenze ed esperienza;
+- builder, query `status/inspect/explain/diff`, wiki derivata e CLI locale;
+- `/gnothi_seauton` read-only su CLI classica, gateway e TUI senza modificare
+  system prompt o tool schema a conversazione avviata;
+- fingerprint economici, drift per dominio e rebuild mirato;
+- E2E con checkout, skill, plugin, MCP, dipendenza ed evento temporanei.
+
+Verifiche locali registrate:
+
+- suite focalizzate dei task intermedi: tutte verdi;
+- regressione drift/collector/CLI: `23 passed`;
+- primo E2E rosso su lookup ambiguo per label, corretto usando l'ID stabile;
+- secondo E2E rosso per assenza di `coverage_changes` nel diff, corretto nel
+  query layer;
+- terzo E2E rosso per creazione involontaria di `hades_backend.db` durante una
+  lettura runtime, corretto evitando l'inizializzazione del DB assente;
+- E2E e query/collector dopo le correzioni: `10 passed`.
+
+Confine con il lavoro backend remoto:
+
+- il backend resta di proprieta' della task Codex
+  `019f5060-716e-7442-8e77-83461773249c`, branch remoto
+  `feature/canonical-graph-foundation-20260712`;
+- questa task locale non ha eseguito SSH, deploy, restart, migration o scritture
+  database e non ha modificato projector canonical graph, explorer/query
+  service, dashboard graph reader, `ImportGraphToNeo4j` o i relativi test;
+- il commit backend conclusivo non e' stato letto da questa task per non
+  interferire con il controllo indipendente e il commit in corso. Va aggiunto
+  qui dalla task backend quando diventa autoritativo;
+- nessuna nuova route backend e' richiesta per l'uso locale. La futura
+  pubblicazione deve riusare il canonical graph con `scope=organism`, mantenere
+  compatibilita' con gli handle pubblici opachi e non esporre nodi tecnici,
+  path locali o contenuti source;
+- i task di upload/provider backend restano intenzionalmente differiti fino a
+  quando il contratto remoto e il relativo commit saranno disponibili.
+
+Requisiti di rilascio: nessun deploy per la slice locale. L'integrazione remota
+futura richiedera' una verifica congiunta delle route Hades v1 e dei test
+canonical-graph, ma non autorizza automaticamente migrazioni o modifiche ai
+dati esistenti.
 
 # 2026-07-13 — Task 8 canonical dashboard follow-up
 

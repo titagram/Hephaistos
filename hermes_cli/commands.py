@@ -124,6 +124,15 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Configuration
     CommandDef("sessions", "Browse and resume previous sessions", "Session"),
 
+    CommandDef(
+        "gnothi_seauton",
+        "Inspect Hades's evidence-backed self model",
+        "Info",
+        aliases=("know-thyself",),
+        args_hint="[status|inspect|explain|diff|wiki]",
+        subcommands=("status", "inspect", "explain", "diff", "wiki"),
+    ),
+
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
                cli_only=True),

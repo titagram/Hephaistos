@@ -9454,6 +9454,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 return "Could not start /learn — please try again."
 
+        if canonical == "gnothi_seauton":
+            # Read-only self-inspection is a normal agent turn so the system
+            # prompt and tool schema remain stable for prompt caching.
+            from agent.gnothi_prompt import build_gnothi_prompt
+
+            try:
+                event.text = build_gnothi_prompt(event.get_command_args().strip())
+                # Fall through to normal agent processing.
+            except Exception:
+                return "Could not start /gnothi_seauton — please try again."
+
         if canonical == "fast":
             return await self._handle_fast_command(event)
 

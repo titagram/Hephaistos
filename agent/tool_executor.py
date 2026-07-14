@@ -21,6 +21,9 @@ import threading
 import time
 from typing import Any, Optional
 
+from hermes_cli import __version__
+from hermes_cli.gnothi.events import emit_experience_event
+
 from agent.display import (
     KawaiiSpinner,
     build_tool_preview as _build_tool_preview,
@@ -68,6 +71,37 @@ def _budget_for_agent(agent) -> BudgetConfig:
 # Maximum number of concurrent worker threads for parallel tool execution.
 # Mirrors the constant in ``run_agent`` for tests/imports that look here.
 _MAX_TOOL_WORKERS = 8
+
+
+def _tool_failure_class(function_name: str, result: Any) -> str:
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except (TypeError, json.JSONDecodeError):
+        data = None
+    if function_name == "terminal" and isinstance(data, dict):
+        if data.get("exit_code") not in (None, 0):
+            return "ExitCode"
+    if function_name == "memory" and isinstance(data, dict):
+        if data.get("success") is False and "exceed the limit" in str(data.get("error") or ""):
+            return "Capacity"
+    return "ToolError"
+
+
+def _record_tool_failure_event(agent: Any, function_name: str, result: Any) -> None:
+    try:
+        emit_experience_event(
+            event_type="tool.failed",
+            generation_id=str(
+                getattr(agent, "generation_id", "") or f"release:{__version__}"
+            ),
+            component_id=f"tool:{function_name}",
+            capability_id=f"capability:{function_name}",
+            operation="tool_call",
+            failure_class=_tool_failure_class(function_name, result),
+            severity="error",
+        )
+    except Exception as exc:
+        logger.debug("gnothi experience emission failed: %s", type(exc).__name__)
 
 
 def _content_bytes(content: Any) -> int:
@@ -670,6 +704,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             duration = time.time() - start
             is_error, _ = _detect_tool_failure(function_name, result)
             if is_error:
+                _record_tool_failure_event(agent, function_name, result)
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
@@ -1500,6 +1535,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Log tool errors to the persistent error log so [error] tags
         # in the UI always have a corresponding detailed entry on disk.
         _is_error_result, _ = _detect_tool_failure(function_name, function_result)
+        if _is_error_result and not _execution_blocked:
+            _record_tool_failure_event(agent, function_name, function_result)
         # The agent-runtime tools above (todo, session_search, memory,
         # context-engine, memory-manager, clarify, delegate_task) are
         # dispatched inline — they never reach handle_function_call, so the
