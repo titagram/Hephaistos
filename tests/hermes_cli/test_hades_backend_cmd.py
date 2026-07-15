@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,52 @@ def test_backend_default_capabilities_include_project_wiki_refresh():
 
     assert "populate_project_wiki" in cmd._detect_default_capabilities()
     assert "populate_project_wiki" in cmd.AUTO_JOB_CAPABILITIES
+
+
+def test_project_token_can_be_read_from_stdin_without_cli_argument(monkeypatch):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    monkeypatch.setattr(cmd.sys, "stdin", io.StringIO("secret-bootstrap-token\n"))
+
+    token = cmd._project_token_from_args(
+        SimpleNamespace(project_token=None, project_token_stdin=True)
+    )
+
+    assert token == "secret-bootstrap-token"
+
+
+def test_project_token_from_stdin_rejects_empty_input(monkeypatch):
+    import pytest
+    import hermes_cli.hades_backend_cmd as cmd
+
+    monkeypatch.setattr(cmd.sys, "stdin", io.StringIO("\n"))
+
+    with pytest.raises(ValueError, match="token is empty"):
+        cmd._project_token_from_args(
+            SimpleNamespace(project_token=None, project_token_stdin=True)
+        )
+
+
+def test_backend_setup_reports_empty_stdin_token_without_traceback(
+    monkeypatch, capsys
+):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    monkeypatch.setattr(cmd.sys, "stdin", io.StringIO("\n"))
+
+    rc = cmd._cmd_setup(
+        SimpleNamespace(
+            url="https://backend.example",
+            project_token=None,
+            project_token_stdin=True,
+            project_id="proj_1",
+            label="test-agent",
+            non_interactive=True,
+        )
+    )
+
+    assert rc == 2
+    assert "token is empty" in capsys.readouterr().err
 
 
 def test_seed_current_backend_workspace_preserves_explicit_empty_capabilities(
@@ -573,6 +620,112 @@ def test_project_unlink_notifies_backend_before_marking_local_binding(monkeypatc
     assert fake.unlinked == [("wb_backend_1", {"project_id": "backend_proj", "agent_id": "agent_1"})]
     assert binding is not None
     assert binding.status == "unlinked"
+
+
+def test_project_unlink_local_only_retires_stale_binding_without_backend_call(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import projects_db as pdb
+    import hermes_cli.projects_cmd as projects_cmd
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with pdb.connect_closing() as conn:
+        project_id = pdb.create_project(
+            conn, name="Demo", folders=[str(workspace)], primary_path=str(workspace)
+        )
+    with hdb.connect_closing() as conn:
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="deleted_backend_project",
+            agent_id="stale_agent",
+            local_project_id=project_id,
+            workspace_fingerprint="wf_stale",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_stale",
+        )
+
+    monkeypatch.setattr(
+        projects_cmd,
+        "_backend_client_from_config",
+        lambda: (_ for _ in ()).throw(AssertionError("backend must not be called")),
+    )
+
+    rc = projects_cmd.projects_command(
+        SimpleNamespace(
+            project_action="unlink",
+            project="demo",
+            path=str(workspace),
+            backend_workspace_binding_id="wb_stale",
+            local_only=True,
+            yes=True,
+        )
+    )
+
+    output = capsys.readouterr().out
+    with hdb.connect_closing() as conn:
+        binding = hdb.get_binding_for_backend_id(conn, "wb_stale")
+
+    assert rc == 0
+    assert "backend unchanged" in output
+    assert binding is not None
+    assert binding.status == "unlinked"
+
+
+def test_project_unlink_local_only_requires_explicit_yes(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli import projects_db as pdb
+    import hermes_cli.projects_cmd as projects_cmd
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with pdb.connect_closing() as conn:
+        project_id = pdb.create_project(
+            conn, name="Demo", folders=[str(workspace)], primary_path=str(workspace)
+        )
+    with hdb.connect_closing() as conn:
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="deleted_backend_project",
+            agent_id="stale_agent",
+            local_project_id=project_id,
+            workspace_fingerprint="wf_stale",
+            display_path="~/repo",
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id="wb_stale",
+        )
+
+    rc = projects_cmd.projects_command(
+        SimpleNamespace(
+            project_action="unlink",
+            project="demo",
+            path=str(workspace),
+            backend_workspace_binding_id="wb_stale",
+            local_only=True,
+            yes=False,
+        )
+    )
+
+    error = capsys.readouterr().err
+    with hdb.connect_closing() as conn:
+        binding = hdb.get_binding_for_backend_id(conn, "wb_stale")
+
+    assert rc == 2
+    assert "requires --yes" in error
+    assert binding is not None
+    assert binding.status == "linked"
 
 
 def test_hades_backend_benchmark_reports_compressed_large_artifact():

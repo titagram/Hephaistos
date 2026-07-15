@@ -111,6 +111,16 @@ def build_parser(
     p_unlink = sub.add_parser("unlink", help="Disable a Hades backend workspace binding")
     p_unlink.add_argument("project", help="Project id or slug")
     p_unlink.add_argument("--path", default=None, help="Workspace path (default: project primary path)")
+    p_unlink.add_argument(
+        "--backend-workspace-binding-id",
+        default=None,
+        help="Select a stale backend binding by id",
+    )
+    p_unlink.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Retire the local binding without contacting the backend (requires --yes)",
+    )
     p_unlink.add_argument("--yes", action="store_true", help="Proceed without an interactive confirmation")
 
     parser.set_defaults(_project_parser=parser)
@@ -383,14 +393,42 @@ def _cmd_unlink_backend(args, conn, proj) -> int:
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_runtime import workspace_fingerprint
 
-    agent = _default_backend_agent()
-    path = Path(args.path or proj.primary_path or ".").expanduser().resolve()
-    fp = workspace_fingerprint(path, agent.project_id)
+    local_only = bool(getattr(args, "local_only", False))
+    if local_only and not bool(getattr(args, "yes", False)):
+        print("project: --local-only requires --yes", file=sys.stderr)
+        return 2
+
+    backend_binding_id = str(
+        getattr(args, "backend_workspace_binding_id", None) or ""
+    ).strip()
     with hdb.connect_closing() as hconn:
-        binding = hdb.get_binding_for_fingerprint(hconn, fp)
-    if binding is None or binding.status != "linked":
+        if backend_binding_id:
+            binding = hdb.get_binding_for_backend_id(hconn, backend_binding_id)
+        else:
+            agent = _default_backend_agent()
+            path = Path(args.path or proj.primary_path or ".").expanduser().resolve()
+            fp = workspace_fingerprint(path, agent.project_id)
+            binding = hdb.get_binding_for_fingerprint(hconn, fp)
+    if binding is None or binding.status not in {"linked", "auth_failed"}:
         print(f"project: no linked Hades backend workspace for {proj.slug}", file=sys.stderr)
         return 1
+    if backend_binding_id and binding.local_project_id != proj.id:
+        print(
+            "project: selected backend binding belongs to a different local project",
+            file=sys.stderr,
+        )
+        return 2
+
+    if local_only:
+        with hdb.connect_closing() as hconn:
+            hdb.mark_binding_unlinked(hconn, binding.workspace_fingerprint)
+        print(
+            f"Unlinked {proj.slug} locally from backend workspace "
+            f"{binding.backend_workspace_binding_id} (backend unchanged)"
+        )
+        return 0
+
+    agent = _default_backend_agent()
     try:
         _backend_client_from_config().unlink_workspace(
             binding.backend_workspace_binding_id,
@@ -401,7 +439,7 @@ def _cmd_unlink_backend(args, conn, proj) -> int:
         print(f"project: backend unlink failed: {redact_secret(str(exc))}", file=sys.stderr)
         return 1
     with hdb.connect_closing() as hconn:
-        hdb.mark_binding_unlinked(hconn, fp)
+        hdb.mark_binding_unlinked(hconn, binding.workspace_fingerprint)
     print(f"Unlinked {proj.slug} from backend workspace {binding.backend_workspace_binding_id}")
     return 0
 

@@ -70,14 +70,26 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
 
     setup = sub.add_parser("setup", help="Register this local Hades agent with the backend")
     setup.add_argument("--url", required=True, help="Backend base URL")
-    setup.add_argument("--project-token", required=True, help="Project-scoped bootstrap token")
+    setup_token = setup.add_mutually_exclusive_group(required=True)
+    setup_token.add_argument("--project-token", help="Project-scoped bootstrap token")
+    setup_token.add_argument(
+        "--project-token-stdin",
+        action="store_true",
+        help="Read the project-scoped bootstrap token from standard input",
+    )
     setup.add_argument("--project-id", required=True, help="Backend project id")
     setup.add_argument("--label", default=None, help="Local agent label")
     setup.add_argument("--non-interactive", action="store_true")
 
     bootstrap = sub.add_parser("bootstrap", help="Tokenized backend setup, project link, and initial sync")
     bootstrap.add_argument("--url", required=True, help="Backend base URL")
-    bootstrap.add_argument("--project-token", required=True, help="Project-scoped bootstrap token")
+    bootstrap_token = bootstrap.add_mutually_exclusive_group(required=True)
+    bootstrap_token.add_argument("--project-token", help="Project-scoped bootstrap token")
+    bootstrap_token.add_argument(
+        "--project-token-stdin",
+        action="store_true",
+        help="Read the project-scoped bootstrap token from standard input",
+    )
     bootstrap.add_argument("--project-id", required=True, help="Backend project id")
     bootstrap.add_argument("--workspace", default=None, help="Workspace path to link (default: current directory)")
     bootstrap.add_argument("--project-name", default=None, help="Local Hades project name to create when needed")
@@ -315,10 +327,24 @@ def _detect_default_capabilities() -> list[str]:
     ]
 
 
+def _project_token_from_args(args: argparse.Namespace) -> str:
+    token = str(getattr(args, "project_token", None) or "").strip()
+    if bool(getattr(args, "project_token_stdin", False)):
+        token = sys.stdin.readline().strip()
+    if not token:
+        raise ValueError("project bootstrap token is empty")
+    return token
+
+
 def _cmd_setup(args: argparse.Namespace) -> int:
     label = args.label or default_agent_label()
     agent_id = default_agent_id(args.project_id, label)
-    bootstrap = HadesBackendClient(args.url, args.project_token)
+    try:
+        project_token = _project_token_from_args(args)
+    except ValueError as exc:
+        print(f"backend setup: {exc}", file=sys.stderr)
+        return 2
+    bootstrap = HadesBackendClient(args.url, project_token)
     bootstrap.verify_token(project_id=args.project_id)
     registered = bootstrap.register_agent(
         project_id=args.project_id,
@@ -781,10 +807,16 @@ def _privacy_counts(response: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    try:
+        project_token = _project_token_from_args(args)
+    except ValueError as exc:
+        print(f"backend bootstrap: {exc}", file=sys.stderr)
+        return 2
     setup_rc = _cmd_setup(
         SimpleNamespace(
             url=args.url,
-            project_token=args.project_token,
+            project_token=project_token,
+            project_token_stdin=False,
             project_id=args.project_id,
             label=None,
             non_interactive=getattr(args, "non_interactive", False),
