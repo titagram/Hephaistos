@@ -954,6 +954,29 @@ def mark_binding_unlinked(conn: sqlite3.Connection, workspace_fingerprint: str) 
         )
 
 
+def update_workspace_binding_git_metadata(
+    conn: sqlite3.Connection,
+    workspace_fingerprint: str,
+    *,
+    git_remote_display: str,
+    git_remote_hash: str,
+    head_commit: str,
+) -> WorkspaceBinding | None:
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE workspace_bindings SET git_remote_display = ?, git_remote_hash = ?, "
+            "head_commit = ?, updated_at = ? WHERE workspace_fingerprint = ?",
+            (
+                git_remote_display,
+                git_remote_hash,
+                head_commit,
+                _now(),
+                workspace_fingerprint,
+            ),
+        )
+    return get_binding_for_fingerprint(conn, workspace_fingerprint)
+
+
 def get_route_auth_health(
     conn: sqlite3.Connection,
     *,

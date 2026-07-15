@@ -895,6 +895,8 @@ def test_cleanup_inbox_events_removes_stale_events(monkeypatch, tmp_path):
 
 
 def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, tmp_path):
+    import subprocess
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     from hermes_cli import hades_backend_db as hdb
@@ -903,7 +905,14 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     workspace = tmp_path / "repo"
     workspace.mkdir()
     (workspace / "README.md").write_text("hello\n", encoding="utf-8")
-    head_commit = "f" * 40
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=workspace, check=True)
+    head_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+    ).strip()
 
     with hdb.connect_closing() as conn:
         hdb.save_agent(
@@ -925,15 +934,20 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
             repo_root=str(workspace),
             git_remote_display="",
             git_remote_hash="",
-            head_commit=head_commit,
+            head_commit="f" * 40,
             backend_workspace_binding_id="wb_1",
         )
 
     class FakeClient:
         def __init__(self):
             self.artifacts = []
+            self.bindings = []
             self.results = []
             self.inbox_queries = []
+
+        def bind_workspace(self, **payload):
+            self.bindings.append(payload)
+            return {"workspace_binding_id": "wb_1"}
 
         def capabilities(self):
             return {"persephone_agent_queue_v1": True}
@@ -980,6 +994,7 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
 
     with hdb.connect_closing() as conn:
         events = hdb.list_inbox_events(conn, project_id="proj_1")
+        refreshed_binding = hdb.get_binding_for_backend_id(conn, "wb_1")
 
     assert result.exit_code == 0
     assert result.summary["completed"] == 1
@@ -991,6 +1006,9 @@ def test_sync_runner_uploads_artifacts_and_polls_persephone_inbox(monkeypatch, t
     assert fake.artifacts[0]["artifact"]["head_commit"] == head_commit
     assert fake.artifacts[0]["artifact"]["indexed_head_commit"] == head_commit
     assert fake.artifacts[0]["artifact"]["workspace_head_commit"] == head_commit
+    assert fake.bindings[0]["head_commit"] == head_commit
+    assert refreshed_binding is not None
+    assert refreshed_binding.head_commit == head_commit
     assert fake.results[0][0] == "job_tree"
     assert fake.inbox_queries == [
         {"project_id": "proj_1", "target_agent_id": "agent_1", "limit": 50}

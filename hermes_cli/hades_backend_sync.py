@@ -212,6 +212,25 @@ def run_backend_sync(
                 print(f"backend sync: failed to configure client for {binding.display_path}: {redact_secret(str(exc))}")
             continue
 
+        try:
+            binding, metadata_refreshed = _refresh_workspace_binding_metadata(
+                client, binding_agent, binding
+            )
+            if metadata_refreshed:
+                auth_observation["success"] = True
+        except Exception as exc:
+            if _is_unauthorized_error(exc):
+                auth_observation["unauthorized"] = True
+                auth_observation["unauthorized_errors"] += 1
+            sync_errors += 1
+            _record_sync_error(binding, str(exc))
+            if not quiet:
+                print(
+                    f"backend sync: failed to refresh workspace metadata for "
+                    f"{binding.display_path}: {redact_secret(str(exc))}"
+                )
+            continue
+
         if binding_agent.agent_id not in queue_capabilities:
             try:
                 advertised = client.capabilities()
@@ -570,6 +589,58 @@ def _sync_baseline_artifacts(
         failed += artifact_failed
         skipped += artifact_skipped
     return uploaded, failed, skipped, source_slice_candidates
+
+
+def _refresh_workspace_binding_metadata(
+    client: object,
+    agent: db.BackendAgent,
+    binding: db.WorkspaceBinding,
+) -> tuple[db.WorkspaceBinding, bool]:
+    from hermes_cli.hades_backend_runtime import git_metadata
+
+    metadata = git_metadata(Path(binding.repo_root))
+    head_commit = str(metadata.get("head_commit") or "").strip()
+    if not head_commit:
+        return binding, False
+    git_remote_display = str(metadata.get("git_remote_display") or "")
+    git_remote_hash = str(metadata.get("git_remote_hash") or "")
+    if (
+        head_commit == binding.head_commit
+        and git_remote_display == binding.git_remote_display
+        and git_remote_hash == binding.git_remote_hash
+    ):
+        return binding, False
+
+    bind_workspace = getattr(client, "bind_workspace", None)
+    if not callable(bind_workspace):
+        raise RuntimeError("backend client cannot refresh workspace metadata")
+    response = bind_workspace(
+        project_id=binding.project_id,
+        agent_id=agent.agent_id,
+        local_project_id=binding.local_project_id,
+        workspace_fingerprint=binding.workspace_fingerprint,
+        display_path=binding.display_path,
+        git_remote_display=git_remote_display,
+        git_remote_hash=git_remote_hash,
+        head_commit=head_commit,
+    )
+    returned_binding_id = str(
+        response.get("workspace_binding_id") or response.get("id") or ""
+    ) if isinstance(response, dict) else ""
+    if returned_binding_id and returned_binding_id != binding.backend_workspace_binding_id:
+        raise RuntimeError("backend returned a different workspace binding during metadata refresh")
+
+    with db.connect_closing() as conn:
+        refreshed = db.update_workspace_binding_git_metadata(
+            conn,
+            binding.workspace_fingerprint,
+            git_remote_display=git_remote_display,
+            git_remote_hash=git_remote_hash,
+            head_commit=head_commit,
+        )
+    if refreshed is None:
+        raise RuntimeError("local workspace binding disappeared during metadata refresh")
+    return refreshed, True
 
 
 def _supports_organism_graph(advertised: dict[str, object]) -> bool:
