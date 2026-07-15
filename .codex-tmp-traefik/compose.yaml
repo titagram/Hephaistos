@@ -14,7 +14,6 @@ services:
       - --certificatesresolvers.le.acme.storage=/acme.json
       - --certificatesresolvers.le.acme.httpchallenge=true
       - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
-      - --api.dashboard=true
       - --log.level=INFO
     ports:
       - "80:80"
@@ -22,6 +21,12 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /home/ubuntu/acme.json:/acme.json
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
     networks:
       - proxy
 

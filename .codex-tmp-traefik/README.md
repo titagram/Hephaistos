@@ -16,6 +16,8 @@ docker compose restart traefik
 
 The service uses the external `traefik_default` network and the host ACME state at `/home/ubuntu/acme.json`. Do not remove either resource during normal maintenance.
 
+The image is pinned, only ports 80 and 443 are published, the Docker socket is read-only, and container logs rotate at 10 MiB with five retained files. The Traefik dashboard is disabled because no managed dashboard router exists.
+
 ## Backups and rollback
 
 Before replacing or reconstructing the proxy, back up both the ACME file and `docker inspect traefik` under `/home/ubuntu/backups/traefik`. Keep ACME permissions and ownership unchanged.
