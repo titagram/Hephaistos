@@ -72,6 +72,37 @@ def test_wiki_verify_skill_requires_fresh_bounded_evidence() -> None:
         assert guard in text
 
 
+def test_wiki_verify_skill_never_verifies_truncated_markdown() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for guard in (
+        "`content_truncated` is explicitly `false`",
+        "missing or `true`",
+        "unseen full Markdown",
+        "do not call `hades backend wiki verify`",
+    ):
+        assert guard in text
+
+
+def test_wiki_verify_skill_maps_each_claim_to_schema_specific_proof() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for contract in (
+        "per-material-claim evidence ledger",
+        "claim -> evidence object(s) -> why the schema or file content proves the claim",
+        "schema-specific proof rules",
+        "`hades.git_tree.v1`",
+        "inventory, path, and hash",
+        "behavior, control flow, or runtime behavior",
+        "generic current artifact hash is not blanket semantic proof",
+        "zero code-verifiable material claims",
+        "unmapped material claim",
+    ):
+        assert contract in text
+
+    assert "Build final proof only from a current artifact or file hash" not in text
+
+
 def test_wiki_verify_openai_metadata_invokes_the_skill() -> None:
     metadata = yaml.safe_load(OPENAI_METADATA.read_text(encoding="utf-8"))
 
