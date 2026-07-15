@@ -16,6 +16,7 @@ Use this skill to review Hades wiki pages whose current revision is `needs_verif
 - Run from the local workspace linked to the intended Hades backend project.
 - Use the `terminal` tool to run the `hades` CLI and inspect local code. Use `read_file` and `search_files` when they are the safer way to inspect a complete file or locate symbols.
 - Treat invocation as permission to verify only fully supported current revisions. Do not edit, draft, or delete wiki content.
+- The registered agent token must have `verify_project_wiki`. If the backend denies that capability, stop: ask a project administrator to grant it and issue a new project-scoped bootstrap token, then run `hades backend setup` to re-register. Never try to upgrade an existing token automatically.
 
 ## How to Run
 
@@ -38,7 +39,7 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
 | Read the current revision | `hades backend wiki show PAGE_ID --json` |
 | Full-content gate | Continue only when `content_truncated` is explicitly `false` |
 | Verify with compare-and-swap | `hades backend wiki verify PAGE_ID --expected-revision REVISION_ID --evidence-file EVIDENCE_FILE --json` |
-| Mapped evidence | Every material claim must be mapped to schema-appropriate proof; submit only its bounded current `artifact_ref` or `file_ref` objects |
+| Mapped evidence | Every material claim must be mapped to schema-appropriate proof and serialized into the `claims` ledger of its bounded current `artifact_ref` or `file_ref` object |
 | Unsafe result | Defer without a verify call, or record a conflict returned by the backend |
 
 ## Procedure
@@ -77,7 +78,7 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
    claim -> evidence object(s) -> why the schema or file content proves the claim
    ```
 
-   For each material claim, record the exact claim, classification, proposed `artifact_ref` or `file_ref`, the inspected schema entry or source location, and the reasoning that connects that content to the claim. One evidence object may support multiple ledger rows, but every material claim needs its own explicit mapping. Defer the whole page for any unmapped material claim.
+   For each material claim, record the exact claim, classification, proposed `artifact_ref` or `file_ref`, the inspected schema entry or source location, and the reasoning that connects that content to the claim. One evidence object may support multiple ledger rows, but every material claim needs its own explicit mapping. Defer the whole page for any unmapped material claim. The final evidence file must serialize each supported ledger row into the supporting evidence object's `claims` array; a prose-only ledger is not sufficient.
 
 5. Use local code first. Inspect complete relevant files and follow direct callers, dependencies, configuration, tests, or routes needed to validate the claim. Hades graph or memory results are discovery only: they may identify candidate paths or symbols, but they are never final proof.
 
@@ -93,20 +94,36 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
 
    Never fabricate evidence, recycle a hash from an older revision, use evidence from another project or binding, or assume that a graph/memory hit proves a claim.
 
-7. Derive `EVIDENCE_FILE` from the completed ledger. Include only evidence objects mapped to at least one material claim, and verify that every material claim has a supported ledger row before continuing. The JSON array must be non-empty, contain at most 80 objects, and use only the allowed verification fields `kind`, `schema`, `sha256`, `hash`, and `path`. Prefer the smallest mapped set that proves all claims. Example shape:
+7. Derive `EVIDENCE_FILE` from the completed ledger. Include only evidence objects mapped to at least one material claim, and verify that every material claim has a supported ledger row before continuing. The JSON array must be non-empty, contain at most 80 objects, and use only the allowed verification fields `kind`, `schema`, `sha256`, `hash`, `path`, and `claims`. Every evidence object must contain between 1 and 8 claims, and the whole file may contain at most 80 claims total. Prefer the smallest mapped set that proves all claims.
+
+   Each `claims` item is an agent-authored attestation connecting that exact material claim to facts you personally inspected. It must contain exactly `claim` and `proof`; both values must be non-blank strings of at most 500 characters. `claim` states the page assertion supported by this evidence object. `proof` states what was inspected and why the referenced schema entry or full file content supports that assertion. The backend establishes only artifact or file integrity and freshness; it stores the agent attestation for auditability but does not independently certify its semantic reasoning.
+
+   Example shape:
 
    ```json
    [
      {
-       "kind": "file_ref",
-       "path": "src/example.py",
-       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-     },
-     {
-       "kind": "artifact_ref",
-       "schema": "hades.symbols.v1",
-       "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-     }
+      "kind": "file_ref",
+      "path": "src/example.py",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "claims": [
+        {
+          "claim": "ExampleService exposes the documented create operation.",
+          "proof": "The complete synchronized src/example.py file defines ExampleService.create with the documented parameters."
+        }
+      ]
+    },
+    {
+      "kind": "artifact_ref",
+      "schema": "hades.symbols.v1",
+      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      "claims": [
+        {
+          "claim": "ExampleService exists in the current workspace.",
+          "proof": "The inspected hades.symbols.v1 entry records ExampleService and its current source path."
+        }
+      ]
+    }
    ]
    ```
 
@@ -151,4 +168,4 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
 
 ## Verification
 
-Before reporting completion, confirm that pagination reached an empty `next_cursor`; every attempted verification had `content_truncated: false`, at least one code-verifiable material claim, and a complete per-claim ledger; every successful page now reports `verified_from_code`; every skipped page remains `needs_verification`; no fabricated, cross-project, unmapped, or blanket-semantic evidence was submitted; and the final counters equal the number of examined pages.
+Before reporting completion, confirm that pagination reached an empty `next_cursor`; every attempted verification had `content_truncated: false`, at least one code-verifiable material claim, and a complete per-claim ledger serialized into bounded `claims` arrays; every successful page now reports `verified_from_code`; every skipped page remains `needs_verification`; no fabricated, cross-project, unmapped, or blanket-semantic evidence was submitted; and the final counters equal the number of examined pages.

@@ -24,7 +24,7 @@
             "description": "Bootstrap token is valid"
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Error"
           }
         }
       }
@@ -43,6 +43,8 @@
     },
     "/api/hades/v1/capabilities": {
       "get": {
+        "summary": "Discover authenticated Hades protocol capabilities",
+        "description": "Requires an authenticated Hades agent token. `persephone_agent_queue_v1` advertises protocol support only; it is not a per-agent permission to mutate data.",
         "security": [
           {
             "bearerAuth": []
@@ -54,20 +56,13 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "persephone_agent_queue_v1": {
-                      "type": "boolean",
-                      "description": "True only when the project-scoped agent queue contract is implemented by this backend"
-                    }
-                  },
-                  "additionalProperties": true
-                },
-                "example": {
-                  "persephone_agent_queue_v1": false
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -354,8 +349,64 @@
                   "evidence_refs": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 80,
+                    "description": "Every evidence reference carries 1-8 agent-authored claim mappings; at most 80 claims are allowed across the complete request.",
                     "items": {
-                      "type": "object"
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "claims"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        "schema": {
+                          "type": "string",
+                          "maxLength": 191
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        "hash": {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        "path": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "claims": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 8,
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "claim",
+                              "proof"
+                            ],
+                            "properties": {
+                              "claim": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": ".*\\S.*"
+                              },
+                              "proof": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": ".*\\S.*"
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "additionalProperties": false
                     }
                   },
                   "verification_note": {
@@ -377,7 +428,20 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "The agent is not granted verify_project_wiki for this project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": {
+                    "code": "wiki_verification_capability_not_allowed",
+                    "message": "The verify_project_wiki capability is not enabled for this Hades agent."
+                  }
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/Error"
@@ -704,7 +768,21 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Request validation failure or an artifact-specific integrity failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ArtifactUploadErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ValidationErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
           }
         }
       }
@@ -1949,6 +2027,77 @@
           }
         }
       },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "required": [
+          "protocol_version",
+          "persephone_agent_queue_v1",
+          "project_id",
+          "agent_id",
+          "backend_agent_id",
+          "external_agent_id",
+          "capabilities",
+          "capability_names",
+          "limits",
+          "policy",
+          "routes",
+          "server_time"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "string"
+          },
+          "persephone_agent_queue_v1": {
+            "type": "boolean",
+            "const": true,
+            "description": "Protocol support advertisement, not a mutating-task permission."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "backend_agent_id": {
+            "type": "string"
+          },
+          "external_agent_id": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "capability_names": {
+            "type": "array",
+            "description": "Effective names granted to this agent. Wiki verification is allowed only when verify_project_wiki is present; existing tokens are not escalated automatically.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "routes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": true
+      },
       "PluginAgentWorkItem": {
         "type": "object",
         "required": [
@@ -2148,7 +2297,8 @@
             "type": "object"
           },
           "sha256": {
-            "type": "string"
+            "type": "string",
+            "description": "Optional SHA-256 of the recursively key-sorted compact JSON artifact, preserving list order, Unicode, slashes, and zero fractions."
           },
           "truncated": {
             "type": "boolean"
@@ -2156,6 +2306,42 @@
           "redactions": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "ArtifactUploadErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_graph_contract",
+                  "invalid_graph_artifact",
+                  "artifact_hash_mismatch",
+                  "artifact_schema_mismatch",
+                  "artifact_encoding_unsupported",
+                  "artifact_compressed_invalid",
+                  "artifact_compressed_size_mismatch",
+                  "artifact_uncompressed_size_mismatch",
+                  "artifact_uncompressed_hash_mismatch"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
           }
         }
       },

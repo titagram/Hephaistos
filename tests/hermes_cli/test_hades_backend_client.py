@@ -133,14 +133,28 @@ CLIENT_ROUTE_CASES = [
             "project_id": "proj_1",
             "workspace_binding_id": "wb_1",
             "expected_current_revision_id": "rev_1",
-            "evidence_refs": [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+            "evidence_refs": [
+                {
+                    "kind": "file_ref",
+                    "path": "src/app.py",
+                    "hash": "a" * 64,
+                    "claims": [{"claim": "claim", "proof": "proof"}],
+                }
+            ],
             "verification_note": "Checked against current tree",
         },
         "json_body": {
             "project_id": "proj_1",
             "workspace_binding_id": "wb_1",
             "expected_current_revision_id": "rev_1",
-            "evidence_refs": [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+            "evidence_refs": [
+                {
+                    "kind": "file_ref",
+                    "path": "src/app.py",
+                    "hash": "a" * 64,
+                    "claims": [{"claim": "claim", "proof": "proof"}],
+                }
+            ],
             "verification_note": "Checked against current tree",
         },
     },
@@ -721,6 +735,10 @@ def _openapi_routes() -> dict[tuple[str, str], dict]:
     }
 
 
+def _openapi_spec() -> dict:
+    return json.loads(OPENAPI_FIXTURE.read_text(encoding="utf-8"))
+
+
 def _json_request_body(request: httpx.Request) -> dict:
     if not request.content:
         return {}
@@ -799,6 +817,66 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
 
 
+def test_openapi_capability_contract_matches_authenticated_backend_discovery():
+    spec = _openapi_spec()
+    operation = spec["paths"]["/api/hades/v1/capabilities"]["get"]
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    capability_schema = spec["components"]["schemas"]["CapabilitiesResponse"]
+
+    assert schema == {"$ref": "#/components/schemas/CapabilitiesResponse"}
+    assert operation["responses"]["401"] == {
+        "$ref": "#/components/responses/Unauthorized"
+    }
+    assert "capability_names" in capability_schema["required"]
+    assert capability_schema["properties"]["persephone_agent_queue_v1"]["const"] is True
+    assert "verify_project_wiki" in capability_schema["properties"]["capability_names"][
+        "description"
+    ]
+    assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"] == {
+        "$ref": "#/components/responses/Error"
+    }
+
+
+def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
+    spec = _openapi_spec()
+    schema = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"][
+        "requestBody"
+    ]["content"]["application/json"]["schema"]
+    evidence = schema["properties"]["evidence_refs"]
+    ref = evidence["items"]
+    claims = ref["properties"]["claims"]
+    mapping = claims["items"]
+
+    assert evidence["maxItems"] == 80
+    assert set(ref["properties"]) == {"kind", "schema", "sha256", "hash", "path", "claims"}
+    assert ref["additionalProperties"] is False
+    assert claims["minItems"] == 1
+    assert claims["maxItems"] == 8
+    assert mapping["required"] == ["claim", "proof"]
+    assert mapping["additionalProperties"] is False
+    assert mapping["properties"]["claim"]["maxLength"] == 500
+    assert mapping["properties"]["proof"]["maxLength"] == 500
+    forbidden = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"][
+        "responses"
+    ]["403"]
+    assert forbidden["content"]["application/json"]["example"]["error"]["code"] == (
+        "wiki_verification_capability_not_allowed"
+    )
+
+
+def test_openapi_artifact_hash_contract_matches_backend_canonical_rules():
+    spec = _openapi_spec()
+    schemas = spec["components"]["schemas"]
+    description = schemas["ArtifactUploadRequest"]["properties"]["sha256"]["description"]
+    error_codes = schemas["ArtifactUploadErrorResponse"]["properties"]["error"][
+        "properties"
+    ]["code"]["enum"]
+
+    assert "recursively key-sorted compact JSON" in description
+    assert "preserving list order, Unicode, slashes, and zero fractions" in description
+    assert "artifact_hash_mismatch" in error_codes
+
+
 def test_wiki_client_methods_use_exact_bounded_backend_contract():
     from hermes_cli.hades_backend_client import HadesBackendClient
 
@@ -839,7 +917,14 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
         project_id="p",
         workspace_binding_id="w",
         expected_current_revision_id="rev",
-        evidence_refs=[{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+        evidence_refs=[
+            {
+                "kind": "file_ref",
+                "path": "src/app.py",
+                "hash": "a" * 64,
+                "claims": [{"claim": "claim", "proof": "proof"}],
+            }
+        ],
         verification_note="Checked against current tree",
     ) == {"ok": True}
 
@@ -873,7 +958,12 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
         "workspace_binding_id": "w",
         "expected_current_revision_id": "rev",
         "evidence_refs": [
-            {"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}
+            {
+                "kind": "file_ref",
+                "path": "src/app.py",
+                "hash": "a" * 64,
+                "claims": [{"claim": "claim", "proof": "proof"}],
+            }
         ],
         "verification_note": "Checked against current tree",
     }

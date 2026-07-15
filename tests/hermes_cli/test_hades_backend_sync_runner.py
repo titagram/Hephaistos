@@ -471,6 +471,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     assert fake.pull_upload_counts == [0]
     assert "read_source_slice" in fake.pull_payloads[0]["capabilities"]
     assert "populate_project_wiki" in fake.pull_payloads[0]["capabilities"]
+    assert "verify_project_wiki" in fake.pull_payloads[0]["capabilities"]
     graph_upload = next(upload for upload in fake.uploads if upload["schema"] == "hades.php_graph.v1")
     graph = graph_upload["artifact"]
     node_ids = {node["id"] for node in graph["nodes"]}
@@ -1602,6 +1603,25 @@ def test_git_tree_artifact_omits_sensitive_ignored_binary_and_large_files(tmp_pa
     assert artifact["retention_class"] == "source_metadata"
     assert artifact["redactions"] == len(artifact["omitted"])
     assert "super-secret-token" not in str(artifact)
+
+
+def test_artifact_payload_hash_matches_backend_cross_language_canonical_vector():
+    from hermes_cli.hades_backend_sync import _artifact_payload_hash
+
+    payload = {
+        "schema": "hades.git_tree.v1",
+        "metadata": {
+            "ratio": 1.0,
+            "labels": ["β", "a/b"],
+            "nested": {"z": "last", "a": "first"},
+        },
+        "head_commit": "a" * 40,
+        "files": [{"sha256": "1" * 64, "path": "src/Foo.php"}],
+    }
+
+    assert _artifact_payload_hash(payload) == (
+        "b8454008f3c25265974e8f97e2a24279af1e9fcdc959503e4621134472897be9"
+    )
 
 
 def test_git_tree_artifact_includes_structured_project_index(tmp_path):

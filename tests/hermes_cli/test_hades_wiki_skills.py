@@ -103,6 +103,35 @@ def test_wiki_verify_skill_maps_each_claim_to_schema_specific_proof() -> None:
     assert "Build final proof only from a current artifact or file hash" not in text
 
 
+def test_wiki_verify_skill_serializes_bounded_agent_attestations_per_evidence_ref() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for contract in (
+        '"claims": [',
+        '"claim":',
+        '"proof":',
+        "between 1 and 8 claims",
+        "at most 80 claims total",
+        "agent-authored attestation",
+        "backend establishes only artifact or file integrity and freshness",
+        "exactly `claim` and `proof`",
+    ):
+        assert contract in text
+
+
+def test_wiki_verify_skill_requires_manual_verification_capability_grant() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for contract in (
+        "`verify_project_wiki`",
+        "project administrator",
+        "new project-scoped bootstrap token",
+        "`hades backend setup`",
+        "Never try to upgrade an existing token automatically",
+    ):
+        assert contract in text
+
+
 def test_wiki_verify_skill_has_consistent_mapped_evidence_guidance() -> None:
     text = SKILL.read_text(encoding="utf-8")
 

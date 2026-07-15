@@ -16,6 +16,9 @@ from hermes_cli.hades_backend_client import redact_secret, validate_wiki_page_id
 WIKI_JSON_MAX_BYTES = 256_000
 WIKI_CONTENT_MAX_CHARS = 24_000
 WIKI_EVIDENCE_MAX_REFS = 80
+WIKI_EVIDENCE_MAX_CLAIMS_PER_REF = 8
+WIKI_EVIDENCE_MAX_TOTAL_CLAIMS = 80
+WIKI_EVIDENCE_CLAIM_MAX_CHARS = 500
 WIKI_NOTE_MAX_CHARS = 2_000
 WIKI_SLUG_MAX_CHARS = 255
 WIKI_TITLE_MAX_CHARS = 255
@@ -29,7 +32,9 @@ _DRAFT_FIELDS = (
 _DRAFT_EVIDENCE_FIELDS = frozenset(
     {"kind", "schema", "sha256", "hash", "path", "bytes", "raw_source_included"}
 )
-_VERIFICATION_EVIDENCE_FIELDS = frozenset({"kind", "schema", "sha256", "hash", "path"})
+_VERIFICATION_EVIDENCE_FIELDS = frozenset(
+    {"kind", "schema", "sha256", "hash", "path", "claims"}
+)
 _HEX_SHA256 = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 _SLUG = re.compile(r"\A[a-z0-9][a-z0-9/-]*\Z")
 _WINDOWS_DRIVE = re.compile(r"\A[A-Za-z]:")
@@ -113,6 +118,8 @@ def _bounded_verification_evidence_refs(value: Any) -> list[Any]:
         raise ValueError("wiki verification requires at least one evidence ref")
     if len(value) > WIKI_EVIDENCE_MAX_REFS:
         raise ValueError(f"wiki evidence exceeds {WIKI_EVIDENCE_MAX_REFS} refs")
+    normalized_refs = []
+    total_claims = 0
     for index, ref in enumerate(value):
         if not isinstance(ref, dict):
             raise ValueError(f"wiki evidence ref {index} must be a JSON object")
@@ -139,7 +146,52 @@ def _bounded_verification_evidence_refs(value: Any) -> list[Any]:
                 raise ValueError(f"wiki evidence ref {index} file_ref requires path")
             if "hash" not in ref and "sha256" not in ref:
                 raise ValueError(f"wiki evidence ref {index} file_ref requires hash or sha256")
-    return value
+        claims = ref.get("claims")
+        if (
+            not isinstance(claims, list)
+            or not 1 <= len(claims) <= WIKI_EVIDENCE_MAX_CLAIMS_PER_REF
+        ):
+            raise ValueError(
+                f"wiki evidence ref {index} claims must contain between 1 and "
+                f"{WIKI_EVIDENCE_MAX_CLAIMS_PER_REF} claims"
+            )
+        normalized_claims = []
+        for claim_index, mapping in enumerate(claims):
+            if not isinstance(mapping, dict) or set(mapping) != {"claim", "proof"}:
+                raise ValueError(
+                    f"wiki evidence ref {index} claim {claim_index} must contain "
+                    "exactly claim and proof"
+                )
+            claim = mapping["claim"]
+            proof = mapping["proof"]
+            if not isinstance(claim, str) or not isinstance(proof, str):
+                raise ValueError(
+                    f"wiki evidence ref {index} claim {claim_index} claim and proof "
+                    "must be strings"
+                )
+            claim = claim.strip()
+            proof = proof.strip()
+            if not claim or not proof:
+                raise ValueError(
+                    f"wiki evidence ref {index} claim {claim_index} claim and proof "
+                    "must be non-blank"
+                )
+            if (
+                len(claim) > WIKI_EVIDENCE_CLAIM_MAX_CHARS
+                or len(proof) > WIKI_EVIDENCE_CLAIM_MAX_CHARS
+            ):
+                raise ValueError(
+                    f"wiki evidence ref {index} claim {claim_index} claim and proof "
+                    f"must be at most {WIKI_EVIDENCE_CLAIM_MAX_CHARS} characters"
+                )
+            normalized_claims.append({"claim": claim, "proof": proof})
+        total_claims += len(normalized_claims)
+        if total_claims > WIKI_EVIDENCE_MAX_TOTAL_CLAIMS:
+            raise ValueError(
+                f"wiki evidence exceeds {WIKI_EVIDENCE_MAX_TOTAL_CLAIMS} total claims"
+            )
+        normalized_refs.append({**ref, "claims": normalized_claims})
+    return normalized_refs
 
 
 def _draft_payload(path_value: Any) -> dict[str, Any]:
@@ -209,6 +261,21 @@ def _current_agent_binding():
 
 
 def _redacted_error(exc: Exception, binding: Any = None) -> str:
+    code = str(getattr(exc, "code", "") or "")
+    if code == "wiki_verification_capability_not_allowed":
+        return (
+            "verification requires verify_project_wiki; ask a project administrator "
+            "to grant it and issue a new project-scoped bootstrap token, then re-register "
+            "this Hades agent with `hades backend setup`. Existing tokens are not upgraded "
+            "automatically"
+        )
+    if code == "wiki_capability_not_allowed":
+        return (
+            "wiki drafting requires populate_project_wiki; ask a project administrator "
+            "to grant it and issue a new project-scoped bootstrap token, then re-register "
+            "this Hades agent with `hades backend setup`. Existing tokens are not upgraded "
+            "automatically"
+        )
     message = redact_secret(str(exc))
     candidates = [Path.cwd()]
     repo_root = getattr(binding, "repo_root", None)
