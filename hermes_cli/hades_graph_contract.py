@@ -484,8 +484,11 @@ def _explicit_values(
 
 
 def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, Any]:
+    promoted_nodes = graph.pop("_canonical_declarations", None)
     raw_nodes_value = (
-        graph.get("symbols")
+        promoted_nodes
+        if isinstance(promoted_nodes, list)
+        else graph.get("symbols")
         if isinstance(graph.get("symbols"), list)
         else graph.get("nodes", [])
     )
@@ -901,6 +904,14 @@ def finalize_graph_artifact(
     )
     canonicalization.update(inventory_report)
     language = str(graph.get("language") or "unknown").strip().lower() or "unknown"
+    graph_languages = graph.get("languages")
+    languages = sorted(
+        {
+            str(item).strip().lower()
+            for item in graph_languages
+            if str(item).strip()
+        }
+    ) if isinstance(graph_languages, list) else [language]
     canonicalization_loss = bool(
         canonicalization["nodes_omitted"]
         or canonicalization["external_nodes_omitted"]
@@ -938,7 +949,7 @@ def finalize_graph_artifact(
             "fallback_reason": reason,
         },
         "coverage": {
-            "languages": [language],
+            "languages": languages or [language],
             "files_total": len(candidates) + len(omitted),
             "files_analyzed": len(candidates),
             "files_failed": len(omitted),

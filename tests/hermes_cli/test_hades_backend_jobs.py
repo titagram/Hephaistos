@@ -276,6 +276,105 @@ def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_p
     assert "return Booking::create" not in str(artifact["source_slice_candidates"])
 
 
+def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    php = tmp_path / "src" / "PhpController.php"
+    php.parent.mkdir(parents=True)
+    php.write_text(
+        "<?php\nnamespace App;\nclass PhpController {}\n",
+        encoding="utf-8",
+    )
+    typescript = tmp_path / "server" / "api.ts"
+    typescript.parent.mkdir(parents=True)
+    typescript.write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        "router.get('/health', healthHandler);\n"
+        "export function healthHandler() { return { ok: true }; }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_polyglot_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    assert result["status"] == "completed"
+    assert artifact["language"] == "polyglot"
+    assert artifact["graph_contract"]["coverage"]["languages"] == [
+        "php",
+        "typescript",
+    ]
+    assert {item.get("name") for item in artifact["symbols"]} >= {
+        "App\\PhpController",
+        "healthHandler",
+    }
+    assert any(
+        route.get("framework") == "express"
+        and route.get("method") == "GET"
+        and route.get("path") == "/health"
+        for route in artifact["routes"]
+    )
+    assert any(
+        node.get("kind") == "route" and node.get("uri") == "/health"
+        for node in artifact["nodes"]
+    )
+
+
+def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    source = tmp_path / "src"
+    source.mkdir()
+    for index in range(1_001):
+        (source / f"class_{index:04d}.py").write_text(
+            f"class Class{index}:\n    pass\n",
+            encoding="utf-8",
+        )
+
+    result = execute_job(
+        {
+            "job_id": "job_large_ast",
+            "capability": "populate_backend_ast",
+            "payload": {"max_symbols": 2_000, "max_edges": 2_000},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    assert "Class1000" in {item.get("name") for item in artifact["symbols"]}
+    assert artifact["graph_contract"]["coverage"]["files_analyzed"] == 1_001
+    assert not any(
+        item.get("reason") == "file_budget_exceeded"
+        for item in artifact.get("omitted", [])
+    )
+
+
+def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
+    from hermes_cli.hades_backend_jobs import _iter_workspace_files
+
+    (tmp_path / "a.py").write_text("12345", encoding="utf-8")
+    (tmp_path / "b.py").write_text("67890", encoding="utf-8")
+
+    files, omitted, truncated = _iter_workspace_files(
+        tmp_path,
+        max_files=10,
+        max_total_bytes=8,
+    )
+
+    assert [path.name for path in files] == ["a.py"]
+    assert omitted == [{"path": "b.py", "reason": "byte_budget_exceeded"}]
+    assert truncated is True
+
+
 def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

@@ -58,7 +58,13 @@ def _route_identity(item: dict[str, Any]) -> tuple[str, ...] | None:
     method = _text(
         item.get("method") or item.get("http_method") or item.get("verb")
     ).upper()
-    uri = _text(item.get("uri") or item.get("route") or item.get("route_path"))
+    path = _text(item.get("path"))
+    uri = _text(
+        item.get("uri")
+        or item.get("route")
+        or item.get("route_path")
+        or (path if path.startswith("/") else "")
+    )
     handler = _text(item.get("handler"))
     if not any((method, uri, handler)):
         return None
@@ -120,7 +126,13 @@ def _promote_routes(
         )
         if method:
             route["method"] = method.upper()
-        uri = _text(record.get("uri") or record.get("route") or record.get("route_path"))
+        path = _text(record.get("path"))
+        uri = _text(
+            record.get("uri")
+            or record.get("route")
+            or record.get("route_path")
+            or (path if path.startswith("/") else "")
+        )
         if uri:
             route["uri"] = uri
         existing = existing_by_identity.get(identity)
@@ -198,7 +210,9 @@ def promote_graph_inventories(graph: dict[str, Any]) -> dict[str, dict[str, int]
         declarations,
         test_files,
     )
-    graph[declarations_key] = declarations
+    # Keep adapter evidence byte-compatible. Canonicalization consumes this
+    # private working collection and removes it before returning the artifact.
+    graph["_canonical_declarations"] = declarations
     return {
         "route_inventory": {
             "detected": route_detected,
