@@ -4273,7 +4273,10 @@ def cmd_backend(args):
     """Configure Hades shared backend."""
     from hermes_cli.hades_backend_cmd import hades_backend_command
 
-    return hades_backend_command(args)
+    exit_code = hades_backend_command(args)
+    if exit_code:
+        raise SystemExit(exit_code)
+    return exit_code
 
 
 def cmd_gnothi(args):
