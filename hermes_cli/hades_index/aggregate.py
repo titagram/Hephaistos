@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hermes_cli.hades_index.inventory import inventory_coverage
+from hermes_cli.hades_index.inventory import (
+    inventory_coverage,
+    merge_inventory_coverage,
+)
 
 
 def _stable_json(value: object) -> str:
@@ -164,6 +167,31 @@ def merge_graph_artifacts(
         for test_file in (artifact["tests"].get("files") or [])
         if isinstance(test_file, dict)
     ]
+    child_inventory_reports = [
+        report
+        for artifact in artifacts
+        for report in (
+            artifact.get("_inventory_coverage"),
+            (
+                artifact["tests"].get("_inventory_coverage")
+                if isinstance(artifact.get("tests"), dict)
+                else None
+            ),
+        )
+        if isinstance(report, dict)
+    ]
+    detected_inventory = merge_inventory_coverage(
+        inventory_coverage(
+            routes_detected=all_routes,
+            tests_detected=all_test_files,
+        ),
+        *child_inventory_reports,
+        dimensions=("routes_detected", "tests_detected"),
+    )
+    retained_inventory = inventory_coverage(
+        routes_retained=routes,
+        tests_retained=tests.get("files") or [],
+    )
     graph = {
         "schema": "hades.code_graph.v1",
         "language": "polyglot" if len(languages) > 1 else (languages[0] if languages else "unknown"),
@@ -192,11 +220,9 @@ def merge_graph_artifacts(
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
-        "_inventory_coverage": inventory_coverage(
-            routes_detected=all_routes,
-            routes_retained=routes,
-            tests_detected=all_test_files,
-            tests_retained=tests.get("files") or [],
+        "_inventory_coverage": merge_inventory_coverage(
+            detected_inventory,
+            retained_inventory,
         ),
     }
     return graph

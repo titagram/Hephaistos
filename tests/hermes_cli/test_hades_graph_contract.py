@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli.hades_graph_contract import finalize_graph_artifact
 from hermes_cli.hades_index.aggregate import merge_graph_artifacts
+from hermes_cli.hades_index.inventory import inventory_coverage
 
 
 def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
@@ -275,6 +276,60 @@ def test_polyglot_coverage_reports_unique_route_and_test_inventory_drops():
     assert coverage["tests_promoted"] == 500
     assert coverage["tests_omitted"] == 50
     assert not any(key.startswith("_") for key in result)
+
+
+def test_polyglot_coverage_unions_duplicate_private_child_identities():
+    shared_routes = [
+        {"name": "orders.index", "method": "GET", "uri": "/orders"},
+        {"name": "orders.show", "method": "GET", "uri": "/orders/{id}"},
+    ]
+    shared_tests = [
+        {"path": "tests/OrdersIndexTest.py"},
+        {"path": "tests/OrdersShowTest.py"},
+    ]
+    artifacts = []
+    for language in ("python", "typescript"):
+        artifacts.append(
+            {
+                "language": language,
+                "framework": language,
+                "routes": shared_routes[:1],
+                "symbols": [],
+                "edges": [],
+                "tests": {
+                    "files": shared_tests[:1],
+                    "_inventory_coverage": inventory_coverage(
+                        tests_detected=shared_tests,
+                        tests_retained=shared_tests[:1],
+                    ),
+                },
+                "omitted": [],
+                "_inventory_coverage": inventory_coverage(
+                    routes_detected=shared_routes,
+                    routes_retained=shared_routes[:1],
+                ),
+            }
+        )
+
+    result = finalize_graph_artifact(
+        merge_graph_artifacts(
+            artifacts,
+            root="workspace",
+            max_symbols=5_000,
+            max_edges=10_000,
+        ),
+        payload={},
+        candidates=[],
+        omitted=[],
+    )
+
+    coverage = result["graph_contract"]["coverage"]
+    assert coverage["routes_promoted"] == 1
+    assert coverage["routes_omitted"] == 1
+    assert coverage["tests_promoted"] == 1
+    assert coverage["tests_omitted"] == 1
+    assert not any(key.startswith("_") for key in result)
+    assert not any(key.startswith("_") for key in result["tests"])
 
 
 def test_inventory_promotion_merges_an_existing_route_node_idempotently():

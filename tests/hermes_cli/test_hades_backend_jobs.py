@@ -534,6 +534,51 @@ def test_populate_backend_ast_counts_single_language_route_inventory_truncation(
     assert coverage["routes_omitted"] == 1
 
 
+def test_populate_backend_ast_preserves_polyglot_inventory_cap_coverage(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("routes.ts").write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        + "".join(
+            f"router.get('/route/{index}', handler{index});\n"
+            for index in range(501)
+        ),
+        encoding="utf-8",
+    )
+    source.joinpath("marker.py").write_text("value = 1\n", encoding="utf-8")
+    tests = workspace / "tests"
+    tests.mkdir()
+    for index in range(501):
+        tests.joinpath(f"behavior_{index:03d}.test.ts").write_text(
+            f"test('behavior {index}', () => {{}});\n",
+            encoding="utf-8",
+        )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_polyglot_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert artifact["language"] == "polyglot"
+    assert len(artifact["routes"]) == 500
+    assert len(artifact["tests"]["files"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 1
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 1
+    assert not any(key.startswith("_") for key in artifact)
+    assert not any(key.startswith("_") for key in artifact["tests"])
+
+
 def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

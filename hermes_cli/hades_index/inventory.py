@@ -104,13 +104,21 @@ def _test_identity(item: dict[str, Any]) -> tuple[str, ...] | None:
     return ("path", path, name) if path else ("name", name)
 
 
-def _unique_identity_count(values: object, *, kind: str) -> int:
+_INVENTORY_KEYS = (
+    "routes_detected",
+    "routes_retained",
+    "tests_detected",
+    "tests_retained",
+)
+
+
+def _identity_tokens(values: object, *, kind: str) -> list[str]:
     if not isinstance(values, list):
-        return 0
+        return []
     identity_fn = _route_identity if kind == "route" else _test_identity
-    return len(
+    return sorted(
         {
-            identity
+            json.dumps(identity, separators=(",", ":"), ensure_ascii=False)
             for value in values
             if isinstance(value, dict)
             if (identity := identity_fn(value)) is not None
@@ -124,40 +132,56 @@ def inventory_coverage(
     routes_retained: object = None,
     tests_detected: object = None,
     tests_retained: object = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Count inventory coverage by canonical identity, never by raw records."""
 
+    identities = {
+        "routes_detected": _identity_tokens(routes_detected, kind="route"),
+        "routes_retained": _identity_tokens(routes_retained, kind="route"),
+        "tests_detected": _identity_tokens(tests_detected, kind="test"),
+        "tests_retained": _identity_tokens(tests_retained, kind="test"),
+    }
     return {
-        "routes_detected": _unique_identity_count(
-            routes_detected, kind="route"
-        ),
-        "routes_retained": _unique_identity_count(
-            routes_retained, kind="route"
-        ),
-        "tests_detected": _unique_identity_count(tests_detected, kind="test"),
-        "tests_retained": _unique_identity_count(tests_retained, kind="test"),
+        **{key: len(values) for key, values in identities.items()},
+        "_identities": identities,
     }
 
 
-def merge_inventory_coverage(*reports: object) -> dict[str, int]:
+def merge_inventory_coverage(
+    *reports: object,
+    dimensions: tuple[str, ...] = _INVENTORY_KEYS,
+) -> dict[str, Any]:
     """Merge partial private reports without double-counting shared inventory."""
 
-    keys = (
-        "routes_detected",
-        "routes_retained",
-        "tests_detected",
-        "tests_retained",
-    )
-    return {
-        key: max(
-            (
-                int(report.get(key) or 0)
+    keys = tuple(key for key in dimensions if key in _INVENTORY_KEYS)
+    identities: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
+    for key in keys:
+        identity_values = sorted(
+            {
+                value
                 for report in reports
                 if isinstance(report, dict)
-            ),
-            default=0,
+                if isinstance(report.get("_identities"), dict)
+                for value in (report["_identities"].get(key) or [])
+                if isinstance(value, str)
+            }
         )
-        for key in keys
+        identities[key] = identity_values
+        counts[key] = max(
+            len(identity_values),
+            max(
+                (
+                    int(report.get(key) or 0)
+                    for report in reports
+                    if isinstance(report, dict)
+                ),
+                default=0,
+            ),
+        )
+    return {
+        **counts,
+        "_identities": identities,
     }
 
 
