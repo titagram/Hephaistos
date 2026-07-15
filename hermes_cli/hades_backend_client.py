@@ -284,6 +284,24 @@ class HadesBackendClient:
             raise ValueError("workspace binding id is required")
         return self._request("POST", f"workspaces/{clean}/unlink", json_body=payload)
 
+    def wiki_pages(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "wiki/pages", params=payload)
+
+    def wiki_page(self, wiki_page_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(wiki_page_id or "").strip()
+        if not clean:
+            raise ValueError("wiki page id is required")
+        return self._request("GET", f"wiki/pages/{clean}", params=payload)
+
+    def create_wiki_draft(self, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", "wiki/pages", json_body=payload)
+
+    def verify_wiki_page(self, wiki_page_id: str, **payload: Any) -> dict[str, Any]:
+        clean = str(wiki_page_id or "").strip()
+        if not clean:
+            raise ValueError("wiki page id is required")
+        return self._request("POST", f"wiki/pages/{clean}/verify", json_body=payload)
+
     def memory_snapshot(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "memory/snapshot", params=payload)
 

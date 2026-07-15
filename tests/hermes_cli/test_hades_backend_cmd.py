@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 from pathlib import Path
@@ -38,6 +39,16 @@ def _seed_current_backend_workspace(monkeypatch, tmp_path, *, capabilities=None)
             backend_workspace_binding_id="wb_1",
         )
     return workspace
+
+
+def _wiki_args(action: str, **kwargs):
+    values = {
+        "backend_action": "wiki",
+        "wiki_action": action,
+        "json": False,
+    }
+    values.update(kwargs)
+    return SimpleNamespace(**values)
 
 
 def test_backend_default_capabilities_include_project_wiki_refresh():
@@ -3383,3 +3394,422 @@ def test_backend_sync_records_last_error_when_backend_pull_fails(monkeypatch, tm
     assert last_error is not None
     assert last_error["workspace_binding_id"] == "wb_1"
     assert "super-secret-token" not in str(last_error)
+
+
+def test_backend_wiki_parser_exposes_review_workflow_and_help(capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    parser = argparse.ArgumentParser(prog="hades")
+    cmd.build_backend_parser(parser.add_subparsers(dest="command"), cmd_backend=lambda _args: 0)
+
+    listed = parser.parse_args(
+        ["backend", "wiki", "list", "--status", "needs_verification", "--limit", "20", "--json"]
+    )
+    shown = parser.parse_args(["backend", "wiki", "show", "page_1", "--json"])
+    drafted = parser.parse_args(["backend", "wiki", "draft", "--from-file", "page.json", "--json"])
+    verified = parser.parse_args(
+        [
+            "backend",
+            "wiki",
+            "verify",
+            "page_1",
+            "--expected-revision",
+            "rev_1",
+            "--evidence-file",
+            "refs.json",
+            "--note",
+            "Checked against current tree",
+            "--json",
+        ]
+    )
+
+    assert (listed.backend_action, listed.wiki_action, listed.status, listed.limit, listed.json) == (
+        "wiki",
+        "list",
+        "needs_verification",
+        20,
+        True,
+    )
+    assert (shown.wiki_action, shown.wiki_page_id, shown.json) == ("show", "page_1", True)
+    assert (drafted.wiki_action, drafted.from_file, drafted.json) == ("draft", "page.json", True)
+    assert (
+        verified.wiki_action,
+        verified.wiki_page_id,
+        verified.expected_revision,
+        verified.evidence_file,
+        verified.note,
+        verified.json,
+    ) == (
+        "verify",
+        "page_1",
+        "rev_1",
+        "refs.json",
+        "Checked against current tree",
+        True,
+    )
+
+    try:
+        parser.parse_args(["backend", "wiki", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    help_output = capsys.readouterr().out
+    assert "list" in help_output
+    assert "show" in help_output
+    assert "draft" in help_output
+    assert "verify" in help_output
+
+
+def test_backend_wiki_list_preserves_json_and_human_output_is_reviewable(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    list_response = {
+        "items": [
+            {
+                "id": "page_1",
+                "current_revision_id": "rev_1",
+                "title": "Overview",
+                "source_status": "needs_verification",
+                "evidence_count": 2,
+            }
+        ],
+        "next_cursor": "cursor_2",
+    }
+    show_response = {
+        "page": {
+            "id": "page_1",
+            "current_revision_id": "rev_1",
+            "title": "Overview",
+            "source_status": "needs_verification",
+            "evidence_refs": [{"kind": "artifact_ref"}],
+        }
+    }
+
+    class FakeClient:
+        def __init__(self):
+            self.list_calls = []
+            self.show_calls = []
+            self.closed = 0
+
+        def wiki_pages(self, **payload):
+            self.list_calls.append(payload)
+            return list_response
+
+        def wiki_page(self, page_id, **payload):
+            self.show_calls.append((page_id, payload))
+            return show_response
+
+        def close(self):
+            self.closed += 1
+
+    fake = FakeClient()
+    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: fake)
+
+    list_rc = cmd.hades_backend_command(
+        _wiki_args("list", status="needs_verification", limit=20, cursor=None, json=True)
+    )
+    assert json.loads(capsys.readouterr().out) == list_response
+
+    show_rc = cmd.hades_backend_command(_wiki_args("show", wiki_page_id=" page_1 "))
+    output = capsys.readouterr().out
+
+    assert list_rc == 0
+    assert show_rc == 0
+    assert fake.list_calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source_status": "needs_verification",
+            "limit": 20,
+        }
+    ]
+    assert fake.show_calls == [
+        ("page_1", {"project_id": "proj_1", "workspace_binding_id": "wb_1"})
+    ]
+    assert fake.closed == 2
+    assert "page_1" in output
+    assert "rev_1" in output
+    assert "Overview" in output
+    assert "needs_verification" in output
+    assert "Evidence: 1" in output
+
+
+def test_backend_wiki_list_human_output_includes_next_cursor(monkeypatch, tmp_path, capsys):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    class FakeClient:
+        def wiki_pages(self, **_payload):
+            return {
+                "items": [
+                    {
+                        "id": "page_1",
+                        "current_revision_id": "rev_1",
+                        "title": "Overview",
+                        "source_status": "needs_verification",
+                        "evidence_count": 2,
+                    }
+                ],
+                "next_cursor": "cursor_2",
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(
+        _wiki_args("list", status=None, limit=20, cursor=None, json=False)
+    )
+    output = capsys.readouterr().out
+
+    assert rc == 0
+    assert "page_1" in output
+    assert "rev_1" in output
+    assert "Overview" in output
+    assert "needs_verification" in output
+    assert "Evidence: 2" in output
+    assert "Next cursor: cursor_2" in output
+
+
+def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    draft_path = tmp_path / "page.json"
+    draft_path.write_text(
+        json.dumps(
+            {
+                "slug": "overview",
+                "title": "Overview",
+                "page_type": "overview",
+                "content_markdown": "# Overview",
+                "evidence_refs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    refs_path = tmp_path / "refs.json"
+    refs = [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}]
+    refs_path.write_text(json.dumps(refs), encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self):
+            self.drafts = []
+            self.verifications = []
+
+        def create_wiki_draft(self, **payload):
+            self.drafts.append(payload)
+            return {"page": {"id": "page_1"}, "revision": {"id": "rev_1"}}
+
+        def verify_wiki_page(self, page_id, **payload):
+            self.verifications.append((page_id, payload))
+            return {"page": {"id": "page_1"}, "revision": {"id": "rev_2"}}
+
+        def close(self):
+            pass
+
+    fake = FakeClient()
+    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: fake)
+
+    draft_rc = cmd.hades_backend_command(
+        _wiki_args("draft", from_file=str(draft_path), json=True)
+    )
+    draft_output = json.loads(capsys.readouterr().out)
+    verify_rc = cmd.hades_backend_command(
+        _wiki_args(
+            "verify",
+            wiki_page_id="page_1",
+            expected_revision="rev_1",
+            evidence_file=str(refs_path),
+            note="Checked against current tree",
+            json=True,
+        )
+    )
+    verify_output = json.loads(capsys.readouterr().out)
+
+    assert draft_rc == 0
+    assert verify_rc == 0
+    assert draft_output == {"page": {"id": "page_1"}, "revision": {"id": "rev_1"}}
+    assert verify_output == {"page": {"id": "page_1"}, "revision": {"id": "rev_2"}}
+    assert fake.drafts == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "slug": "overview",
+            "title": "Overview",
+            "page_type": "overview",
+            "content_markdown": "# Overview",
+            "evidence_refs": [],
+        }
+    ]
+    assert fake.verifications == [
+        (
+            "page_1",
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "expected_current_revision_id": "rev_1",
+                "evidence_refs": refs,
+                "verification_note": "Checked against current tree",
+            },
+        )
+    ]
+
+
+def test_backend_wiki_rejects_invalid_json_shapes_before_client_creation(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    invalid_draft = tmp_path / "draft.json"
+    invalid_draft.write_text("[]", encoding="utf-8")
+    invalid_refs = tmp_path / "refs.json"
+    invalid_refs.write_text("{}", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        wiki_actions,
+        "client_from_config",
+        lambda: (calls.append(True) or None),
+    )
+
+    draft_rc = cmd.hades_backend_command(
+        _wiki_args("draft", from_file=str(invalid_draft), json=True)
+    )
+    draft_error = capsys.readouterr().err
+    verify_rc = cmd.hades_backend_command(
+        _wiki_args(
+            "verify",
+            wiki_page_id="page_1",
+            expected_revision="rev_1",
+            evidence_file=str(invalid_refs),
+            note=None,
+            json=True,
+        )
+    )
+    verify_error = capsys.readouterr().err
+
+    assert draft_rc == 1
+    assert verify_rc == 1
+    assert calls == []
+    assert "JSON object" in draft_error
+    assert "JSON list" in verify_error
+
+
+def test_backend_wiki_rejects_over_limit_content_and_evidence_before_request(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    oversized_draft = tmp_path / "draft.json"
+    oversized_draft.write_text(
+        json.dumps(
+            {
+                "slug": "overview",
+                "title": "Overview",
+                "page_type": "overview",
+                "content_markdown": "x" * 24_001,
+                "evidence_refs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    oversized_refs = tmp_path / "refs.json"
+    oversized_refs.write_text(json.dumps([{}] * 81), encoding="utf-8")
+
+    class FakeClient:
+        def __getattr__(self, _name):
+            raise AssertionError("backend request must not be made")
+
+    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+
+    content_rc = cmd.hades_backend_command(
+        _wiki_args("draft", from_file=str(oversized_draft), json=True)
+    )
+    content_error = capsys.readouterr().err
+    refs_rc = cmd.hades_backend_command(
+        _wiki_args(
+            "verify",
+            wiki_page_id="page_1",
+            expected_revision="rev_1",
+            evidence_file=str(oversized_refs),
+            note=None,
+            json=True,
+        )
+    )
+    refs_error = capsys.readouterr().err
+
+    assert content_rc == 1
+    assert refs_rc == 1
+    assert "24,000" in content_error
+    assert "80" in refs_error
+
+
+def test_backend_wiki_requires_current_binding_before_client_creation(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.chdir(tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    calls = []
+    monkeypatch.setattr(
+        wiki_actions,
+        "client_from_config",
+        lambda: (calls.append(True) or None),
+    )
+
+    rc = cmd.hades_backend_command(
+        _wiki_args("list", status=None, limit=20, cursor=None, json=True)
+    )
+    error = capsys.readouterr().err
+
+    assert rc == 1
+    assert calls == []
+    assert "not configured" in error
+
+
+def test_backend_wiki_redacts_backend_errors(monkeypatch, tmp_path, capsys):
+    workspace = _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    class FakeClient:
+        def wiki_pages(self, **_payload):
+            raise RuntimeError(
+                f"token=super-secret-token rejected in workspace {workspace}"
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+
+    rc = cmd.hades_backend_command(
+        _wiki_args("list", status=None, limit=20, cursor=None, json=True)
+    )
+    error = capsys.readouterr().err
+
+    assert rc == 1
+    assert "super-secret-token" not in error
+    assert str(workspace) not in error
+    assert "token=***" in error

@@ -198,6 +198,25 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     tasks_explain = tasks_sub.add_parser("explain", help="Show cached details for one backend task work item")
     tasks_explain.add_argument("work_item_id", help="Backend work item id")
     tasks_explain.add_argument("--json", action="store_true", help="Emit machine-readable task detail")
+    wiki = sub.add_parser("wiki", help="Review, draft, and verify backend project wiki pages")
+    wiki_sub = wiki.add_subparsers(dest="wiki_action")
+    wiki_list = wiki_sub.add_parser("list", help="List bounded wiki pages for the current workspace")
+    wiki_list.add_argument("--status", default=None, help="Filter by current revision source status")
+    wiki_list.add_argument("--limit", type=int, default=20, help="Maximum pages to return (1-50)")
+    wiki_list.add_argument("--cursor", default=None, help="Opaque pagination cursor from the previous page")
+    wiki_list.add_argument("--json", action="store_true", help="Emit the backend wiki response as JSON")
+    wiki_show = wiki_sub.add_parser("show", help="Show one bounded current wiki revision")
+    wiki_show.add_argument("wiki_page_id", help="Backend wiki page id")
+    wiki_show.add_argument("--json", action="store_true", help="Emit the backend wiki response as JSON")
+    wiki_draft = wiki_sub.add_parser("draft", help="Create an auditable wiki draft from bounded JSON")
+    wiki_draft.add_argument("--from-file", required=True, help="Path to a bounded wiki draft JSON object")
+    wiki_draft.add_argument("--json", action="store_true", help="Emit the backend wiki response as JSON")
+    wiki_verify = wiki_sub.add_parser("verify", help="Verify a wiki page against bounded evidence JSON")
+    wiki_verify.add_argument("wiki_page_id", help="Backend wiki page id")
+    wiki_verify.add_argument("--expected-revision", required=True, help="Expected current revision id")
+    wiki_verify.add_argument("--evidence-file", required=True, help="Path to a bounded evidence-ref JSON list")
+    wiki_verify.add_argument("--note", default=None, help="Optional verification note")
+    wiki_verify.add_argument("--json", action="store_true", help="Emit the backend wiki response as JSON")
     jobs = sub.add_parser("jobs", help="List local backend jobs needing review")
     jobs.add_argument("--status", action="append", default=None, help="Filter by job status; repeatable")
     jobs.add_argument("--all", action="store_true", help="Show all local backend jobs")
@@ -2569,6 +2588,10 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         return _cmd_worker_setup(args)
     if action == "tasks":
         return _cmd_tasks(args)
+    if action == "wiki":
+        from hermes_cli.hades_wiki_actions import run_wiki_action
+
+        return run_wiki_action(args)
     if action == "jobs":
         return _cmd_jobs(args)
     if action == "approve-job":
@@ -2602,7 +2625,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|bootstrap-awareness|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|bootstrap-awareness|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|wiki|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

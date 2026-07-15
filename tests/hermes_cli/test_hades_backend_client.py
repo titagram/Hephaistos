@@ -631,11 +631,15 @@ CLIENT_ROUTE_CASES = [
 INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}
 
 INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
+    "create_wiki_draft",
     "presence_heartbeat",
     "presence_list",
     "code_claim_create",
     "code_claim_release",
     "code_claim_detect_conflicts",
+    "verify_wiki_page",
+    "wiki_page",
+    "wiki_pages",
 }
 
 
@@ -724,6 +728,104 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
 
     assert public_client_methods == covered_client_methods | INTENTIONALLY_UNMAPPED_CLIENT_METHODS
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
+
+
+def test_wiki_client_methods_use_exact_bounded_backend_contract():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.wiki_pages(
+        project_id="p",
+        workspace_binding_id="w",
+        source_status="needs_verification",
+        limit=20,
+    ) == {"ok": True}
+    assert client.wiki_page(
+        " page ",
+        project_id="p",
+        workspace_binding_id="w",
+    ) == {"ok": True}
+    assert client.create_wiki_draft(
+        project_id="p",
+        workspace_binding_id="w",
+        slug="overview",
+        title="Overview",
+        page_type="overview",
+        content_markdown="# Overview",
+        evidence_refs=[],
+    ) == {"ok": True}
+    assert client.verify_wiki_page(
+        " page ",
+        project_id="p",
+        workspace_binding_id="w",
+        expected_current_revision_id="rev",
+        evidence_refs=[{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+        verification_note="Checked against current tree",
+    ) == {"ok": True}
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/hades/v1/wiki/pages"),
+        ("GET", "/api/hades/v1/wiki/pages/page"),
+        ("POST", "/api/hades/v1/wiki/pages"),
+        ("POST", "/api/hades/v1/wiki/pages/page/verify"),
+    ]
+    assert _query_dict(requests[0]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "source_status": "needs_verification",
+        "limit": "20",
+    }
+    assert _query_dict(requests[1]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+    }
+    assert _json_request_body(requests[2]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "slug": "overview",
+        "title": "Overview",
+        "page_type": "overview",
+        "content_markdown": "# Overview",
+        "evidence_refs": [],
+    }
+    assert _json_request_body(requests[3]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "expected_current_revision_id": "rev",
+        "evidence_refs": [
+            {"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}
+        ],
+        "verification_note": "Checked against current tree",
+    }
+
+
+@pytest.mark.parametrize("method_name", ["wiki_page", "verify_wiki_page"])
+def test_wiki_client_page_methods_require_a_non_empty_page_id(method_name):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(lambda _request: pytest.fail("request must not be sent")),
+    )
+
+    with pytest.raises(ValueError, match="wiki page id is required"):
+        getattr(client, method_name)(
+            "  ",
+            project_id="p",
+            workspace_binding_id="w",
+        )
 
 
 def test_client_uses_hades_v1_routes_and_bearer_auth():
