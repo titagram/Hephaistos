@@ -9,6 +9,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
+from hermes_cli.hades_index.inventory import promote_graph_inventories
+
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v1"
 MAX_CANONICALIZATION_ISSUES = 50
 DEFAULT_MAX_GRAPH_NODES = 5_000
@@ -575,6 +577,7 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
             "semantic": semantic,
             "aliases": _node_aliases(raw_node, canonical_id),
             "synthetic": False,
+            "kind": _first_text(raw_node, "kind", "type").lower() or "symbol",
         })
 
     candidates_by_id: dict[str, dict[str, Any]] = {}
@@ -696,6 +699,7 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
                 "semantic": semantic,
                 "aliases": {locator, canonical_id},
                 "synthetic": True,
+                "kind": _first_text(node, "kind", "type").lower() or "symbol",
             }
         external_id_by_locator[locator] = canonical_id
 
@@ -717,9 +721,15 @@ def _canonicalize_graph(graph: dict[str, Any], *, max_nodes: int) -> dict[str, A
     ranked_candidates = sorted(
         candidates_by_id.values(),
         key=lambda candidate: (
-            0 if reference_counts[candidate["id"]] else 1,
+            0
+            if not candidate["synthetic"]
+            and candidate["kind"] in {"route", "http_endpoint", "endpoint", "test"}
+            else 1
+            if reference_counts[candidate["id"]]
+            else 2
+            if not candidate["synthetic"]
+            else 3,
             -reference_counts[candidate["id"]],
-            1 if candidate["synthetic"] else 0,
             candidate["id"],
         ),
     )
@@ -881,6 +891,7 @@ def finalize_graph_artifact(
     candidates: list[Path],
     omitted: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    inventory_report = promote_graph_inventories(graph)
     canonicalization = _canonicalize_graph(
         graph,
         # ``max_symbols`` bounds extractor declarations, not the canonical
@@ -888,6 +899,7 @@ def finalize_graph_artifact(
         # small test/index jobs do not lose valid declarations to placeholders.
         max_nodes=int(payload.get("max_graph_nodes") or DEFAULT_MAX_GRAPH_NODES),
     )
+    canonicalization.update(inventory_report)
     language = str(graph.get("language") or "unknown").strip().lower() or "unknown"
     canonicalization_loss = bool(
         canonicalization["nodes_omitted"]

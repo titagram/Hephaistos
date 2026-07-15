@@ -2,6 +2,8 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.hades_graph_contract import finalize_graph_artifact
 
 
@@ -79,6 +81,117 @@ def _finalize(
         candidates=[],
         omitted=omitted or [],
     )
+
+
+@pytest.mark.parametrize(
+    ("schema", "language"),
+    [
+        ("hades.php_graph.v1", "php"),
+        ("hades.code_graph.v1", "python"),
+        ("hades.code_graph.v1", "typescript"),
+    ],
+)
+def test_finalize_promotes_uniform_route_inventory_to_first_class_nodes(
+    schema: str,
+    language: str,
+):
+    result = _finalize(
+        {
+            "schema": schema,
+            "language": language,
+            "routes": [
+                {
+                    "framework": "fixture",
+                    "method": "GET",
+                    "uri": "/orders/{id}",
+                    "name": "orders.show",
+                    "handler": "OrderController@show",
+                    "path": "src/OrderController.php",
+                    "line": 12,
+                }
+            ],
+            "symbols": [
+                {"kind": "method", "name": "OrderController@show"}
+            ],
+            "edges": [
+                {
+                    "kind": "route_handler",
+                    "from": "route:orders.show",
+                    "to": "OrderController@show",
+                }
+            ],
+        },
+        max_symbols=20,
+    )
+
+    route = next(node for node in result["nodes"] if node.get("kind") == "route")
+    assert route["name"] == "orders.show"
+    assert route["uri"] == "/orders/{id}"
+    assert route["method"] == "GET"
+    assert route["handler"] == "OrderController@show"
+    assert result["canonicalization"]["route_inventory"] == {
+        "detected": 1,
+        "promoted": 1,
+        "merged": 0,
+    }
+
+
+def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
+    result = _finalize(
+        {
+            "schema": "hades.php_graph.v1",
+            "language": "php",
+            "symbols": [],
+            "edges": [],
+            "tests": {
+                "schema": "hades.test_map.v1",
+                "files": [
+                    {
+                        "path": "tests/AdminControllerBulkDeleteBehaviorTest.php",
+                        "framework": "phpunit",
+                        "cases": ["testBulkDeleteSkipsForbiddenRows"],
+                        "target_candidates": [
+                            "AdminControllerBulkDeleteBehavior"
+                        ],
+                    }
+                ],
+            },
+        },
+        max_symbols=20,
+    )
+
+    test_node = next(node for node in result["nodes"] if node.get("kind") == "test")
+    assert test_node["name"] == "AdminControllerBulkDeleteBehaviorTest"
+    assert test_node["framework"] == "phpunit"
+    assert result["canonicalization"]["test_inventory"] == {
+        "detected": 1,
+        "promoted": 1,
+        "merged": 0,
+    }
+
+
+def test_inventory_promotion_merges_an_existing_route_node_idempotently():
+    result = _finalize(
+        {
+            "routes": [
+                {"method": "GET", "uri": "/orders", "name": "orders.index"}
+            ],
+            "symbols": [
+                {"kind": "route", "name": "orders.index", "method": "GET"}
+            ],
+            "edges": [],
+        },
+        max_symbols=20,
+    )
+
+    routes = [node for node in result["nodes"] if node.get("kind") == "route"]
+    assert len(routes) == 1
+    assert routes[0]["uri"] == "/orders"
+    assert result["canonicalization"]["route_inventory"] == {
+        "detected": 1,
+        "promoted": 0,
+        "merged": 1,
+    }
 
 
 def test_canonicalizes_php_like_nodes_and_closes_legacy_edges_without_paths_in_ids():
