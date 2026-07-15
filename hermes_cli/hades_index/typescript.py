@@ -23,6 +23,7 @@ from hermes_cli.hades_backend_jobs import (
     TS_IMPORT_RE,
     MAX_LOG_EVENTS,
 )
+from hermes_cli.hades_index.inventory import inventory_coverage
 
 
 TS_EXPORT_DECL_RE = re.compile(
@@ -615,12 +616,13 @@ def build_graph(
     language = "prisma"
     if ts_files:
         language = "typescript" if any(path.suffix.lower() in {".ts", ".tsx"} for path in ts_files) else "javascript"
+    retained_routes = routes[:500]
     graph = {
         "schema": "hades.code_graph.v1",
         "language": language,
         "framework": framework,
         "root": workspace_root.name,
-        "routes": routes[:500],
+        "routes": retained_routes,
         "symbols": symbols,
         "edges": edges,
         "database": graph_database,
@@ -637,6 +639,10 @@ def build_graph(
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
+        "_inventory_coverage": inventory_coverage(
+            routes_detected=routes,
+            routes_retained=retained_routes,
+        ),
     }
     graph["summary"] = _ts_graph_summary(
         graph["routes"],
@@ -648,5 +654,4 @@ def build_graph(
         logs=logs,
     )
     return graph
-
 

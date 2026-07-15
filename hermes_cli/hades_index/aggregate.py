@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import Any
 
-from hermes_cli.hades_index.inventory import _route_identity, _test_identity
+from hermes_cli.hades_index.inventory import inventory_coverage
 
 
 def _stable_json(value: object) -> str:
@@ -22,20 +21,6 @@ def _stable_unique(values: list[Any]) -> list[Any]:
     for value in values:
         unique.setdefault(_stable_json(value), value)
     return [unique[key] for key in sorted(unique)]
-
-
-def _unique_inventory_count(
-    values: list[Any],
-    identity_fn: Callable[[dict[str, Any]], tuple[str, ...] | None],
-) -> int:
-    return len(
-        {
-            identity
-            for value in values
-            if isinstance(value, dict)
-            if (identity := identity_fn(value)) is not None
-        }
-    )
 
 
 def _round_robin_unique(
@@ -207,20 +192,11 @@ def merge_graph_artifacts(
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
-        "_inventory_coverage": {
-            "routes_detected": _unique_inventory_count(
-                all_routes,
-                _route_identity,
-            ),
-            "routes_retained": _unique_inventory_count(routes, _route_identity),
-            "tests_detected": _unique_inventory_count(
-                all_test_files,
-                _test_identity,
-            ),
-            "tests_retained": _unique_inventory_count(
-                tests.get("files") or [],
-                _test_identity,
-            ),
-        },
+        "_inventory_coverage": inventory_coverage(
+            routes_detected=all_routes,
+            routes_retained=routes,
+            tests_detected=all_test_files,
+            tests_retained=tests.get("files") or [],
+        ),
     }
     return graph

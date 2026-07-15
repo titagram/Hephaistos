@@ -19,6 +19,7 @@ from hermes_cli.hades_backend_jobs import (
     _snake_name,
     MAX_LOG_EVENTS,
 )
+from hermes_cli.hades_index.inventory import inventory_coverage
 
 
 PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
@@ -742,12 +743,13 @@ def build_graph(
     }
     framework = "python_web" if len(frameworks) > 1 else next(iter(frameworks), "python")
     graph_database = {**database, "tables": database["tables"][:500]}
+    retained_routes = routes[:500]
     graph = {
         "schema": "hades.code_graph.v1",
         "language": "python",
         "framework": framework,
         "root": workspace_root.name,
-        "routes": routes[:500],
+        "routes": retained_routes,
         "symbols": symbols,
         "edges": edges,
         "database": graph_database,
@@ -763,6 +765,10 @@ def build_graph(
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
+        "_inventory_coverage": inventory_coverage(
+            routes_detected=routes,
+            routes_retained=retained_routes,
+        ),
     }
     graph["summary"] = _py_graph_summary(
         graph["routes"],
@@ -774,5 +780,4 @@ def build_graph(
         logs=logs,
     )
     return graph
-
 

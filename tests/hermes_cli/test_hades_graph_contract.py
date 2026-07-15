@@ -223,6 +223,8 @@ def test_finalize_distinguishes_same_test_names_by_path_and_unions_collections()
         "promoted": 2,
         "merged": 1,
     }
+    assert result["graph_contract"]["coverage"]["tests_promoted"] == 2
+    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
 
 
 def test_polyglot_coverage_reports_unique_route_and_test_inventory_drops():

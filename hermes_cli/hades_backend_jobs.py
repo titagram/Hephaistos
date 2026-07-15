@@ -584,12 +584,21 @@ def _build_test_map(
     max_edges: int,
     max_file_bytes: int,
 ) -> tuple[dict[str, Any], bool]:
+    from hermes_cli.hades_index.inventory import inventory_coverage
+
     files: list[dict[str, Any]] = []
     truncated = False
-    for path in candidates:
+    test_candidates = [
+        path
+        for path in candidates
+        if _is_test_path(path.relative_to(workspace_root).as_posix())
+    ]
+    detected_files = [
+        {"path": path.relative_to(workspace_root).as_posix()}
+        for path in test_candidates
+    ]
+    for path in test_candidates:
         rel = path.relative_to(workspace_root).as_posix()
-        if not _is_test_path(rel):
-            continue
         if len(files) >= MAX_TEST_FILES:
             truncated = True
             break
@@ -655,6 +664,10 @@ def _build_test_map(
         "files": files,
         "truncated": truncated,
         "raw_source_included": False,
+        "_inventory_coverage": inventory_coverage(
+            tests_detected=detected_files,
+            tests_retained=files,
+        ),
     }, truncated
 
 

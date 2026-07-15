@@ -471,6 +471,69 @@ def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
     ]
 
 
+def test_populate_backend_ast_counts_single_language_test_inventory_truncation(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    tests = workspace / "tests"
+    tests.mkdir(parents=True)
+    for index in range(501):
+        tests.joinpath(f"test_behavior_{index:03d}.py").write_text(
+            f"def test_behavior_{index}():\n    pass\n",
+            encoding="utf-8",
+        )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_single_language_test_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert len(artifact["tests"]["files"]) == 500
+    assert artifact["tests"]["truncated"] is True
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 1
+
+
+def test_populate_backend_ast_counts_single_language_route_inventory_truncation(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("routes.ts").write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        + "".join(
+            f"router.get('/route/{index}', handler{index});\n"
+            for index in range(501)
+        ),
+        encoding="utf-8",
+    )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_single_language_route_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert len(artifact["routes"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 1
+
+
 def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 

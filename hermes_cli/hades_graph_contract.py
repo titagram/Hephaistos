@@ -9,7 +9,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
-from hermes_cli.hades_index.inventory import promote_graph_inventories
+from hermes_cli.hades_index.inventory import (
+    inventory_coverage,
+    merge_inventory_coverage,
+    promote_graph_inventories,
+)
 
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v1"
 MAX_CANONICALIZATION_ISSUES = 50
@@ -944,7 +948,22 @@ def finalize_graph_artifact(
 ) -> dict[str, Any]:
     effective_omissions = _deduplicate_omissions(graph.get("omitted"), omitted)
     graph["omitted"] = effective_omissions
-    aggregate_inventory = graph.pop("_inventory_coverage", None)
+    private_inventory = graph.pop("_inventory_coverage", None)
+    tests = graph.get("tests")
+    private_test_inventory = (
+        tests.pop("_inventory_coverage", None) if isinstance(tests, dict) else None
+    )
+    retained_inventory = inventory_coverage(
+        routes_detected=graph.get("routes"),
+        routes_retained=graph.get("routes"),
+        tests_detected=tests.get("files") if isinstance(tests, dict) else None,
+        tests_retained=tests.get("files") if isinstance(tests, dict) else None,
+    )
+    effective_inventory = merge_inventory_coverage(
+        retained_inventory,
+        private_inventory,
+        private_test_inventory,
+    )
     inventory_report = promote_graph_inventories(graph)
     canonicalization = _canonicalize_graph(
         graph,
@@ -987,30 +1006,13 @@ def finalize_graph_artifact(
         payload.get("head_commit") or payload.get("workspace_head_commit") or ""
     ).strip()
     branch = str(payload.get("branch") or payload.get("current_branch") or "").strip()
-    route_inventory = canonicalization["route_inventory"]
-    test_inventory = canonicalization["test_inventory"]
     files_total, files_analyzed, files_failed, files_budget_omitted = (
         _coverage_file_counts(candidates, effective_omissions)
     )
-    routes_promoted = int(route_inventory["promoted"]) + int(route_inventory["merged"])
-    tests_promoted = int(test_inventory["promoted"]) + int(test_inventory["merged"])
-    routes_detected = int(route_inventory["detected"])
-    tests_detected = int(test_inventory["detected"])
-    if isinstance(aggregate_inventory, dict):
-        routes_detected = int(
-            aggregate_inventory.get("routes_detected") or routes_detected
-        )
-        tests_detected = int(
-            aggregate_inventory.get("tests_detected") or tests_detected
-        )
-        routes_promoted = min(
-            routes_promoted,
-            int(aggregate_inventory.get("routes_retained") or 0),
-        )
-        tests_promoted = min(
-            tests_promoted,
-            int(aggregate_inventory.get("tests_retained") or 0),
-        )
+    routes_promoted = int(effective_inventory["routes_retained"])
+    tests_promoted = int(effective_inventory["tests_retained"])
+    routes_detected = int(effective_inventory["routes_detected"])
+    tests_detected = int(effective_inventory["tests_detected"])
     graph["head_commit"] = head or None
     graph["workspace_head_commit"] = head or None
     graph["canonicalization"] = canonicalization

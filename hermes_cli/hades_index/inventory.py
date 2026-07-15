@@ -104,6 +104,63 @@ def _test_identity(item: dict[str, Any]) -> tuple[str, ...] | None:
     return ("path", path, name) if path else ("name", name)
 
 
+def _unique_identity_count(values: object, *, kind: str) -> int:
+    if not isinstance(values, list):
+        return 0
+    identity_fn = _route_identity if kind == "route" else _test_identity
+    return len(
+        {
+            identity
+            for value in values
+            if isinstance(value, dict)
+            if (identity := identity_fn(value)) is not None
+        }
+    )
+
+
+def inventory_coverage(
+    *,
+    routes_detected: object = None,
+    routes_retained: object = None,
+    tests_detected: object = None,
+    tests_retained: object = None,
+) -> dict[str, int]:
+    """Count inventory coverage by canonical identity, never by raw records."""
+
+    return {
+        "routes_detected": _unique_identity_count(
+            routes_detected, kind="route"
+        ),
+        "routes_retained": _unique_identity_count(
+            routes_retained, kind="route"
+        ),
+        "tests_detected": _unique_identity_count(tests_detected, kind="test"),
+        "tests_retained": _unique_identity_count(tests_retained, kind="test"),
+    }
+
+
+def merge_inventory_coverage(*reports: object) -> dict[str, int]:
+    """Merge partial private reports without double-counting shared inventory."""
+
+    keys = (
+        "routes_detected",
+        "routes_retained",
+        "tests_detected",
+        "tests_retained",
+    )
+    return {
+        key: max(
+            (
+                int(report.get(key) or 0)
+                for report in reports
+                if isinstance(report, dict)
+            ),
+            default=0,
+        )
+        for key in keys
+    }
+
+
 def _copy_fields(item: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     return {
         key: item[key]
