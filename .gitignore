@@ -152,3 +152,6 @@ infographic/
 .hades-dev/**/trajectories/
 .hades-dev/tmp_remote_patch/
 .superpowers/sdd/progress.md
+
+# Host-only Traefik staging files; canonical config lives on the server.
+.codex-tmp-traefik/
