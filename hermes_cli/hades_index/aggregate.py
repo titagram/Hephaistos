@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
+
+from hermes_cli.hades_index.inventory import _route_identity, _test_identity
 
 
 def _stable_json(value: object) -> str:
@@ -19,6 +22,20 @@ def _stable_unique(values: list[Any]) -> list[Any]:
     for value in values:
         unique.setdefault(_stable_json(value), value)
     return [unique[key] for key in sorted(unique)]
+
+
+def _unique_inventory_count(
+    values: list[Any],
+    identity_fn: Callable[[dict[str, Any]], tuple[str, ...] | None],
+) -> int:
+    return len(
+        {
+            identity
+            for value in values
+            if isinstance(value, dict)
+            if (identity := identity_fn(value)) is not None
+        }
+    )
 
 
 def _round_robin_unique(
@@ -118,6 +135,12 @@ def merge_graph_artifacts(
     symbols = _round_robin_unique(artifacts, "symbols", limit=max_symbols)
     edges = _round_robin_unique(artifacts, "edges", limit=max_edges)
     routes = _round_robin_unique(artifacts, "routes", limit=500)
+    all_routes = [
+        route
+        for artifact in artifacts
+        for route in (artifact.get("routes") or [])
+        if isinstance(route, dict)
+    ]
     tables = _stable_unique(
         [
             table
@@ -148,6 +171,14 @@ def merge_graph_artifacts(
         for index, artifact in enumerate(artifacts)
         if isinstance(artifact.get("analysis"), dict)
     }
+    tests = _merge_test_maps(artifacts)
+    all_test_files = [
+        test_file
+        for artifact in artifacts
+        if isinstance(artifact.get("tests"), dict)
+        for test_file in (artifact["tests"].get("files") or [])
+        if isinstance(test_file, dict)
+    ]
     graph = {
         "schema": "hades.code_graph.v1",
         "language": "polyglot" if len(languages) > 1 else (languages[0] if languages else "unknown"),
@@ -159,7 +190,7 @@ def merge_graph_artifacts(
         "symbols": symbols,
         "edges": edges,
         "database": {"tables": tables},
-        "tests": _merge_test_maps(artifacts),
+        "tests": tests,
         "logs": _merge_log_maps(artifacts),
         "dependency_manifests": dependency_manifests,
         "analysis": analysis,
@@ -176,5 +207,20 @@ def merge_graph_artifacts(
         "redactions": len(omitted),
         "retention_class": "source_symbols",
         "raw_source_included": False,
+        "_inventory_coverage": {
+            "routes_detected": _unique_inventory_count(
+                all_routes,
+                _route_identity,
+            ),
+            "routes_retained": _unique_inventory_count(routes, _route_identity),
+            "tests_detected": _unique_inventory_count(
+                all_test_files,
+                _test_identity,
+            ),
+            "tests_retained": _unique_inventory_count(
+                tests.get("files") or [],
+                _test_identity,
+            ),
+        },
     }
     return graph

@@ -69,6 +69,54 @@ def _stable_json(value: object) -> str:
     )
 
 
+def _deduplicate_omissions(*collections: object) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for collection in collections:
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if isinstance(item, dict):
+                unique.setdefault(_stable_json(item), dict(item))
+    return [unique[key] for key in sorted(unique)]
+
+
+def _coverage_file_counts(
+    candidates: list[Path],
+    omissions: list[dict[str, Any]],
+) -> tuple[int, int, int, int]:
+    failed_reasons_by_path: dict[str, set[str]] = defaultdict(set)
+    for item in omissions:
+        path = _clean_text(item.get("path")).replace("\\", "/")
+        if path:
+            failed_reasons_by_path[path.removeprefix("./")].add(
+                _clean_text(item.get("reason"))
+            )
+    failed_paths_by_name: dict[str, list[str]] = defaultdict(list)
+    for failed_path in failed_reasons_by_path:
+        failed_paths_by_name[PurePosixPath(failed_path).name].append(failed_path)
+
+    def failed_path_for(candidate: Path) -> str:
+        candidate_path = candidate.as_posix()
+        for failed_path in failed_paths_by_name.get(candidate.name, []):
+            if candidate_path == failed_path or candidate_path.endswith(
+                f"/{failed_path}"
+            ):
+                return failed_path
+        return ""
+
+    candidate_failures = [failed_path_for(candidate) for candidate in candidates]
+    failed_candidate_paths = {path for path in candidate_failures if path}
+    analyzed = sum(1 for path in candidate_failures if not path)
+    failed = len(failed_reasons_by_path)
+    total = len(candidates) + failed - len(failed_candidate_paths)
+    budget_omitted = sum(
+        1
+        for reasons in failed_reasons_by_path.values()
+        if reasons & {"file_budget_exceeded", "byte_budget_exceeded"}
+    )
+    return total, analyzed, failed, budget_omitted
+
+
 def _hashed_id(prefix: str, value: object) -> str:
     return prefix + hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
 
@@ -894,6 +942,9 @@ def finalize_graph_artifact(
     candidates: list[Path],
     omitted: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    effective_omissions = _deduplicate_omissions(graph.get("omitted"), omitted)
+    graph["omitted"] = effective_omissions
+    aggregate_inventory = graph.pop("_inventory_coverage", None)
     inventory_report = promote_graph_inventories(graph)
     canonicalization = _canonicalize_graph(
         graph,
@@ -917,7 +968,7 @@ def finalize_graph_artifact(
         or canonicalization["external_nodes_omitted"]
         or canonicalization["edges_omitted"]
     )
-    bounded_input_loss = bool(graph.get("truncated")) or bool(omitted)
+    bounded_input_loss = bool(graph.get("truncated")) or bool(effective_omissions)
     if canonicalization["edges_emitted"] == 0:
         quality = "inventory_only"
         if canonicalization_loss:
@@ -938,14 +989,28 @@ def finalize_graph_artifact(
     branch = str(payload.get("branch") or payload.get("current_branch") or "").strip()
     route_inventory = canonicalization["route_inventory"]
     test_inventory = canonicalization["test_inventory"]
-    files_budget_omitted = sum(
-        1
-        for item in omitted
-        if str(item.get("reason") or "")
-        in {"file_budget_exceeded", "byte_budget_exceeded"}
+    files_total, files_analyzed, files_failed, files_budget_omitted = (
+        _coverage_file_counts(candidates, effective_omissions)
     )
     routes_promoted = int(route_inventory["promoted"]) + int(route_inventory["merged"])
     tests_promoted = int(test_inventory["promoted"]) + int(test_inventory["merged"])
+    routes_detected = int(route_inventory["detected"])
+    tests_detected = int(test_inventory["detected"])
+    if isinstance(aggregate_inventory, dict):
+        routes_detected = int(
+            aggregate_inventory.get("routes_detected") or routes_detected
+        )
+        tests_detected = int(
+            aggregate_inventory.get("tests_detected") or tests_detected
+        )
+        routes_promoted = min(
+            routes_promoted,
+            int(aggregate_inventory.get("routes_retained") or 0),
+        )
+        tests_promoted = min(
+            tests_promoted,
+            int(aggregate_inventory.get("tests_retained") or 0),
+        )
     graph["head_commit"] = head or None
     graph["workspace_head_commit"] = head or None
     graph["canonicalization"] = canonicalization
@@ -960,14 +1025,14 @@ def finalize_graph_artifact(
         },
         "coverage": {
             "languages": languages or [language],
-            "files_total": len(candidates) + len(omitted),
-            "files_analyzed": len(candidates),
-            "files_failed": len(omitted),
+            "files_total": files_total,
+            "files_analyzed": files_analyzed,
+            "files_failed": files_failed,
             "files_budget_omitted": files_budget_omitted,
             "routes_promoted": routes_promoted,
-            "routes_omitted": max(0, int(route_inventory["detected"]) - routes_promoted),
+            "routes_omitted": max(0, routes_detected - routes_promoted),
             "tests_promoted": tests_promoted,
-            "tests_omitted": max(0, int(test_inventory["detected"]) - tests_promoted),
+            "tests_omitted": max(0, tests_detected - tests_promoted),
             "nodes_capacity_omitted": int(
                 canonicalization["issue_reasons"].get("node_capacity_exceeded", 0)
             ),

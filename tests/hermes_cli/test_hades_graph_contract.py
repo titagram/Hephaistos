@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.hades_graph_contract import finalize_graph_artifact
+from hermes_cli.hades_index.aggregate import merge_graph_artifacts
 
 
 def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
@@ -179,6 +180,99 @@ def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
     }
     assert result["graph_contract"]["coverage"]["tests_promoted"] == 1
     assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
+
+
+def test_finalize_distinguishes_same_test_names_by_path_and_unions_collections():
+    result = _finalize(
+        {
+            "schema": "hades.code_graph.v1",
+            "language": "python",
+            "symbols": [],
+            "edges": [],
+            "tests": {
+                "files": [
+                    {
+                        "path": "tests/unit/UserTest.py",
+                        "cases": ["test_beta", "test_alpha"],
+                        "target_candidates": ["User", "Account"],
+                    },
+                    {
+                        "path": "tests/integration/UserTest.py",
+                        "cases": ["test_integration"],
+                        "target_candidates": ["UserApi"],
+                    },
+                    {
+                        "path": "tests/unit/./UserTest.py",
+                        "cases": ["test_gamma", "test_alpha"],
+                        "target_candidates": ["Account", "Profile"],
+                    },
+                ]
+            },
+        },
+        max_symbols=20,
+    )
+
+    test_nodes = [node for node in result["nodes"] if node.get("kind") == "test"]
+    assert len(test_nodes) == 2
+    assert len({node["id"] for node in test_nodes}) == 2
+    unit = next(node for node in test_nodes if "test_gamma" in node.get("cases", []))
+    assert unit["cases"] == ["test_alpha", "test_beta", "test_gamma"]
+    assert unit["target_candidates"] == ["Account", "Profile", "User"]
+    assert result["canonicalization"]["test_inventory"] == {
+        "detected": 3,
+        "promoted": 2,
+        "merged": 1,
+    }
+
+
+def test_polyglot_coverage_reports_unique_route_and_test_inventory_drops():
+    artifacts = []
+    for language, start in (("php", 0), ("python", 250)):
+        artifacts.append(
+            {
+                "language": language,
+                "framework": language,
+                "routes": [
+                    {
+                        "name": f"route.{index}",
+                        "method": "GET",
+                        "uri": f"/routes/{index}",
+                    }
+                    for index in range(start, start + 300)
+                ],
+                "symbols": [],
+                "edges": [],
+                "tests": {
+                    "files": [
+                        {"path": f"tests/{index}/BehaviorTest.py"}
+                        for index in range(start, start + 300)
+                    ]
+                },
+                "omitted": [],
+            }
+        )
+
+    graph = merge_graph_artifacts(
+        artifacts,
+        root="workspace",
+        max_symbols=5_000,
+        max_edges=10_000,
+    )
+    result = finalize_graph_artifact(
+        graph,
+        payload={},
+        candidates=[],
+        omitted=[],
+    )
+
+    coverage = result["graph_contract"]["coverage"]
+    assert len(result["routes"]) == 500
+    assert len(result["tests"]["files"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 50
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 50
+    assert not any(key.startswith("_") for key in result)
 
 
 def test_inventory_promotion_merges_an_existing_route_node_idempotently():

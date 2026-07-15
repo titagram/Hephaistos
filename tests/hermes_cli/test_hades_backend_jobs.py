@@ -329,6 +329,41 @@ def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
     )
 
 
+def test_populate_backend_ast_polyglot_coverage_deduplicates_adapter_failures(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("Controller.php").write_text(
+        "<?php\nclass Controller {}\n",
+        encoding="utf-8",
+    )
+    oversized = source / "oversized.ts"
+    with oversized.open("wb") as handle:
+        handle.truncate(512_001)
+
+    result = execute_job(
+        {
+            "job_id": "job_polyglot_coverage",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    coverage = artifact["graph_contract"]["coverage"]
+    assert artifact["omitted"] == [
+        {"path": "src/oversized.ts", "reason": "file_too_large"}
+    ]
+    assert coverage["files_total"] == 2
+    assert coverage["files_analyzed"] == 1
+    assert coverage["files_failed"] == 1
+
+
 def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -356,6 +391,111 @@ def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path)
         item.get("reason") == "file_budget_exceeded"
         for item in artifact.get("omitted", [])
     )
+
+
+def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    for index in range(10_001):
+        (source / f"module_{index:05d}.py").touch()
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_file_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20_000},
+        },
+        workspace_root=workspace,
+    )
+
+    coverage = result["artifact"]["graph_contract"]["coverage"]
+    assert coverage["files_analyzed"] == 10_000
+    assert coverage["files_budget_omitted"] == 1
+    assert result["artifact"]["truncated"] is True
+
+
+def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    oversized = source / "oversized.py"
+    with oversized.open("wb") as handle:
+        handle.truncate(134_217_729)
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_byte_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_total_bytes": 268_435_456},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    coverage = artifact["graph_contract"]["coverage"]
+    assert coverage["files_analyzed"] == 0
+    assert coverage["files_budget_omitted"] == 1
+    assert artifact["omitted"] == [
+        {"path": "src/oversized.py", "reason": "byte_budget_exceeded"}
+    ]
+
+
+def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    oversized = source / "oversized.py"
+    with oversized.open("wb") as handle:
+        handle.truncate(512_001)
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_per_file_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_file_bytes": 1_024_000},
+        },
+        workspace_root=workspace,
+    )
+
+    assert result["artifact"]["omitted"] == [
+        {"path": "src/oversized.py", "reason": "file_too_large"}
+    ]
+
+
+def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("graph.py").write_text(
+        "".join(f"import module_{index}\n" for index in range(10_001))
+        + "".join(f"class Class{index}:\n    pass\n" for index in range(5_001)),
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_graph_caps",
+            "capability": "populate_backend_ast",
+            "payload": {"max_symbols": 6_000, "max_edges": 12_000},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    assert len(artifact["symbols"]) == 5_000
+    assert len(artifact["edges"]) == 10_000
+    assert artifact["truncated"] is True
 
 
 def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):

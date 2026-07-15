@@ -1604,8 +1604,11 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     from hermes_cli.hades_index import build_graph_for_workspace
 
     payload = job.get("payload") or {}
-    max_files = int(payload.get("max_files") or 10_000)
-    max_total_bytes = int(payload.get("max_total_bytes") or 134_217_728)
+    max_files = min(int(payload.get("max_files") or 10_000), 10_000)
+    max_total_bytes = min(
+        int(payload.get("max_total_bytes") or 134_217_728),
+        134_217_728,
+    )
     candidates, omitted, truncated = _iter_workspace_files(
         workspace_root,
         max_files=max_files,
@@ -1614,6 +1617,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
 
     # Dispatch to pluggable indexer (currently a seam over existing functions)
     artifact = build_graph_for_workspace(workspace_root, candidates, omitted, payload)
+    artifact["truncated"] = bool(artifact.get("truncated")) or truncated
 
     return {
         "status": "completed",

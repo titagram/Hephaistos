@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -80,6 +81,29 @@ def _test_name(item: dict[str, Any]) -> str:
     return PurePosixPath(path.replace("\\", "/")).stem if path else ""
 
 
+def _normalized_test_path(item: dict[str, Any]) -> str:
+    raw = _text(item.get("path") or item.get("source_path") or item.get("file"))
+    if not raw:
+        return ""
+    parts: list[str] = []
+    for part in PurePosixPath(raw.replace("\\", "/")).parts:
+        if part in {"", ".", "/"}:
+            continue
+        if part == ".." and parts and parts[-1] != "..":
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts)
+
+
+def _test_identity(item: dict[str, Any]) -> tuple[str, ...] | None:
+    name = _test_name(item)
+    if not name:
+        return None
+    path = _normalized_test_path(item)
+    return ("path", path, name) if path else ("name", name)
+
+
 def _copy_fields(item: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     return {
         key: item[key]
@@ -95,6 +119,29 @@ def _merge_missing(
     for key, value in incoming.items():
         if key not in existing or existing[key] in (None, "", [], {}):
             existing[key] = value
+
+
+def _merge_test_fields(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
+    for key in ("cases", "target_candidates"):
+        values = [
+            *(
+                existing.get(key)
+                if isinstance(existing.get(key), list)
+                else []
+            ),
+            *(
+                incoming.get(key)
+                if isinstance(incoming.get(key), list)
+                else []
+            ),
+        ]
+        if values:
+            unique = {
+                json.dumps(value, sort_keys=True, ensure_ascii=False, default=str): value
+                for value in values
+            }
+            existing[key] = [unique[fingerprint] for fingerprint in sorted(unique)]
+    _merge_missing(existing, incoming)
 
 
 def _promote_routes(
@@ -153,18 +200,19 @@ def _promote_tests(
     tests: object,
 ) -> tuple[int, int, int]:
     records = [item for item in tests if isinstance(item, dict)] if isinstance(tests, list) else []
-    existing_by_name = {
-        name: declaration
+    existing_by_identity = {
+        identity: declaration
         for declaration in declarations
         if isinstance(declaration, dict)
         if _kind(declaration) in {"test", "test_case", "test_class"}
-        if (name := _test_name(declaration))
+        if (identity := _test_identity(declaration)) is not None
     }
     promoted = 0
     merged = 0
     for record in records:
         name = _test_name(record)
-        if not name:
+        identity = _test_identity(record)
+        if not name or identity is None:
             continue
         test = {
             "kind": "test",
@@ -172,13 +220,19 @@ def _promote_tests(
             **_copy_fields(record, _TEST_FIELDS),
         }
         test["name"] = name
-        existing = existing_by_name.get(name)
+        normalized_path = _normalized_test_path(record)
+        if normalized_path:
+            for key in ("path", "source_path", "file"):
+                if key in test:
+                    test[key] = normalized_path
+                    break
+        existing = existing_by_identity.get(identity)
         if existing is None:
             declarations.append(test)
-            existing_by_name[name] = test
+            existing_by_identity[identity] = test
             promoted += 1
             continue
-        _merge_missing(existing, test)
+        _merge_test_fields(existing, test)
         merged += 1
     return len(records), promoted, merged
 

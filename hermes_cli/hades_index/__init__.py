@@ -35,9 +35,9 @@ def build_graph_for_workspace(
     from hermes_cli.hades_index import typescript as typescript_indexer
 
     workspace_root = Path(workspace_root)
-    max_symbols = int(payload.get("max_symbols") or 5_000)
-    max_edges = int(payload.get("max_edges") or max_symbols * 2)
-    max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
+    max_symbols = min(int(payload.get("max_symbols") or 5_000), 5_000)
+    max_edges = min(int(payload.get("max_edges") or max_symbols * 2), 10_000)
+    max_file_bytes = min(int(payload.get("max_file_bytes") or 512_000), 512_000)
     truncated = False
 
     manifest_names = {
