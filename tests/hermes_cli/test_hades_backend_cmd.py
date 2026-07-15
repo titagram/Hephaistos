@@ -3826,13 +3826,34 @@ def _invalid_wiki_evidence_cases():
         pytest.param([{"kind": "   "}], "kind", id="blank-kind"),
         pytest.param([{"kind": "k" * 65}], "kind", id="long-kind"),
         pytest.param([{"kind": 1}], "kind", id="non-string-kind"),
+        pytest.param([{"kind": "git_head"}], "artifact_ref or file_ref", id="unknown-kind"),
         pytest.param([{"kind": "file_ref", "extra": "x"}], "unsupported", id="extra-key"),
+        pytest.param(
+            [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64, "bytes": 1}],
+            "unsupported",
+            id="draft-only-bytes",
+        ),
+        pytest.param(
+            [
+                {
+                    "kind": "file_ref",
+                    "path": "src/app.py",
+                    "hash": "a" * 64,
+                    "raw_source_included": False,
+                }
+            ],
+            "unsupported",
+            id="draft-only-raw-source",
+        ),
+        pytest.param([{"kind": "artifact_ref"}], "sha256", id="artifact-missing-sha"),
         pytest.param([{"kind": "artifact_ref", "schema": 1}], "schema", id="schema-type"),
         pytest.param([{"kind": "artifact_ref", "schema": None}], "schema", id="schema-null"),
         pytest.param([{"kind": "artifact_ref", "schema": "s" * 192}], "schema", id="schema-long"),
         pytest.param([{"kind": "artifact_ref", "sha256": None}], "sha256", id="sha-null"),
         pytest.param([{"kind": "artifact_ref", "sha256": "a" * 63}], "sha256", id="sha-short"),
         pytest.param([{"kind": "artifact_ref", "sha256": "g" * 64}], "sha256", id="sha-nonhex"),
+        pytest.param([{"kind": "file_ref", "hash": "a" * 64}], "path", id="file-missing-path"),
+        pytest.param([{"kind": "file_ref", "path": "src/app.py"}], "hash", id="file-missing-hash"),
         pytest.param([{"kind": "file_ref", "hash": "a" * 65}], "hash", id="hash-long"),
         pytest.param([{"kind": "file_ref", "hash": None}], "hash", id="hash-null"),
         pytest.param([{"kind": "file_ref", "hash": "z" * 64}], "hash", id="hash-nonhex"),
@@ -3873,24 +3894,61 @@ def test_backend_wiki_verify_rejects_invalid_evidence_contract(tmp_path, refs, m
         _verification_evidence(path)
 
 
-def test_backend_wiki_evidence_accepts_exact_backend_scalar_shape(tmp_path):
-    from hermes_cli.hades_wiki_actions import _verification_evidence
-
-    refs = [
+@pytest.mark.parametrize(
+    "ref",
+    [
+        {
+            "kind": "artifact_ref",
+            "schema": "hades.git_tree.v1",
+            "sha256": "a" * 64,
+        },
         {
             "kind": "file_ref",
             "schema": "hades.file_ref.v1",
             "sha256": "a" * 64,
             "hash": "b" * 64,
             "path": "src/app.py",
-            "bytes": 0,
-            "raw_source_included": False,
-        }
-    ]
+        },
+    ],
+    ids=("artifact", "file"),
+)
+def test_backend_wiki_verify_accepts_exact_verification_evidence_shape(tmp_path, ref):
+    from hermes_cli.hades_wiki_actions import _verification_evidence
+
+    refs = [ref]
     path = tmp_path / "refs.json"
     path.write_text(json.dumps(refs), encoding="utf-8")
 
     assert _verification_evidence(path) == refs
+
+
+def test_backend_wiki_draft_keeps_backend_evidence_superset(tmp_path):
+    from hermes_cli.hades_wiki_actions import _draft_payload
+
+    ref = {
+        "kind": "file_ref",
+        "schema": "hades.file_ref.v1",
+        "sha256": "a" * 64,
+        "hash": "b" * 64,
+        "path": "src/app.py",
+        "bytes": 0,
+        "raw_source_included": False,
+    }
+    path = tmp_path / "draft.json"
+    path.write_text(
+        json.dumps(
+            {
+                "slug": "technical/architecture",
+                "title": "Architecture",
+                "page_type": "technical",
+                "content_markdown": "# Architecture",
+                "evidence_refs": [ref],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _draft_payload(path)["evidence_refs"] == [ref]
 
 
 def test_backend_wiki_draft_reuses_evidence_contract_and_maximum(tmp_path):
@@ -4063,8 +4121,34 @@ def test_backend_wiki_rejects_invalid_json_shapes_before_client_creation(
     assert "JSON list" in verify_error
 
 
+@pytest.mark.parametrize(
+    ("ref", "message"),
+    [
+        (
+            {"kind": "file_ref", "path": "../secret", "hash": "a" * 64},
+            "safe relative",
+        ),
+        (
+            {"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64, "bytes": 1},
+            "unsupported",
+        ),
+        (
+            {
+                "kind": "file_ref",
+                "path": "src/app.py",
+                "hash": "a" * 64,
+                "raw_source_included": False,
+            },
+            "unsupported",
+        ),
+        ({"kind": "git_head"}, "artifact_ref or file_ref"),
+        ({"kind": "artifact_ref"}, "sha256"),
+        ({"kind": "file_ref", "path": "src/app.py"}, "hash"),
+    ],
+    ids=("unsafe-path", "draft-bytes", "draft-raw-source", "unknown-kind", "artifact-sha", "file-hash"),
+)
 def test_backend_wiki_rejects_invalid_evidence_item_before_client_creation(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, ref, message
 ):
     _seed_current_backend_workspace(monkeypatch, tmp_path)
 
@@ -4072,10 +4156,7 @@ def test_backend_wiki_rejects_invalid_evidence_item_before_client_creation(
     import hermes_cli.hades_wiki_actions as wiki_actions
 
     refs_path = tmp_path / "refs.json"
-    refs_path.write_text(
-        json.dumps([{"kind": "file_ref", "path": "../secret", "hash": "a" * 64}]),
-        encoding="utf-8",
-    )
+    refs_path.write_text(json.dumps([ref]), encoding="utf-8")
     calls = []
     monkeypatch.setattr(
         wiki_actions,
@@ -4096,7 +4177,7 @@ def test_backend_wiki_rejects_invalid_evidence_item_before_client_creation(
 
     assert rc == 1
     assert calls == []
-    assert "safe relative" in capsys.readouterr().err
+    assert message in capsys.readouterr().err
 
 
 def test_backend_wiki_rejects_overlong_note_before_client_creation(

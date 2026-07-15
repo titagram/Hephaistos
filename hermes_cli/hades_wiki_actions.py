@@ -26,9 +26,10 @@ _DRAFT_FIELDS = (
     "page_type",
     "content_markdown",
 )
-_EVIDENCE_FIELDS = frozenset(
+_DRAFT_EVIDENCE_FIELDS = frozenset(
     {"kind", "schema", "sha256", "hash", "path", "bytes", "raw_source_included"}
 )
+_VERIFICATION_EVIDENCE_FIELDS = frozenset({"kind", "schema", "sha256", "hash", "path"})
 _HEX_SHA256 = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 _SLUG = re.compile(r"\A[a-z0-9][a-z0-9/-]*\Z")
 _WINDOWS_DRIVE = re.compile(r"\A[A-Za-z]:")
@@ -70,17 +71,15 @@ def _safe_relative_path(value: Any) -> bool:
     return all(segment not in {"", ".", ".."} for segment in value.split("/"))
 
 
-def _bounded_evidence_refs(value: Any, *, require_nonempty: bool = False) -> list[Any]:
+def _bounded_draft_evidence_refs(value: Any) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError("wiki evidence must be a JSON list")
-    if require_nonempty and not value:
-        raise ValueError("wiki verification requires at least one evidence ref")
     if len(value) > WIKI_EVIDENCE_MAX_REFS:
         raise ValueError(f"wiki evidence exceeds {WIKI_EVIDENCE_MAX_REFS} refs")
     for index, ref in enumerate(value):
         if not isinstance(ref, dict):
             raise ValueError(f"wiki evidence ref {index} must be a JSON object")
-        unsupported = sorted(set(ref) - _EVIDENCE_FIELDS)
+        unsupported = sorted(set(ref) - _DRAFT_EVIDENCE_FIELDS)
         if unsupported:
             raise ValueError(f"wiki evidence ref {index} has unsupported field: {unsupported[0]}")
         kind = ref.get("kind")
@@ -104,6 +103,42 @@ def _bounded_evidence_refs(value: Any, *, require_nonempty: bool = False) -> lis
         raw_source_included = ref.get("raw_source_included")
         if "raw_source_included" in ref and not isinstance(raw_source_included, bool):
             raise ValueError(f"wiki evidence ref {index} raw_source_included must be a boolean")
+    return value
+
+
+def _bounded_verification_evidence_refs(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError("wiki evidence must be a JSON list")
+    if not value:
+        raise ValueError("wiki verification requires at least one evidence ref")
+    if len(value) > WIKI_EVIDENCE_MAX_REFS:
+        raise ValueError(f"wiki evidence exceeds {WIKI_EVIDENCE_MAX_REFS} refs")
+    for index, ref in enumerate(value):
+        if not isinstance(ref, dict):
+            raise ValueError(f"wiki evidence ref {index} must be a JSON object")
+        unsupported = sorted(set(ref) - _VERIFICATION_EVIDENCE_FIELDS)
+        if unsupported:
+            raise ValueError(f"wiki evidence ref {index} has unsupported field: {unsupported[0]}")
+        kind = ref.get("kind")
+        if kind not in {"artifact_ref", "file_ref"}:
+            raise ValueError(f"wiki evidence ref {index} kind must be artifact_ref or file_ref")
+        schema = ref.get("schema")
+        if "schema" in ref and (not isinstance(schema, str) or len(schema) > 191):
+            raise ValueError(f"wiki evidence ref {index} schema must be a string of at most 191 characters")
+        for field in ("sha256", "hash"):
+            digest = ref.get(field)
+            if field in ref and (not isinstance(digest, str) or _HEX_SHA256.fullmatch(digest) is None):
+                raise ValueError(f"wiki evidence ref {index} {field} must be an exact 64-character hexadecimal hash")
+        path = ref.get("path")
+        if "path" in ref and not _safe_relative_path(path):
+            raise ValueError(f"wiki evidence ref {index} path must be a safe relative path")
+        if kind == "artifact_ref" and "sha256" not in ref:
+            raise ValueError(f"wiki evidence ref {index} artifact_ref requires sha256")
+        if kind == "file_ref":
+            if "path" not in ref:
+                raise ValueError(f"wiki evidence ref {index} file_ref requires path")
+            if "hash" not in ref and "sha256" not in ref:
+                raise ValueError(f"wiki evidence ref {index} file_ref requires hash or sha256")
     return value
 
 
@@ -135,7 +170,7 @@ def _draft_payload(path_value: Any) -> dict[str, Any]:
         raise ValueError("wiki draft content_markdown must be a non-empty string")
     if len(content) > WIKI_CONTENT_MAX_CHARS:
         raise ValueError(f"wiki draft content exceeds {WIKI_CONTENT_MAX_CHARS:,} characters")
-    evidence_refs = _bounded_evidence_refs(value.get("evidence_refs", []))
+    evidence_refs = _bounded_draft_evidence_refs(value.get("evidence_refs", []))
     return {
         "slug": value["slug"],
         "title": value["title"],
@@ -146,7 +181,7 @@ def _draft_payload(path_value: Any) -> dict[str, Any]:
 
 
 def _verification_evidence(path_value: Any) -> list[Any]:
-    return _bounded_evidence_refs(_load_bounded_json(path_value), require_nonempty=True)
+    return _bounded_verification_evidence_refs(_load_bounded_json(path_value))
 
 
 def _verification_note(value: Any) -> str | None:
