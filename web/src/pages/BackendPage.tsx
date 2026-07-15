@@ -617,6 +617,8 @@ type ReviewActionRunner = (
   success: string,
 ) => Promise<void>;
 
+type ToastNotifier = ReturnType<typeof useToast>["showToast"];
+
 function PolicyControlsPanel({
   status,
   jobs,
@@ -647,7 +649,7 @@ function PolicyControlsPanel({
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              variant="outline"
+              outlined
               disabled={busyAction !== null}
               prefix={busyAction === "backend:sync" ? <Spinner /> : <RefreshCw className="h-4 w-4" />}
               onClick={() =>
@@ -728,7 +730,7 @@ function PolicyControlsPanel({
                     </Button>
                     <Button
                       size="sm"
-                      variant="outline"
+                      outlined
                       prefix={
                         busyAction === `job:${job.job_id}:refuse` ? (
                           <Spinner />
@@ -822,7 +824,7 @@ function PrivacyControlsPanel({
           <div className="grid gap-2 sm:grid-cols-2">
             <Button
               size="sm"
-              variant="outline"
+              outlined
               disabled={disabled}
               prefix={busyAction === "privacy:export" ? <Spinner /> : <Download className="h-4 w-4" />}
               onClick={() =>
@@ -837,7 +839,7 @@ function PrivacyControlsPanel({
             </Button>
             <Button
               size="sm"
-              variant="outline"
+              outlined
               disabled={disabled}
               prefix={busyAction === "privacy:export-content" ? <Spinner /> : <Download className="h-4 w-4" />}
               onClick={() => {
@@ -853,7 +855,7 @@ function PrivacyControlsPanel({
             </Button>
             <Button
               size="sm"
-              variant="outline"
+              outlined
               disabled={disabled}
               prefix={busyAction === "privacy:delete-dry-run" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
               onClick={() =>
@@ -868,7 +870,7 @@ function PrivacyControlsPanel({
             </Button>
             <Button
               size="sm"
-              variant="destructive"
+              destructive
               disabled={disabled}
               prefix={busyAction === "privacy:delete-confirm" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
               onClick={() => {
@@ -897,7 +899,7 @@ function PrivacyControlsPanel({
             <div className="grid gap-2 sm:grid-cols-2">
               <Button
                 size="sm"
-                variant="outline"
+                outlined
                 disabled={disabled}
                 prefix={busyAction === "privacy:retention-dry-run" ? <Spinner /> : <Clock className="h-4 w-4" />}
                 onClick={() =>
@@ -912,7 +914,7 @@ function PrivacyControlsPanel({
               </Button>
               <Button
                 size="sm"
-                variant="destructive"
+                destructive
                 disabled={disabled}
                 prefix={busyAction === "privacy:retention-confirm" ? <Spinner /> : <Trash2 className="h-4 w-4" />}
                 onClick={() => {
@@ -1157,7 +1159,7 @@ function BugIntakePanel({
 }: {
   status: HadesBackendStatus;
   onCreated: () => Promise<void>;
-  showToast: (message: string, tone?: "success" | "error") => void;
+  showToast: ToastNotifier;
 }) {
   const [form, setForm] = useState<BugIntakeFormState>(() => initialBugIntakeForm(status));
   const [submitting, setSubmitting] = useState(false);
@@ -1503,7 +1505,7 @@ function BugIntakePanel({
 function BugCaseLookupPanel({
   showToast,
 }: {
-  showToast: (message: string, tone?: "success" | "error") => void;
+  showToast: ToastNotifier;
 }) {
   const [bugReportId, setBugReportId] = useState("");
   const [detail, setDetail] = useState<HadesBackendBugReportDetailResponse | null>(null);
@@ -1702,7 +1704,7 @@ function initialPromotionForm(): DiagnosisPromotionFormState {
 function DiagnosisPromotionPanel({
   showToast,
 }: {
-  showToast: (message: string, tone?: "success" | "error") => void;
+  showToast: ToastNotifier;
 }) {
   const [form, setForm] = useState<DiagnosisPromotionFormState>(() => initialPromotionForm());
   const [submitting, setSubmitting] = useState(false);
@@ -2146,7 +2148,7 @@ export default function BackendPage() {
                             </Button>
                             <Button
                               size="sm"
-                              variant="outline"
+                              outlined
                               prefix={
                                 busyAction === `job:${job.job_id}:refuse` ? (
                                   <Spinner />
@@ -2195,7 +2197,7 @@ export default function BackendPage() {
                         {(proposal.status === "refused" || proposal.status === "conflicted") && (
                           <Button
                             size="sm"
-                            variant="outline"
+                            outlined
                             prefix={
                               busyAction === `proposal:${proposal.proposal_id}:ack` ? (
                                 <Spinner />
