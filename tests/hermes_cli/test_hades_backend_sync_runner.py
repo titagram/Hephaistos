@@ -196,7 +196,6 @@ def test_sync_runner_logs_redacted_backend_errors(monkeypatch, tmp_path, caplog)
             head_commit="",
             backend_workspace_binding_id="wb_1",
         )
-
     class FakeClient:
         def memory_snapshot(self, **payload):
             raise RuntimeError("token=super-secret-token failed")
@@ -323,6 +322,29 @@ def test_sync_runner_counts_pending_source_slice_jobs(monkeypatch, tmp_path):
             git_remote_hash="",
             head_commit="abc123",
             backend_workspace_binding_id="wb_1",
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id="retired_proj",
+            agent_id="retired_agent",
+            local_project_id="p_retired",
+            workspace_fingerprint="wf_retired",
+            display_path="~/retired",
+            repo_root=str(tmp_path / "retired"),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="old",
+            backend_workspace_binding_id="wb_retired",
+        )
+        hdb.mark_binding_unlinked(conn, "wf_retired")
+        hdb.upsert_job(
+            conn,
+            job_id="job_slice_retired",
+            project_id="retired_proj",
+            workspace_binding_id="wb_retired",
+            capability="read_source_slice",
+            payload={"path": "old.py", "start_line": 1, "end_line": 2},
+            status="waiting_confirmation",
         )
 
     class FakeClient:

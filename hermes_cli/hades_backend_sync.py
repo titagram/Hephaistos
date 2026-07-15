@@ -431,12 +431,16 @@ def run_backend_sync(
             sync_errors += organism_failed
 
     with db.connect_closing() as conn:
+        active_binding_ids = {
+            binding.backend_workspace_binding_id for binding in bindings
+        }
         source_slice_jobs_waiting = max(
             source_slice_jobs_waiting,
             sum(
                 1
                 for job in db.list_jobs(conn, statuses=["waiting_confirmation"])
                 if job.capability == "read_source_slice"
+                and job.workspace_binding_id in active_binding_ids
             ),
         )
 
