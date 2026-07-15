@@ -103,6 +103,24 @@ def test_wiki_verify_skill_maps_each_claim_to_schema_specific_proof() -> None:
     assert "Build final proof only from a current artifact or file hash" not in text
 
 
+def test_wiki_verify_skill_has_consistent_mapped_evidence_guidance() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for contract in (
+        "| Mapped evidence |",
+        "Every material claim must be mapped to schema-appropriate proof",
+        "graph query or search hit",
+        "inspected current graph-artifact entry",
+        "encoded structural facts",
+    ):
+        assert contract in text
+
+    assert "| Safe evidence |" not in text
+    assert (
+        "graph edge, filename, or stale artifact is a locator, not evidence" not in text
+    )
+
+
 def test_wiki_verify_openai_metadata_invokes_the_skill() -> None:
     metadata = yaml.safe_load(OPENAI_METADATA.read_text(encoding="utf-8"))
 

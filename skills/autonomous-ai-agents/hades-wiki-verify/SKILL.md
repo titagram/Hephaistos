@@ -38,7 +38,7 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
 | Read the current revision | `hades backend wiki show PAGE_ID --json` |
 | Full-content gate | Continue only when `content_truncated` is explicitly `false` |
 | Verify with compare-and-swap | `hades backend wiki verify PAGE_ID --expected-revision REVISION_ID --evidence-file EVIDENCE_FILE --json` |
-| Safe evidence | Non-empty JSON array containing at most 80 current `artifact_ref` or `file_ref` objects |
+| Mapped evidence | Every material claim must be mapped to schema-appropriate proof; submit only its bounded current `artifact_ref` or `file_ref` objects |
 | Unsafe result | Defer without a verify call, or record a conflict returned by the backend |
 
 ## Procedure
@@ -143,7 +143,7 @@ Stop before any verification if status is unconfigured, the workspace is unmappe
 
 - A plausible page is not a verified page; all material checkable claims need current code-derived proof.
 - Bounded `show` output is not complete Markdown unless `content_truncated` is explicitly `false`.
-- A search result, memory chunk, graph edge, filename, or stale artifact is a locator, not evidence.
+- A graph query or search hit, memory chunk, filename, or stale artifact is only a locator. An inspected current graph-artifact entry may prove only encoded structural facts under the schema-specific rules above.
 - Artifact freshness and schema membership are not blanket semantic proof; connect inspected content to each claim in the ledger.
 - A successful earlier `show` does not authorize verifying a later revision. Always pass the freshly reviewed current revision ID.
 - Do not “fix” an unsupported page during verification. Defer it so a separate authoring workflow can revise the Markdown.
