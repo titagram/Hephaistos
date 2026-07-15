@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 
 import pytest
+
+
+def _extract_wiki_agent_context(content_markdown: str) -> dict:
+    match = re.search(
+        r"## Agent Context\s*\n+```json\n(?P<context>\{[^\n]+\})\n```",
+        content_markdown,
+    )
+    assert match is not None
+    return json.loads(match.group("context"))
 
 
 def _symlink_or_skip(link, target, *, target_is_directory=False):
@@ -678,6 +689,75 @@ def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     assert any(slug.endswith("-symbol-map") for slug in slugs)
     assert any(slug.endswith("-tests-quality") for slug in slugs)
     assert "return Booking::create" not in str(result)
+    for page in pages:
+        content = page["content_markdown"]
+        assert "## Human Summary" in content
+        assert "## Agent Context" in content
+        assert "```json" in content
+        assert len(content) <= 24_000
+        context = _extract_wiki_agent_context(content)
+        assert context["schema"] == "hades.wiki.agent_context.v1"
+        assert context["page_kind"]
+        assert context["evidence_kinds"]
+        assert context["raw_source_included"] is False
+
+    repeated = execute_job(
+        {
+            "job_id": "job_wiki_repeated",
+            "capability": "populate_project_wiki",
+            "payload": {"max_files": 80, "max_symbols": 200},
+        },
+        workspace_root=tmp_path,
+    )
+    assert [page["content_markdown"] for page in repeated["pages"]] == [
+        page["content_markdown"] for page in pages
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        ("service.py", "class Service:\n    marker = 'RAW_SOURCE_SENTINEL'\n"),
+        ("service.ts", "export class Service { marker = 'RAW_SOURCE_SENTINEL'; }\n"),
+        ("service.go", 'package service\nconst marker = "RAW_SOURCE_SENTINEL"\n'),
+        ("service.rs", 'const MARKER: &str = "RAW_SOURCE_SENTINEL";\n'),
+        ("Service.java", 'class Service { String marker = "RAW_SOURCE_SENTINEL"; }\n'),
+        ("Service.php", "<?php\nclass Service { private string $marker = 'RAW_SOURCE_SENTINEL'; }\n"),
+    ],
+    ids=["python", "typescript", "go", "rust", "java", "php"],
+)
+def test_populate_project_wiki_dual_audience_contract_is_language_agnostic(
+    tmp_path,
+    filename,
+    source,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": f"job_wiki_{filename}",
+            "capability": "populate_project_wiki",
+            "payload": {"max_files": 20, "max_symbols": 20},
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert result["pages"]
+    assert "RAW_SOURCE_SENTINEL" not in str(result)
+    for page in result["pages"]:
+        content = page["content_markdown"]
+        context = _extract_wiki_agent_context(content)
+        assert context == {
+            "evidence_kinds": sorted(
+                {ref["kind"] for ref in page["evidence_refs"]}
+            ),
+            "page_kind": context["page_kind"],
+            "raw_source_included": False,
+            "schema": "hades.wiki.agent_context.v1",
+        }
+        assert len(content) <= 24_000
 
 
 def test_sync_git_tree_omits_symlink_file_and_directory_escapes(tmp_path):
