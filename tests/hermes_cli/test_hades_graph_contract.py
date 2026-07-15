@@ -37,6 +37,12 @@ def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
             "files_total": 1,
             "files_analyzed": 1,
             "files_failed": 0,
+            "files_budget_omitted": 0,
+            "routes_promoted": 0,
+            "routes_omitted": 0,
+            "tests_promoted": 0,
+            "tests_omitted": 0,
+            "nodes_capacity_omitted": 0,
         },
         "source": {"branch": "main", "head_commit": "abc123"},
     }
@@ -63,6 +69,7 @@ def test_finalize_graph_artifact_exposes_inventory_fallback(tmp_path: Path):
         == "bounded_or_omitted_input"
     )
     assert result["graph_contract"]["coverage"]["files_failed"] == 1
+    assert result["graph_contract"]["coverage"]["files_budget_omitted"] == 0
 
 
 def _finalize(
@@ -134,6 +141,8 @@ def test_finalize_promotes_uniform_route_inventory_to_first_class_nodes(
         "promoted": 1,
         "merged": 0,
     }
+    assert result["graph_contract"]["coverage"]["routes_promoted"] == 1
+    assert result["graph_contract"]["coverage"]["routes_omitted"] == 0
 
 
 def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
@@ -168,6 +177,8 @@ def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
         "promoted": 1,
         "merged": 0,
     }
+    assert result["graph_contract"]["coverage"]["tests_promoted"] == 1
+    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
 
 
 def test_inventory_promotion_merges_an_existing_route_node_idempotently():

@@ -936,6 +936,16 @@ def finalize_graph_artifact(
         payload.get("head_commit") or payload.get("workspace_head_commit") or ""
     ).strip()
     branch = str(payload.get("branch") or payload.get("current_branch") or "").strip()
+    route_inventory = canonicalization["route_inventory"]
+    test_inventory = canonicalization["test_inventory"]
+    files_budget_omitted = sum(
+        1
+        for item in omitted
+        if str(item.get("reason") or "")
+        in {"file_budget_exceeded", "byte_budget_exceeded"}
+    )
+    routes_promoted = int(route_inventory["promoted"]) + int(route_inventory["merged"])
+    tests_promoted = int(test_inventory["promoted"]) + int(test_inventory["merged"])
     graph["head_commit"] = head or None
     graph["workspace_head_commit"] = head or None
     graph["canonicalization"] = canonicalization
@@ -953,6 +963,14 @@ def finalize_graph_artifact(
             "files_total": len(candidates) + len(omitted),
             "files_analyzed": len(candidates),
             "files_failed": len(omitted),
+            "files_budget_omitted": files_budget_omitted,
+            "routes_promoted": routes_promoted,
+            "routes_omitted": max(0, int(route_inventory["detected"]) - routes_promoted),
+            "tests_promoted": tests_promoted,
+            "tests_omitted": max(0, int(test_inventory["detected"]) - tests_promoted),
+            "nodes_capacity_omitted": int(
+                canonicalization["issue_reasons"].get("node_capacity_exceeded", 0)
+            ),
         },
         "source": {"branch": branch or None, "head_commit": head or None},
     }

@@ -7967,3 +7967,26 @@ base e Traefik.
 Verifica remota non-live: 11 file di test selezionati, 2171 assertion e zero
 failure; Pint sui tre file PHP modificati, OpenAPI JSON e diff check passati.
 PostgreSQL e Neo4j live non sono stati modificati.
+
+# 2026-07-15 — Riparazione search grafo language-agnostic
+
+Il lavoro e' isolato su `codex/language-agnostic-graph-search` sia nel repository
+Hades Agent sia nel backend. La baseline e' verde: 66 test locali iniziali e
+171 test backend con 1313 assertion. Il contratto locale promuove inventari
+route/test senza mutare l'evidenza legacy, aggrega PHP, Python,
+TypeScript/JavaScript e SQL in workspace polyglot e risolve route Symfony
+ereditate con ciclo/profondita' bounded.
+
+Sul backend sono previsti: hydration idempotente delle route anche per artifact
+gia' contrattualizzati, alias di ricerca pubblici bounded, indice Neo4j
+versionato, copertura additiva e messaggi frontend coerenti. Traefik resta fuori
+scope. Prima di migration, rebuild o import live saranno creati e verificati i
+backup richiesti; nessuna mutazione live e' stata ancora eseguita.
+
+Stato implementazione isolata: hydration e search-v2 sono verdi; l'indice v1
+resta presente solo come rollback mentre l'Explorer legge esclusivamente v2.
+Il contratto coverage aggiunge soltanto contatori bounded per linguaggi,
+file analizzati/omessi per budget, route/test promossi o omessi e nodi esclusi
+per capacita'. Il backend persiste questi dati in una colonna nullable e il
+frontend dichiara esplicitamente quando una ricerca riguarda un sottoinsieme
+indicizzato. I vecchi record senza coverage restano compatibili (`null`).

@@ -474,7 +474,7 @@ Include decoded coverage in `projectionEnvelope()`. Add optional TypeScript fiel
 docker compose -f docker-compose.devboard.yaml exec -T app env \
   APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
   php artisan test tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php
-cd frontend && npm test -- --run src/components/devboard/GraphExplorer.test.tsx && npm run build
+cd frontend && npm test -- --watchAll=false --runInBand src/components/devboard/GraphExplorer.test.tsx && npm run build
 ```
 
 - [ ] **Step 7: Commit Task 6**
