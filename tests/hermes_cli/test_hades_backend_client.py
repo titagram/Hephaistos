@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OPENAPI_FIXTURE = REPO_ROOT / "docs" / "hades" / "openapi-hades-v1.json"
+VALID_WIKI_PAGE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 CLIENT_ROUTE_CASES = [
     {
@@ -70,6 +71,92 @@ CLIENT_ROUTE_CASES = [
         "args": ["wb_1"],
         "kwargs": {"project_id": "proj_1", "agent_id": "agent_1"},
         "json_body": {"project_id": "proj_1", "agent_id": "agent_1"},
+    },
+    {
+        "method_name": "wiki_pages",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/wiki/pages",
+        "wire_path": "/api/hades/v1/wiki/pages",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source_status": "needs_verification",
+            "limit": 20,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source_status": "needs_verification",
+            "limit": "20",
+        },
+    },
+    {
+        "method_name": "wiki_page",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/wiki/pages/{page}",
+        "wire_path": f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}",
+        "args": [VALID_WIKI_PAGE_ID],
+        "kwargs": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+        "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+    },
+    {
+        "method_name": "create_wiki_draft",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/wiki/pages",
+        "wire_path": "/api/hades/v1/wiki/pages",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "slug": "technical/overview",
+            "title": "Overview",
+            "page_type": "technical",
+            "content_markdown": "# Overview",
+            "evidence_refs": [],
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "slug": "technical/overview",
+            "title": "Overview",
+            "page_type": "technical",
+            "content_markdown": "# Overview",
+            "evidence_refs": [],
+        },
+    },
+    {
+        "method_name": "verify_wiki_page",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/wiki/pages/{page}/verify",
+        "wire_path": f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}/verify",
+        "args": [VALID_WIKI_PAGE_ID],
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "expected_current_revision_id": "rev_1",
+            "evidence_refs": [
+                {
+                    "kind": "file_ref",
+                    "path": "src/app.py",
+                    "hash": "a" * 64,
+                    "claims": [{"claim": "claim", "proof": "proof"}],
+                }
+            ],
+            "verification_note": "Checked against current tree",
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "expected_current_revision_id": "rev_1",
+            "evidence_refs": [
+                {
+                    "kind": "file_ref",
+                    "path": "src/app.py",
+                    "hash": "a" * 64,
+                    "claims": [{"claim": "claim", "proof": "proof"}],
+                }
+            ],
+            "verification_note": "Checked against current tree",
+        },
     },
     {
         "method_name": "memory_snapshot",
@@ -648,6 +735,10 @@ def _openapi_routes() -> dict[tuple[str, str], dict]:
     }
 
 
+def _openapi_spec() -> dict:
+    return json.loads(OPENAPI_FIXTURE.read_text(encoding="utf-8"))
+
+
 def _json_request_body(request: httpx.Request) -> dict:
     if not request.content:
         return {}
@@ -726,6 +817,225 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
 
 
+def test_openapi_capability_contract_matches_authenticated_backend_discovery():
+    spec = _openapi_spec()
+    operation = spec["paths"]["/api/hades/v1/capabilities"]["get"]
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    capability_schema = spec["components"]["schemas"]["CapabilitiesResponse"]
+
+    assert schema == {"$ref": "#/components/schemas/CapabilitiesResponse"}
+    assert operation["responses"]["401"] == {
+        "$ref": "#/components/responses/Unauthorized"
+    }
+    assert "capability_names" in capability_schema["required"]
+    assert capability_schema["properties"]["persephone_agent_queue_v1"]["const"] is True
+    assert "verify_project_wiki" in capability_schema["properties"]["capability_names"][
+        "description"
+    ]
+    assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"] == {
+        "$ref": "#/components/responses/Error"
+    }
+
+
+def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
+    spec = _openapi_spec()
+    operation = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"]
+    schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    evidence = schema["properties"]["evidence_refs"]
+    ref = evidence["items"]
+    claims = ref["properties"]["claims"]
+    mapping = claims["items"]
+
+    assert evidence["maxItems"] == 80
+    assert set(ref["properties"]) == {"kind", "schema", "sha256", "hash", "path", "claims"}
+    assert ref["additionalProperties"] is False
+    assert claims["minItems"] == 1
+    assert claims["maxItems"] == 8
+    assert mapping["required"] == ["claim", "proof"]
+    assert mapping["additionalProperties"] is False
+    assert mapping["properties"]["claim"]["maxLength"] == 500
+    assert mapping["properties"]["proof"]["maxLength"] == 500
+    forbidden = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"][
+        "responses"
+    ]["403"]
+    assert forbidden["content"]["application/json"]["example"]["error"]["code"] == (
+        "wiki_verification_capability_not_allowed"
+    )
+    assert operation["responses"]["422"] == {"$ref": "#/components/responses/Error"}
+
+
+def test_openapi_artifact_hash_contract_matches_backend_canonical_rules():
+    spec = _openapi_spec()
+    schemas = spec["components"]["schemas"]
+    description = schemas["ArtifactUploadRequest"]["properties"]["sha256"]["description"]
+    error_codes = schemas["ArtifactUploadErrorResponse"]["properties"]["error"][
+        "properties"
+    ]["code"]["enum"]
+
+    assert "recursively key-sorted compact JSON" in description
+    assert "preserving list order, Unicode, slashes, and zero fractions" in description
+    assert "artifact_hash_mismatch" in error_codes
+
+
+def test_wiki_client_methods_use_exact_bounded_backend_contract():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.wiki_pages(
+        project_id="p",
+        workspace_binding_id="w",
+        source_status="needs_verification",
+        limit=20,
+    ) == {"ok": True}
+    assert client.wiki_page(
+        f" {VALID_WIKI_PAGE_ID} ",
+        project_id="p",
+        workspace_binding_id="w",
+    ) == {"ok": True}
+    assert client.create_wiki_draft(
+        project_id="p",
+        workspace_binding_id="w",
+        slug="technical/overview",
+        title="Overview",
+        page_type="technical",
+        content_markdown="# Overview",
+        evidence_refs=[],
+    ) == {"ok": True}
+    assert client.verify_wiki_page(
+        f" {VALID_WIKI_PAGE_ID} ",
+        project_id="p",
+        workspace_binding_id="w",
+        expected_current_revision_id="rev",
+        evidence_refs=[
+            {
+                "kind": "file_ref",
+                "path": "src/app.py",
+                "hash": "a" * 64,
+                "claims": [{"claim": "claim", "proof": "proof"}],
+            }
+        ],
+        verification_note="Checked against current tree",
+    ) == {"ok": True}
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/hades/v1/wiki/pages"),
+        ("GET", f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}"),
+        ("POST", "/api/hades/v1/wiki/pages"),
+        ("POST", f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}/verify"),
+    ]
+    assert _query_dict(requests[0]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "source_status": "needs_verification",
+        "limit": "20",
+    }
+    assert _query_dict(requests[1]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+    }
+    assert _json_request_body(requests[2]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "slug": "technical/overview",
+        "title": "Overview",
+        "page_type": "technical",
+        "content_markdown": "# Overview",
+        "evidence_refs": [],
+    }
+    assert _json_request_body(requests[3]) == {
+        "project_id": "p",
+        "workspace_binding_id": "w",
+        "expected_current_revision_id": "rev",
+        "evidence_refs": [
+            {
+                "kind": "file_ref",
+                "path": "src/app.py",
+                "hash": "a" * 64,
+                "claims": [{"claim": "claim", "proof": "proof"}],
+            }
+        ],
+        "verification_note": "Checked against current tree",
+    }
+
+
+@pytest.mark.parametrize("method_name", ["wiki_page", "verify_wiki_page"])
+def test_wiki_client_page_methods_require_a_non_empty_page_id(method_name):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(lambda _request: pytest.fail("request must not be sent")),
+    )
+
+    with pytest.raises(ValueError, match="canonical ULID"):
+        getattr(client, method_name)(
+            "  ",
+            project_id="p",
+            workspace_binding_id="w",
+        )
+
+
+@pytest.mark.parametrize("method_name", ["wiki_page", "verify_wiki_page"])
+@pytest.mark.parametrize(
+    "page_id",
+    ["../../privacy/export", "page?admin=1", "page#fragment"],
+)
+def test_wiki_client_rejects_non_ulid_page_ids_without_sending_request(method_name, page_id):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+        ),
+    )
+
+    with pytest.raises(ValueError, match="canonical ULID"):
+        getattr(client, method_name)(
+            page_id,
+            project_id="p",
+            workspace_binding_id="w",
+        )
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["wiki/../privacy/export", "health?admin=1", "health#fragment"],
+)
+def test_client_rejects_unsafe_internal_route_paths(path):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+        ),
+    )
+
+    with pytest.raises(ValueError, match="backend route path"):
+        client._request("GET", path)
+
+    assert requests == []
+
+
 def test_client_uses_hades_v1_routes_and_bearer_auth():
     from hermes_cli.hades_backend_client import HadesBackendClient
 
@@ -777,6 +1087,18 @@ def test_token_env_key_is_stable_and_redaction_hides_tokens():
     assert first.isupper()
     assert "sk-live-secret" not in redact_secret("token=sk-live-secret")
     assert "derived-token" not in redact_secret("Bearer derived-token")
+
+
+@pytest.mark.parametrize("token_kind", ["agent", "bootstrap"])
+def test_redaction_hides_complete_pipe_delimited_hades_tokens(token_kind):
+    from hermes_cli.hades_backend_client import redact_secret
+
+    secret = "S" * 64
+    token = f"hades_{token_kind}_01ARZ3NDEKTSV4RRFFQ69G5FAV|{secret}"
+
+    redacted = redact_secret(f"request failed: token={token}")
+
+    assert redacted == "request failed: token=***"
 
 
 def test_client_raises_backend_error_with_redacted_body():

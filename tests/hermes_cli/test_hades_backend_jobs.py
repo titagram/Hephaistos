@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 
 import pytest
+
+
+def _extract_wiki_agent_context(content_markdown: str) -> dict:
+    match = re.search(
+        r"## Agent Context\s*\n+```json\n(?P<context>\{[^\n]+\})\n```",
+        content_markdown,
+    )
+    assert match is not None
+    return json.loads(match.group("context"))
 
 
 def _symlink_or_skip(link, target, *, target_is_directory=False):
@@ -668,7 +679,7 @@ def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     assert result["status"] == "completed"
     assert result["schema"] == "devboard.wiki_refresh_result.v1"
     assert result["raw_source_included"] is False
-    assert overview["source_status"] == "verified_from_code"
+    assert {page["source_status"] for page in pages} == {"needs_verification"}
     assert "Project Overview" in overview["title"]
     assert "Raw source is not embedded" in overview["content_markdown"]
     assert any(ref["kind"] == "artifact_ref" for ref in overview["evidence_refs"])
@@ -678,6 +689,93 @@ def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     assert any(slug.endswith("-symbol-map") for slug in slugs)
     assert any(slug.endswith("-tests-quality") for slug in slugs)
     assert "return Booking::create" not in str(result)
+    for page in pages:
+        content = page["content_markdown"]
+        assert "## Human Summary" in content
+        assert "## Agent Context" in content
+        assert "```json" in content
+        assert len(content) <= 24_000
+        context = _extract_wiki_agent_context(content)
+        assert context["schema"] == "hades.wiki.agent_context.v1"
+        assert context["page_kind"]
+        assert context["evidence_kinds"]
+        assert context["raw_source_included"] is False
+
+    repeated = execute_job(
+        {
+            "job_id": "job_wiki_repeated",
+            "capability": "populate_project_wiki",
+            "payload": {"max_files": 80, "max_symbols": 200},
+        },
+        workspace_root=tmp_path,
+    )
+    assert [page["content_markdown"] for page in repeated["pages"]] == [
+        page["content_markdown"] for page in pages
+    ]
+
+
+def test_wiki_artifact_evidence_uses_authoritative_canonical_payload_hash():
+    from hermes_cli.hades_backend_jobs import _artifact_evidence
+    from hermes_cli.hades_backend_sync import _artifact_payload_hash
+
+    payload = {
+        "schema": "hades.git_tree.v1",
+        "metadata": {
+            "ratio": 1.0,
+            "labels": ["β", "a/b"],
+            "nested": {"z": "last", "a": "first"},
+        },
+        "head_commit": "a" * 40,
+        "files": [{"sha256": "1" * 64, "path": "src/Foo.php"}],
+    }
+
+    assert _artifact_evidence(payload)["sha256"] == _artifact_payload_hash(payload)
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        ("service.py", "class Service:\n    marker = 'RAW_SOURCE_SENTINEL'\n"),
+        ("service.ts", "export class Service { marker = 'RAW_SOURCE_SENTINEL'; }\n"),
+        ("service.go", 'package service\nconst marker = "RAW_SOURCE_SENTINEL"\n'),
+        ("service.rs", 'const MARKER: &str = "RAW_SOURCE_SENTINEL";\n'),
+        ("Service.java", 'class Service { String marker = "RAW_SOURCE_SENTINEL"; }\n'),
+        ("Service.php", "<?php\nclass Service { private string $marker = 'RAW_SOURCE_SENTINEL'; }\n"),
+    ],
+    ids=["python", "typescript", "go", "rust", "java", "php"],
+)
+def test_populate_project_wiki_dual_audience_contract_is_language_agnostic(
+    tmp_path,
+    filename,
+    source,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+
+    result = execute_job(
+        {
+            "job_id": f"job_wiki_{filename}",
+            "capability": "populate_project_wiki",
+            "payload": {"max_files": 20, "max_symbols": 20},
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert result["pages"]
+    assert "RAW_SOURCE_SENTINEL" not in str(result)
+    for page in result["pages"]:
+        content = page["content_markdown"]
+        context = _extract_wiki_agent_context(content)
+        assert context == {
+            "evidence_kinds": sorted(
+                {ref["kind"] for ref in page["evidence_refs"]}
+            ),
+            "page_kind": context["page_kind"],
+            "raw_source_included": False,
+            "schema": "hades.wiki.agent_context.v1",
+        }
+        assert len(content) <= 24_000
 
 
 def test_sync_git_tree_omits_symlink_file_and_directory_escapes(tmp_path):

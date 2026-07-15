@@ -6,7 +6,6 @@ import base64
 from dataclasses import dataclass
 import gzip
 import hashlib
-import json
 import logging
 from pathlib import Path
 import re
@@ -15,6 +14,10 @@ import time
 from typing import Callable
 
 from hermes_cli import hades_backend_db as db
+from hermes_cli.hades_artifact_hash import (
+    artifact_payload_hash as _artifact_payload_hash,
+    canonical_artifact_bytes,
+)
 
 logger = logging.getLogger("hermes_cli.hades_backend")
 
@@ -993,13 +996,8 @@ def _artifact_upload_cache_key(binding: db.WorkspaceBinding, schema: str) -> str
     return f"{ARTIFACT_UPLOAD_CACHE_PREFIX}:{binding.backend_workspace_binding_id}:{schema}"
 
 
-def _artifact_payload_hash(artifact_payload: dict[str, object]) -> str:
-    encoded = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _artifact_upload_fields(artifact_payload: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
-    encoded = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    encoded = canonical_artifact_bytes(artifact_payload)
     if len(encoded) < ARTIFACT_COMPRESSION_MIN_BYTES:
         return {"artifact": artifact_payload}, {"compressed": False, "original_bytes": len(encoded), "compressed_bytes": 0}
 
