@@ -3269,6 +3269,104 @@ def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path
     assert "return new Response" not in str(artifact)
 
 
+def test_populate_backend_ast_resolves_inherited_symfony_controller_routes(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    controllers = tmp_path / "src" / "Controller"
+    controllers.mkdir(parents=True)
+    (controllers / "AdminController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "abstract class AdminController {\n"
+        "    /** @Route(\"/\", name=\"\") */\n"
+        "    public function index() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (controllers / "RoleController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "abstract class RoleController extends AdminController {}\n",
+        encoding="utf-8",
+    )
+    (controllers / "WorkerController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "/** @Route(\"/generale/soggetti-attivi\", name=\"contact_flock_roles_worker\") */\n"
+        "class WorkerController extends RoleController {}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_symfony_inherited_route",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    inherited = next(
+        route
+        for route in artifact["routes"]
+        if route.get("name") == "contact_flock_roles_worker"
+    )
+    assert inherited["uri"] == "/generale/soggetti-attivi/"
+    assert inherited["handler"] == "WorkerController@index"
+    assert inherited["defined_handler"] == "AdminController@index"
+    assert inherited["inherited"] is True
+    assert (
+        "route_handler",
+        "route:contact_flock_roles_worker",
+        "AdminController@index",
+    ) in {
+        (edge.get("kind"), edge.get("from"), edge.get("to"))
+        for edge in artifact["edges"]
+    }
+    assert "WorkerController@index" not in {
+        symbol.get("name") for symbol in artifact["symbols"]
+    }
+
+
+def test_populate_backend_ast_bounds_symfony_inheritance_cycles(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    controllers = tmp_path / "src" / "Controller"
+    controllers.mkdir(parents=True)
+    (controllers / "AController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "/** @Route(\"/a\", name=\"a_\") */\n"
+        "class AController extends BController {}\n",
+        encoding="utf-8",
+    )
+    (controllers / "BController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "class BController extends AController {\n"
+        "    /** @Route(\"/index\", name=\"index\") */\n"
+        "    public function index() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_symfony_cycle",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    report = result["artifact"]["analysis"]["symfony_inheritance"]
+    assert result["status"] == "completed"
+    assert report["status"] == "partial"
+    assert report["cycles"] >= 1
+    assert any(route.get("name") == "a_index" for route in result["artifact"]["routes"])
+
+
 def test_populate_backend_ast_extracts_doctrine_schema_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
