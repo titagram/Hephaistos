@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SKILL_DIR = ROOT / "skills" / "autonomous-ai-agents" / "hades-wiki-verify"
+SKILL = SKILL_DIR / "SKILL.md"
+OPENAI_METADATA = SKILL_DIR / "agents" / "openai.yaml"
+DESCRIPTION = "Use when Hades wiki pages need evidence verification."
+
+
+def _frontmatter(text: str) -> dict:
+    assert text.startswith("---\n"), "SKILL.md must start with YAML frontmatter"
+    _, raw, _ = text.split("---", 2)
+    parsed = yaml.safe_load(raw)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_wiki_verify_skill_metadata_is_bounded_and_discoverable() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+    metadata = _frontmatter(text)
+
+    assert metadata == {"name": "hades-wiki-verify", "description": DESCRIPTION}
+    assert DESCRIPTION.startswith("Use when")
+    assert DESCRIPTION.endswith(".")
+    assert len(DESCRIPTION) <= 60
+
+
+def test_wiki_verify_skill_processes_every_current_revision_once() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for command in (
+        "hades backend status --json",
+        "hades backend sync",
+        "hades backend wiki list --status needs_verification --limit 20 --json",
+        "hades backend wiki show PAGE_ID --json",
+        "hades backend wiki verify PAGE_ID",
+        "--expected-revision REVISION_ID",
+        "--evidence-file EVIDENCE_FILE",
+    ):
+        assert command in text
+
+    for invariant in (
+        "exactly one page and its current revision at a time",
+        "Read the whole `content_markdown`",
+        "enumerate every checkable claim",
+        "next_cursor",
+        "verified/deferred/conflicted",
+    ):
+        assert invariant in text
+
+
+def test_wiki_verify_skill_requires_fresh_bounded_evidence() -> None:
+    text = SKILL.read_text(encoding="utf-8")
+
+    for guard in (
+        "local code first",
+        "discovery only",
+        "current artifact or file hash",
+        "`artifact_ref`",
+        "`file_ref`",
+        "at most 80",
+        "Never fabricate evidence",
+        "leave the page `needs_verification`",
+        "missing, stale, or conflicting",
+        "exact reason",
+    ):
+        assert guard in text
+
+
+def test_wiki_verify_openai_metadata_invokes_the_skill() -> None:
+    metadata = yaml.safe_load(OPENAI_METADATA.read_text(encoding="utf-8"))
+
+    assert metadata == {
+        "interface": {
+            "display_name": "Verify Hades Wiki",
+            "short_description": "Verify wiki claims against project evidence",
+            "default_prompt": (
+                "Use $hades-wiki-verify to verify pending Hades wiki pages step by step."
+            ),
+        }
+    }
+    assert 25 <= len(metadata["interface"]["short_description"]) <= 64

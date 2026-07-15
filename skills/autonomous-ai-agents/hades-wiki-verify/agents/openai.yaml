@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Hades Wiki"
+  short_description: "Verify wiki claims against project evidence"
+  default_prompt: "Use $hades-wiki-verify to verify pending Hades wiki pages step by step."
