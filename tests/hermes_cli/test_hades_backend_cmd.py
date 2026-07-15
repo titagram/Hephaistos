@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _seed_current_backend_workspace(monkeypatch, tmp_path, *, capabilities=None):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -3468,24 +3470,50 @@ def test_backend_wiki_list_preserves_json_and_human_output_is_reviewable(
     import hermes_cli.hades_wiki_actions as wiki_actions
 
     list_response = {
+        "protocol_version": "v1",
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
         "items": [
             {
                 "id": "page_1",
+                "project_id": "proj_1",
+                "repository_id": None,
+                "slug": "technical/overview",
                 "current_revision_id": "rev_1",
+                "revision_id": "rev_1",
                 "title": "Overview",
+                "page_type": "technical",
+                "producer": "hades",
+                "source_type": "hades_agent_draft",
                 "source_status": "needs_verification",
                 "evidence_count": 2,
+                "updated_at": "2026-07-15T10:00:00+00:00",
+                "revision_created_at": "2026-07-15T10:00:00+00:00",
             }
         ],
         "next_cursor": "cursor_2",
     }
     show_response = {
-        "page": {
+        "protocol_version": "v1",
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "wiki_page": {
             "id": "page_1",
+            "project_id": "proj_1",
+            "repository_id": None,
+            "slug": "technical/overview",
             "current_revision_id": "rev_1",
+            "revision_id": "rev_1",
             "title": "Overview",
+            "page_type": "technical",
+            "producer": "hades",
+            "source_type": "hades_agent_draft",
             "source_status": "needs_verification",
+            "content_markdown": "# Overview",
+            "content_truncated": False,
             "evidence_refs": [{"kind": "artifact_ref"}],
+            "updated_at": "2026-07-15T10:00:00+00:00",
+            "revision_created_at": "2026-07-15T10:00:00+00:00",
         }
     }
 
@@ -3547,13 +3575,25 @@ def test_backend_wiki_list_human_output_includes_next_cursor(monkeypatch, tmp_pa
     class FakeClient:
         def wiki_pages(self, **_payload):
             return {
+                "protocol_version": "v1",
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
                 "items": [
                     {
                         "id": "page_1",
+                        "project_id": "proj_1",
+                        "repository_id": None,
+                        "slug": "technical/overview",
                         "current_revision_id": "rev_1",
+                        "revision_id": "rev_1",
                         "title": "Overview",
+                        "page_type": "technical",
+                        "producer": "hades",
+                        "source_type": "hades_agent_draft",
                         "source_status": "needs_verification",
                         "evidence_count": 2,
+                        "updated_at": "2026-07-15T10:00:00+00:00",
+                        "revision_created_at": "2026-07-15T10:00:00+00:00",
                     }
                 ],
                 "next_cursor": "cursor_2",
@@ -3578,6 +3618,300 @@ def test_backend_wiki_list_human_output_includes_next_cursor(monkeypatch, tmp_pa
     assert "Next cursor: cursor_2" in output
 
 
+@pytest.mark.parametrize(
+    ("envelope", "expected"),
+    [
+        (
+            {
+                "protocol_version": "v1",
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "wiki_page": {
+                    "id": "page_1",
+                    "project_id": "proj_1",
+                    "repository_id": None,
+                    "slug": "technical/architecture",
+                    "current_revision_id": "rev_1",
+                    "revision_id": "rev_1",
+                    "title": "Architecture",
+                    "page_type": "technical",
+                    "producer": "hades",
+                    "source_type": "hades_agent_draft",
+                    "source_status": "needs_verification",
+                    "content_markdown": "# Architecture",
+                    "content_truncated": False,
+                    "evidence_refs": [{"kind": "artifact_ref"}],
+                    "updated_at": "2026-07-15T10:00:00+00:00",
+                    "revision_created_at": "2026-07-15T10:00:00+00:00",
+                },
+            },
+            {
+                "id": "page_1",
+                "revision_id": "rev_1",
+                "title": "Architecture",
+                "status": "needs_verification",
+                "evidence_count": 1,
+            },
+        ),
+        (
+            {
+                "wiki_page_id": "page_1",
+                "wiki_revision_id": "rev_2",
+                "source_status": "needs_verification",
+                "created": True,
+            },
+            {
+                "id": "page_1",
+                "revision_id": "rev_2",
+                "title": "untitled",
+                "status": "needs_verification",
+                "evidence_count": 0,
+            },
+        ),
+        (
+            {
+                "wiki_page_id": "page_1",
+                "wiki_revision_id": "rev_3",
+                "source_status": "verified_from_code",
+                "created": False,
+            },
+            {
+                "id": "page_1",
+                "revision_id": "rev_3",
+                "title": "untitled",
+                "status": "verified_from_code",
+                "evidence_count": 0,
+            },
+        ),
+    ],
+    ids=("detail", "draft", "verify"),
+)
+def test_backend_wiki_summary_parses_real_backend_envelopes(envelope, expected):
+    from hermes_cli.hades_wiki_actions import _page_summary
+
+    assert _page_summary(envelope) == expected
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_limit"),
+    [(None, 20), (1, 1), (50, 50), (0, None), (51, None)],
+)
+def test_backend_wiki_list_validates_limit_before_client_creation(
+    monkeypatch, tmp_path, capsys, limit, expected_limit
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    factory_calls = []
+    list_calls = []
+
+    class FakeClient:
+        def wiki_pages(self, **payload):
+            list_calls.append(payload)
+            return {
+                "protocol_version": "v1",
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "items": [],
+                "next_cursor": None,
+            }
+
+        def close(self):
+            pass
+
+    def client_factory():
+        factory_calls.append(True)
+        return FakeClient()
+
+    monkeypatch.setattr(wiki_actions, "client_from_config", client_factory)
+
+    rc = cmd.hades_backend_command(
+        _wiki_args("list", status=None, limit=limit, cursor=None, json=True)
+    )
+    captured = capsys.readouterr()
+
+    if expected_limit is None:
+        assert rc == 1
+        assert factory_calls == []
+        assert list_calls == []
+        assert "between 1 and 50" in captured.err
+    else:
+        assert rc == 0
+        assert factory_calls == [True]
+        assert list_calls == [
+            {
+                "project_id": "proj_1",
+                "workspace_binding_id": "wb_1",
+                "limit": expected_limit,
+            }
+        ]
+
+
+@pytest.mark.parametrize("page_type", ["business", "technical", "runbook", "audit"])
+def test_backend_wiki_draft_accepts_backend_page_types_and_optional_evidence(
+    tmp_path, page_type
+):
+    from hermes_cli.hades_wiki_actions import _draft_payload
+
+    path = tmp_path / "draft.json"
+    path.write_text(
+        json.dumps(
+            {
+                "slug": "technical/architecture",
+                "title": "Architecture",
+                "page_type": page_type,
+                "content_markdown": "# Architecture",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _draft_payload(path) == {
+        "slug": "technical/architecture",
+        "title": "Architecture",
+        "page_type": page_type,
+        "content_markdown": "# Architecture",
+        "evidence_refs": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"slug": ""}, "slug"),
+        ({"slug": "Technical/architecture"}, "slug"),
+        ({"slug": "a" * 256}, "slug"),
+        ({"slug": 1}, "slug"),
+        ({"title": ""}, "title"),
+        ({"title": "   "}, "title"),
+        ({"title": "t" * 256}, "title"),
+        ({"title": 1}, "title"),
+        ({"page_type": "overview"}, "page_type"),
+        ({"page_type": 1}, "page_type"),
+        ({"content_markdown": ""}, "content_markdown"),
+        ({"content_markdown": "   "}, "content_markdown"),
+        ({"content_markdown": "x" * 24_001}, "24,000"),
+        ({"content_markdown": 1}, "content_markdown"),
+        ({"source_status": "verified_from_code"}, "source_status"),
+    ],
+)
+def test_backend_wiki_draft_rejects_values_outside_backend_contract(
+    tmp_path, override, message
+):
+    from hermes_cli.hades_wiki_actions import _draft_payload
+
+    payload = {
+        "slug": "technical/architecture",
+        "title": "Architecture",
+        "page_type": "technical",
+        "content_markdown": "# Architecture",
+        "evidence_refs": [],
+    }
+    payload.update(override)
+    path = tmp_path / "draft.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _draft_payload(path)
+
+
+def _invalid_wiki_evidence_cases():
+    return [
+        pytest.param([], "at least one", id="empty"),
+        pytest.param(["not-an-object"], "JSON object", id="non-object"),
+        pytest.param([{}], "kind", id="missing-kind"),
+        pytest.param([{"kind": ""}], "kind", id="empty-kind"),
+        pytest.param([{"kind": "   "}], "kind", id="blank-kind"),
+        pytest.param([{"kind": "k" * 65}], "kind", id="long-kind"),
+        pytest.param([{"kind": 1}], "kind", id="non-string-kind"),
+        pytest.param([{"kind": "file_ref", "extra": "x"}], "unsupported", id="extra-key"),
+        pytest.param([{"kind": "artifact_ref", "schema": 1}], "schema", id="schema-type"),
+        pytest.param([{"kind": "artifact_ref", "schema": None}], "schema", id="schema-null"),
+        pytest.param([{"kind": "artifact_ref", "schema": "s" * 192}], "schema", id="schema-long"),
+        pytest.param([{"kind": "artifact_ref", "sha256": None}], "sha256", id="sha-null"),
+        pytest.param([{"kind": "artifact_ref", "sha256": "a" * 63}], "sha256", id="sha-short"),
+        pytest.param([{"kind": "artifact_ref", "sha256": "g" * 64}], "sha256", id="sha-nonhex"),
+        pytest.param([{"kind": "file_ref", "hash": "a" * 65}], "hash", id="hash-long"),
+        pytest.param([{"kind": "file_ref", "hash": None}], "hash", id="hash-null"),
+        pytest.param([{"kind": "file_ref", "hash": "z" * 64}], "hash", id="hash-nonhex"),
+        pytest.param([{"kind": "file_ref", "path": "/etc/passwd"}], "safe relative", id="absolute"),
+        pytest.param([{"kind": "file_ref", "path": None}], "safe relative", id="path-null"),
+        pytest.param([{"kind": "file_ref", "path": "C:/secret"}], "safe relative", id="drive"),
+        pytest.param([{"kind": "file_ref", "path": "src\\app.py"}], "safe relative", id="backslash"),
+        pytest.param([{"kind": "file_ref", "path": "../secret"}], "safe relative", id="parent"),
+        pytest.param([{"kind": "file_ref", "path": "./app.py"}], "safe relative", id="dot"),
+        pytest.param([{"kind": "file_ref", "path": "src//app.py"}], "safe relative", id="empty-segment"),
+        pytest.param([{"kind": "file_ref", "path": "src/\x01app.py"}], "safe relative", id="control"),
+        pytest.param([{"kind": "file_ref", "path": "p" * 2049}], "safe relative", id="path-long"),
+        pytest.param([{"kind": "file_ref", "bytes": -1}], "bytes", id="bytes-negative"),
+        pytest.param([{"kind": "file_ref", "bytes": None}], "bytes", id="bytes-null"),
+        pytest.param([{"kind": "file_ref", "bytes": True}], "bytes", id="bytes-bool"),
+        pytest.param([{"kind": "file_ref", "bytes": "1"}], "bytes", id="bytes-string"),
+        pytest.param(
+            [{"kind": "file_ref", "raw_source_included": 1}],
+            "raw_source_included",
+            id="raw-source-type",
+        ),
+        pytest.param(
+            [{"kind": "file_ref", "raw_source_included": None}],
+            "raw_source_included",
+            id="raw-source-null",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("refs", "message"), _invalid_wiki_evidence_cases())
+def test_backend_wiki_verify_rejects_invalid_evidence_contract(tmp_path, refs, message):
+    from hermes_cli.hades_wiki_actions import _verification_evidence
+
+    path = tmp_path / "refs.json"
+    path.write_text(json.dumps(refs), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _verification_evidence(path)
+
+
+def test_backend_wiki_evidence_accepts_exact_backend_scalar_shape(tmp_path):
+    from hermes_cli.hades_wiki_actions import _verification_evidence
+
+    refs = [
+        {
+            "kind": "file_ref",
+            "schema": "hades.file_ref.v1",
+            "sha256": "a" * 64,
+            "hash": "b" * 64,
+            "path": "src/app.py",
+            "bytes": 0,
+            "raw_source_included": False,
+        }
+    ]
+    path = tmp_path / "refs.json"
+    path.write_text(json.dumps(refs), encoding="utf-8")
+
+    assert _verification_evidence(path) == refs
+
+
+def test_backend_wiki_draft_reuses_evidence_contract_and_maximum(tmp_path):
+    from hermes_cli.hades_wiki_actions import _draft_payload
+
+    base = {
+        "slug": "technical/architecture",
+        "title": "Architecture",
+        "page_type": "technical",
+        "content_markdown": "# Architecture",
+    }
+    path = tmp_path / "draft.json"
+    for evidence_refs, message in (
+        ([{"kind": "file_ref", "extra": "x"}], "unsupported"),
+        ([{"kind": "artifact_ref"}] * 81, "80"),
+    ):
+        path.write_text(json.dumps({**base, "evidence_refs": evidence_refs}), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            _draft_payload(path)
+
+
 def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
     monkeypatch, tmp_path, capsys
 ):
@@ -3590,9 +3924,9 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
     draft_path.write_text(
         json.dumps(
             {
-                "slug": "overview",
+                "slug": "technical/overview",
                 "title": "Overview",
-                "page_type": "overview",
+                "page_type": "technical",
                 "content_markdown": "# Overview",
                 "evidence_refs": [],
             }
@@ -3610,11 +3944,21 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
 
         def create_wiki_draft(self, **payload):
             self.drafts.append(payload)
-            return {"page": {"id": "page_1"}, "revision": {"id": "rev_1"}}
+            return {
+                "wiki_page_id": "page_1",
+                "wiki_revision_id": "rev_1",
+                "source_status": "needs_verification",
+                "created": True,
+            }
 
         def verify_wiki_page(self, page_id, **payload):
             self.verifications.append((page_id, payload))
-            return {"page": {"id": "page_1"}, "revision": {"id": "rev_2"}}
+            return {
+                "wiki_page_id": "page_1",
+                "wiki_revision_id": "rev_2",
+                "source_status": "verified_from_code",
+                "created": False,
+            }
 
         def close(self):
             pass
@@ -3640,15 +3984,25 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
 
     assert draft_rc == 0
     assert verify_rc == 0
-    assert draft_output == {"page": {"id": "page_1"}, "revision": {"id": "rev_1"}}
-    assert verify_output == {"page": {"id": "page_1"}, "revision": {"id": "rev_2"}}
+    assert draft_output == {
+        "wiki_page_id": "page_1",
+        "wiki_revision_id": "rev_1",
+        "source_status": "needs_verification",
+        "created": True,
+    }
+    assert verify_output == {
+        "wiki_page_id": "page_1",
+        "wiki_revision_id": "rev_2",
+        "source_status": "verified_from_code",
+        "created": False,
+    }
     assert fake.drafts == [
         {
             "project_id": "proj_1",
             "workspace_binding_id": "wb_1",
-            "slug": "overview",
+            "slug": "technical/overview",
             "title": "Overview",
-            "page_type": "overview",
+            "page_type": "technical",
             "content_markdown": "# Overview",
             "evidence_refs": [],
         }
@@ -3709,6 +4063,78 @@ def test_backend_wiki_rejects_invalid_json_shapes_before_client_creation(
     assert "JSON list" in verify_error
 
 
+def test_backend_wiki_rejects_invalid_evidence_item_before_client_creation(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    refs_path = tmp_path / "refs.json"
+    refs_path.write_text(
+        json.dumps([{"kind": "file_ref", "path": "../secret", "hash": "a" * 64}]),
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        wiki_actions,
+        "client_from_config",
+        lambda: (calls.append(True) or None),
+    )
+
+    rc = cmd.hades_backend_command(
+        _wiki_args(
+            "verify",
+            wiki_page_id="page_1",
+            expected_revision="rev_1",
+            evidence_file=str(refs_path),
+            note=None,
+            json=True,
+        )
+    )
+
+    assert rc == 1
+    assert calls == []
+    assert "safe relative" in capsys.readouterr().err
+
+
+def test_backend_wiki_rejects_overlong_note_before_client_creation(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    refs_path = tmp_path / "refs.json"
+    refs_path.write_text(
+        json.dumps([{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}]),
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        wiki_actions,
+        "client_from_config",
+        lambda: (calls.append(True) or None),
+    )
+
+    rc = cmd.hades_backend_command(
+        _wiki_args(
+            "verify",
+            wiki_page_id="page_1",
+            expected_revision="rev_1",
+            evidence_file=str(refs_path),
+            note="n" * 2001,
+            json=True,
+        )
+    )
+
+    assert rc == 1
+    assert calls == []
+    assert "2,000" in capsys.readouterr().err
+
+
 def test_backend_wiki_rejects_over_limit_content_and_evidence_before_request(
     monkeypatch, tmp_path, capsys
 ):
@@ -3721,9 +4147,9 @@ def test_backend_wiki_rejects_over_limit_content_and_evidence_before_request(
     oversized_draft.write_text(
         json.dumps(
             {
-                "slug": "overview",
+                "slug": "technical/overview",
                 "title": "Overview",
-                "page_type": "overview",
+                "page_type": "technical",
                 "content_markdown": "x" * 24_001,
                 "evidence_refs": [],
             }

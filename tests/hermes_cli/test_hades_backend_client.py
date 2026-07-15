@@ -759,9 +759,9 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
     assert client.create_wiki_draft(
         project_id="p",
         workspace_binding_id="w",
-        slug="overview",
+        slug="technical/overview",
         title="Overview",
-        page_type="overview",
+        page_type="technical",
         content_markdown="# Overview",
         evidence_refs=[],
     ) == {"ok": True}
@@ -793,9 +793,9 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
     assert _json_request_body(requests[2]) == {
         "project_id": "p",
         "workspace_binding_id": "w",
-        "slug": "overview",
+        "slug": "technical/overview",
         "title": "Overview",
-        "page_type": "overview",
+        "page_type": "technical",
         "content_markdown": "# Overview",
         "evidence_refs": [],
     }

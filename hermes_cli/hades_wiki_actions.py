@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,13 +16,23 @@ from hermes_cli.hades_backend_runtime import client_from_config
 WIKI_JSON_MAX_BYTES = 256_000
 WIKI_CONTENT_MAX_CHARS = 24_000
 WIKI_EVIDENCE_MAX_REFS = 80
+WIKI_NOTE_MAX_CHARS = 2_000
+WIKI_SLUG_MAX_CHARS = 255
+WIKI_TITLE_MAX_CHARS = 255
+WIKI_PAGE_TYPES = frozenset({"business", "technical", "runbook", "audit"})
 _DRAFT_FIELDS = (
     "slug",
     "title",
     "page_type",
     "content_markdown",
-    "evidence_refs",
 )
+_EVIDENCE_FIELDS = frozenset(
+    {"kind", "schema", "sha256", "hash", "path", "bytes", "raw_source_included"}
+)
+_HEX_SHA256 = re.compile(r"\A[0-9a-fA-F]{64}\Z")
+_SLUG = re.compile(r"\A[a-z0-9][a-z0-9/-]*\Z")
+_WINDOWS_DRIVE = re.compile(r"\A[A-Za-z]:")
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
 
 
 def _load_bounded_json(path_value: Any) -> Any:
@@ -45,11 +56,54 @@ def _load_bounded_json(path_value: Any) -> Any:
         raise ValueError(f"wiki JSON file is invalid at line {exc.lineno}, column {exc.colno}") from None
 
 
-def _bounded_evidence_refs(value: Any) -> list[Any]:
+def _safe_relative_path(value: Any) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2048
+        or value.startswith("/")
+        or "\\" in value
+        or _WINDOWS_DRIVE.match(value)
+        or _CONTROL_CHARACTER.search(value)
+    ):
+        return False
+    return all(segment not in {"", ".", ".."} for segment in value.split("/"))
+
+
+def _bounded_evidence_refs(value: Any, *, require_nonempty: bool = False) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError("wiki evidence must be a JSON list")
+    if require_nonempty and not value:
+        raise ValueError("wiki verification requires at least one evidence ref")
     if len(value) > WIKI_EVIDENCE_MAX_REFS:
         raise ValueError(f"wiki evidence exceeds {WIKI_EVIDENCE_MAX_REFS} refs")
+    for index, ref in enumerate(value):
+        if not isinstance(ref, dict):
+            raise ValueError(f"wiki evidence ref {index} must be a JSON object")
+        unsupported = sorted(set(ref) - _EVIDENCE_FIELDS)
+        if unsupported:
+            raise ValueError(f"wiki evidence ref {index} has unsupported field: {unsupported[0]}")
+        kind = ref.get("kind")
+        if not isinstance(kind, str) or not kind.strip() or len(kind) > 64:
+            raise ValueError(f"wiki evidence ref {index} kind must be a non-empty string of at most 64 characters")
+        schema = ref.get("schema")
+        if "schema" in ref and (not isinstance(schema, str) or len(schema) > 191):
+            raise ValueError(f"wiki evidence ref {index} schema must be a string of at most 191 characters")
+        for field in ("sha256", "hash"):
+            digest = ref.get(field)
+            if field in ref and (not isinstance(digest, str) or _HEX_SHA256.fullmatch(digest) is None):
+                raise ValueError(f"wiki evidence ref {index} {field} must be an exact 64-character hexadecimal hash")
+        path = ref.get("path")
+        if "path" in ref and not _safe_relative_path(path):
+            raise ValueError(f"wiki evidence ref {index} path must be a safe relative path")
+        byte_count = ref.get("bytes")
+        if "bytes" in ref and (
+            isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0
+        ):
+            raise ValueError(f"wiki evidence ref {index} bytes must be a non-negative integer")
+        raw_source_included = ref.get("raw_source_included")
+        if "raw_source_included" in ref and not isinstance(raw_source_included, bool):
+            raise ValueError(f"wiki evidence ref {index} raw_source_included must be a boolean")
     return value
 
 
@@ -60,14 +114,28 @@ def _draft_payload(path_value: Any) -> dict[str, Any]:
     missing = [field for field in _DRAFT_FIELDS if field not in value]
     if missing:
         raise ValueError(f"wiki draft is missing required field: {missing[0]}")
-    for field in ("slug", "title", "page_type", "content_markdown"):
-        if not isinstance(value[field], str):
-            raise ValueError(f"wiki draft field {field} must be a string")
-    if not value["slug"].strip() or not value["title"].strip() or not value["page_type"].strip():
-        raise ValueError("wiki draft slug, title, and page_type are required")
-    if len(value["content_markdown"]) > WIKI_CONTENT_MAX_CHARS:
+    if "source_status" in value:
+        raise ValueError("wiki draft field source_status is prohibited")
+    slug = value["slug"]
+    if (
+        not isinstance(slug, str)
+        or not slug
+        or len(slug) > WIKI_SLUG_MAX_CHARS
+        or _SLUG.fullmatch(slug) is None
+    ):
+        raise ValueError("wiki draft slug must match the backend slug contract")
+    title = value["title"]
+    if not isinstance(title, str) or not title.strip() or len(title) > WIKI_TITLE_MAX_CHARS:
+        raise ValueError("wiki draft title must be a non-empty string of at most 255 characters")
+    page_type = value["page_type"]
+    if not isinstance(page_type, str) or page_type not in WIKI_PAGE_TYPES:
+        raise ValueError("wiki draft page_type must be business, technical, runbook, or audit")
+    content = value["content_markdown"]
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("wiki draft content_markdown must be a non-empty string")
+    if len(content) > WIKI_CONTENT_MAX_CHARS:
         raise ValueError(f"wiki draft content exceeds {WIKI_CONTENT_MAX_CHARS:,} characters")
-    evidence_refs = _bounded_evidence_refs(value["evidence_refs"])
+    evidence_refs = _bounded_evidence_refs(value.get("evidence_refs", []))
     return {
         "slug": value["slug"],
         "title": value["title"],
@@ -78,7 +146,25 @@ def _draft_payload(path_value: Any) -> dict[str, Any]:
 
 
 def _verification_evidence(path_value: Any) -> list[Any]:
-    return _bounded_evidence_refs(_load_bounded_json(path_value))
+    return _bounded_evidence_refs(_load_bounded_json(path_value), require_nonempty=True)
+
+
+def _verification_note(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("wiki verification note must be a string")
+    if len(value) > WIKI_NOTE_MAX_CHARS:
+        raise ValueError(f"wiki verification note exceeds {WIKI_NOTE_MAX_CHARS:,} characters")
+    return value
+
+
+def _list_limit(value: Any) -> int:
+    if value is None:
+        return 20
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
+        raise ValueError("wiki list limit must be between 1 and 50")
+    return value
 
 
 def _current_binding():
@@ -106,25 +192,19 @@ def _redacted_error(exc: Exception, binding: Any = None) -> str:
 
 def _page_summary(value: Any) -> dict[str, Any]:
     response = value if isinstance(value, dict) else {}
-    page = response.get("page") if isinstance(response.get("page"), dict) else response
-    revision = response.get("revision") if isinstance(response.get("revision"), dict) else {}
-    if not revision and isinstance(page.get("current_revision"), dict):
-        revision = page["current_revision"]
-    evidence = revision.get("evidence_refs")
-    if not isinstance(evidence, list):
-        evidence = page.get("evidence_refs")
+    page = response.get("wiki_page") if isinstance(response.get("wiki_page"), dict) else response
+    evidence = page.get("evidence_refs")
     evidence_count = page.get("evidence_count")
     if not isinstance(evidence_count, int):
         evidence_count = len(evidence) if isinstance(evidence, list) else 0
     return {
-        "id": page.get("id") or response.get("id") or "unknown",
+        "id": page.get("id") or response.get("wiki_page_id") or "unknown",
         "revision_id": page.get("current_revision_id")
-        or revision.get("id")
-        or response.get("current_revision_id")
+        or page.get("revision_id")
+        or response.get("wiki_revision_id")
         or "unknown",
         "title": page.get("title") or response.get("title") or "untitled",
         "status": page.get("source_status")
-        or revision.get("source_status")
         or response.get("source_status")
         or "unknown",
         "evidence_count": evidence_count,
@@ -164,12 +244,20 @@ def run_wiki_action(args: argparse.Namespace) -> int:
     client = None
     binding = None
     try:
+        limit = _list_limit(getattr(args, "limit", None)) if action == "list" else None
         draft = _draft_payload(getattr(args, "from_file", None)) if action == "draft" else None
         evidence = (
             _verification_evidence(getattr(args, "evidence_file", None))
             if action == "verify"
             else None
         )
+        note = _verification_note(getattr(args, "note", None)) if action == "verify" else None
+        page_id = str(getattr(args, "wiki_page_id", "") or "").strip()
+        if action in {"show", "verify"} and not page_id:
+            raise ValueError("wiki page id is required")
+        expected_revision = str(getattr(args, "expected_revision", "") or "").strip()
+        if action == "verify" and not expected_revision:
+            raise ValueError("expected wiki revision id is required")
         binding = _current_binding()
         scope = {
             "project_id": binding.project_id,
@@ -177,9 +265,6 @@ def run_wiki_action(args: argparse.Namespace) -> int:
         }
         client = client_from_config()
         if action == "list":
-            limit = int(getattr(args, "limit", 20) or 20)
-            if not 1 <= limit <= 50:
-                raise ValueError("wiki list limit must be between 1 and 50")
             request = {
                 **scope,
                 "source_status": str(getattr(args, "status", "") or "").strip() or None,
@@ -188,23 +273,16 @@ def run_wiki_action(args: argparse.Namespace) -> int:
             }
             response = client.wiki_pages(**{key: value for key, value in request.items() if value is not None})
         elif action == "show":
-            page_id = str(getattr(args, "wiki_page_id", "") or "").strip()
             response = client.wiki_page(page_id, **scope)
         elif action == "draft":
             response = client.create_wiki_draft(**scope, **(draft or {}))
         elif action == "verify":
-            page_id = str(getattr(args, "wiki_page_id", "") or "").strip()
-            expected_revision = str(getattr(args, "expected_revision", "") or "").strip()
-            if not page_id:
-                raise ValueError("wiki page id is required")
-            if not expected_revision:
-                raise ValueError("expected wiki revision id is required")
             response = client.verify_wiki_page(
                 page_id,
                 **scope,
                 expected_current_revision_id=expected_revision,
                 evidence_refs=evidence or [],
-                verification_note=getattr(args, "note", None),
+                verification_note=note,
             )
         else:
             raise ValueError("wiki action is required: list, show, draft, or verify")
