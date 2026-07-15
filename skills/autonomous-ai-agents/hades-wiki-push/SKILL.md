@@ -45,7 +45,7 @@ Create a structural wiki baseline, human-authored narrative drafts, or both. Str
 
 ## Verification Boundary
 
-Never mark agent-authored narrative as verified and never run `hades backend wiki verify` from this skill. Structural pages may be `verified_from_code` because Hades generates them from bounded artifacts; narrative drafts remain `needs_verification` until a separate review.
+Never mark generated content as verified and never run `hades backend wiki verify` from this skill. All generated pages remain `needs_verification` until a separate review verifies every material claim against current evidence.
 
 Hand off the pending page IDs, draft outputs, source paths, unresolved claims, and current workspace binding to `hades-wiki-verify`. If that skill is unavailable, report the pending IDs and stop rather than self-verifying.
 

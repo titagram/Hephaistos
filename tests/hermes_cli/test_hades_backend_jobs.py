@@ -679,7 +679,7 @@ def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     assert result["status"] == "completed"
     assert result["schema"] == "devboard.wiki_refresh_result.v1"
     assert result["raw_source_included"] is False
-    assert overview["source_status"] == "verified_from_code"
+    assert {page["source_status"] for page in pages} == {"needs_verification"}
     assert "Project Overview" in overview["title"]
     assert "Raw source is not embedded" in overview["content_markdown"]
     assert any(ref["kind"] == "artifact_ref" for ref in overview["evidence_refs"])
@@ -712,6 +712,24 @@ def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     assert [page["content_markdown"] for page in repeated["pages"]] == [
         page["content_markdown"] for page in pages
     ]
+
+
+def test_wiki_artifact_evidence_uses_authoritative_canonical_payload_hash():
+    from hermes_cli.hades_backend_jobs import _artifact_evidence
+    from hermes_cli.hades_backend_sync import _artifact_payload_hash
+
+    payload = {
+        "schema": "hades.git_tree.v1",
+        "metadata": {
+            "ratio": 1.0,
+            "labels": ["β", "a/b"],
+            "nested": {"z": "last", "a": "first"},
+        },
+        "head_commit": "a" * 40,
+        "files": [{"sha256": "1" * 64, "path": "src/Foo.php"}],
+    }
+
+    assert _artifact_evidence(payload)["sha256"] == _artifact_payload_hash(payload)
 
 
 @pytest.mark.parametrize(

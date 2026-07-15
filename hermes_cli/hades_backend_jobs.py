@@ -11,6 +11,7 @@ import subprocess
 import tomllib
 from typing import Any
 
+from hermes_cli.hades_artifact_hash import artifact_payload_hash
 from hermes_cli.hades_backend_client import redact_secret
 from hermes_cli.hades_source_slice_policy import plan_source_slice_candidates
 
@@ -1169,11 +1170,10 @@ def _wiki_bounded(lines: list[str], *, max_chars: int = 24_000) -> str:
 
 
 def _artifact_evidence(artifact: dict[str, Any]) -> dict[str, Any]:
-    encoded = json.dumps(artifact, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return {
         "kind": "artifact_ref",
         "schema": artifact.get("schema"),
-        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "sha256": artifact_payload_hash(artifact),
         "raw_source_included": bool(artifact.get("raw_source_included")),
     }
 
@@ -1248,7 +1248,7 @@ def _wiki_page(
         "title": title,
         "page_type": page_type,
         "producer": "hades",
-        "source_status": "verified_from_code",
+        "source_status": "needs_verification",
         "content_markdown": f"{header}{human_markdown}{footer}",
         "evidence_refs": bounded_evidence,
     }

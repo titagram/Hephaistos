@@ -839,9 +839,8 @@ def test_openapi_capability_contract_matches_authenticated_backend_discovery():
 
 def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
     spec = _openapi_spec()
-    schema = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"][
-        "requestBody"
-    ]["content"]["application/json"]["schema"]
+    operation = spec["paths"]["/api/hades/v1/wiki/pages/{page}/verify"]["post"]
+    schema = operation["requestBody"]["content"]["application/json"]["schema"]
     evidence = schema["properties"]["evidence_refs"]
     ref = evidence["items"]
     claims = ref["properties"]["claims"]
@@ -862,6 +861,7 @@ def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
     assert forbidden["content"]["application/json"]["example"]["error"]["code"] == (
         "wiki_verification_capability_not_allowed"
     )
+    assert operation["responses"]["422"] == {"$ref": "#/components/responses/Error"}
 
 
 def test_openapi_artifact_hash_contract_matches_backend_canonical_rules():
@@ -1087,6 +1087,18 @@ def test_token_env_key_is_stable_and_redaction_hides_tokens():
     assert first.isupper()
     assert "sk-live-secret" not in redact_secret("token=sk-live-secret")
     assert "derived-token" not in redact_secret("Bearer derived-token")
+
+
+@pytest.mark.parametrize("token_kind", ["agent", "bootstrap"])
+def test_redaction_hides_complete_pipe_delimited_hades_tokens(token_kind):
+    from hermes_cli.hades_backend_client import redact_secret
+
+    secret = "S" * 64
+    token = f"hades_{token_kind}_01ARZ3NDEKTSV4RRFFQ69G5FAV|{secret}"
+
+    redacted = redact_secret(f"request failed: token={token}")
+
+    assert redacted == "request failed: token=***"
 
 
 def test_client_raises_backend_error_with_redacted_body():

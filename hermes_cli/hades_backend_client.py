@@ -18,6 +18,9 @@ PERSEPHONE_SSE_MAX_EVENT_BYTES = 65_536 + 16_384
 PERSEPHONE_SSE_MAX_LINE_BYTES = PERSEPHONE_SSE_MAX_EVENT_BYTES
 PERSEPHONE_SSE_MAX_FIELD_BYTES = 4_096
 _SECRET_PATTERNS = (
+    re.compile(
+        r"(?i)hades_(?:agent|bootstrap)_[0-9A-HJKMNP-TV-Z]{26}\|[A-Za-z0-9]{64}"
+    ),
     re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_\-]{6,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}"),
     re.compile(r"(?i)(token[=:]\s*)[A-Za-z0-9._\-]{8,}"),

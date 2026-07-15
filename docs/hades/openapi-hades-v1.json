@@ -450,7 +450,7 @@
             "$ref": "#/components/responses/Error"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "$ref": "#/components/responses/Error"
           }
         }
       }

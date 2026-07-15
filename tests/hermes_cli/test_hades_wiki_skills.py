@@ -8,6 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = ROOT / "skills" / "autonomous-ai-agents" / "hades-wiki-verify"
 SKILL = SKILL_DIR / "SKILL.md"
+PUSH_SKILL = ROOT / "skills" / "autonomous-ai-agents" / "hades-wiki-push" / "SKILL.md"
 OPENAI_METADATA = SKILL_DIR / "agents" / "openai.yaml"
 DESCRIPTION = "Use when Hades wiki pages need evidence verification."
 
@@ -163,3 +164,10 @@ def test_wiki_verify_openai_metadata_invokes_the_skill() -> None:
         }
     }
     assert 25 <= len(metadata["interface"]["short_description"]) <= 64
+
+
+def test_wiki_push_leaves_all_generated_pages_for_separate_verification() -> None:
+    text = PUSH_SKILL.read_text(encoding="utf-8")
+
+    assert "All generated pages remain `needs_verification`" in text
+    assert "Structural pages may be `verified_from_code`" not in text
