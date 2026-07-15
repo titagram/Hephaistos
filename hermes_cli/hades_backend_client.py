@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from typing import Any, Iterator
-from urllib.parse import urljoin
+from urllib.parse import unquote
 
 import httpx
 
@@ -23,6 +23,8 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(token[=:]\s*)[A-Za-z0-9._\-]{8,}"),
     re.compile(r"(?i)(api[_-]?key[=:]\s*)[A-Za-z0-9._\-]{8,}"),
 )
+_WIKI_PAGE_ID = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
+_ROUTE_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
 
 
 class HadesBackendError(RuntimeError):
@@ -79,6 +81,14 @@ def redact_secret(text: Any) -> str:
     for pattern in _SECRET_PATTERNS:
         value = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "***", value)
     return value
+
+
+def validate_wiki_page_id(value: Any) -> str:
+    """Return a canonical opaque wiki page ULID or reject it before routing."""
+    clean = str(value or "").strip()
+    if _WIKI_PAGE_ID.fullmatch(clean) is None:
+        raise ValueError("wiki page id must be a canonical ULID")
+    return clean
 
 
 def _string_param(value: Any) -> str:
@@ -190,8 +200,22 @@ class HadesBackendClient:
         self._client.close()
 
     def _url(self, path: str) -> str:
-        clean = "/" + str(path or "").lstrip("/")
-        return urljoin(API_PREFIX.rstrip("/") + "/", clean.lstrip("/"))
+        clean = str(path or "").strip().strip("/")
+        decoded = clean
+        for _ in range(2):
+            decoded_once = unquote(decoded)
+            if decoded_once == decoded:
+                break
+            decoded = decoded_once
+        segments = decoded.split("/")
+        if (
+            not clean
+            or any(marker in decoded for marker in ("?", "#", "\\"))
+            or _ROUTE_CONTROL_CHARACTER.search(decoded)
+            or any(not segment or segment in {".", ".."} for segment in segments)
+        ):
+            raise ValueError("backend route path must be a safe relative path")
+        return f"{API_PREFIX}/{clean}"
 
     def _request(
         self,
@@ -288,18 +312,14 @@ class HadesBackendClient:
         return self._request("GET", "wiki/pages", params=payload)
 
     def wiki_page(self, wiki_page_id: str, **payload: Any) -> dict[str, Any]:
-        clean = str(wiki_page_id or "").strip()
-        if not clean:
-            raise ValueError("wiki page id is required")
+        clean = validate_wiki_page_id(wiki_page_id)
         return self._request("GET", f"wiki/pages/{clean}", params=payload)
 
     def create_wiki_draft(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "wiki/pages", json_body=payload)
 
     def verify_wiki_page(self, wiki_page_id: str, **payload: Any) -> dict[str, Any]:
-        clean = str(wiki_page_id or "").strip()
-        if not clean:
-            raise ValueError("wiki page id is required")
+        clean = validate_wiki_page_id(wiki_page_id)
         return self._request("POST", f"wiki/pages/{clean}/verify", json_body=payload)
 
     def memory_snapshot(self, **payload: Any) -> dict[str, Any]:

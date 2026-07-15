@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hermes_cli.hades_backend_client import redact_secret
-from hermes_cli.hades_backend_runtime import client_from_config
+from hermes_cli import hades_backend_runtime as runtime
+from hermes_cli.hades_backend_client import redact_secret, validate_wiki_page_id
 
 
 WIKI_JSON_MAX_BYTES = 256_000
@@ -202,11 +202,10 @@ def _list_limit(value: Any) -> int:
     return value
 
 
-def _current_binding():
-    from hermes_cli.hades_backend_cmd import _current_workspace_binding
+def _current_agent_binding():
+    from hermes_cli.hades_backend_cmd import _current_workspace_scoped_agent_binding
 
-    _agent, binding = _current_workspace_binding()
-    return binding
+    return _current_workspace_scoped_agent_binding()
 
 
 def _redacted_error(exc: Exception, binding: Any = None) -> str:
@@ -287,18 +286,20 @@ def run_wiki_action(args: argparse.Namespace) -> int:
             else None
         )
         note = _verification_note(getattr(args, "note", None)) if action == "verify" else None
-        page_id = str(getattr(args, "wiki_page_id", "") or "").strip()
-        if action in {"show", "verify"} and not page_id:
-            raise ValueError("wiki page id is required")
+        page_id = (
+            validate_wiki_page_id(getattr(args, "wiki_page_id", ""))
+            if action in {"show", "verify"}
+            else ""
+        )
         expected_revision = str(getattr(args, "expected_revision", "") or "").strip()
         if action == "verify" and not expected_revision:
             raise ValueError("expected wiki revision id is required")
-        binding = _current_binding()
+        agent, binding = _current_agent_binding()
         scope = {
             "project_id": binding.project_id,
             "workspace_binding_id": binding.backend_workspace_binding_id,
         }
-        client = client_from_config()
+        client = runtime.client_for_agent(agent)
         if action == "list":
             request = {
                 **scope,

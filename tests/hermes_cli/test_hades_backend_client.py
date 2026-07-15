@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OPENAPI_FIXTURE = REPO_ROOT / "docs" / "hades" / "openapi-hades-v1.json"
+VALID_WIKI_PAGE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 CLIENT_ROUTE_CASES = [
     {
@@ -70,6 +71,78 @@ CLIENT_ROUTE_CASES = [
         "args": ["wb_1"],
         "kwargs": {"project_id": "proj_1", "agent_id": "agent_1"},
         "json_body": {"project_id": "proj_1", "agent_id": "agent_1"},
+    },
+    {
+        "method_name": "wiki_pages",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/wiki/pages",
+        "wire_path": "/api/hades/v1/wiki/pages",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source_status": "needs_verification",
+            "limit": 20,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "source_status": "needs_verification",
+            "limit": "20",
+        },
+    },
+    {
+        "method_name": "wiki_page",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/wiki/pages/{page}",
+        "wire_path": f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}",
+        "args": [VALID_WIKI_PAGE_ID],
+        "kwargs": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+        "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+    },
+    {
+        "method_name": "create_wiki_draft",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/wiki/pages",
+        "wire_path": "/api/hades/v1/wiki/pages",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "slug": "technical/overview",
+            "title": "Overview",
+            "page_type": "technical",
+            "content_markdown": "# Overview",
+            "evidence_refs": [],
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "slug": "technical/overview",
+            "title": "Overview",
+            "page_type": "technical",
+            "content_markdown": "# Overview",
+            "evidence_refs": [],
+        },
+    },
+    {
+        "method_name": "verify_wiki_page",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/wiki/pages/{page}/verify",
+        "wire_path": f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}/verify",
+        "args": [VALID_WIKI_PAGE_ID],
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "expected_current_revision_id": "rev_1",
+            "evidence_refs": [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+            "verification_note": "Checked against current tree",
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "expected_current_revision_id": "rev_1",
+            "evidence_refs": [{"kind": "file_ref", "path": "src/app.py", "hash": "a" * 64}],
+            "verification_note": "Checked against current tree",
+        },
     },
     {
         "method_name": "memory_snapshot",
@@ -631,15 +704,11 @@ CLIENT_ROUTE_CASES = [
 INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}
 
 INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
-    "create_wiki_draft",
     "presence_heartbeat",
     "presence_list",
     "code_claim_create",
     "code_claim_release",
     "code_claim_detect_conflicts",
-    "verify_wiki_page",
-    "wiki_page",
-    "wiki_pages",
 }
 
 
@@ -752,7 +821,7 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
         limit=20,
     ) == {"ok": True}
     assert client.wiki_page(
-        " page ",
+        f" {VALID_WIKI_PAGE_ID} ",
         project_id="p",
         workspace_binding_id="w",
     ) == {"ok": True}
@@ -766,7 +835,7 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
         evidence_refs=[],
     ) == {"ok": True}
     assert client.verify_wiki_page(
-        " page ",
+        f" {VALID_WIKI_PAGE_ID} ",
         project_id="p",
         workspace_binding_id="w",
         expected_current_revision_id="rev",
@@ -776,9 +845,9 @@ def test_wiki_client_methods_use_exact_bounded_backend_contract():
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/hades/v1/wiki/pages"),
-        ("GET", "/api/hades/v1/wiki/pages/page"),
+        ("GET", f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}"),
         ("POST", "/api/hades/v1/wiki/pages"),
-        ("POST", "/api/hades/v1/wiki/pages/page/verify"),
+        ("POST", f"/api/hades/v1/wiki/pages/{VALID_WIKI_PAGE_ID}/verify"),
     ]
     assert _query_dict(requests[0]) == {
         "project_id": "p",
@@ -820,12 +889,61 @@ def test_wiki_client_page_methods_require_a_non_empty_page_id(method_name):
         transport=httpx.MockTransport(lambda _request: pytest.fail("request must not be sent")),
     )
 
-    with pytest.raises(ValueError, match="wiki page id is required"):
+    with pytest.raises(ValueError, match="canonical ULID"):
         getattr(client, method_name)(
             "  ",
             project_id="p",
             workspace_binding_id="w",
         )
+
+
+@pytest.mark.parametrize("method_name", ["wiki_page", "verify_wiki_page"])
+@pytest.mark.parametrize(
+    "page_id",
+    ["../../privacy/export", "page?admin=1", "page#fragment"],
+)
+def test_wiki_client_rejects_non_ulid_page_ids_without_sending_request(method_name, page_id):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+        ),
+    )
+
+    with pytest.raises(ValueError, match="canonical ULID"):
+        getattr(client, method_name)(
+            page_id,
+            project_id="p",
+            workspace_binding_id="w",
+        )
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["wiki/../privacy/export", "health?admin=1", "health#fragment"],
+)
+def test_client_rejects_unsafe_internal_route_paths(path):
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+        ),
+    )
+
+    with pytest.raises(ValueError, match="backend route path"):
+        client._request("GET", path)
+
+    assert requests == []
 
 
 def test_client_uses_hades_v1_routes_and_bearer_auth():

@@ -9,6 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 
+VALID_WIKI_PAGE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
 def _seed_current_backend_workspace(monkeypatch, tmp_path, *, capabilities=None):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     workspace = tmp_path / "repo"
@@ -3535,14 +3538,16 @@ def test_backend_wiki_list_preserves_json_and_human_output_is_reviewable(
             self.closed += 1
 
     fake = FakeClient()
-    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: fake)
+    monkeypatch.setattr(wiki_actions.runtime, "client_for_agent", lambda _agent: fake)
 
     list_rc = cmd.hades_backend_command(
         _wiki_args("list", status="needs_verification", limit=20, cursor=None, json=True)
     )
     assert json.loads(capsys.readouterr().out) == list_response
 
-    show_rc = cmd.hades_backend_command(_wiki_args("show", wiki_page_id=" page_1 "))
+    show_rc = cmd.hades_backend_command(
+        _wiki_args("show", wiki_page_id=f" {VALID_WIKI_PAGE_ID} ")
+    )
     output = capsys.readouterr().out
 
     assert list_rc == 0
@@ -3556,7 +3561,7 @@ def test_backend_wiki_list_preserves_json_and_human_output_is_reviewable(
         }
     ]
     assert fake.show_calls == [
-        ("page_1", {"project_id": "proj_1", "workspace_binding_id": "wb_1"})
+        (VALID_WIKI_PAGE_ID, {"project_id": "proj_1", "workspace_binding_id": "wb_1"})
     ]
     assert fake.closed == 2
     assert "page_1" in output
@@ -3564,6 +3569,104 @@ def test_backend_wiki_list_preserves_json_and_human_output_is_reviewable(
     assert "Overview" in output
     assert "needs_verification" in output
     assert "Evidence: 1" in output
+
+
+def test_backend_wiki_uses_agent_owned_by_current_workspace_binding(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    from hermes_cli import hades_backend_db as hdb
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent_2",
+            project_id="proj_2",
+            base_url="https://backend.example",
+            label="other-project",
+            token_env_key="HADES_BACKEND_AGENT_TOKEN_OTHER",
+            capabilities={"memory": True},
+        )
+        conn.execute("UPDATE backend_agents SET updated_at = 10 WHERE agent_id = 'agent_1'")
+        conn.execute("UPDATE backend_agents SET updated_at = 20 WHERE agent_id = 'agent_2'")
+        conn.commit()
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def wiki_pages(self, **payload):
+            self.calls.append(payload)
+            return {"items": [], "next_cursor": None}
+
+        def close(self):
+            pass
+
+    default_client = FakeClient()
+    binding_client = FakeClient()
+    selected_agents = []
+
+    def client_for_agent(agent):
+        selected_agents.append((agent.agent_id, agent.project_id))
+        return binding_client
+
+    monkeypatch.setattr(runtime, "client_from_config", lambda: default_client)
+    monkeypatch.setattr(runtime, "client_for_agent", client_for_agent)
+
+    rc = cmd.hades_backend_command(
+        _wiki_args("list", status=None, limit=20, cursor=None, json=True)
+    )
+    capsys.readouterr()
+
+    assert rc == 0
+    assert selected_agents == [("agent_1", "proj_1")]
+    assert default_client.calls == []
+    assert binding_client.calls == [
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "limit": 20,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "page_id",
+    ["../../privacy/export", "page?admin=1", "page#fragment"],
+)
+def test_backend_wiki_rejects_non_ulid_page_id_before_client_creation(
+    monkeypatch, tmp_path, capsys, page_id
+):
+    _seed_current_backend_workspace(monkeypatch, tmp_path)
+
+    import hermes_cli.hades_backend_cmd as cmd
+    import hermes_cli.hades_backend_runtime as runtime
+    import hermes_cli.hades_wiki_actions as wiki_actions
+
+    factory_calls = []
+
+    class FakeClient:
+        def wiki_page(self, _page_id, **_payload):
+            return {"id": "unexpected"}
+
+        def close(self):
+            pass
+
+    def factory(*_args):
+        factory_calls.append(True)
+        return FakeClient()
+
+    monkeypatch.setattr(runtime, "client_for_agent", factory)
+
+    rc = cmd.hades_backend_command(_wiki_args("show", wiki_page_id=page_id, json=True))
+
+    assert rc == 1
+    assert factory_calls == []
+    assert "canonical ULID" in capsys.readouterr().err
 
 
 def test_backend_wiki_list_human_output_includes_next_cursor(monkeypatch, tmp_path, capsys):
@@ -3602,7 +3705,11 @@ def test_backend_wiki_list_human_output_includes_next_cursor(monkeypatch, tmp_pa
         def close(self):
             pass
 
-    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+    monkeypatch.setattr(
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: FakeClient(),
+    )
 
     rc = cmd.hades_backend_command(
         _wiki_args("list", status=None, limit=20, cursor=None, json=False)
@@ -3721,11 +3828,11 @@ def test_backend_wiki_list_validates_limit_before_client_creation(
         def close(self):
             pass
 
-    def client_factory():
+    def client_factory(_agent):
         factory_calls.append(True)
         return FakeClient()
 
-    monkeypatch.setattr(wiki_actions, "client_from_config", client_factory)
+    monkeypatch.setattr(wiki_actions.runtime, "client_for_agent", client_factory)
 
     rc = cmd.hades_backend_command(
         _wiki_args("list", status=None, limit=limit, cursor=None, json=True)
@@ -4022,7 +4129,7 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
             pass
 
     fake = FakeClient()
-    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: fake)
+    monkeypatch.setattr(wiki_actions.runtime, "client_for_agent", lambda _agent: fake)
 
     draft_rc = cmd.hades_backend_command(
         _wiki_args("draft", from_file=str(draft_path), json=True)
@@ -4031,7 +4138,7 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
     verify_rc = cmd.hades_backend_command(
         _wiki_args(
             "verify",
-            wiki_page_id="page_1",
+            wiki_page_id=VALID_WIKI_PAGE_ID,
             expected_revision="rev_1",
             evidence_file=str(refs_path),
             note="Checked against current tree",
@@ -4067,7 +4174,7 @@ def test_backend_wiki_draft_and_verify_send_exact_bounded_shapes(
     ]
     assert fake.verifications == [
         (
-            "page_1",
+            VALID_WIKI_PAGE_ID,
             {
                 "project_id": "proj_1",
                 "workspace_binding_id": "wb_1",
@@ -4093,9 +4200,9 @@ def test_backend_wiki_rejects_invalid_json_shapes_before_client_creation(
     invalid_refs.write_text("{}", encoding="utf-8")
     calls = []
     monkeypatch.setattr(
-        wiki_actions,
-        "client_from_config",
-        lambda: (calls.append(True) or None),
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: (calls.append(True) or None),
     )
 
     draft_rc = cmd.hades_backend_command(
@@ -4159,9 +4266,9 @@ def test_backend_wiki_rejects_invalid_evidence_item_before_client_creation(
     refs_path.write_text(json.dumps([ref]), encoding="utf-8")
     calls = []
     monkeypatch.setattr(
-        wiki_actions,
-        "client_from_config",
-        lambda: (calls.append(True) or None),
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: (calls.append(True) or None),
     )
 
     rc = cmd.hades_backend_command(
@@ -4195,9 +4302,9 @@ def test_backend_wiki_rejects_overlong_note_before_client_creation(
     )
     calls = []
     monkeypatch.setattr(
-        wiki_actions,
-        "client_from_config",
-        lambda: (calls.append(True) or None),
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: (calls.append(True) or None),
     )
 
     rc = cmd.hades_backend_command(
@@ -4244,7 +4351,11 @@ def test_backend_wiki_rejects_over_limit_content_and_evidence_before_request(
         def __getattr__(self, _name):
             raise AssertionError("backend request must not be made")
 
-    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+    monkeypatch.setattr(
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: FakeClient(),
+    )
 
     content_rc = cmd.hades_backend_command(
         _wiki_args("draft", from_file=str(oversized_draft), json=True)
@@ -4279,9 +4390,9 @@ def test_backend_wiki_requires_current_binding_before_client_creation(
 
     calls = []
     monkeypatch.setattr(
-        wiki_actions,
-        "client_from_config",
-        lambda: (calls.append(True) or None),
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: (calls.append(True) or None),
     )
 
     rc = cmd.hades_backend_command(
@@ -4309,7 +4420,11 @@ def test_backend_wiki_redacts_backend_errors(monkeypatch, tmp_path, capsys):
         def close(self):
             pass
 
-    monkeypatch.setattr(wiki_actions, "client_from_config", lambda: FakeClient())
+    monkeypatch.setattr(
+        wiki_actions.runtime,
+        "client_for_agent",
+        lambda _agent: FakeClient(),
+    )
 
     rc = cmd.hades_backend_command(
         _wiki_args("list", status=None, limit=20, cursor=None, json=True)
