@@ -883,6 +883,144 @@ def _php_symfony_route(
     return route
 
 
+def _php_symfony_class_index(
+    workspace_root: Path,
+    php_files: list[Path],
+    *,
+    max_file_bytes: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    classes_by_name: dict[str, dict[str, Any]] = {}
+    files_failed = 0
+    for path in sorted(php_files):
+        rel = path.relative_to(workspace_root).as_posix()
+        if _is_test_path(rel):
+            continue
+        try:
+            if path.stat().st_size > max_file_bytes:
+                files_failed += 1
+                continue
+            source, was_truncated, _digest = _read_text_bounded(path, max_file_bytes)
+        except OSError:
+            files_failed += 1
+            continue
+        if was_truncated:
+            files_failed += 1
+            continue
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        file_classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            fqcn = _php_fqcn(namespace, match.group("name"))
+            parent_name = str(match.group("extends") or "")
+            info = {
+                "name": fqcn,
+                "parent": _php_fqcn_resolved(namespace, parent_name, uses)
+                if parent_name
+                else "",
+                "path": rel,
+                "line": _line_number(source, match.start()),
+                "offset": match.start(),
+                "class_routes": _php_route_metadata_before(source, match.start()),
+                "methods": [],
+            }
+            file_classes.append(info)
+            classes_by_name[fqcn] = info
+        for method_match in PHP_METHOD_RE.finditer(source):
+            class_info = _class_context(file_classes, method_match.start())
+            if class_info is None:
+                continue
+            method_name = str(method_match.group("name") or "")
+            class_info["methods"].append(
+                {
+                    "name": method_name,
+                    "symbol": f"{_php_short_name(str(class_info['name']))}@{method_name}",
+                    "routes": _php_route_metadata_before(source, method_match.start()),
+                    "path": rel,
+                    "line": _line_number(source, method_match.start()),
+                }
+            )
+    return classes_by_name, {
+        "status": "partial" if files_failed else "full",
+        "classes_indexed": len(classes_by_name),
+        "files_failed": files_failed,
+        "cycles": 0,
+        "depth_exceeded": 0,
+        "max_depth": 32,
+    }
+
+
+def _php_inherited_symfony_routes(
+    classes_by_name: dict[str, dict[str, Any]],
+    report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    routes: list[dict[str, Any]] = []
+    seen_routes: set[str] = set()
+    max_depth = int(report.get("max_depth") or 32)
+    for fqcn in sorted(classes_by_name):
+        concrete = classes_by_name[fqcn]
+        class_routes = concrete.get("class_routes") or []
+        if not class_routes:
+            continue
+        seen_classes = {fqcn}
+        seen_methods = {
+            str(method.get("name") or "")
+            for method in concrete.get("methods") or []
+        }
+        parent_name = str(concrete.get("parent") or "")
+        depth = 0
+        while parent_name:
+            if parent_name in seen_classes:
+                report["cycles"] = int(report.get("cycles") or 0) + 1
+                report["status"] = "partial"
+                break
+            seen_classes.add(parent_name)
+            depth += 1
+            if depth > max_depth:
+                report["depth_exceeded"] = int(report.get("depth_exceeded") or 0) + 1
+                report["status"] = "partial"
+                break
+            ancestor = classes_by_name.get(parent_name)
+            if ancestor is None:
+                break
+            for method in ancestor.get("methods") or []:
+                method_name = str(method.get("name") or "")
+                if not method_name or method_name in seen_methods:
+                    continue
+                seen_methods.add(method_name)
+                method_routes = method.get("routes") or (
+                    [{}] if method_name == "__invoke" else []
+                )
+                for class_route in class_routes:
+                    for method_route in method_routes:
+                        route = _php_symfony_route(
+                            class_route,
+                            method_route,
+                            handler=f"{_php_short_name(fqcn)}@{method_name}",
+                            controller=fqcn,
+                            rel=str(method.get("path") or concrete.get("path") or ""),
+                            fallback_line=int(method.get("line") or 0),
+                        )
+                        route.update(
+                            {
+                                "defined_handler": str(method.get("symbol") or ""),
+                                "defined_controller": str(ancestor.get("name") or ""),
+                                "effective_controller": fqcn,
+                                "inherited": True,
+                            }
+                        )
+                        fingerprint = json.dumps(
+                            route,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
+                        if fingerprint not in seen_routes:
+                            seen_routes.add(fingerprint)
+                            routes.append(route)
+            parent_name = str(ancestor.get("parent") or "")
+    return routes
+
+
 def _php_attribute_short_name(name: str) -> str:
     return str(name or "").split("\\")[-1]
 
@@ -2756,18 +2894,28 @@ def _php_route_edges(
         route_id = _php_route_id(route)
         route_ref = f"route:{route_id}"
         handler = route.get("handler", "")
-        if "@" in handler:
+        defined_handler = route.get("defined_handler", "")
+        edge_handler = defined_handler or handler
+        if "@" in edge_handler:
+            route_handler_edge = {
+                "kind": "route_handler",
+                "from": route_ref,
+                "to": edge_handler,
+                "method": route.get("method"),
+                "uri": route.get("uri"),
+                "path": route.get("path"),
+                "line": route.get("line"),
+            }
+            if defined_handler:
+                route_handler_edge.update(
+                    {
+                        "effective_handler": handler,
+                        "defined_handler": defined_handler,
+                    }
+                )
             if not _edge_append(
                 edges,
-                {
-                    "kind": "route_handler",
-                    "from": route_ref,
-                    "to": handler,
-                    "method": route.get("method"),
-                    "uri": route.get("uri"),
-                    "path": route.get("path"),
-                    "line": route.get("line"),
-                },
+                route_handler_edge,
                 max_edges=max_edges,
             ):
                 truncated = True
@@ -7039,13 +7187,25 @@ def build_graph(
         php_files,
         max_file_bytes=max_file_bytes,
     )
-    routes = _laravel_routes(workspace_root, file_refs)
+    symfony_class_index, symfony_inheritance_report = _php_symfony_class_index(
+        workspace_root,
+        php_files,
+        max_file_bytes=max_file_bytes,
+    )
+    inherited_symfony_routes = _php_inherited_symfony_routes(
+        symfony_class_index,
+        symfony_inheritance_report,
+    )
+    routes = [*_laravel_routes(workspace_root, file_refs), *inherited_symfony_routes]
     routes_by_handler: dict[str, list[dict[str, Any]]] = {}
     route_by_name: dict[str, dict[str, Any]] = {}
     for route in routes:
         handler = str(route.get("handler") or "")
         if handler:
             routes_by_handler.setdefault(handler, []).append(route)
+        defined_handler = str(route.get("defined_handler") or "")
+        if defined_handler and defined_handler != handler:
+            routes_by_handler.setdefault(defined_handler, []).append(route)
         route_name = str(route.get("name") or "")
         if route_name:
             route_by_name.setdefault(route_name, route)
@@ -8792,6 +8952,7 @@ def build_graph(
         "middleware": {key: value for key, value in middleware_catalog.items() if not key.startswith("_")},
         "tests": tests,
         "logs": logs,
+        "analysis": {"symfony_inheritance": symfony_inheritance_report},
         "summary": "",
         "omitted": omitted,
         "truncated": truncated or len(symbols) >= max_symbols or len(edges) >= max_edges,
@@ -8801,5 +8962,3 @@ def build_graph(
     }
     graph["summary"] = _php_graph_summary(routes, symbols, edges, database, tests, logs)
     return graph
-
-

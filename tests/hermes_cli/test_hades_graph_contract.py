@@ -2,7 +2,11 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.hades_graph_contract import finalize_graph_artifact
+from hermes_cli.hades_index.aggregate import merge_graph_artifacts
+from hermes_cli.hades_index.inventory import inventory_coverage
 
 
 def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
@@ -35,6 +39,12 @@ def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
             "files_total": 1,
             "files_analyzed": 1,
             "files_failed": 0,
+            "files_budget_omitted": 0,
+            "routes_promoted": 0,
+            "routes_omitted": 0,
+            "tests_promoted": 0,
+            "tests_omitted": 0,
+            "nodes_capacity_omitted": 0,
         },
         "source": {"branch": "main", "head_commit": "abc123"},
     }
@@ -61,6 +71,7 @@ def test_finalize_graph_artifact_exposes_inventory_fallback(tmp_path: Path):
         == "bounded_or_omitted_input"
     )
     assert result["graph_contract"]["coverage"]["files_failed"] == 1
+    assert result["graph_contract"]["coverage"]["files_budget_omitted"] == 0
 
 
 def _finalize(
@@ -79,6 +90,270 @@ def _finalize(
         candidates=[],
         omitted=omitted or [],
     )
+
+
+@pytest.mark.parametrize(
+    ("schema", "language"),
+    [
+        ("hades.php_graph.v1", "php"),
+        ("hades.code_graph.v1", "python"),
+        ("hades.code_graph.v1", "typescript"),
+    ],
+)
+def test_finalize_promotes_uniform_route_inventory_to_first_class_nodes(
+    schema: str,
+    language: str,
+):
+    result = _finalize(
+        {
+            "schema": schema,
+            "language": language,
+            "routes": [
+                {
+                    "framework": "fixture",
+                    "method": "GET",
+                    "uri": "/orders/{id}",
+                    "name": "orders.show",
+                    "handler": "OrderController@show",
+                    "path": "src/OrderController.php",
+                    "line": 12,
+                }
+            ],
+            "symbols": [
+                {"kind": "method", "name": "OrderController@show"}
+            ],
+            "edges": [
+                {
+                    "kind": "route_handler",
+                    "from": "route:orders.show",
+                    "to": "OrderController@show",
+                }
+            ],
+        },
+        max_symbols=20,
+    )
+
+    route = next(node for node in result["nodes"] if node.get("kind") == "route")
+    assert route["name"] == "orders.show"
+    assert route["uri"] == "/orders/{id}"
+    assert route["method"] == "GET"
+    assert route["handler"] == "OrderController@show"
+    assert result["canonicalization"]["route_inventory"] == {
+        "detected": 1,
+        "promoted": 1,
+        "merged": 0,
+    }
+    assert result["graph_contract"]["coverage"]["routes_promoted"] == 1
+    assert result["graph_contract"]["coverage"]["routes_omitted"] == 0
+
+
+def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
+    result = _finalize(
+        {
+            "schema": "hades.php_graph.v1",
+            "language": "php",
+            "symbols": [],
+            "edges": [],
+            "tests": {
+                "schema": "hades.test_map.v1",
+                "files": [
+                    {
+                        "path": "tests/AdminControllerBulkDeleteBehaviorTest.php",
+                        "framework": "phpunit",
+                        "cases": ["testBulkDeleteSkipsForbiddenRows"],
+                        "target_candidates": [
+                            "AdminControllerBulkDeleteBehavior"
+                        ],
+                    }
+                ],
+            },
+        },
+        max_symbols=20,
+    )
+
+    test_node = next(node for node in result["nodes"] if node.get("kind") == "test")
+    assert test_node["name"] == "AdminControllerBulkDeleteBehaviorTest"
+    assert test_node["framework"] == "phpunit"
+    assert result["canonicalization"]["test_inventory"] == {
+        "detected": 1,
+        "promoted": 1,
+        "merged": 0,
+    }
+    assert result["graph_contract"]["coverage"]["tests_promoted"] == 1
+    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
+
+
+def test_finalize_distinguishes_same_test_names_by_path_and_unions_collections():
+    result = _finalize(
+        {
+            "schema": "hades.code_graph.v1",
+            "language": "python",
+            "symbols": [],
+            "edges": [],
+            "tests": {
+                "files": [
+                    {
+                        "path": "tests/unit/UserTest.py",
+                        "cases": ["test_beta", "test_alpha"],
+                        "target_candidates": ["User", "Account"],
+                    },
+                    {
+                        "path": "tests/integration/UserTest.py",
+                        "cases": ["test_integration"],
+                        "target_candidates": ["UserApi"],
+                    },
+                    {
+                        "path": "tests/unit/./UserTest.py",
+                        "cases": ["test_gamma", "test_alpha"],
+                        "target_candidates": ["Account", "Profile"],
+                    },
+                ]
+            },
+        },
+        max_symbols=20,
+    )
+
+    test_nodes = [node for node in result["nodes"] if node.get("kind") == "test"]
+    assert len(test_nodes) == 2
+    assert len({node["id"] for node in test_nodes}) == 2
+    unit = next(node for node in test_nodes if "test_gamma" in node.get("cases", []))
+    assert unit["cases"] == ["test_alpha", "test_beta", "test_gamma"]
+    assert unit["target_candidates"] == ["Account", "Profile", "User"]
+    assert result["canonicalization"]["test_inventory"] == {
+        "detected": 3,
+        "promoted": 2,
+        "merged": 1,
+    }
+    assert result["graph_contract"]["coverage"]["tests_promoted"] == 2
+    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
+
+
+def test_polyglot_coverage_reports_unique_route_and_test_inventory_drops():
+    artifacts = []
+    for language, start in (("php", 0), ("python", 250)):
+        artifacts.append(
+            {
+                "language": language,
+                "framework": language,
+                "routes": [
+                    {
+                        "name": f"route.{index}",
+                        "method": "GET",
+                        "uri": f"/routes/{index}",
+                    }
+                    for index in range(start, start + 300)
+                ],
+                "symbols": [],
+                "edges": [],
+                "tests": {
+                    "files": [
+                        {"path": f"tests/{index}/BehaviorTest.py"}
+                        for index in range(start, start + 300)
+                    ]
+                },
+                "omitted": [],
+            }
+        )
+
+    graph = merge_graph_artifacts(
+        artifacts,
+        root="workspace",
+        max_symbols=5_000,
+        max_edges=10_000,
+    )
+    result = finalize_graph_artifact(
+        graph,
+        payload={},
+        candidates=[],
+        omitted=[],
+    )
+
+    coverage = result["graph_contract"]["coverage"]
+    assert len(result["routes"]) == 500
+    assert len(result["tests"]["files"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 50
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 50
+    assert not any(key.startswith("_") for key in result)
+
+
+def test_polyglot_coverage_unions_duplicate_private_child_identities():
+    shared_routes = [
+        {"name": "orders.index", "method": "GET", "uri": "/orders"},
+        {"name": "orders.show", "method": "GET", "uri": "/orders/{id}"},
+    ]
+    shared_tests = [
+        {"path": "tests/OrdersIndexTest.py"},
+        {"path": "tests/OrdersShowTest.py"},
+    ]
+    artifacts = []
+    for language in ("python", "typescript"):
+        artifacts.append(
+            {
+                "language": language,
+                "framework": language,
+                "routes": shared_routes[:1],
+                "symbols": [],
+                "edges": [],
+                "tests": {
+                    "files": shared_tests[:1],
+                    "_inventory_coverage": inventory_coverage(
+                        tests_detected=shared_tests,
+                        tests_retained=shared_tests[:1],
+                    ),
+                },
+                "omitted": [],
+                "_inventory_coverage": inventory_coverage(
+                    routes_detected=shared_routes,
+                    routes_retained=shared_routes[:1],
+                ),
+            }
+        )
+
+    result = finalize_graph_artifact(
+        merge_graph_artifacts(
+            artifacts,
+            root="workspace",
+            max_symbols=5_000,
+            max_edges=10_000,
+        ),
+        payload={},
+        candidates=[],
+        omitted=[],
+    )
+
+    coverage = result["graph_contract"]["coverage"]
+    assert coverage["routes_promoted"] == 1
+    assert coverage["routes_omitted"] == 1
+    assert coverage["tests_promoted"] == 1
+    assert coverage["tests_omitted"] == 1
+    assert not any(key.startswith("_") for key in result)
+    assert not any(key.startswith("_") for key in result["tests"])
+
+
+def test_inventory_promotion_merges_an_existing_route_node_idempotently():
+    result = _finalize(
+        {
+            "routes": [
+                {"method": "GET", "uri": "/orders", "name": "orders.index"}
+            ],
+            "symbols": [
+                {"kind": "route", "name": "orders.index", "method": "GET"}
+            ],
+            "edges": [],
+        },
+        max_symbols=20,
+    )
+
+    routes = [node for node in result["nodes"] if node.get("kind") == "route"]
+    assert len(routes) == 1
+    assert routes[0]["uri"] == "/orders"
+    assert result["canonicalization"]["route_inventory"] == {
+        "detected": 1,
+        "promoted": 0,
+        "merged": 1,
+    }
 
 
 def test_canonicalizes_php_like_nodes_and_closes_legacy_edges_without_paths_in_ids():

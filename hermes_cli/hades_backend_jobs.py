@@ -584,12 +584,21 @@ def _build_test_map(
     max_edges: int,
     max_file_bytes: int,
 ) -> tuple[dict[str, Any], bool]:
+    from hermes_cli.hades_index.inventory import inventory_coverage
+
     files: list[dict[str, Any]] = []
     truncated = False
-    for path in candidates:
+    test_candidates = [
+        path
+        for path in candidates
+        if _is_test_path(path.relative_to(workspace_root).as_posix())
+    ]
+    detected_files = [
+        {"path": path.relative_to(workspace_root).as_posix()}
+        for path in test_candidates
+    ]
+    for path in test_candidates:
         rel = path.relative_to(workspace_root).as_posix()
-        if not _is_test_path(rel):
-            continue
         if len(files) >= MAX_TEST_FILES:
             truncated = True
             break
@@ -655,6 +664,10 @@ def _build_test_map(
         "files": files,
         "truncated": truncated,
         "raw_source_included": False,
+        "_inventory_coverage": inventory_coverage(
+            tests_detected=detected_files,
+            tests_retained=files,
+        ),
     }, truncated
 
 
@@ -988,10 +1001,16 @@ def _execute_read_source_slice(job: dict[str, Any], workspace_root: Path) -> dic
     }
 
 
-def _iter_workspace_files(root: Path, *, max_files: int) -> tuple[list[Path], list[dict[str, str]], bool]:
+def _iter_workspace_files(
+    root: Path,
+    *,
+    max_files: int,
+    max_total_bytes: int | None = None,
+) -> tuple[list[Path], list[dict[str, str]], bool]:
     ignore_spec = _gitignore_spec(root)
     files: list[Path] = []
     omitted: list[dict[str, str]] = []
+    total_bytes = 0
     for current, dirs, names in os.walk(root):
         current_path = Path(current)
         kept_dirs: list[str] = []
@@ -1019,9 +1038,25 @@ def _iter_workspace_files(root: Path, *, max_files: int) -> tuple[list[Path], li
                 omitted.append({"path": rel, "reason": skip_reason})
                 continue
             if path.is_file():
-                files.append(path)
                 if len(files) >= max_files:
+                    omitted.append({"path": rel, "reason": "file_budget_exceeded"})
                     return files, omitted, True
+                if max_total_bytes is not None:
+                    try:
+                        size = path.stat().st_size
+                    except OSError as exc:
+                        omitted.append(
+                            {
+                                "path": rel,
+                                "reason": _io_error_reason("stat_error", exc),
+                            }
+                        )
+                        continue
+                    if total_bytes + size > max_total_bytes:
+                        omitted.append({"path": rel, "reason": "byte_budget_exceeded"})
+                        return files, omitted, True
+                    total_bytes += size
+                files.append(path)
     return files, omitted, False
 
 
@@ -1279,7 +1314,7 @@ def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) ->
             "capability": "populate_backend_ast",
             "payload": {
                 **payload,
-                "max_files": min(max_files, int(payload.get("max_ast_files") or 1_000)),
+                "max_files": min(max_files, int(payload.get("max_ast_files") or 10_000)),
                 "max_symbols": max_symbols,
                 "max_file_bytes": max_file_bytes,
             },
@@ -1582,11 +1617,20 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     from hermes_cli.hades_index import build_graph_for_workspace
 
     payload = job.get("payload") or {}
-    max_files = int(payload.get("max_files") or 1_000)
-    candidates, omitted, truncated = _iter_workspace_files(workspace_root, max_files=max_files)
+    max_files = min(int(payload.get("max_files") or 10_000), 10_000)
+    max_total_bytes = min(
+        int(payload.get("max_total_bytes") or 134_217_728),
+        134_217_728,
+    )
+    candidates, omitted, truncated = _iter_workspace_files(
+        workspace_root,
+        max_files=max_files,
+        max_total_bytes=max_total_bytes,
+    )
 
     # Dispatch to pluggable indexer (currently a seam over existing functions)
     artifact = build_graph_for_workspace(workspace_root, candidates, omitted, payload)
+    artifact["truncated"] = bool(artifact.get("truncated")) or truncated
 
     return {
         "status": "completed",

@@ -332,8 +332,10 @@ Upload `hades.php_graph.v1` with `graph_contract`, complete `routes[]`, a route-
 - [ ] **Step 2: Verify RED in the app container**
 
 ```bash
-docker compose -f docker-compose.devboard.yaml exec -T app php artisan test \
-  backend/tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
+docker compose -f docker-compose.devboard.yaml exec -T app env \
+  APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
+  php artisan test \
+  tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
   --filter="hydrates contracted route inventories"
 ```
 
@@ -350,9 +352,11 @@ Move route adaptation out of the legacy-only branch. Always call it before `Cano
 - [ ] **Step 5: Run graph repository/projection tests GREEN**
 
 ```bash
-docker compose -f docker-compose.devboard.yaml exec -T app php artisan test \
-  backend/tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
-  backend/tests/Feature/CanonicalGraphProjectionTest.php
+docker compose -f docker-compose.devboard.yaml exec -T app env \
+  APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
+  php artisan test \
+  tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
+  tests/Feature/CanonicalGraphProjectionTest.php
 ```
 
 - [ ] **Step 6: Commit Task 4 in the backend repository**
@@ -411,10 +415,12 @@ Use `canonical_node_search_v2`, retain mandatory graph-version/project/scope pre
 - [ ] **Step 7: Run unit/projection/explorer tests GREEN**
 
 ```bash
-docker compose -f docker-compose.devboard.yaml exec -T app php artisan test \
-  backend/tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php \
-  backend/tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
-  backend/tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php
+docker compose -f docker-compose.devboard.yaml exec -T app env \
+  APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
+  php artisan test \
+  tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php \
+  tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
+  tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php
 ```
 
 - [ ] **Step 8: Commit Task 5**
@@ -423,8 +429,8 @@ docker compose -f docker-compose.devboard.yaml exec -T app php artisan test \
 git add backend/app/Services/Graph/DashboardGraphSearchTerms.php \
   backend/app/Services/Graph/Neo4jCanonicalGraphProjector.php \
   backend/app/Services/Graph/DashboardGraphExplorerService.php \
-  backend/tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php \
-  backend/tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php
+  tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php \
+  tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php
 git commit -m "feat(graph): add safe canonical search aliases"
 ```
 
@@ -465,8 +471,10 @@ Include decoded coverage in `projectionEnvelope()`. Add optional TypeScript fiel
 - [ ] **Step 6: Run backend/frontend tests and builds GREEN**
 
 ```bash
-docker compose -f docker-compose.devboard.yaml exec -T app php artisan test backend/tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php
-cd frontend && npm test -- --run src/components/devboard/GraphExplorer.test.tsx && npm run build
+docker compose -f docker-compose.devboard.yaml exec -T app env \
+  APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
+  php artisan test tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php
+cd frontend && npm test -- --watchAll=false --runInBand src/components/devboard/GraphExplorer.test.tsx && npm run build
 ```
 
 - [ ] **Step 7: Commit Task 6**
@@ -511,12 +519,14 @@ Use message `test(hades): cover language-agnostic graph extraction` only if Task
 - [ ] **Step 1: Run the full graph/backend slices**
 
 ```bash
-docker compose -f docker-compose.devboard.yaml exec -T app php artisan test \
-  backend/tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
-  backend/tests/Feature/CanonicalGraphProjectionTest.php \
-  backend/tests/Feature/CanonicalGraphRebuildCommandTest.php \
-  backend/tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php \
-  backend/tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php
+docker compose -f docker-compose.devboard.yaml exec -T app env \
+  APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory: DB_URL= \
+  php artisan test \
+  tests/Feature/Hades/CanonicalHadesGraphProjectionTest.php \
+  tests/Feature/CanonicalGraphProjectionTest.php \
+  tests/Feature/CanonicalGraphRebuildCommandTest.php \
+  tests/Feature/Dashboard/DashboardGraphExplorerApiTest.php \
+  tests/Unit/Services/Graph/DashboardGraphExplorerServiceTest.php
 ```
 
 - [ ] **Step 2: Back up migration state and apply the additive migration**

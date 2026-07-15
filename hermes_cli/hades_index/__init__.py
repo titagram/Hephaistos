@@ -35,41 +35,41 @@ def build_graph_for_workspace(
     from hermes_cli.hades_index import typescript as typescript_indexer
 
     workspace_root = Path(workspace_root)
-    max_symbols = int(payload.get("max_symbols") or 5_000)
-    max_edges = int(payload.get("max_edges") or max_symbols * 2)
-    max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
+    max_symbols = min(int(payload.get("max_symbols") or 5_000), 5_000)
+    max_edges = min(int(payload.get("max_edges") or max_symbols * 2), 10_000)
+    max_file_bytes = min(int(payload.get("max_file_bytes") or 512_000), 512_000)
     truncated = False
 
-    # Detect language and build appropriate graph
-    has_php = any(path.suffix.lower() == ".php" for path in candidates)
-    has_ts = any(path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"} for path in candidates)
-    has_sql = any(path.suffix.lower() == ".sql" for path in candidates)
-    has_python = any(path.suffix.lower() == ".py" for path in candidates)
+    manifest_names = {
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    }
+    adapter_specs = [
+        ("php", php_indexer, lambda path: path.suffix.lower() == ".php"),
+        (
+            "typescript",
+            typescript_indexer,
+            lambda path: path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"}
+            or path.name in manifest_names,
+        ),
+        ("sql", sql_indexer, lambda path: path.suffix.lower() == ".sql"),
+        ("python", python_indexer, lambda path: path.suffix.lower() == ".py"),
+    ]
+    detected = [
+        (name, indexer, [path for path in candidates if predicate(path)])
+        for name, indexer, predicate in adapter_specs
+        if any(predicate(path) and path.name not in manifest_names for path in candidates)
+    ]
+    if not detected:
+        detected = [("python", python_indexer, candidates)]
 
-    if has_php:
-        graph = php_indexer.build_graph(
+    if len(detected) == 1:
+        _name, indexer, adapter_candidates = detected[0]
+        graph = indexer.build_graph(
             workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
-            max_symbols=max_symbols,
-            max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
-        )
-    elif has_ts:
-        graph = typescript_indexer.build_graph(
-            workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
-            max_symbols=max_symbols,
-            max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
-        )
-    elif has_sql:
-        graph = sql_indexer.build_graph(
-            workspace_root,
-            candidates,
+            adapter_candidates,
             omitted,
             truncated=truncated,
             max_symbols=max_symbols,
@@ -77,15 +77,26 @@ def build_graph_for_workspace(
             max_file_bytes=max_file_bytes,
         )
     else:
-        # Default to Python
-        graph = python_indexer.build_graph(
-            workspace_root,
-            candidates,
-            omitted,
-            truncated=truncated,
+        artifacts: list[dict[str, Any]] = []
+        for _name, indexer, adapter_candidates in detected:
+            artifacts.append(
+                indexer.build_graph(
+                    workspace_root,
+                    adapter_candidates,
+                    list(omitted),
+                    truncated=truncated,
+                    max_symbols=max_symbols,
+                    max_edges=max_edges,
+                    max_file_bytes=max_file_bytes,
+                )
+            )
+        from hermes_cli.hades_index.aggregate import merge_graph_artifacts
+
+        graph = merge_graph_artifacts(
+            artifacts,
+            root=workspace_root.name,
             max_symbols=max_symbols,
             max_edges=max_edges,
-            max_file_bytes=max_file_bytes,
         )
 
     # Optional parsers and analyzers only enrich the proven legacy graph. Any

@@ -276,6 +276,353 @@ def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_p
     assert "return Booking::create" not in str(artifact["source_slice_candidates"])
 
 
+def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    php = tmp_path / "src" / "PhpController.php"
+    php.parent.mkdir(parents=True)
+    php.write_text(
+        "<?php\nnamespace App;\nclass PhpController {}\n",
+        encoding="utf-8",
+    )
+    typescript = tmp_path / "server" / "api.ts"
+    typescript.parent.mkdir(parents=True)
+    typescript.write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        "router.get('/health', healthHandler);\n"
+        "export function healthHandler() { return { ok: true }; }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_polyglot_graph",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    assert result["status"] == "completed"
+    assert artifact["language"] == "polyglot"
+    assert artifact["graph_contract"]["coverage"]["languages"] == [
+        "php",
+        "typescript",
+    ]
+    assert {item.get("name") for item in artifact["symbols"]} >= {
+        "App\\PhpController",
+        "healthHandler",
+    }
+    assert any(
+        route.get("framework") == "express"
+        and route.get("method") == "GET"
+        and route.get("path") == "/health"
+        for route in artifact["routes"]
+    )
+    assert any(
+        node.get("kind") == "route" and node.get("uri") == "/health"
+        for node in artifact["nodes"]
+    )
+
+
+def test_populate_backend_ast_polyglot_coverage_deduplicates_adapter_failures(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("Controller.php").write_text(
+        "<?php\nclass Controller {}\n",
+        encoding="utf-8",
+    )
+    oversized = source / "oversized.ts"
+    with oversized.open("wb") as handle:
+        handle.truncate(512_001)
+
+    result = execute_job(
+        {
+            "job_id": "job_polyglot_coverage",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    coverage = artifact["graph_contract"]["coverage"]
+    assert artifact["omitted"] == [
+        {"path": "src/oversized.ts", "reason": "file_too_large"}
+    ]
+    assert coverage["files_total"] == 2
+    assert coverage["files_analyzed"] == 1
+    assert coverage["files_failed"] == 1
+
+
+def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    source = tmp_path / "src"
+    source.mkdir()
+    for index in range(1_001):
+        (source / f"class_{index:04d}.py").write_text(
+            f"class Class{index}:\n    pass\n",
+            encoding="utf-8",
+        )
+
+    result = execute_job(
+        {
+            "job_id": "job_large_ast",
+            "capability": "populate_backend_ast",
+            "payload": {"max_symbols": 2_000, "max_edges": 2_000},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    assert "Class1000" in {item.get("name") for item in artifact["symbols"]}
+    assert artifact["graph_contract"]["coverage"]["files_analyzed"] == 1_001
+    assert not any(
+        item.get("reason") == "file_budget_exceeded"
+        for item in artifact.get("omitted", [])
+    )
+
+
+def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    for index in range(10_001):
+        (source / f"module_{index:05d}.py").touch()
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_file_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20_000},
+        },
+        workspace_root=workspace,
+    )
+
+    coverage = result["artifact"]["graph_contract"]["coverage"]
+    assert coverage["files_analyzed"] == 10_000
+    assert coverage["files_budget_omitted"] == 1
+    assert result["artifact"]["truncated"] is True
+
+
+def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    oversized = source / "oversized.py"
+    with oversized.open("wb") as handle:
+        handle.truncate(134_217_729)
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_byte_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_total_bytes": 268_435_456},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    coverage = artifact["graph_contract"]["coverage"]
+    assert coverage["files_analyzed"] == 0
+    assert coverage["files_budget_omitted"] == 1
+    assert artifact["omitted"] == [
+        {"path": "src/oversized.py", "reason": "byte_budget_exceeded"}
+    ]
+
+
+def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    oversized = source / "oversized.py"
+    with oversized.open("wb") as handle:
+        handle.truncate(512_001)
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_per_file_cap",
+            "capability": "populate_backend_ast",
+            "payload": {"max_file_bytes": 1_024_000},
+        },
+        workspace_root=workspace,
+    )
+
+    assert result["artifact"]["omitted"] == [
+        {"path": "src/oversized.py", "reason": "file_too_large"}
+    ]
+
+
+def test_populate_backend_ast_counts_single_language_test_inventory_truncation(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    tests = workspace / "tests"
+    tests.mkdir(parents=True)
+    for index in range(501):
+        tests.joinpath(f"test_behavior_{index:03d}.py").write_text(
+            f"def test_behavior_{index}():\n    pass\n",
+            encoding="utf-8",
+        )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_single_language_test_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert len(artifact["tests"]["files"]) == 500
+    assert artifact["tests"]["truncated"] is True
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 1
+
+
+def test_populate_backend_ast_counts_single_language_route_inventory_truncation(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("routes.ts").write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        + "".join(
+            f"router.get('/route/{index}', handler{index});\n"
+            for index in range(501)
+        ),
+        encoding="utf-8",
+    )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_single_language_route_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert len(artifact["routes"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 1
+
+
+def test_populate_backend_ast_preserves_polyglot_inventory_cap_coverage(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("routes.ts").write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        + "".join(
+            f"router.get('/route/{index}', handler{index});\n"
+            for index in range(501)
+        ),
+        encoding="utf-8",
+    )
+    source.joinpath("marker.py").write_text("value = 1\n", encoding="utf-8")
+    tests = workspace / "tests"
+    tests.mkdir()
+    for index in range(501):
+        tests.joinpath(f"behavior_{index:03d}.test.ts").write_text(
+            f"test('behavior {index}', () => {{}});\n",
+            encoding="utf-8",
+        )
+
+    artifact = execute_job(
+        {
+            "job_id": "job_polyglot_inventory_cap",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=workspace,
+    )["artifact"]
+
+    coverage = artifact["graph_contract"]["coverage"]
+    assert artifact["language"] == "polyglot"
+    assert len(artifact["routes"]) == 500
+    assert len(artifact["tests"]["files"]) == 500
+    assert coverage["routes_promoted"] == 500
+    assert coverage["routes_omitted"] == 1
+    assert coverage["tests_promoted"] == 500
+    assert coverage["tests_omitted"] == 1
+    assert not any(key.startswith("_") for key in artifact)
+    assert not any(key.startswith("_") for key in artifact["tests"])
+
+
+def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    source.joinpath("graph.py").write_text(
+        "".join(f"import module_{index}\n" for index in range(10_001))
+        + "".join(f"class Class{index}:\n    pass\n" for index in range(5_001)),
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_hard_graph_caps",
+            "capability": "populate_backend_ast",
+            "payload": {"max_symbols": 6_000, "max_edges": 12_000},
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    assert len(artifact["symbols"]) == 5_000
+    assert len(artifact["edges"]) == 10_000
+    assert artifact["truncated"] is True
+
+
+def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
+    from hermes_cli.hades_backend_jobs import _iter_workspace_files
+
+    (tmp_path / "a.py").write_text("12345", encoding="utf-8")
+    (tmp_path / "b.py").write_text("67890", encoding="utf-8")
+
+    files, omitted, truncated = _iter_workspace_files(
+        tmp_path,
+        max_files=10,
+        max_total_bytes=8,
+    )
+
+    assert [path.name for path in files] == ["a.py"]
+    assert omitted == [{"path": "b.py", "reason": "byte_budget_exceeded"}]
+    assert truncated is True
+
+
 def test_populate_project_wiki_generates_bounded_wiki_refresh_pages(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -3168,6 +3515,104 @@ def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path
     assert "#[Route" not in str(artifact)
     assert "@Route" not in str(artifact)
     assert "return new Response" not in str(artifact)
+
+
+def test_populate_backend_ast_resolves_inherited_symfony_controller_routes(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    controllers = tmp_path / "src" / "Controller"
+    controllers.mkdir(parents=True)
+    (controllers / "AdminController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "abstract class AdminController {\n"
+        "    /** @Route(\"/\", name=\"\") */\n"
+        "    public function index() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (controllers / "RoleController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "abstract class RoleController extends AdminController {}\n",
+        encoding="utf-8",
+    )
+    (controllers / "WorkerController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "/** @Route(\"/generale/soggetti-attivi\", name=\"contact_flock_roles_worker\") */\n"
+        "class WorkerController extends RoleController {}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_symfony_inherited_route",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = result["artifact"]
+    inherited = next(
+        route
+        for route in artifact["routes"]
+        if route.get("name") == "contact_flock_roles_worker"
+    )
+    assert inherited["uri"] == "/generale/soggetti-attivi/"
+    assert inherited["handler"] == "WorkerController@index"
+    assert inherited["defined_handler"] == "AdminController@index"
+    assert inherited["inherited"] is True
+    assert (
+        "route_handler",
+        "route:contact_flock_roles_worker",
+        "AdminController@index",
+    ) in {
+        (edge.get("kind"), edge.get("from"), edge.get("to"))
+        for edge in artifact["edges"]
+    }
+    assert "WorkerController@index" not in {
+        symbol.get("name") for symbol in artifact["symbols"]
+    }
+
+
+def test_populate_backend_ast_bounds_symfony_inheritance_cycles(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    controllers = tmp_path / "src" / "Controller"
+    controllers.mkdir(parents=True)
+    (controllers / "AController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "/** @Route(\"/a\", name=\"a_\") */\n"
+        "class AController extends BController {}\n",
+        encoding="utf-8",
+    )
+    (controllers / "BController.php").write_text(
+        "<?php\n"
+        "namespace App\\Controller;\n"
+        "class BController extends AController {\n"
+        "    /** @Route(\"/index\", name=\"index\") */\n"
+        "    public function index() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_symfony_cycle",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    report = result["artifact"]["analysis"]["symfony_inheritance"]
+    assert result["status"] == "completed"
+    assert report["status"] == "partial"
+    assert report["cycles"] >= 1
+    assert any(route.get("name") == "a_index" for route in result["artifact"]["routes"])
 
 
 def test_populate_backend_ast_extracts_doctrine_schema_graph_without_source(tmp_path):
