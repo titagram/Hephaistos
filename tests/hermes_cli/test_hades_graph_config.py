@@ -59,7 +59,11 @@ def _git_commit_all(root: Path, message: str = "initial") -> None:
     )
 
 
-def _real_git_submodule_or_skip(tmp_path: Path) -> tuple[Path, Path]:
+def _real_git_submodule_or_skip(
+    tmp_path: Path,
+    *,
+    empty_child: bool = False,
+) -> tuple[Path, Path]:
     """Create a parent with one committed, checked-out local child submodule."""
 
     child = tmp_path / "child"
@@ -67,8 +71,16 @@ def _real_git_submodule_or_skip(tmp_path: Path) -> tuple[Path, Path]:
     child.mkdir()
     parent.mkdir()
     _git_init_with_identity(child)
-    _write(child, "src/child.py", "CHILD = 'pinned'\n")
-    _git_commit_all(child, "child initial")
+    if empty_child:
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "empty child initial"],
+            cwd=child,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    else:
+        _write(child, "src/child.py", "CHILD = 'pinned'\n")
+        _git_commit_all(child, "child initial")
     _git_init_with_identity(parent)
     _write(parent, "src/parent.py", "PARENT = 'safe'\n")
     _git_commit_all(parent, "parent initial")
@@ -492,17 +504,19 @@ def test_unavailable_git_submodule_hashes_gitlink_and_marks_partial(tmp_path):
     from hermes_cli.hades_index.inventory import build_source_snapshot
 
     commit = "a" * 40
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     try:
         subprocess.run(
             ["git", "init"],
-            cwd=tmp_path,
+            cwd=workspace,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         subprocess.run(
             ["git", "update-index", "--add", "--cacheinfo", f"160000,{commit},lib"],
-            cwd=tmp_path,
+            cwd=workspace,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -510,7 +524,7 @@ def test_unavailable_git_submodule_hashes_gitlink_and_marks_partial(tmp_path):
     except (OSError, subprocess.CalledProcessError) as exc:
         pytest.skip(f"git index fixture unavailable: {exc}")
 
-    snapshot = build_source_snapshot(tmp_path)
+    snapshot = build_source_snapshot(workspace)
     expected_file = (
         hashlib
         .sha256(b"SUBMODULE_UNAVAILABLE\0" + commit.encode("ascii"))
@@ -636,6 +650,35 @@ def test_pinned_checked_out_submodule_is_recursively_inventoried_and_clean(tmp_p
     )
 
     assert identity.tree_sha256 == hashlib.sha256(expected_preimage).hexdigest()
+    assert identity.dirty is False
+
+
+def test_pinned_empty_checked_out_submodule_is_clean_without_partial_marker(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+    from hermes_cli.hades_index.inventory import build_source_snapshot
+
+    parent, child_checkout = _real_git_submodule_or_skip(tmp_path, empty_child=True)
+
+    identity = build_source_identity(parent, load_hades_graph_index_config({}))
+    snapshot = build_source_snapshot(parent)
+    records = {
+        ".gitmodules": (parent / ".gitmodules").read_bytes(),
+        "src/parent.py": (parent / "src/parent.py").read_bytes(),
+    }
+    expected_preimage = b"".join(
+        path.encode("utf-8")
+        + b"\0"
+        + hashlib.sha256(content).hexdigest().encode("ascii")
+        + b"\n"
+        for path, content in sorted(records.items())
+    )
+
+    assert list(child_checkout.iterdir()) == [child_checkout / ".git"]
+    assert identity.tree_sha256 == hashlib.sha256(expected_preimage).hexdigest()
+    assert snapshot.partial_reasons == ()
     assert identity.dirty is False
 
 

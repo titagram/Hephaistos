@@ -525,13 +525,20 @@ def _git_submodules(root: Path) -> dict[str, str]:
     return result
 
 
-def _submodule_is_available(path: Path) -> bool:
+def _submodule_is_available(path: Path, pinned_commit: str) -> bool:
+    """Return whether a gitlink has its pinned Git checkout available.
+
+    An empty repository checkout normally contains only its `.git` worktree
+    link.  Directory contents therefore cannot distinguish it from a missing
+    submodule; the Git worktree boundary and the parent-pinned commit can.
+    """
+
     if not path.is_dir():
         return False
-    try:
-        return any(child.name != ".git" for child in path.iterdir())
-    except OSError:
+    inside = _git_command(path, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.strip() != b"true":
         return False
+    return _git_command(path, "cat-file", "-e", f"{pinned_commit}^{{commit}}") is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -588,7 +595,7 @@ def _git_head_inventory(
                 continue
             if mode == b"160000" and kind == b"commit":
                 checkout = root / path
-                if not _submodule_is_available(checkout):
+                if not _submodule_is_available(checkout, object_id.decode("ascii")):
                     entries[path] = _GitHeadEntry(mode, kind, object_id, repository)
                     continue
                 checked_out_head = _git_command(checkout, "rev-parse", "HEAD")
@@ -732,7 +739,7 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
         if _is_out_of_scope(path, user_excluded_paths):
             continue
         candidate = root / path
-        if not _submodule_is_available(candidate):
+        if not _submodule_is_available(candidate, commit):
             unavailable_submodules.add(path)
             raw_paths.append(path)
             records.append(
