@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli.hades_graph_contract import canonical_json_bytes
+from hermes_cli.hades_graph_config import load_hades_graph_index_config
+from hermes_cli.hades_graph_v2.model import (
+    FrameworkKnowledge,
+    FrameworkRecord,
+    SourceIdentity,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     AdapterDiagnostic,
     AdapterResult,
@@ -39,6 +47,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     EffectKind,
     EntrypointCandidate,
     EntrypointKind,
+    ExtractionContext,
     ExecutableDeclaration,
     ExceptionScope,
     ExceptionSuccessor,
@@ -77,6 +86,11 @@ from hermes_cli.hades_index.lifecycle.model import (
 _DIGEST = "a" * 64
 
 
+@dataclass(frozen=True, slots=True)
+class _EffectWithPayload(Effect):
+    arbitrary_payload: dict[str, str]
+
+
 def _key(
     family: str,
     locator_kind: str = "ast",
@@ -111,7 +125,7 @@ def _evidence(
 ) -> IREvidence:
     return IREvidence(
         origin=EvidenceOrigin.VERIFIED_FROM_CODE,
-        extractor="tree_sitter.python",
+        extractor="tree-sitter.python",
         locator=locator or _ast(),
         inference_rule=None,
     )
@@ -495,16 +509,11 @@ def test_entrypoint_handler_and_unresolved_fact_are_exclusive_and_linked() -> No
                 replace(entrypoint, handler_local_key=result.declarations[0].local_key),
             ),
         ).validate()
-    with pytest.raises(IRValidationError, match="entrypoint_handler"):
+    with pytest.raises(IRValidationError, match="call_target"):
         replace(
-            result,
-            unresolved_facts=(
-                replace(
-                    result.unresolved_facts[0],
-                    resolution_kind=ResolutionKind.CALL_TARGET,
-                ),
-            ),
-        ).validate()
+            result.unresolved_facts[0],
+            resolution_kind=ResolutionKind.CALL_TARGET,
+        )
 
 
 def test_unresolved_candidate_knowledge_enforces_its_closed_empty_or_nonempty_contract() -> (
@@ -567,3 +576,300 @@ def test_closed_enums_and_nullable_fields_reject_invalid_values() -> None:
             "next",
             None,
         )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "declarations",
+        "blocks",
+        "branch_arms",
+        "structures",
+        "call_sites",
+        "edge_facts",
+        "exception_scopes",
+        "terminals",
+        "effects",
+        "framework_segments",
+        "entrypoints",
+        "unresolved_facts",
+        "coverage_events",
+        "diagnostics",
+    ),
+)
+def test_adapter_result_rejects_non_exact_record_family_types(field_name: str) -> None:
+    result = _valid_result()
+    if field_name == "effects":
+        bad = SimpleNamespace(
+            local_key=result.effects[0].local_key,
+            arbitrary_payload={"raw_source": "secret"},
+        )
+    else:
+        bad = object()
+    with pytest.raises(IRValidationError, match="exact"):
+        replace(result, **{field_name: (bad,)}).validate()
+
+
+def test_adapter_result_rejects_dataclass_subclasses_with_extra_payload() -> None:
+    result = _valid_result()
+    effect = result.effects[0]
+    payload_effect = _EffectWithPayload(
+        local_key=effect.local_key,
+        source=effect.source,
+        kind=effect.kind,
+        operation=effect.operation,
+        public_resource_name=effect.public_resource_name,
+        protocol=effect.protocol,
+        locator=effect.locator,
+        arbitrary_payload={"raw_source": "secret"},
+    )
+    with pytest.raises(IRValidationError, match="exact Effect"):
+        replace(result, effects=(payload_effect,)).validate()
+
+
+def test_edge_node_references_and_lifecycle_relation_matrix_are_closed() -> None:
+    result = _valid_result()
+    edge = result.edge_facts[0]
+    with pytest.raises(IRValidationError, match="node"):
+        replace(
+            result,
+            edge_facts=(replace(edge, source_node_local_key=edge.local_key),),
+        ).validate()
+    with pytest.raises(IRValidationError, match="conditional"):
+        replace(
+            result,
+            edge_facts=(replace(edge, flow=EdgeFlow.CONDITIONAL),),
+        ).validate()
+    with pytest.raises(IRValidationError, match="call-site"):
+        replace(
+            result,
+            edge_facts=(replace(edge, relation=Relation.INVOKES),),
+        ).validate()
+
+
+def test_returns_to_requires_matching_invocation_and_its_exact_continuation() -> None:
+    result = _valid_result()
+    call_structure = next(
+        structure
+        for structure in result.structures
+        if structure.kind is StructureKind.CALL_SITE
+    )
+    invoke = replace(
+        result.edge_facts[0],
+        local_key=_key("edge_fact", structural="body/invoke"),
+        relation=Relation.INVOKES,
+        call_site_key=call_structure.local_key,
+        locator=_ast("body/call"),
+        evidence=_evidence(_ast("body/call")),
+    )
+    bad_return = replace(
+        result.edge_facts[0],
+        local_key=_key("edge_fact", structural="body/return-edge"),
+        relation=Relation.RETURNS_TO,
+        call_site_key=call_structure.local_key,
+        target=LocalNodeTarget(result.blocks[0].local_key),
+        locator=_ast("body/call"),
+        evidence=_evidence(_ast("body/call")),
+    )
+    edges = tuple(
+        sorted(
+            (result.edge_facts[0], invoke, bad_return), key=lambda row: row.local_key
+        )
+    )
+    with pytest.raises(IRValidationError, match="continuation"):
+        replace(result, edge_facts=edges).validate()
+
+
+def test_handled_throws_to_requires_a_matching_exception_scope_record() -> None:
+    result = _valid_result()
+    exception_structure = next(
+        structure
+        for structure in result.structures
+        if structure.kind is StructureKind.EXCEPTION_SCOPE
+    )
+    throw = replace(
+        result.edge_facts[0],
+        relation=Relation.THROWS_TO,
+        flow=EdgeFlow.EXCEPTION,
+        condition=ConditionIR(
+            "predicate",
+            "is_exception",
+            _DIGEST,
+            ConditionPolarity.EXCEPTION,
+        ),
+        exception_scope_key=exception_structure.local_key,
+    )
+    with pytest.raises(IRValidationError, match="matching exception scope"):
+        replace(
+            result,
+            edge_facts=(throw,),
+            exception_scopes=(),
+        ).validate()
+
+
+def test_evidence_origin_extractor_and_file_locator_context_are_closed() -> None:
+    assert (
+        IREvidence(
+            origin=EvidenceOrigin.VERIFIED_FROM_CODE,
+            extractor="tree-sitter.python",
+            locator=_ast(),
+            inference_rule=None,
+        ).extractor
+        == "tree-sitter.python"
+    )
+    with pytest.raises(IRValidationError, match="extractor"):
+        IREvidence(
+            origin=EvidenceOrigin.VERIFIED_FROM_CODE,
+            extractor="tree_sitter.python",
+            locator=_ast(),
+            inference_rule=None,
+        )
+    with pytest.raises(IRValidationError, match="inference_rule"):
+        IREvidence(
+            origin=EvidenceOrigin.INFERRED,
+            extractor="tree-sitter.python",
+            locator=_ast(),
+            inference_rule=None,
+        )
+    with pytest.raises(IRValidationError, match="inference_rule"):
+        IREvidence(
+            origin=EvidenceOrigin.VERIFIED_FROM_CODE,
+            extractor="tree-sitter.python",
+            locator=_ast(),
+            inference_rule="static_analysis",
+        )
+    result = _valid_result()
+    records = _records()
+    with pytest.raises(IRValidationError, match="file locator"):
+        replace(
+            result,
+            entrypoints=(
+                replace(
+                    result.entrypoints[0],
+                    evidence=_evidence(FileLocatorIR("inventory.py", _DIGEST)),
+                ),
+            ),
+        ).validate()
+    with pytest.raises(IRValidationError, match="file locator"):
+        replace(
+            result.framework_segments[0],
+            evidence=_evidence(FileLocatorIR("inventory.py", _DIGEST)),
+        )
+    with pytest.raises(IRValidationError, match="file locator"):
+        replace(
+            records["boundary"],
+            evidence=_evidence(FileLocatorIR("inventory.py", _DIGEST)),
+        )
+
+
+def test_unresolved_subject_candidate_and_entrypoint_assertion_matrices_are_exact() -> (
+    None
+):
+    result = _valid_result()
+    fact = result.unresolved_facts[0]
+    with pytest.raises(IRValidationError, match="call_target"):
+        replace(fact, resolution_kind=ResolutionKind.CALL_TARGET)
+    edge_only = replace(
+        fact,
+        candidate_set_knowledge=CandidateSetKnowledge.INCOMPLETE,
+        candidate_edge_local_keys=(result.edge_facts[0].local_key,),
+    )
+    with pytest.raises(IRValidationError, match="target hints"):
+        replace(result, unresolved_facts=(edge_only,)).validate()
+    unrelated_complete = replace(
+        fact,
+        candidate_set_knowledge=CandidateSetKnowledge.COMPLETE,
+        candidate_target_local_keys=(result.blocks[0].local_key,),
+        candidate_edge_local_keys=(result.edge_facts[0].local_key,),
+    )
+    with pytest.raises(IRValidationError, match="candidate targets"):
+        replace(result, unresolved_facts=(unrelated_complete,)).validate()
+    mismatched_edge = replace(
+        result.edge_facts[0], locator=_config("routes/not-this-one")
+    )
+    with pytest.raises(IRValidationError, match="registration"):
+        replace(result, edge_facts=(mismatched_edge,)).validate()
+
+
+def test_extraction_context_is_runtime_typed_and_deterministically_ordered() -> None:
+    source_identity = SourceIdentity(None, _DIGEST, False, None)
+    framework = FrameworkRecord(
+        language="python",
+        name="fastapi",
+        version=None,
+        detector="package-lock",
+        configuration_paths=(),
+        knowledge=FrameworkKnowledge.VERIFIED,
+    )
+    context = ExtractionContext(
+        workspace_root=Path("/workspace"),
+        project_id="project",
+        workspace_binding_id="binding",
+        source_identity=source_identity,
+        graph_config=load_hades_graph_index_config({}),
+        detected_languages=("python",),
+        detected_frameworks=(framework,),
+        composer_metadata=(),
+        python_metadata=(),
+        package_metadata=(),
+        tsconfig_metadata=(),
+        file_accessor=lambda path: path.read_bytes(),
+    )
+    assert context.source_identity is source_identity
+    with pytest.raises(IRValidationError, match="source_identity"):
+        replace(context, source_identity=object())
+    with pytest.raises(IRValidationError, match="graph_config"):
+        replace(context, graph_config=object())
+    with pytest.raises(IRValidationError, match="detected_frameworks"):
+        replace(context, detected_frameworks=(object(),))
+
+
+def test_condition_ir_rejects_raw_literals_and_secret_assignments_without_echoing_them() -> (
+    None
+):
+    for normalized in ('password == "topsecret"', "token = 12345"):
+        with pytest.raises(IRValidationError) as error:
+            ConditionIR("predicate", normalized, _DIGEST, ConditionPolarity.TRUE)
+        assert normalized not in str(error.value)
+
+
+def test_non_key_families_and_pipeline_orders_are_unique() -> None:
+    result = _valid_result()
+    with pytest.raises(IRValidationError, match="duplicate"):
+        replace(result, branch_arms=result.branch_arms * 2).validate()
+    duplicate_entrypoints = tuple(
+        sorted(
+            result.entrypoints * 2,
+            key=lambda item: (item.kind.value, item.framework or ""),
+        )
+    )
+    with pytest.raises(IRValidationError, match="duplicate"):
+        replace(result, entrypoints=duplicate_entrypoints).validate()
+    second_segment = replace(
+        result.framework_segments[0],
+        local_key=_key(
+            "framework_pipeline_segment",
+            locator_kind="config",
+            structural="routes/1",
+            ordinal=1,
+        ),
+    )
+    segments = tuple(
+        sorted(
+            (result.framework_segments[0], second_segment),
+            key=lambda segment: segment.local_key,
+        )
+    )
+    with pytest.raises(IRValidationError, match="pipeline_order"):
+        replace(
+            result,
+            framework_segments=segments,
+            entrypoints=(
+                replace(
+                    result.entrypoints[0],
+                    framework_segment_keys=tuple(
+                        segment.local_key for segment in segments
+                    ),
+                ),
+            ),
+        ).validate()

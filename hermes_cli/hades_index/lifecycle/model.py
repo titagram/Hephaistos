@@ -44,9 +44,15 @@ from hermes_cli.hades_graph_v2.schema import GraphContractError, SAFE_INTEGER_MA
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+_EXTRACTOR_RE = re.compile(r"^[a-z][a-z0-9.-]{0,127}$")
 _RULE_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]{0,31}$")
+_CONDITION_SAFE_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_.$:\s()\[\]!<>=&|+*/%?,\-]*$")
+_CONDITION_LITERAL_RE = re.compile(r"(?<![A-Za-z_$])\d+(?:\.\d+)?(?![A-Za-z_])")
+_CONDITION_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:password|secret|token|api[_-]?key|credential)\b\s*(?:={1,3}|!={1,2})"
+)
 
 
 class IRValidationError(ValueError):
@@ -362,15 +368,24 @@ class IREvidence:
     inference_rule: str | None
 
     def __post_init__(self) -> None:
-        _require_enum(self.origin, EvidenceOrigin, field_name="evidence.origin")
+        if type(self.origin) is not EvidenceOrigin:
+            _fail("invalid_enum", "evidence.origin must be an EvidenceOrigin")
         extractor = _nfc(self.extractor, field_name="evidence.extractor", limit=128)
-        if not _IDENTIFIER_RE.fullmatch(extractor.replace(".", "_")):
-            _fail("invalid_identifier", "evidence.extractor must be a lower identifier")
-        if not isinstance(self.locator, (FileLocatorIR, AstLocatorIR, ConfigLocatorIR)):
+        if not _EXTRACTOR_RE.fullmatch(extractor):
+            _fail(
+                "invalid_identifier",
+                "evidence.extractor must be a lower dot-or-hyphen identifier",
+            )
+        if type(self.locator) not in {FileLocatorIR, AstLocatorIR, ConfigLocatorIR}:
             _fail(
                 "invalid_locator", "evidence.locator must be a closed evidence locator"
             )
-        if self.inference_rule is not None:
+        if self.origin is EvidenceOrigin.INFERRED:
+            if self.inference_rule is None:
+                _fail(
+                    "invalid_inference_rule",
+                    "inferred evidence requires an inference_rule",
+                )
             rule = _nfc(
                 self.inference_rule, field_name="evidence.inference_rule", limit=80
             )
@@ -379,6 +394,11 @@ class IREvidence:
                     "invalid_identifier",
                     "evidence.inference_rule must be lower snake case",
                 )
+        elif self.inference_rule is not None:
+            _fail(
+                "invalid_inference_rule",
+                "only inferred evidence may carry an inference_rule",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,9 +411,32 @@ class ConditionIR:
     def __post_init__(self) -> None:
         if self.kind != "predicate":
             _fail("invalid_discriminator", "condition kind must be predicate")
-        _nfc(self.normalized, field_name="condition.normalized", limit=256)
+        normalized = _nfc(self.normalized, field_name="condition.normalized", limit=256)
+        if (
+            not _CONDITION_SAFE_RE.fullmatch(normalized)
+            or any(mark in normalized for mark in ("'", '"', "`"))
+            or _CONDITION_LITERAL_RE.search(normalized)
+            or _CONDITION_SENSITIVE_ASSIGNMENT_RE.search(normalized)
+        ):
+            _fail(
+                "invalid_condition",
+                "condition.normalized must be a redacted identifier/operator expression",
+            )
         _digest(self.hash, field_name="condition.hash")
         _require_enum(self.polarity, ConditionPolarity, field_name="condition.polarity")
+
+
+def _require_context_evidence(evidence: object, *, field_name: str) -> IREvidence:
+    """Require non-inventory evidence for an emitted semantic lifecycle fact."""
+
+    if type(evidence) is not IREvidence:
+        _fail("invalid_record", f"{field_name} must be an exact IREvidence")
+    if type(evidence.locator) is FileLocatorIR:
+        _fail(
+            "invalid_file_locator",
+            "file locator is only allowed for inventory-file facts",
+        )
+    return evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,8 +862,7 @@ class StructureIR:
         ):
             if value is not None:
                 _key(value, field_name=field_name)
-        if not isinstance(self.evidence, IREvidence):
-            _fail("invalid_record", "structure.evidence must be IREvidence")
+        _require_context_evidence(self.evidence, field_name="structure.evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,8 +934,9 @@ class FrameworkBoundaryDescriptor:
             _nfc(self.public_name, field_name="public_name", limit=1024)
         if not isinstance(self.locator, (AstLocatorIR, ConfigLocatorIR)):
             _fail("invalid_locator", "framework boundary locator must be AST or config")
-        if not isinstance(self.evidence, IREvidence):
-            _fail("invalid_record", "framework boundary evidence must be IREvidence")
+        _require_context_evidence(
+            self.evidence, field_name="framework boundary evidence"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -949,8 +992,7 @@ class EdgeFactIR:
             _nonnegative(self.order, field_name="edge.order")
         if not isinstance(self.locator, (AstLocatorIR, ConfigLocatorIR)):
             _fail("invalid_locator", "edge locator must be AST or config")
-        if not isinstance(self.evidence, IREvidence):
-            _fail("invalid_record", "edge.evidence must be IREvidence")
+        _require_context_evidence(self.evidence, field_name="edge.evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1159,8 +1201,9 @@ class FrameworkPipelineSegment:
             )
         if tuple(sorted(values, key=_successor_sort_key)) != values:
             _fail("not_sorted", "short circuit successors must be sorted")
-        if not isinstance(self.evidence, IREvidence):
-            _fail("invalid_record", "framework segment evidence must be IREvidence")
+        _require_context_evidence(
+            self.evidence, field_name="framework segment evidence"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1257,8 +1300,7 @@ class EntrypointCandidate:
             _fail("invalid_reference", "framework_segment_keys must contain local keys")
         if len(set(segments)) != len(segments):
             _fail("not_unique", "framework_segment_keys must be unique")
-        if not isinstance(self.evidence, IREvidence):
-            _fail("invalid_record", "entrypoint.evidence must be IREvidence")
+        _require_context_evidence(self.evidence, field_name="entrypoint.evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1303,7 +1345,7 @@ class UnresolvedFact:
 
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="unresolved.local_key")
-        if not isinstance(self.subject, (CallSiteSubjectIR, EdgeSubjectIR)):
+        if type(self.subject) not in {CallSiteSubjectIR, EdgeSubjectIR}:
             _fail(
                 "invalid_discriminator", "unresolved subject must be call_site or edge"
             )
@@ -1315,6 +1357,22 @@ class UnresolvedFact:
             CandidateSetKnowledge,
             field_name="candidate_set_knowledge",
         )
+        if (
+            self.resolution_kind is ResolutionKind.CALL_TARGET
+            and type(self.subject) is not CallSiteSubjectIR
+        ):
+            _fail(
+                "invalid_unresolved_subject",
+                "call_target requires a call_site subject",
+            )
+        if (
+            self.resolution_kind is not ResolutionKind.CALL_TARGET
+            and type(self.subject) is not EdgeSubjectIR
+        ):
+            _fail(
+                "invalid_unresolved_subject",
+                "edge-target resolution kinds require an edge subject",
+            )
         reason = _nfc(self.reason_code, field_name="reason_code", limit=128)
         if not _REASON_RE.fullmatch(reason):
             _fail("invalid_identifier", "reason_code must be lower snake case")
@@ -1462,6 +1520,13 @@ class ExtractionContext:
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_root, Path):
             _fail("invalid_context", "workspace_root must be a Path")
+        if type(self.source_identity) is not SourceIdentity:
+            _fail("invalid_context", "source_identity must be an exact SourceIdentity")
+        if type(self.graph_config) is not HadesGraphIndexConfig:
+            _fail(
+                "invalid_context",
+                "graph_config must be an exact HadesGraphIndexConfig",
+            )
         for field_name, value in (
             ("project_id", self.project_id),
             ("workspace_binding_id", self.workspace_binding_id),
@@ -1476,6 +1541,17 @@ class ExtractionContext:
                 "invalid_context", "detected_languages must contain lower identifiers"
             )
         _sorted_unique(languages, field_name="detected_languages")
+        frameworks = _tuple(self.detected_frameworks, field_name="detected_frameworks")
+        if any(type(item) is not FrameworkRecord for item in frameworks):
+            _fail(
+                "invalid_context",
+                "detected_frameworks must contain exact FrameworkRecord values",
+            )
+        framework_key = lambda item: (item.language, item.name, item.version or "")
+        if tuple(sorted(frameworks, key=framework_key)) != frameworks:
+            _fail("not_sorted", "detected_frameworks must be deterministically sorted")
+        if len({framework_key(item) for item in frameworks}) != len(frameworks):
+            _fail("duplicate_record", "detected_frameworks must be unique")
         for field_name, values in (
             ("composer_metadata", self.composer_metadata),
             ("python_metadata", self.python_metadata),
@@ -1483,8 +1559,20 @@ class ExtractionContext:
             ("tsconfig_metadata", self.tsconfig_metadata),
         ):
             rows = _tuple(values, field_name=field_name)
-            if any(not isinstance(item, ConfigLocatorIR) for item in rows):
-                _fail("invalid_context", f"{field_name} must contain ConfigLocatorIR")
+            if any(type(item) is not ConfigLocatorIR for item in rows):
+                _fail(
+                    "invalid_context",
+                    f"{field_name} must contain exact ConfigLocatorIR values",
+                )
+            locator_key = lambda item: (
+                item.source_location.path,
+                item.structural_pointer,
+                item.ordinal,
+            )
+            if tuple(sorted(rows, key=locator_key)) != rows:
+                _fail("not_sorted", f"{field_name} must be deterministically sorted")
+            if len({locator_key(item) for item in rows}) != len(rows):
+                _fail("duplicate_record", f"{field_name} must be unique")
         if not callable(self.file_accessor):
             _fail("invalid_context", "file_accessor must be read-only callable")
 
@@ -1543,9 +1631,125 @@ local_key = local_record_key
 def _result_sorted(
     records: tuple[object, ...], *, field_name: str, key: Callable[[object], object]
 ) -> None:
-    _tuple(records, field_name=field_name)
+    values = _tuple(records, field_name=field_name)
     if tuple(sorted(records, key=key)) != records:
         _fail("not_sorted", f"{field_name} must be deterministically sorted")
+    keys = tuple(key(row) for row in values)
+    if len(set(keys)) != len(keys):
+        _fail("duplicate_record", f"{field_name} contains a duplicate record")
+
+
+def _result_family(
+    records: tuple[object, ...],
+    *,
+    field_name: str,
+    record_type: type[object],
+    key: Callable[[object], object],
+) -> None:
+    """Validate one closed, immutable AdapterResult tuple without normalizing it."""
+
+    values = _tuple(records, field_name=field_name)
+    if any(type(record) is not record_type for record in values):
+        _fail(
+            "invalid_record",
+            f"{field_name} must contain exact {record_type.__name__} records",
+        )
+    _result_sorted(values, field_name=field_name, key=key)
+
+
+_TERMINAL_NODE_KINDS: dict[TerminalKind, NodeKind] = {
+    TerminalKind.RESPONSE: NodeKind.RESPONSE,
+    TerminalKind.REDIRECT: NodeKind.REDIRECT,
+    TerminalKind.ABORT: NodeKind.ABORT,
+    TerminalKind.EXCEPTION: NodeKind.EXCEPTION,
+    TerminalKind.EXIT: NodeKind.EXIT,
+}
+
+_RESOLUTION_TARGET_KINDS: dict[ResolutionKind, frozenset[NodeKind]] = {
+    ResolutionKind.CALL_TARGET: frozenset({
+        NodeKind.FUNCTION,
+        NodeKind.METHOD,
+        NodeKind.CONTROLLER,
+        NodeKind.SERVICE,
+        NodeKind.DOMAIN,
+        NodeKind.REPOSITORY,
+        NodeKind.MIDDLEWARE,
+        NodeKind.GUARD,
+        NodeKind.AUTHORIZATION,
+        NodeKind.VALIDATOR,
+        NodeKind.BINDING,
+        NodeKind.LISTENER,
+        NodeKind.JOB,
+    }),
+    ResolutionKind.ENTRYPOINT_HANDLER: frozenset({
+        NodeKind.FUNCTION,
+        NodeKind.METHOD,
+        NodeKind.CONTROLLER,
+        NodeKind.SERVICE,
+        NodeKind.LISTENER,
+        NodeKind.JOB,
+    }),
+    ResolutionKind.ASYNC_TARGET: frozenset({
+        NodeKind.EVENT,
+        NodeKind.LISTENER,
+        NodeKind.JOB,
+        NodeKind.QUEUE,
+        NodeKind.ASYNC_BOUNDARY,
+        NodeKind.FUNCTION,
+        NodeKind.METHOD,
+        NodeKind.SERVICE,
+    }),
+    ResolutionKind.EXCEPTION_TARGET: frozenset({
+        NodeKind.EXCEPTION,
+        NodeKind.LISTENER,
+        NodeKind.FRAMEWORK_BOUNDARY,
+        NodeKind.FUNCTION,
+        NodeKind.METHOD,
+        NodeKind.SERVICE,
+    }),
+    ResolutionKind.FRAMEWORK_TARGET: frozenset({
+        NodeKind.MIDDLEWARE,
+        NodeKind.GUARD,
+        NodeKind.AUTHORIZATION,
+        NodeKind.VALIDATOR,
+        NodeKind.BINDING,
+        NodeKind.CONTROLLER,
+        NodeKind.FRAMEWORK_BOUNDARY,
+        NodeKind.FUNCTION,
+        NodeKind.METHOD,
+        NodeKind.SERVICE,
+    }),
+    ResolutionKind.EXTERNAL_TARGET: frozenset({
+        NodeKind.INTEGRATION,
+        NodeKind.EXTERNAL_BOUNDARY,
+        NodeKind.MODEL,
+        NodeKind.REPOSITORY,
+        NodeKind.TABLE,
+        NodeKind.QUERY,
+        NodeKind.CACHE,
+        NodeKind.STORAGE,
+        NodeKind.QUEUE,
+    }),
+}
+
+
+def _locator_key(locator: OccurrenceLocatorIR) -> tuple[object, ...]:
+    if type(locator) is AstLocatorIR:
+        return (
+            "ast",
+            locator.source_location.path,
+            locator.structural_path,
+            locator.ordinal,
+        )
+    if type(locator) is ConfigLocatorIR:
+        return (
+            "config",
+            locator.source_location.path,
+            locator.structural_pointer,
+            locator.ordinal,
+        )
+    _fail("invalid_locator", "lifecycle occurrence locator must be AST or config")
+    raise AssertionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -1568,51 +1772,51 @@ class AdapterResult:
     def validate(self) -> None:
         """Validate a result as read-only facts; never repair or reorder adapter data."""
 
-        families: tuple[tuple[str, tuple[object, ...]], ...] = (
-            ("declarations", self.declarations),
-            ("blocks", self.blocks),
-            ("structures", self.structures),
-            ("call_sites", self.call_sites),
-            ("edge_facts", self.edge_facts),
-            ("exception_scopes", self.exception_scopes),
-            ("terminals", self.terminals),
-            ("effects", self.effects),
-            ("framework_segments", self.framework_segments),
-            ("unresolved_facts", self.unresolved_facts),
+        local_families: tuple[tuple[str, tuple[object, ...], type[object]], ...] = (
+            ("declarations", self.declarations, ExecutableDeclaration),
+            ("blocks", self.blocks, BasicBlock),
+            ("structures", self.structures, StructureIR),
+            ("call_sites", self.call_sites, CallSite),
+            ("edge_facts", self.edge_facts, EdgeFactIR),
+            ("exception_scopes", self.exception_scopes, ExceptionScope),
+            ("terminals", self.terminals, Terminal),
+            ("effects", self.effects, Effect),
+            ("framework_segments", self.framework_segments, FrameworkPipelineSegment),
+            ("unresolved_facts", self.unresolved_facts, UnresolvedFact),
         )
-        for name, records in families:
-            _result_sorted(
-                records, field_name=name, key=lambda item: getattr(item, "local_key")
+        for name, records, record_type in local_families:
+            _result_family(
+                records,
+                field_name=name,
+                record_type=record_type,
+                key=lambda item: item.local_key,
             )
-            if any(
-                not isinstance(getattr(item, "local_key", None), str)
-                for item in records
-            ):
-                _fail("invalid_record", f"{name} must contain typed local-key records")
-        _result_sorted(
+        _result_family(
             self.branch_arms,
             field_name="branch_arms",
+            record_type=BranchArm,
             key=lambda item: (
                 item.branch_local_key,
                 item.arm_ordinal,
                 item.target_block_key,
             ),
         )
-        _result_sorted(
+        _result_family(
             self.entrypoints,
             field_name="entrypoints",
+            record_type=EntrypointCandidate,
             key=lambda item: (
                 item.kind.value,
                 item.framework or "",
                 item.public_path or "",
                 item.public_name or "",
-                item.registration_locator.source_location.path,
-                item.registration_locator.ordinal,
+                *_locator_key(item.registration_locator),
             ),
         )
-        _result_sorted(
+        _result_family(
             self.coverage_events,
             field_name="coverage_events",
+            record_type=CoverageEvent,
             key=lambda item: (
                 item.language,
                 item.capability.value,
@@ -1621,9 +1825,10 @@ class AdapterResult:
                 item.path or "",
             ),
         )
-        _result_sorted(
+        _result_family(
             self.diagnostics,
             field_name="diagnostics",
+            record_type=AdapterDiagnostic,
             key=lambda item: (
                 item.code,
                 item.location.path,
@@ -1633,12 +1838,9 @@ class AdapterResult:
         )
 
         indexes: dict[str, dict[str, object]] = {
-            name: {getattr(row, "local_key"): row for row in rows}
-            for name, rows in families
+            name: {row.local_key: row for row in records}
+            for name, records, _record_type in local_families
         }
-        for name, rows in families:
-            if len(indexes[name]) != len(rows):
-                _fail("duplicate_local_key", f"{name} contains a duplicate local key")
         all_local_keys: set[str] = set()
         for name, index in indexes.items():
             overlap = all_local_keys.intersection(index)
@@ -1658,6 +1860,22 @@ class AdapterResult:
         terminals = indexes["terminals"]
         segments = indexes["framework_segments"]
         unresolved = indexes["unresolved_facts"]
+        nodes: dict[str, object] = {
+            **declarations,
+            **blocks,
+            **terminals,
+        }
+        node_kinds: dict[str, NodeKind] = {
+            **{
+                key: declaration.declaration_kind
+                for key, declaration in declarations.items()
+            },
+            **{key: NodeKind.BASIC_BLOCK for key in blocks},
+            **{
+                key: _TERMINAL_NODE_KINDS[terminal.kind]
+                for key, terminal in terminals.items()
+            },
+        }
 
         def need(index: dict[str, object], key: str, label: str) -> object:
             if key not in index:
@@ -1666,6 +1884,13 @@ class AdapterResult:
                     f"{label} does not resolve in this AdapterResult",
                 )
             return index[key]
+
+        def need_node(key: str, label: str) -> object:
+            if key not in nodes:
+                _fail(
+                    "unresolved_reference", f"{label} must resolve to an emitted node"
+                )
+            return nodes[key]
 
         for declaration in self.declarations:
             if declaration.owner_declaration_key is not None:
@@ -1678,78 +1903,28 @@ class AdapterResult:
                 + declaration.exception_exit_block_keys
             ):
                 need(blocks, block_key, "declaration exit block")
-        for block in self.blocks:
-            need(declarations, block.declaration_key, "block declaration")
-            for successor in block.successors:
-                if isinstance(
-                    successor,
-                    (
-                        AlwaysSuccessor,
-                        BranchSuccessor,
-                        ExceptionSuccessor,
-                        LoopSuccessor,
-                    ),
-                ):
-                    need(blocks, successor.target_block_key, "successor block")
-                elif isinstance(successor, AsyncSuccessor):
-                    if successor.target_local_key not in all_local_keys:
-                        _fail(
-                            "unresolved_reference",
-                            "async successor target does not resolve",
-                        )
-                else:
-                    need(terminals, successor.terminal_local_key, "return terminal")
-                if isinstance(successor, BranchSuccessor):
-                    arm = next(
-                        (
-                            item
-                            for item in self.branch_arms
-                            if item.branch_local_key == successor.branch_arm_key
-                        ),
-                        None,
-                    )
-                    if arm is None:
-                        _fail(
-                            "unresolved_reference",
-                            "branch successor arm does not resolve",
-                        )
-                if isinstance(successor, ExceptionSuccessor):
-                    structure = need(
-                        structures,
-                        successor.exception_scope_key,
-                        "exception successor structure",
-                    )
-                    if (
-                        not isinstance(structure, StructureIR)
-                        or structure.kind is not StructureKind.EXCEPTION_SCOPE
-                    ):
-                        _fail(
-                            "invalid_structure",
-                            "exception successor must reference exception_scope structure",
-                        )
+
+        branch_arms_by_structure: dict[str, BranchArm] = {
+            arm.branch_local_key: arm for arm in self.branch_arms
+        }
         for arm in self.branch_arms:
             structure = need(structures, arm.branch_local_key, "branch arm structure")
-            if (
-                not isinstance(structure, StructureIR)
-                or structure.kind is not StructureKind.BRANCH_GROUP
-            ):
+            if structure.kind is not StructureKind.BRANCH_GROUP:
                 _fail(
                     "invalid_structure",
                     "branch arm must reference branch_group structure",
                 )
             need(blocks, arm.source_block_key, "branch arm source block")
             need(blocks, arm.target_block_key, "branch arm target block")
+
         for structure in self.structures:
             need(declarations, structure.owner_declaration_key, "structure owner")
             if structure.continuation_block_key is not None:
                 need(blocks, structure.continuation_block_key, "structure continuation")
             if structure.parent_structure_key is not None:
                 need(structures, structure.parent_structure_key, "parent structure")
-            if isinstance(structure.evidence.locator, FileLocatorIR):
-                _fail(
-                    "invalid_file_locator",
-                    "file locator is only allowed for inventory-file facts",
-                )
+
+        call_site_structure_by_site: dict[str, StructureIR] = {}
         for site in self.call_sites:
             need(
                 declarations,
@@ -1759,32 +1934,32 @@ class AdapterResult:
             need(blocks, site.source_block_key, "call-site source block")
             need(blocks, site.continuation_block_key, "call-site continuation block")
             matching = [
-                row
-                for row in self.structures
-                if row.kind is StructureKind.CALL_SITE
-                and row.owner_declaration_key == site.caller_declaration_key
-                and row.structural_path == site.locator.structural_path
-                and row.ordinal == site.locator.ordinal
+                structure
+                for structure in self.structures
+                if structure.kind is StructureKind.CALL_SITE
+                and structure.owner_declaration_key == site.caller_declaration_key
+                and structure.structural_path == site.locator.structural_path
+                and structure.ordinal == site.locator.ordinal
             ]
-            if not matching:
+            if len(matching) != 1:
                 _fail(
                     "invalid_structure",
-                    "call-site requires an emitted call_site StructureIR",
+                    "call-site requires one matching call_site StructureIR",
                 )
+            call_site_structure_by_site[site.local_key] = matching[0]
             if site.exception_scope_key is not None:
                 structure = need(
                     structures,
                     site.exception_scope_key,
                     "call-site exception structure",
                 )
-                if (
-                    not isinstance(structure, StructureIR)
-                    or structure.kind is not StructureKind.EXCEPTION_SCOPE
-                ):
+                if structure.kind is not StructureKind.EXCEPTION_SCOPE:
                     _fail(
                         "invalid_structure",
                         "call-site exception reference must be exception_scope structure",
                     )
+
+        scope_structure_by_scope: dict[str, StructureIR] = {}
         for scope in self.exception_scopes:
             need(declarations, scope.declaration_key, "exception scope declaration")
             for block_key in scope.catch_block_keys:
@@ -1794,26 +1969,111 @@ class AdapterResult:
             if scope.parent_scope_key is not None:
                 need(scopes, scope.parent_scope_key, "exception parent scope")
             matching = [
-                row
-                for row in self.structures
-                if row.kind is StructureKind.EXCEPTION_SCOPE
-                and row.owner_declaration_key == scope.declaration_key
-                and row.structural_path == scope.locator.structural_path
-                and row.ordinal == scope.locator.ordinal
+                structure
+                for structure in self.structures
+                if structure.kind is StructureKind.EXCEPTION_SCOPE
+                and structure.owner_declaration_key == scope.declaration_key
+                and structure.structural_path == scope.locator.structural_path
+                and structure.ordinal == scope.locator.ordinal
             ]
-            if not matching:
+            if len(matching) != 1:
                 _fail(
                     "invalid_structure",
-                    "exception scope requires emitted exception_scope StructureIR",
+                    "exception scope requires one matching exception_scope StructureIR",
                 )
+            scope_structure_by_scope[scope.local_key] = matching[0]
+
+        for block in self.blocks:
+            need(declarations, block.declaration_key, "block declaration")
+            for successor in block.successors:
+                if type(successor) in {
+                    AlwaysSuccessor,
+                    BranchSuccessor,
+                    ExceptionSuccessor,
+                    LoopSuccessor,
+                }:
+                    need(blocks, successor.target_block_key, "successor block")
+                elif type(successor) is AsyncSuccessor:
+                    need_node(successor.target_local_key, "async successor target")
+                else:
+                    need(terminals, successor.terminal_local_key, "return terminal")
+                if type(successor) is BranchSuccessor:
+                    if successor.branch_arm_key not in branch_arms_by_structure:
+                        _fail(
+                            "unresolved_reference",
+                            "branch successor arm does not resolve",
+                        )
+                if type(successor) is ExceptionSuccessor:
+                    structure = need(
+                        structures,
+                        successor.exception_scope_key,
+                        "exception successor structure",
+                    )
+                    if structure.kind is not StructureKind.EXCEPTION_SCOPE:
+                        _fail(
+                            "invalid_structure",
+                            "exception successor must reference exception_scope structure",
+                        )
+
+        def validate_edge_condition(edge: EdgeFactIR) -> None:
+            branch = (
+                structures.get(edge.branch_group_key)
+                if edge.branch_group_key is not None
+                else None
+            )
+            dynamic_dispatch = (
+                branch is not None
+                and branch.subtype is StructureSubtype.DYNAMIC_DISPATCH
+            )
+            if edge.flow is EdgeFlow.CONDITIONAL:
+                if edge.condition is None or edge.condition.polarity not in {
+                    ConditionPolarity.TRUE,
+                    ConditionPolarity.FALSE,
+                    ConditionPolarity.LOOP_BODY,
+                    ConditionPolarity.LOOP_EXIT,
+                }:
+                    _fail(
+                        "invalid_condition",
+                        "conditional edges require a true/false/loop condition",
+                    )
+            elif edge.flow is EdgeFlow.ALTERNATIVE:
+                if not dynamic_dispatch and (
+                    edge.condition is None
+                    or edge.condition.polarity
+                    not in {ConditionPolarity.CASE, ConditionPolarity.DEFAULT}
+                ):
+                    _fail(
+                        "invalid_condition",
+                        "alternative edges require a case/default condition",
+                    )
+            elif edge.flow is EdgeFlow.EXCEPTION:
+                if (
+                    edge.condition is None
+                    or edge.condition.polarity is not ConditionPolarity.EXCEPTION
+                ):
+                    _fail(
+                        "invalid_condition",
+                        "exception edges require an exception condition",
+                    )
+            elif edge.flow is EdgeFlow.ALWAYS:
+                if (
+                    edge.condition is not None
+                    and edge.condition.polarity is not ConditionPolarity.FINALLY
+                ):
+                    _fail(
+                        "invalid_condition",
+                        "always edges require no condition except an explicit finally",
+                    )
+            elif edge.condition is not None:
+                _fail(
+                    "invalid_condition",
+                    "async and loop edges cannot carry a condition",
+                )
+
         for edge in self.edge_facts:
-            if edge.source_node_local_key not in all_local_keys:
-                _fail("unresolved_reference", "edge source does not resolve")
-            if (
-                isinstance(edge.target, LocalNodeTarget)
-                and edge.target.local_key not in all_local_keys
-            ):
-                _fail("unresolved_reference", "edge target does not resolve")
+            need_node(edge.source_node_local_key, "edge source")
+            if type(edge.target) is LocalNodeTarget:
+                need_node(edge.target.local_key, "edge target")
             for field_name, value, expected_kind in (
                 ("branch", edge.branch_group_key, StructureKind.BRANCH_GROUP),
                 ("call_site", edge.call_site_key, StructureKind.CALL_SITE),
@@ -1821,64 +2081,109 @@ class AdapterResult:
             ):
                 if value is not None:
                     structure = need(structures, value, f"edge {field_name} structure")
-                    if (
-                        not isinstance(structure, StructureIR)
-                        or structure.kind is not expected_kind
-                    ):
+                    if structure.kind is not expected_kind:
                         _fail(
                             "invalid_structure",
                             f"edge {field_name} reference requires matching StructureIR",
                         )
-            if isinstance(edge.evidence.locator, FileLocatorIR):
-                _fail(
-                    "invalid_file_locator",
-                    "file locator is only allowed for inventory-file facts",
+            validate_edge_condition(edge)
+
+            if edge.relation is Relation.INVOKES:
+                if edge.call_site_key is None:
+                    _fail("invalid_call_site", "invokes edges require a call-site")
+                if not any(
+                    structure.local_key == edge.call_site_key
+                    for structure in call_site_structure_by_site.values()
+                ):
+                    _fail(
+                        "invalid_call_site",
+                        "invokes edge call-site must match an emitted CallSite",
+                    )
+            if edge.relation is Relation.RETURNS_TO:
+                if edge.call_site_key is None:
+                    _fail("invalid_call_site", "returns_to edges require a call-site")
+                site = next(
+                    (
+                        candidate
+                        for candidate, structure in call_site_structure_by_site.items()
+                        if structure.local_key == edge.call_site_key
+                    ),
+                    None,
                 )
+                if site is None:
+                    _fail(
+                        "invalid_call_site",
+                        "returns_to edge call-site must match an emitted CallSite",
+                    )
+                call_site = call_sites[site]
+                if (
+                    type(edge.target) is not LocalNodeTarget
+                    or edge.target.local_key != call_site.continuation_block_key
+                ):
+                    _fail(
+                        "invalid_return",
+                        "returns_to must target its call-site continuation",
+                    )
+                if not any(
+                    invocation.relation is Relation.INVOKES
+                    and invocation.call_site_key == edge.call_site_key
+                    for invocation in self.edge_facts
+                ):
+                    _fail(
+                        "invalid_return",
+                        "returns_to requires a matching invocation",
+                    )
+            if edge.relation is Relation.THROWS_TO:
+                if edge.exception_scope_key is not None:
+                    if not any(
+                        structure.local_key == edge.exception_scope_key
+                        for structure in scope_structure_by_scope.values()
+                    ):
+                        _fail(
+                            "invalid_exception_scope",
+                            "handled throws_to requires a matching exception scope",
+                        )
+                elif (
+                    type(edge.target) is not LocalNodeTarget
+                    or node_kinds[edge.target.local_key] is not NodeKind.EXCEPTION
+                ):
+                    _fail(
+                        "invalid_throw_target",
+                        "unhandled throws_to must target an exception terminal",
+                    )
+
         for terminal in self.terminals:
             need(blocks, terminal.source_block_key, "terminal source block")
         for effect in self.effects:
-            source_key = effect.source.local_key
-            if isinstance(effect.source, BlockEffectSource):
-                need(blocks, source_key, "effect source block")
+            if type(effect.source) is BlockEffectSource:
+                need(blocks, effect.source.local_key, "effect source block")
             else:
-                need(call_sites, source_key, "effect source call site")
+                need(call_sites, effect.source.local_key, "effect source call site")
         for segment in self.framework_segments:
-            if (
-                isinstance(segment.target, FrameworkLocalTarget)
-                and segment.target.local_key not in all_local_keys
-            ):
-                _fail(
-                    "unresolved_reference", "framework segment target does not resolve"
-                )
+            if type(segment.target) is FrameworkLocalTarget:
+                need_node(segment.target.local_key, "framework segment target")
             for successor in (
                 segment.success_successor,
             ) + segment.short_circuit_successors:
-                if isinstance(
-                    successor,
-                    (
-                        AlwaysSuccessor,
-                        BranchSuccessor,
-                        ExceptionSuccessor,
-                        LoopSuccessor,
-                    ),
-                ):
+                if type(successor) in {
+                    AlwaysSuccessor,
+                    BranchSuccessor,
+                    ExceptionSuccessor,
+                    LoopSuccessor,
+                }:
                     need(
                         blocks, successor.target_block_key, "framework successor block"
                     )
-                elif (
-                    isinstance(successor, AsyncSuccessor)
-                    and successor.target_local_key not in all_local_keys
-                ):
-                    _fail(
-                        "unresolved_reference",
-                        "framework async target does not resolve",
-                    )
-                elif isinstance(successor, ReturnSuccessor):
+                elif type(successor) is AsyncSuccessor:
+                    need_node(successor.target_local_key, "framework async target")
+                else:
                     need(
                         terminals,
                         successor.terminal_local_key,
                         "framework return terminal",
                     )
+
+        entrypoints_by_unresolved: dict[str, EntrypointCandidate] = {}
         for entrypoint in self.entrypoints:
             if entrypoint.handler_local_key is not None:
                 need(declarations, entrypoint.handler_local_key, "entrypoint handler")
@@ -1889,42 +2194,268 @@ class AdapterResult:
                     "entrypoint unresolved fact",
                 )
                 if (
-                    not isinstance(fact, UnresolvedFact)
-                    or fact.resolution_kind is not ResolutionKind.ENTRYPOINT_HANDLER
-                    or not isinstance(fact.subject, EdgeSubjectIR)
+                    fact.resolution_kind is not ResolutionKind.ENTRYPOINT_HANDLER
+                    or type(fact.subject) is not EdgeSubjectIR
                 ):
                     _fail(
                         "invalid_entrypoint_unresolved",
                         "entrypoint unresolved fact must be an entrypoint_handler edge fact",
                     )
-                need(
-                    edges, fact.subject.local_key, "entrypoint unresolved edge subject"
-                )
+                entrypoints_by_unresolved[fact.local_key] = entrypoint
             pipeline = tuple(
                 need(segments, segment_key, "entrypoint framework segment")
                 for segment_key in entrypoint.framework_segment_keys
             )
-            if (
-                tuple(sorted(pipeline, key=lambda item: item.pipeline_order))
-                != pipeline
-            ):
+            pipeline_orders = tuple(segment.pipeline_order for segment in pipeline)
+            if pipeline_orders != tuple(sorted(pipeline_orders)):
                 _fail(
                     "not_sorted",
                     "entrypoint framework segments must be ordered by pipeline_order",
                 )
+            if len(set(pipeline_orders)) != len(pipeline_orders):
+                _fail(
+                    "duplicate_pipeline_order",
+                    "entrypoint framework segment pipeline_order values must be unique",
+                )
+
+        def edge_matches_resolution(
+            edge: EdgeFactIR,
+            kind: ResolutionKind,
+            *,
+            call_site_structure_key: str | None = None,
+        ) -> bool:
+            if kind is ResolutionKind.CALL_TARGET:
+                return (
+                    edge.relation is Relation.INVOKES
+                    and edge.flow
+                    in {EdgeFlow.ALWAYS, EdgeFlow.CONDITIONAL, EdgeFlow.ALTERNATIVE}
+                    and edge.call_site_key == call_site_structure_key
+                )
+            if kind is ResolutionKind.ENTRYPOINT_HANDLER:
+                return edge.relation is Relation.ROUTES_TO and edge.flow in {
+                    EdgeFlow.ALWAYS,
+                    EdgeFlow.CONDITIONAL,
+                    EdgeFlow.ALTERNATIVE,
+                }
+            if kind is ResolutionKind.ASYNC_TARGET:
+                return (
+                    edge.relation
+                    in {
+                        Relation.EMITS,
+                        Relation.DISPATCHES,
+                        Relation.SCHEDULES,
+                    }
+                    and edge.flow is EdgeFlow.ASYNC
+                )
+            if kind is ResolutionKind.EXCEPTION_TARGET:
+                return (
+                    edge.relation
+                    in {
+                        Relation.THROWS_TO,
+                        Relation.HANDLES,
+                    }
+                    and edge.flow is EdgeFlow.EXCEPTION
+                )
+            if kind is ResolutionKind.FRAMEWORK_TARGET:
+                return edge.relation in {
+                    Relation.PASSES_THROUGH,
+                    Relation.BINDS,
+                    Relation.VALIDATES,
+                    Relation.AUTHORIZES,
+                    Relation.ROUTES_TO,
+                    Relation.HANDLES,
+                } and edge.flow in {
+                    EdgeFlow.ALWAYS,
+                    EdgeFlow.CONDITIONAL,
+                    EdgeFlow.ALTERNATIVE,
+                }
+            return edge.relation in {
+                Relation.CALLS_EXTERNAL,
+                Relation.READS,
+                Relation.WRITES,
+                Relation.QUERIES,
+            } and edge.flow in {
+                EdgeFlow.ALWAYS,
+                EdgeFlow.CONDITIONAL,
+                EdgeFlow.ALTERNATIVE,
+                EdgeFlow.ASYNC,
+            }
+
+        def require_candidate_target(edge: EdgeFactIR, kind: ResolutionKind) -> str:
+            if type(edge.target) is not LocalNodeTarget:
+                _fail(
+                    "invalid_candidate_target",
+                    "candidate edges must target an emitted local node",
+                )
+            target_key = edge.target.local_key
+            target_kind = node_kinds[target_key]
+            if target_kind not in _RESOLUTION_TARGET_KINDS[kind]:
+                _fail(
+                    "invalid_candidate_target",
+                    "candidate target has an incompatible node kind",
+                )
+            return target_key
+
         for fact in self.unresolved_facts:
-            if isinstance(fact.subject, CallSiteSubjectIR):
-                need(call_sites, fact.subject.local_key, "unresolved call-site subject")
-            else:
-                need(edges, fact.subject.local_key, "unresolved edge subject")
-            for key in fact.candidate_target_local_keys:
-                if key not in all_local_keys:
-                    _fail(
-                        "unresolved_reference",
-                        "unresolved candidate target does not resolve",
+            subject_edge: EdgeFactIR | None = None
+            call_site_structure_key: str | None = None
+            if type(fact.subject) is CallSiteSubjectIR:
+                site = need(
+                    call_sites, fact.subject.local_key, "unresolved call-site subject"
+                )
+                call_site_structure_key = call_site_structure_by_site[
+                    site.local_key
+                ].local_key
+                subject_invocations = [
+                    edge
+                    for edge in self.edge_facts
+                    if edge_matches_resolution(
+                        edge,
+                        fact.resolution_kind,
+                        call_site_structure_key=call_site_structure_key,
                     )
-            for key in fact.candidate_edge_local_keys:
+                ]
+                if fact.candidate_set_knowledge is not CandidateSetKnowledge.COMPLETE:
+                    if len(subject_invocations) != 1:
+                        _fail(
+                            "invalid_unresolved_subject",
+                            "call_target requires one exact subject invocation",
+                        )
+                    subject_edge = subject_invocations[0]
+            else:
+                subject_edge = need(
+                    edges, fact.subject.local_key, "unresolved edge subject"
+                )
+                if not edge_matches_resolution(subject_edge, fact.resolution_kind):
+                    _fail(
+                        "invalid_unresolved_subject",
+                        "unresolved subject edge violates its resolution matrix",
+                    )
+
+            candidate_edges = tuple(
                 need(edges, key, "unresolved candidate edge")
+                for key in fact.candidate_edge_local_keys
+            )
+            for target_key in fact.candidate_target_local_keys:
+                need_node(target_key, "unresolved candidate target")
+                if (
+                    fact.candidate_set_knowledge is not CandidateSetKnowledge.COMPLETE
+                    and node_kinds[target_key]
+                    not in _RESOLUTION_TARGET_KINDS[fact.resolution_kind]
+                ):
+                    _fail(
+                        "invalid_candidate_target",
+                        "candidate target has an incompatible node kind",
+                    )
+
+            if fact.candidate_set_knowledge is CandidateSetKnowledge.INCOMPLETE:
+                if not fact.candidate_target_local_keys:
+                    _fail(
+                        "invalid_candidate_set",
+                        "incomplete candidate knowledge requires target hints",
+                    )
+                for edge in candidate_edges:
+                    if not edge_matches_resolution(
+                        edge,
+                        fact.resolution_kind,
+                        call_site_structure_key=call_site_structure_key,
+                    ):
+                        _fail(
+                            "invalid_candidate_edge",
+                            "incomplete candidate edge violates its resolution matrix",
+                        )
+                    if edge.evidence.origin is not EvidenceOrigin.INFERRED:
+                        _fail(
+                            "invalid_candidate_edge",
+                            "incomplete candidate edges must be inferred",
+                        )
+                    if require_candidate_target(edge, fact.resolution_kind) not in set(
+                        fact.candidate_target_local_keys
+                    ):
+                        _fail(
+                            "invalid_candidate_set",
+                            "incomplete candidate edge target is not a target hint",
+                        )
+            elif fact.candidate_set_knowledge is CandidateSetKnowledge.COMPLETE:
+                if not candidate_edges:
+                    _fail(
+                        "invalid_candidate_set",
+                        "complete candidate knowledge requires candidate edges",
+                    )
+                candidate_targets: list[str] = []
+                for edge in candidate_edges:
+                    if not edge_matches_resolution(
+                        edge,
+                        fact.resolution_kind,
+                        call_site_structure_key=call_site_structure_key,
+                    ):
+                        _fail(
+                            "invalid_candidate_edge",
+                            "complete candidate edge violates its resolution matrix",
+                        )
+                    candidate_targets.append(
+                        require_candidate_target(edge, fact.resolution_kind)
+                    )
+                if tuple(sorted(candidate_targets)) != fact.candidate_target_local_keys:
+                    _fail(
+                        "invalid_candidate_set",
+                        "complete candidate targets must equal candidate edge targets",
+                    )
+                for edge in candidate_edges:
+                    if (
+                        fact.resolution_kind is ResolutionKind.CALL_TARGET
+                        and edge.evidence.origin is not EvidenceOrigin.INFERRED
+                    ):
+                        _fail(
+                            "invalid_candidate_edge",
+                            "complete call-target candidate edges must be inferred",
+                        )
+                    if (
+                        fact.resolution_kind is not ResolutionKind.CALL_TARGET
+                        and edge.evidence.origin
+                        not in {
+                            EvidenceOrigin.INFERRED,
+                            EvidenceOrigin.UNRESOLVED,
+                        }
+                    ):
+                        _fail(
+                            "invalid_candidate_edge",
+                            "complete candidate edges must be inferred or unresolved",
+                        )
+                first = candidate_edges[0]
+                for edge in candidate_edges[1:]:
+                    if (
+                        edge.source_node_local_key != first.source_node_local_key
+                        or edge.relation is not first.relation
+                        or _locator_key(edge.locator) != _locator_key(first.locator)
+                        or edge.call_site_key != first.call_site_key
+                        or edge.exception_scope_key != first.exception_scope_key
+                        or edge.condition != first.condition
+                        or edge.branch_group_key != first.branch_group_key
+                        or edge.order != first.order
+                    ):
+                        _fail(
+                            "invalid_candidate_set",
+                            "complete candidate edges must express one assertion",
+                        )
+
+            if fact.resolution_kind is ResolutionKind.ENTRYPOINT_HANDLER:
+                entrypoint = entrypoints_by_unresolved.get(fact.local_key)
+                if entrypoint is None or subject_edge is None:
+                    _fail(
+                        "invalid_entrypoint_unresolved",
+                        "entrypoint_handler requires one entrypoint assertion",
+                    )
+                if subject_edge.relation is not Relation.ROUTES_TO:
+                    _fail(
+                        "invalid_entrypoint_unresolved",
+                        "entrypoint handler subject must be routes_to",
+                    )
+                if subject_edge.locator != entrypoint.registration_locator:
+                    _fail(
+                        "invalid_entrypoint_unresolved",
+                        "entrypoint handler subject must match registration locator",
+                    )
 
 
 __all__ = [
