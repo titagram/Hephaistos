@@ -31,6 +31,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     FrameworkPipelineSegment,
     local_record_key,
 )
+from hermes_cli.hades_index.php import extract_lifecycle_entrypoints as php_entrypoints
 from hermes_cli.hades_index.python import (
     extract_lifecycle_entrypoints as python_entrypoints,
 )
@@ -205,6 +206,39 @@ def test_language_module_delegates_its_syntax_to_registered_frameworks(
 
     assert any(candidate.framework == "fastapi" for candidate in result.candidates)
     assert adapter.calls == ["detect", "entrypoints", "pipeline"]
+
+
+def test_language_delegates_never_run_foreign_or_unknown_registry_adapters(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path, languages=("php", "python"))
+    registry = FrameworkAdapterRegistry()
+    python_adapter = _Adapter("python", "fastapi", "python-main")
+    php_adapter = _Adapter("php", "symfony", "php-main")
+    registry.register(python_adapter)
+    registry.register(php_adapter)
+
+    python_entrypoints(
+        context, (_syntax(language="python", names=("main",)),), registry=registry
+    )
+    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert php_adapter.calls == []
+
+    php_entrypoints(
+        context, (_syntax(language="php", names=("main",)),), registry=registry
+    )
+    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert php_adapter.calls == ["detect", "entrypoints", "pipeline"]
+
+    unknown_context = _context(tmp_path, languages=("rust",))
+    unknown = python_entrypoints(
+        unknown_context,
+        (_syntax(language="rust", path="src/main.rs", names=("main",)),),
+        registry=registry,
+    )
+    assert unknown.candidates == ()
+    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert php_adapter.calls == ["detect", "entrypoints", "pipeline"]
 
 
 def test_generic_entrypoints_cover_non_http_runtime_roots(tmp_path: Path) -> None:

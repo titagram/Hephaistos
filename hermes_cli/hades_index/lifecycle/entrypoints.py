@@ -380,12 +380,20 @@ def extract_languages_entrypoints(
         active_registry = registry
     else:
         raise TypeError("registry must be a FrameworkAdapterRegistry")
-    framework_run = run_framework_adapters(active_registry, context, own_syntax)
-    framework = EntrypointExtraction(
-        framework_run.candidates,
-        framework_run.framework_segments,
-        (),
-    )
+    if own_syntax:
+        framework_run = run_framework_adapters(
+            active_registry,
+            context,
+            own_syntax,
+            languages=languages,
+        )
+        framework = EntrypointExtraction(
+            framework_run.candidates,
+            framework_run.framework_segments,
+            (),
+        )
+    else:
+        framework = EntrypointExtraction((), (), ())
     return merge_entrypoint_extractions(
         generic,
         framework,

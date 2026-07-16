@@ -99,8 +99,10 @@ def run_framework_adapters(
     registry: FrameworkAdapterRegistry,
     context: ExtractionContext,
     syntax: Sequence[SyntaxIR],
+    *,
+    languages: frozenset[str] | None = None,
 ) -> FrameworkAdapterRun:
-    """Run every detected adapter once, preserving explicit registration order."""
+    """Run selected detected adapters once in explicit registration order."""
 
     detections: list[FrameworkDetection] = []
     candidates: list[EntrypointCandidate] = []
@@ -108,6 +110,8 @@ def run_framework_adapters(
     seen_segments: set[str] = set()
 
     for adapter in registry.adapters:
+        if languages is not None and adapter.language not in languages:
+            continue
         detection = adapter.detect(context)
         if type(detection) is not FrameworkDetection:
             raise FrameworkAdapterError(
