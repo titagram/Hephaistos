@@ -59,6 +59,33 @@ def _git_commit_all(root: Path, message: str = "initial") -> None:
     )
 
 
+def _real_git_submodule_or_skip(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a parent with one committed, checked-out local child submodule."""
+
+    child = tmp_path / "child"
+    parent = tmp_path / "parent"
+    child.mkdir()
+    parent.mkdir()
+    _git_init_with_identity(child)
+    _write(child, "src/child.py", "CHILD = 'pinned'\n")
+    _git_commit_all(child, "child initial")
+    _git_init_with_identity(parent)
+    _write(parent, "src/parent.py", "PARENT = 'safe'\n")
+    _git_commit_all(parent, "parent initial")
+    try:
+        subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child), "lib"],
+            cwd=parent,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _git_commit_all(parent, "add child submodule")
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"local git submodule fixture unavailable: {exc}")
+    return parent, parent / "lib"
+
+
 def test_graph_index_config_defaults_are_exact_and_immutable():
     from hermes_cli.hades_graph_config import load_hades_graph_index_config
 
@@ -167,6 +194,18 @@ def test_graph_index_config_rejects_every_unsafe_exclusion_scalar(value):
         })
 
 
+def test_graph_index_config_rejects_isolated_surrogate_with_typed_error():
+    from hermes_cli.hades_graph_config import (
+        GraphIndexConfigError,
+        load_hades_graph_index_config,
+    )
+
+    with pytest.raises(GraphIndexConfigError, match="excluded_paths"):
+        load_hades_graph_index_config({
+            "hades": {"graph_index": {"excluded_paths": ["\ud800"]}}
+        })
+
+
 def test_graph_index_config_retains_safe_glob_exclusion():
     from hermes_cli.hades_graph_config import load_hades_graph_index_config
 
@@ -196,6 +235,37 @@ def test_secret_exclusions_are_compulsory_and_user_exclusions_are_additive(tmp_p
 
     assert identity.tree_sha256 == expected
     assert "top-secret" not in str(identity)
+
+
+def test_only_exact_lowercase_env_example_is_in_source_scope(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        is_compiled_source_excluded,
+        load_hades_graph_index_config,
+    )
+
+    template = b"PUBLIC_TEMPLATE=true\n"
+    secret = b"DO_NOT_HASH=top-secret\n"
+    template_root = tmp_path / "template"
+    secret_root = tmp_path / "secrets"
+    _write(template_root, ".env.example", template)
+    _write(secret_root, "uppercase/.env.EXAMPLE", secret)
+    _write(secret_root, "unicode/.env.e\u0301xample", secret)
+
+    identity = build_source_identity(template_root, load_hades_graph_index_config({}))
+    secret_identity = build_source_identity(
+        secret_root,
+        load_hades_graph_index_config({}),
+    )
+    expected_digest = hashlib.sha256(template).hexdigest().encode("ascii")
+    expected = hashlib.sha256(b".env.example\0" + expected_digest + b"\n").hexdigest()
+
+    assert identity.tree_sha256 == expected
+    assert is_compiled_source_excluded(".env.example") is False
+    assert is_compiled_source_excluded(".env.EXAMPLE") is True
+    assert is_compiled_source_excluded(".env.e\u0301xample") is True
+    assert "top-secret" not in str(identity)
+    assert secret_identity.tree_sha256 == hashlib.sha256(b"").hexdigest()
 
 
 def test_compiled_scope_excludes_git_metadata_files_and_directories(tmp_path):
@@ -541,6 +611,65 @@ def test_unchanged_tracked_in_scope_symlink_is_not_dirty(tmp_path):
     identity = build_source_identity(workspace, load_hades_graph_index_config({}))
 
     assert identity.dirty is False
+
+
+def test_pinned_checked_out_submodule_is_recursively_inventoried_and_clean(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    parent, child_checkout = _real_git_submodule_or_skip(tmp_path)
+
+    identity = build_source_identity(parent, load_hades_graph_index_config({}))
+    records = {
+        ".gitmodules": (parent / ".gitmodules").read_bytes(),
+        "lib/src/child.py": (child_checkout / "src/child.py").read_bytes(),
+        "src/parent.py": (parent / "src/parent.py").read_bytes(),
+    }
+    expected_preimage = b"".join(
+        path.encode("utf-8")
+        + b"\0"
+        + hashlib.sha256(content).hexdigest().encode("ascii")
+        + b"\n"
+        for path, content in sorted(records.items())
+    )
+
+    assert identity.tree_sha256 == hashlib.sha256(expected_preimage).hexdigest()
+    assert identity.dirty is False
+
+
+def test_modified_checked_out_submodule_is_dirty(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    parent, child_checkout = _real_git_submodule_or_skip(tmp_path)
+    _write(child_checkout, "src/child.py", "CHILD = 'changed'\n")
+
+    identity = build_source_identity(parent, load_hades_graph_index_config({}))
+
+    assert identity.dirty is True
+
+
+def test_checked_out_submodule_at_mismatched_commit_is_dirty(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    parent, child_checkout = _real_git_submodule_or_skip(tmp_path)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "child mismatched commit"],
+        cwd=child_checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    identity = build_source_identity(parent, load_hades_graph_index_config({}))
+
+    assert identity.dirty is True
 
 
 def test_verify_source_unchanged_raises_typed_error_on_digest_mismatch(tmp_path):

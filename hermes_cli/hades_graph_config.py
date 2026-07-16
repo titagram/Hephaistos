@@ -179,12 +179,18 @@ def _safe_user_exclusion(value: object, *, index: int) -> str:
             f"hades.graph_index.excluded_paths[{index}] must be a string"
         )
     normalized = unicodedata.normalize("NFC", value)
+    try:
+        encoded = normalized.encode("utf-8")
+    except UnicodeEncodeError:
+        raise GraphIndexConfigError(
+            f"hades.graph_index.excluded_paths[{index}] must be a safe source-relative path"
+        ) from None
     if (
         not normalized
         or normalized.startswith("/")
         or "\\" in normalized
         or "\x00" in normalized
-        or len(normalized.encode("utf-8")) > 4_096
+        or len(encoded) > 4_096
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
         or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
         or (
@@ -201,14 +207,17 @@ def _safe_user_exclusion(value: object, *, index: int) -> str:
 def _is_hades_sensitive_source_path(path: str) -> bool:
     """Apply the existing Hades sensitive-name policy without I/O imports."""
 
-    parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+    raw_parts = PurePosixPath(path).parts
+    parts = tuple(part.casefold() for part in raw_parts)
     if not parts:
         return True
     if any(part in COMPILED_EXCLUDED_DIRECTORY_NAMES for part in parts):
         return True
     name = parts[-1]
     # The v2 specification explicitly retains example env files in scope.
-    if name == ".env.example":
+    # This exception is intentionally exact and case-sensitive: source-path
+    # identity does not case-fold, and every other `.env.*` spelling is secret.
+    if raw_parts[-1] == ".env.example":
         return False
     stem = PurePosixPath(name).stem.casefold()
     stem_normalized = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")

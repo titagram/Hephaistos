@@ -534,39 +534,93 @@ def _submodule_is_available(path: Path) -> bool:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class _GitHeadEntry:
+    """A scoped historical entry with the repository that owns its blob."""
+
+    mode: bytes
+    kind: bytes
+    object_id: bytes
+    repository: Path
+
+
 def _git_head_inventory(
     root: Path,
     user_excluded_paths: tuple[str, ...],
-) -> tuple[tuple[str, str], ...] | None:
-    """Return the HEAD inventory under the same source-scope rules as disk."""
+) -> tuple[tuple[tuple[str, str], ...] | None, bool]:
+    """Return the scoped historical inventory and a pinned-submodule mismatch flag.
 
-    output = _git_command(root, "ls-tree", "-r", "-z", "HEAD")
-    if output is None:
-        return None
-    entries: dict[str, tuple[bytes, bytes, bytes]] = {}
-    for entry in output.split(b"\0"):
-        if not entry or b"\t" not in entry:
-            continue
-        metadata, raw_path = entry.split(b"\t", 1)
-        fields = metadata.split()
-        if len(fields) != 3:
-            continue
-        mode, kind, object_id = fields
-        try:
-            path = _safe_source_relative_path(os.fsdecode(raw_path))
-        except (UnicodeError, SourceIdentityError):
-            continue
-        entries[path] = (mode, kind, object_id)
+    A gitlink is a source-tree boundary, not its source identity.  If its
+    checkout is present, both the live inventory and the historical inventory
+    must recurse through the child at the exact commit pinned by the parent.
+    If it is unavailable, both use the explicit unavailable marker instead.
+    """
 
-    content_cache: dict[bytes, bytes] = {}
+    entries: dict[str, _GitHeadEntry] = {}
+    pinned_submodule_mismatch = False
 
-    def blob_content(object_id: bytes) -> bytes | None:
-        cached = content_cache.get(object_id)
+    def scoped_path(prefix: str, relative_path: str) -> str:
+        return (
+            relative_path
+            if not prefix
+            else _safe_source_relative_path(f"{prefix}/{relative_path}")
+        )
+
+    def collect_tree(repository: Path, treeish: str, prefix: str) -> bool:
+        nonlocal pinned_submodule_mismatch
+        output = _git_command(repository, "ls-tree", "-r", "-z", treeish)
+        if output is None:
+            return False
+        for item in output.split(b"\0"):
+            if not item or b"\t" not in item:
+                continue
+            metadata, raw_path = item.split(b"\t", 1)
+            fields = metadata.split()
+            if len(fields) != 3:
+                continue
+            mode, kind, object_id = fields
+            try:
+                relative_path = _safe_source_relative_path(os.fsdecode(raw_path))
+                path = scoped_path(prefix, relative_path)
+            except (UnicodeError, SourceIdentityError):
+                continue
+            if _is_out_of_scope(path, user_excluded_paths):
+                continue
+            if mode == b"160000" and kind == b"commit":
+                checkout = root / path
+                if not _submodule_is_available(checkout):
+                    entries[path] = _GitHeadEntry(mode, kind, object_id, repository)
+                    continue
+                checked_out_head = _git_command(checkout, "rev-parse", "HEAD")
+                if checked_out_head is None or checked_out_head.strip() != object_id:
+                    pinned_submodule_mismatch = True
+                if not collect_tree(checkout, object_id.decode("ascii"), path):
+                    # A visible checkout without the parent-pinned object is
+                    # not equivalent to an unavailable gitlink.  Mark it
+                    # dirty, while leaving no synthetic source record behind.
+                    pinned_submodule_mismatch = True
+                continue
+            entries[path] = _GitHeadEntry(mode, kind, object_id, repository)
+        return True
+
+    if not collect_tree(root, "HEAD", ""):
+        return None, False
+
+    content_cache: dict[tuple[Path, bytes], bytes] = {}
+
+    def blob_content(entry: _GitHeadEntry) -> bytes | None:
+        cache_key = (entry.repository, entry.object_id)
+        cached = content_cache.get(cache_key)
         if cached is not None:
             return cached
-        content = _git_command(root, "cat-file", "blob", object_id.decode("ascii"))
+        content = _git_command(
+            entry.repository,
+            "cat-file",
+            "blob",
+            entry.object_id.decode("ascii"),
+        )
         if content is not None:
-            content_cache[object_id] = content
+            content_cache[cache_key] = content
         return content
 
     def relative_link_target(path: str, target: bytes) -> str | None:
@@ -588,22 +642,21 @@ def _git_head_inventory(
             parts.append(part)
         try:
             return _safe_source_relative_path("/".join(parts))
-        except SourceIdentityError:
+        except (SourceIdentityError, UnicodeEncodeError):
             return None
 
     def resolve_entry(path: str, seen: frozenset[str] = frozenset()) -> str | None:
         entry = entries.get(path)
         if entry is None:
             return None
-        mode, kind, object_id = entry
-        if mode == b"160000" and kind == b"commit":
-            return hashlib.sha256(_UNAVAILABLE_SUBMODULE_PREFIX + object_id).hexdigest()
-        if kind != b"blob":
+        if entry.mode == b"160000" and entry.kind == b"commit":
+            return hashlib.sha256(_UNAVAILABLE_SUBMODULE_PREFIX + entry.object_id).hexdigest()
+        if entry.kind != b"blob":
             return None
-        content = blob_content(object_id)
+        content = blob_content(entry)
         if content is None:
             return None
-        if mode != b"120000":
+        if entry.mode != b"120000":
             return hashlib.sha256(content).hexdigest()
         if path in seen:
             return hashlib.sha256(_INVALID_SYMLINK_PREFIX + content).hexdigest()
@@ -624,7 +677,7 @@ def _git_head_inventory(
         digest = resolve_entry(path)
         if digest is not None:
             records.append((path, digest))
-    return tuple(sorted(records))
+    return tuple(sorted(records)), pinned_submodule_mismatch
 
 
 def _git_metadata(
@@ -645,8 +698,15 @@ def _git_metadata(
     if branch is not None and (not branch or len(branch.encode("utf-8")) > 255):
         branch = None
 
-    head_records = _git_head_inventory(root, user_excluded_paths)
-    dirty = bool(current_records) if head_records is None else current_records != head_records
+    head_records, pinned_submodule_mismatch = _git_head_inventory(
+        root,
+        user_excluded_paths,
+    )
+    dirty = (
+        bool(current_records)
+        if head_records is None
+        else pinned_submodule_mismatch or current_records != head_records
+    )
     return head or None, dirty, branch
 
 
