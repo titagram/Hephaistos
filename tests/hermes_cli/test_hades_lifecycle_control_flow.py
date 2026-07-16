@@ -705,6 +705,161 @@ def test_unscoped_cross_file_lexical_name_is_not_an_exact_call_target():
     assert decision.disposition is ResolutionDisposition.UNRESOLVED_FRONTIER
 
 
+def _typed_receiver_result(
+    *,
+    receiver_method_count: int,
+    same_file_receiver_methods: bool,
+    symbol_resolution_full: bool,
+) -> tuple[AdapterResult, str, tuple[str, ...]]:
+    """Build a free-function homonym plus methods owned by ``app.Service``."""
+
+    result = _fixture(
+        workers=receiver_method_count + 1,
+        symbol_resolution_full=symbol_resolution_full,
+    )
+    free_function = next(
+        item for item in result.declarations if item.qualified_name == "app.worker"
+    )
+    receiver_methods = tuple(
+        item
+        for item in result.declarations
+        if item.name == "worker" and item.local_key != free_function.local_key
+    )
+    service_key = _key("executable_declaration", "declaration/service")
+    service_entry = _key("basic_block", "declaration/service/entry")
+    service = ExecutableDeclaration(
+        local_key=service_key,
+        language="python",
+        declaration_kind=NodeKind.SERVICE,
+        identity_kind=DeclarationIdentityKind.NAMED,
+        owner_declaration_key=None,
+        name="Service",
+        qualified_name="app.Service",
+        namespace="app",
+        modifiers=(),
+        parameters=(),
+        return_type=None,
+        locator=_ast("declaration/service"),
+        entry_block_key=service_entry,
+        normal_exit_block_keys=(service_entry,),
+        exception_exit_block_keys=(),
+    )
+    service_block = BasicBlock(
+        service_entry,
+        service_key,
+        ControlKind.ENTRY,
+        0,
+        _ast("declaration/service/entry"),
+        (),
+    )
+    other_location = SourceLocationIR("src/service.py", 1, 99, _DIGEST)
+    updated_methods = tuple(
+        replace(
+            method,
+            owner_declaration_key=service_key,
+            qualified_name=f"app.Service.worker{index}",
+            locator=(
+                method.locator
+                if same_file_receiver_methods
+                else AstLocatorIR(
+                    other_location,
+                    f"declaration/service/worker/{index}",
+                    0,
+                )
+            ),
+        )
+        for index, method in enumerate(receiver_methods)
+    )
+    method_by_key = {method.local_key: method for method in updated_methods}
+    call_site = replace(
+        result.call_sites[0],
+        target_expression_kind=TargetExpressionKind.DIRECT_INSTANCE_METHOD,
+        lexical_target="worker",
+        fully_qualified_target=None,
+        receiver_type="app.Service",
+    )
+    typed = replace(
+        result,
+        declarations=_sort((
+            service,
+            *(method_by_key.get(item.local_key, item) for item in result.declarations),
+        )),
+        blocks=_sort((*result.blocks, service_block)),
+        call_sites=(call_site,),
+    )
+    typed.validate()
+    return (
+        typed,
+        free_function.local_key,
+        tuple(method.local_key for method in updated_methods),
+    )
+
+
+def test_ambiguous_same_file_name_continues_to_unique_receiver_proof():
+    from hermes_cli.hades_index.lifecycle.interprocedural import (
+        ResolutionDisposition,
+        resolve_call_sites,
+    )
+
+    result, _free_function, receiver_methods = _typed_receiver_result(
+        receiver_method_count=1,
+        same_file_receiver_methods=True,
+        symbol_resolution_full=True,
+    )
+
+    decision = resolve_call_sites((result,)).calls[0]
+    assert decision.disposition is ResolutionDisposition.EXACT
+    assert decision.target_declaration_keys == receiver_methods
+
+
+def test_unique_same_file_name_still_precedes_receiver_proof():
+    from hermes_cli.hades_index.lifecycle.interprocedural import (
+        ResolutionDisposition,
+        resolve_call_sites,
+    )
+
+    result, free_function, _receiver_methods = _typed_receiver_result(
+        receiver_method_count=1,
+        same_file_receiver_methods=False,
+        symbol_resolution_full=True,
+    )
+
+    decision = resolve_call_sites((result,)).calls[0]
+    assert decision.disposition is ResolutionDisposition.EXACT
+    assert decision.target_declaration_keys == (free_function,)
+
+
+@pytest.mark.parametrize(
+    ("symbol_resolution_full", "expected"),
+    (
+        (False, "frontier"),
+        (True, "candidates"),
+    ),
+)
+def test_ambiguous_receiver_keeps_candidates_or_frontier(
+    symbol_resolution_full: bool,
+    expected: str,
+):
+    from hermes_cli.hades_index.lifecycle.interprocedural import (
+        ResolutionDisposition,
+        resolve_call_sites,
+    )
+
+    result, _free_function, receiver_methods = _typed_receiver_result(
+        receiver_method_count=2,
+        same_file_receiver_methods=True,
+        symbol_resolution_full=symbol_resolution_full,
+    )
+
+    decision = resolve_call_sites((result,)).calls[0]
+    if expected == "frontier":
+        assert decision.disposition is ResolutionDisposition.UNRESOLVED_FRONTIER
+        assert decision.target_declaration_keys == ()
+    else:
+        assert decision.disposition is ResolutionDisposition.EXHAUSTIVE_CANDIDATES
+        assert decision.target_declaration_keys == tuple(sorted(receiver_methods))
+
+
 def test_cfg_cycle_detection_is_iterative_for_a_deep_acyclic_graph():
     from hermes_cli.hades_index.lifecycle.control_flow import build_control_flow
 

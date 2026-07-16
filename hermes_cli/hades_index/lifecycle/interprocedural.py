@@ -114,38 +114,52 @@ def _declaration_names(declaration: ExecutableDeclaration) -> frozenset[str]:
 def _static_exact_targets(
     site: CallSite, declarations: tuple[ExecutableDeclaration, ...]
 ) -> tuple[ExecutableDeclaration, ...]:
-    """Return only target sets supported by an exact static proof.
+    """Return the best static target set, stopping only on unique proof.
 
     Import/namespace/container proof is deliberately absent from this frozen
     IR until the language/framework adapters emit it.  In that situation this
     resolver returns no target rather than pretending a same-name declaration
-    is imported or registered.
+    is imported or registered.  A tier with zero or several candidates is not
+    exact proof: later, more-specific static tiers still get a chance to
+    identify one target.  If none do, the last constrained candidate set is
+    retained for closed-world candidate handling by the caller.
     """
 
     if site.target_expression_kind not in _STATIC_EXACT_KINDS:
         return ()
     call_path = site.locator.source_location.path
 
-    # 1. An explicit fully qualified/static target is authoritative.
+    fallback: tuple[ExecutableDeclaration, ...] = ()
+
+    # 1. An explicit fully qualified/static target is authoritative only when
+    # it names exactly one declaration.  Duplicate/ambiguous inventory facts
+    # must not prevent later static proof from refining the answer.
     if site.fully_qualified_target is not None:
-        return tuple(
+        qualified = tuple(
             declaration
             for declaration in declarations
             if site.fully_qualified_target in _declaration_names(declaration)
         )
+        if len(qualified) == 1:
+            return qualified
+        if qualified:
+            fallback = qualified
 
     if site.lexical_target is None:
-        return ()
-    # 1. Same-file lexical declaration takes precedence over a homonym in a
-    # different module.  The declaration order is fixed later by local key.
+        return fallback
+    # 2. A unique same-file lexical declaration takes precedence over a
+    # receiver proof.  An ambiguous same-file homonym is only a fallback: it
+    # may be refined by the typed-receiver tier below.
     same_file = tuple(
         declaration
         for declaration in declarations
         if declaration.locator.source_location.path == call_path
         and site.lexical_target in _declaration_names(declaration)
     )
-    if same_file:
+    if len(same_file) == 1:
         return same_file
+    if same_file:
+        fallback = same_file
 
     # 3. A receiver type can prove an owner/type relationship without relying
     # on a ranking heuristic.  The current IR records owner declaration keys;
@@ -163,10 +177,12 @@ def _static_exact_targets(
             if declaration.owner_declaration_key in owner_keys
             and declaration.name == leaf
         )
-        if typed:
+        if len(typed) == 1:
             return typed
+        if typed:
+            fallback = typed
 
-    return ()
+    return fallback
 
 
 def _dynamic_candidate_targets(
