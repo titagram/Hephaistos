@@ -1,0 +1,675 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/dashboard-response.schema.json",
+  "title": "Hades Dashboard Graph Response v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version"],
+  "properties": {
+    "protocol_version": {"const": "hades.dashboard_graph.v2"},
+    "graph_context": {"oneOf": [{"$ref": "#/$defs/opaqueToken"}, {"type": "null"}]},
+    "projection": {"oneOf": [{"$ref": "#/$defs/projectionDto"}, {"type": "null"}]},
+    "data": {},
+    "error": {"$ref": "#/$defs/errorDto"}
+  },
+  "oneOf": [
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"type": "null"},
+        "projection": {"type": "null"},
+        "data": {"$ref": "#/$defs/scopesData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/overviewData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/entrypointsData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/lifecycleData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/lifecycleExpandData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/searchData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/detailData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/neighborhoodData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/impactData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["graph_context", "projection", "data"],
+      "properties": {
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "projection": {"$ref": "#/$defs/projectionDto"},
+        "data": {"$ref": "#/$defs/pathData"}
+      },
+      "not": {"required": ["error"]}
+    },
+    {
+      "required": ["error"],
+      "not": {"anyOf": [{"required": ["graph_context"]}, {"required": ["projection"]}, {"required": ["data"]}]}
+    }
+  ],
+  "$defs": {
+    "safeInteger": {"$ref": "artifact.schema.json#/$defs/safeInteger"},
+    "countKnowledge": {"$ref": "artifact.schema.json#/$defs/countKnowledge"},
+    "nodeKind": {"$ref": "artifact.schema.json#/$defs/nodeKinds"},
+    "entrypointKind": {"$ref": "artifact.schema.json#/$defs/entrypointKinds"},
+    "stage": {"$ref": "artifact.schema.json#/$defs/stage"},
+    "relation": {"$ref": "artifact.schema.json#/$defs/relation"},
+    "reasonCode": {"$ref": "artifact.schema.json#/$defs/reasonCode"},
+    "opaqueToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "plainText256": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "plainText1000": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "nullableToken": {"oneOf": [{"$ref": "#/$defs/opaqueToken"}, {"type": "null"}]},
+    "nullableText": {"oneOf": [{"$ref": "#/$defs/plainText1000"}, {"type": "null"}]},
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": {"const": "workspace_binding"},
+        "id": {"$ref": "artifact.schema.json#/$defs/ulid"}
+      }
+    },
+    "scopeDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "label", "workspace_name", "ready", "active_projection_generated_at", "completeness", "entrypoint_discovery"],
+      "properties": {
+        "scope": {"$ref": "#/$defs/scope"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "workspace_name": {"$ref": "#/$defs/plainText1000"},
+        "ready": {"type": "boolean"},
+        "active_projection_generated_at": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/utcTimestamp"}, {"type": "null"}]},
+        "completeness": {"oneOf": [{"enum": ["full", "partial"]}, {"type": "null"}]},
+        "entrypoint_discovery": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "projectionDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "completeness", "generated_at", "source_label"],
+      "properties": {
+        "state": {"const": "ready"},
+        "completeness": {"enum": ["full", "partial"]},
+        "generated_at": {"$ref": "artifact.schema.json#/$defs/utcTimestamp"},
+        "source_label": {"$ref": "#/$defs/plainText1000"}
+      }
+    },
+    "capabilityCompletenessDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "plain_summary", "reason_count"],
+      "properties": {
+        "status": {"enum": ["full", "partial", "unsupported", "not_applicable"]},
+        "plain_summary": {"$ref": "#/$defs/plainText1000"},
+        "reason_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "capabilityCompletenessMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventory", "entrypoint_discovery", "symbol_resolution", "call_graph", "control_flow", "framework_lifecycle", "exceptions", "async", "data_access"],
+      "properties": {
+        "inventory": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "entrypoint_discovery": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "symbol_resolution": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "call_graph": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "control_flow": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "framework_lifecycle": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "exceptions": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "async": {"$ref": "#/$defs/capabilityCompletenessDto"},
+        "data_access": {"$ref": "#/$defs/capabilityCompletenessDto"}
+      }
+    },
+    "completenessDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "capabilities"],
+      "properties": {
+        "status": {"enum": ["full", "partial"]},
+        "capabilities": {"$ref": "#/$defs/capabilityCompletenessMap"}
+      }
+    },
+    "omittedReasonCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "count"],
+      "properties": {
+        "code": {"$ref": "#/$defs/reasonCode"},
+        "count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "coverageDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "entrypoints", "records", "omitted_reason_counts"],
+      "properties": {
+        "files": {"$ref": "artifact.schema.json#/$defs/fileCoverage"},
+        "entrypoints": {"$ref": "artifact.schema.json#/$defs/entrypointCoverage"},
+        "records": {"$ref": "artifact.schema.json#/$defs/recordCoverage"},
+        "omitted_reason_counts": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/omittedReasonCount"}
+        }
+      }
+    },
+    "overviewCountsDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "relationships", "entrypoints", "flows", "uncertainties"],
+      "properties": {
+        "nodes": {"$ref": "#/$defs/countKnowledge"},
+        "relationships": {"$ref": "#/$defs/countKnowledge"},
+        "entrypoints": {"$ref": "#/$defs/countKnowledge"},
+        "flows": {"$ref": "#/$defs/countKnowledge"},
+        "uncertainties": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "stageCountDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "count"],
+      "properties": {
+        "stage": {"$ref": "#/$defs/stage"},
+        "count": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "sourceLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "start_line", "end_line"],
+      "properties": {
+        "path": {"$ref": "artifact.schema.json#/$defs/safePath"},
+        "start_line": {"$ref": "artifact.schema.json#/$defs/positiveLine"},
+        "end_line": {"$ref": "artifact.schema.json#/$defs/positiveLine"}
+      }
+    },
+    "evidenceBadge": {"enum": ["verified_from_code", "agent_verified", "observed_runtime", "inferred", "unresolved"]},
+    "verificationState": {"enum": ["verified", "contradicted", "needs_verification", "not_applicable"]},
+    "entrypointDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "entrypoint_kind", "label", "method_semantics", "methods", "public_path", "public_name", "effective_handler_handle", "handler_label", "framework", "evidence_badge", "verification_state", "flow_completeness"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/opaqueToken"},
+        "entrypoint_kind": {"$ref": "#/$defs/entrypointKind"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "method_semantics": {"enum": ["explicit", "unrestricted", "not_applicable"]},
+        "methods": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_-]{0,31}$", "maxLength": 32}},
+        "public_path": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^?#\\u0000-\\u001f\\u007f]*$"}, {"type": "null"}]},
+        "public_name": {"$ref": "#/$defs/nullableText"},
+        "effective_handler_handle": {"$ref": "#/$defs/nullableToken"},
+        "handler_label": {"$ref": "#/$defs/nullableText"},
+        "framework": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/frameworkName"}, {"type": "null"}]},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"},
+        "verification_state": {"$ref": "#/$defs/verificationState"},
+        "flow_completeness": {"$ref": "#/$defs/completenessDto"}
+      }
+    },
+    "layoutDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_ordinal", "min_depth", "order_key", "branch_lane", "lane_ordinal"],
+      "properties": {
+        "stage_ordinal": {"$ref": "#/$defs/safeInteger"},
+        "min_depth": {"$ref": "#/$defs/safeInteger"},
+        "order_key": {"$ref": "#/$defs/plainText1000"},
+        "branch_lane": {"enum": ["backbone", "alternative", "exception", "loop", "async"]},
+        "lane_ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "lifecycleNodeDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "kind", "label", "qualified_name", "role_label", "stage", "layout", "source_location", "evidence_badge", "verification_state", "uncertainty_count", "expandable"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/opaqueToken"},
+        "kind": {"$ref": "#/$defs/nodeKind"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "qualified_name": {"$ref": "#/$defs/nullableText"},
+        "role_label": {"$ref": "#/$defs/plainText1000"},
+        "stage": {"oneOf": [{"$ref": "#/$defs/stage"}, {"type": "null"}]},
+        "layout": {"oneOf": [{"$ref": "#/$defs/layoutDto"}, {"type": "null"}]},
+        "source_location": {"oneOf": [{"$ref": "#/$defs/sourceLocation"}, {"type": "null"}]},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"},
+        "verification_state": {"$ref": "#/$defs/verificationState"},
+        "uncertainty_count": {"$ref": "#/$defs/countKnowledge"},
+        "expandable": {"type": "boolean"}
+      }
+    },
+    "lifecycleEdgeDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "source_handle", "target_handle", "relation", "flow", "label", "condition_label", "branch_group_handle", "backbone_role", "evidence_badge"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/opaqueToken"},
+        "source_handle": {"$ref": "#/$defs/opaqueToken"},
+        "target_handle": {"$ref": "#/$defs/opaqueToken"},
+        "relation": {"$ref": "#/$defs/relation"},
+        "flow": {"oneOf": [{"enum": ["always", "conditional", "alternative", "exception", "async", "loop"]}, {"type": "null"}]},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "condition_label": {"$ref": "#/$defs/nullableText"},
+        "branch_group_handle": {"$ref": "#/$defs/nullableToken"},
+        "backbone_role": {"enum": ["mandatory", "branch", "exception", "loop", "async"]},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"}
+      }
+    },
+    "collapsedGroupDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "group_kind", "label", "source_handle", "target_handle", "arm_count", "represented_node_count", "total_node_count", "expanded", "next_cursor"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/opaqueToken"},
+        "group_kind": {"enum": ["branch", "mandatory_chain", "stage_overflow", "loop", "exception", "verification_materialization_gap"]},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "source_handle": {"$ref": "#/$defs/opaqueToken"},
+        "target_handle": {"$ref": "#/$defs/nullableToken"},
+        "arm_count": {"$ref": "#/$defs/countKnowledge"},
+        "represented_node_count": {"$ref": "#/$defs/safeInteger"},
+        "total_node_count": {"$ref": "#/$defs/countKnowledge"},
+        "expanded": {"type": "boolean"},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"}
+      }
+    },
+    "asyncFlowSummaryDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flow_handle", "trigger_label", "root_label", "stage_counts", "completeness", "cycle", "expandable"],
+      "properties": {
+        "flow_handle": {"$ref": "#/$defs/opaqueToken"},
+        "trigger_label": {"$ref": "#/$defs/plainText1000"},
+        "root_label": {"$ref": "#/$defs/plainText1000"},
+        "stage_counts": {"type": "array", "maxItems": 12, "uniqueItems": true, "items": {"$ref": "#/$defs/stageCountDto"}},
+        "completeness": {"$ref": "#/$defs/completenessDto"},
+        "cycle": {"type": "boolean"},
+        "expandable": {"type": "boolean"}
+      }
+    },
+    "terminalOutcomeDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_handle", "kind", "label", "status_code", "exception_type", "count", "evidence_badge"],
+      "properties": {
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "kind": {"enum": ["response", "redirect", "abort", "exception", "exit"]},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "status_code": {"oneOf": [{"$ref": "#/$defs/safeInteger"}, {"type": "null"}]},
+        "exception_type": {"$ref": "#/$defs/nullableText"},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"}
+      }
+    },
+    "searchResultDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "label", "kind", "source_location", "match_basis", "match_explanation", "selectable", "unresolved_reason"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/nullableToken"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "kind": {"$ref": "#/$defs/nodeKind"},
+        "source_location": {"oneOf": [{"$ref": "#/$defs/sourceLocation"}, {"type": "null"}]},
+        "match_basis": {"enum": ["exact_identifier", "exact_route", "lexical_alias", "vector_candidate"]},
+        "match_explanation": {"$ref": "#/$defs/plainText1000"},
+        "selectable": {"type": "boolean"},
+        "unresolved_reason": {"oneOf": [{"const": "not_in_current_projection"}, {"type": "null"}]}
+      }
+    },
+    "relationshipDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_handle", "node_handle", "direction", "relation", "label", "flow", "count", "evidence_badge", "verification_state"],
+      "properties": {
+        "edge_handle": {"$ref": "#/$defs/opaqueToken"},
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "direction": {"enum": ["incoming", "outgoing"]},
+        "relation": {"$ref": "#/$defs/relation"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "flow": {"oneOf": [{"enum": ["always", "conditional", "alternative", "exception", "async", "loop"]}, {"type": "null"}]},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"},
+        "verification_state": {"$ref": "#/$defs/verificationState"}
+      }
+    },
+    "effectDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_handle", "kind", "operation", "label", "count", "evidence_badge"],
+      "properties": {
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "kind": {"enum": ["model", "table", "query", "cache", "storage"]},
+        "operation": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/identifier"}, {"type": "null"}]},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"}
+      }
+    },
+    "integrationDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_handle", "protocol", "operation", "label", "count", "evidence_badge"],
+      "properties": {
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "protocol": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/identifier"}, {"type": "null"}]},
+        "operation": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/identifier"}, {"type": "null"}]},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "evidence_badge": {"$ref": "#/$defs/evidenceBadge"}
+      }
+    },
+    "entrypointMembershipDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint_handle", "label", "entrypoint_kind", "stage", "flow_completeness"],
+      "properties": {
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"},
+        "label": {"$ref": "#/$defs/plainText1000"},
+        "entrypoint_kind": {"$ref": "#/$defs/entrypointKind"},
+        "stage": {"$ref": "#/$defs/stage"},
+        "flow_completeness": {"$ref": "#/$defs/completenessDto"}
+      }
+    },
+    "uncertaintyDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "reason_label", "question", "impact", "priority", "verification_state", "evidence_requirements"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/opaqueToken"},
+        "reason_label": {"$ref": "#/$defs/plainText1000"},
+        "question": {"$ref": "#/$defs/plainText1000"},
+        "impact": {"$ref": "#/$defs/plainText1000"},
+        "priority": {"enum": ["low", "normal", "high", "critical"]},
+        "verification_state": {"$ref": "#/$defs/verificationState"},
+        "evidence_requirements": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"$ref": "artifact.schema.json#/$defs/ruleIdentifier"}}
+      }
+    },
+    "detailCountsDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["incoming", "outgoing", "callers", "callees", "effects", "integrations", "entrypoint_memberships", "uncertainties"],
+      "properties": {
+        "incoming": {"$ref": "#/$defs/countKnowledge"},
+        "outgoing": {"$ref": "#/$defs/countKnowledge"},
+        "callers": {"$ref": "#/$defs/countKnowledge"},
+        "callees": {"$ref": "#/$defs/countKnowledge"},
+        "effects": {"$ref": "#/$defs/countKnowledge"},
+        "integrations": {"$ref": "#/$defs/countKnowledge"},
+        "entrypoint_memberships": {"$ref": "#/$defs/countKnowledge"},
+        "uncertainties": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "entrypointKindKnowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["http_route", "process_main", "cli_command", "scheduled_job", "queue_consumer", "event_listener", "rpc_method", "public_api"],
+      "properties": {
+        "http_route": {"$ref": "#/$defs/countKnowledge"},
+        "process_main": {"$ref": "#/$defs/countKnowledge"},
+        "cli_command": {"$ref": "#/$defs/countKnowledge"},
+        "scheduled_job": {"$ref": "#/$defs/countKnowledge"},
+        "queue_consumer": {"$ref": "#/$defs/countKnowledge"},
+        "event_listener": {"$ref": "#/$defs/countKnowledge"},
+        "rpc_method": {"$ref": "#/$defs/countKnowledge"},
+        "public_api": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "technicalSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_graph_version", "projection_version", "verification_set_hash", "counts", "coverage"],
+      "properties": {
+        "artifact_graph_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "projection_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "verification_set_hash": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "counts": {"$ref": "#/$defs/overviewCountsDto"},
+        "coverage": {"$ref": "#/$defs/coverageDto"}
+      }
+    },
+    "scopesData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {"items": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/scopeDto"}}}
+    },
+    "overviewData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "completeness", "coverage", "recommended_mode"],
+      "properties": {
+        "counts": {"$ref": "#/$defs/overviewCountsDto"},
+        "completeness": {"$ref": "#/$defs/completenessDto"},
+        "coverage": {"$ref": "#/$defs/coverageDto"},
+        "recommended_mode": {"enum": ["request_lifecycle", "execution_flow", "analyze_element"]}
+      }
+    },
+    "entrypointsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "counts_by_kind", "discovery_knowledge", "next_cursor", "recommended_mode"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/entrypointDto"}},
+        "counts_by_kind": {"$ref": "#/$defs/entrypointKindKnowledge"},
+        "discovery_knowledge": {"$ref": "#/$defs/countKnowledge"},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"},
+        "recommended_mode": {"enum": ["request_lifecycle", "execution_flow", "analyze_element"]}
+      }
+    },
+    "backboneDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges"],
+      "properties": {
+        "nodes": {"type": "array", "maxItems": 120, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleNodeDto"}},
+        "edges": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleEdgeDto"}}
+      }
+    },
+    "lifecycleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "mode_label", "stage_counts", "backbone", "collapsed_groups", "async_flow_summaries", "terminal_outcomes", "completeness_by_capability", "uncertainty_counts", "technical_summary"],
+      "properties": {
+        "entrypoint": {"$ref": "#/$defs/entrypointDto"},
+        "mode_label": {"$ref": "#/$defs/plainText1000"},
+        "stage_counts": {"type": "array", "maxItems": 12, "uniqueItems": true, "items": {"$ref": "#/$defs/stageCountDto"}},
+        "backbone": {"$ref": "#/$defs/backboneDto"},
+        "collapsed_groups": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/collapsedGroupDto"}},
+        "async_flow_summaries": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/asyncFlowSummaryDto"}},
+        "terminal_outcomes": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/terminalOutcomeDto"}},
+        "completeness_by_capability": {"$ref": "#/$defs/capabilityCompletenessMap"},
+        "uncertainty_counts": {"$ref": "#/$defs/countKnowledge"},
+        "technical_summary": {"oneOf": [{"$ref": "#/$defs/technicalSummary"}, {"type": "null"}]}
+      }
+    },
+    "lifecycleExpandData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "collapsed_groups", "next_cursor"],
+      "properties": {
+        "nodes": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleNodeDto"}},
+        "edges": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleEdgeDto"}},
+        "collapsed_groups": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/collapsedGroupDto"}},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"}
+      }
+    },
+    "searchData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/searchResultDto"}},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"}
+      }
+    },
+    "detailData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "relationships", "effects", "integrations", "entrypoint_memberships", "uncertainties", "counts"],
+      "properties": {
+        "node": {"$ref": "#/$defs/lifecycleNodeDto"},
+        "relationships": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/relationshipDto"}},
+        "effects": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/effectDto"}},
+        "integrations": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/integrationDto"}},
+        "entrypoint_memberships": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/entrypointMembershipDto"}},
+        "uncertainties": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/uncertaintyDto"}},
+        "counts": {"$ref": "#/$defs/detailCountsDto"}
+      }
+    },
+    "neighborhoodData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "count", "next_cursor"],
+      "properties": {
+        "nodes": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleNodeDto"}},
+        "edges": {"type": "array", "maxItems": 9007199254740991, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleEdgeDto"}},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"}
+      }
+    },
+    "impactData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoints", "nodes", "count", "next_cursor"],
+      "properties": {
+        "entrypoints": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/entrypointMembershipDto"}},
+        "nodes": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleNodeDto"}},
+        "count": {"$ref": "#/$defs/countKnowledge"},
+        "next_cursor": {"$ref": "#/$defs/nullableToken"}
+      }
+    },
+    "pathData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "nodes", "edges", "reason"],
+      "properties": {
+        "state": {"enum": ["found", "not_found", "unknown"]},
+        "nodes": {"type": "array", "maxItems": 100000, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleNodeDto"}},
+        "edges": {"type": "array", "maxItems": 100000, "uniqueItems": true, "items": {"$ref": "#/$defs/lifecycleEdgeDto"}},
+        "reason": {"oneOf": [{"$ref": "#/$defs/reasonCode"}, {"type": "null"}]}
+      }
+    },
+    "emptyDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "maintenanceDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "retry_after_seconds"],
+      "properties": {
+        "reason": {"enum": ["backup", "cutover", "retirement", "operator"]},
+        "retry_after_seconds": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "errorDto": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": {"enum": ["graph_not_ready", "graph_context_stale", "graph_scope_mismatch", "graph_entrypoint_not_found", "graph_query_invalid", "graph_projection_partial", "graph_projection_failed", "graph_handle_invalid", "graph_cursor_invalid", "graph_search_snapshot_expired", "graph_maintenance"]},
+        "message": {"$ref": "#/$defs/plainText1000"},
+        "retryable": {"type": "boolean"},
+        "details": {"oneOf": [{"$ref": "#/$defs/emptyDetails"}, {"$ref": "#/$defs/maintenanceDetails"}]}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "code": {"enum": ["graph_not_ready", "graph_context_stale", "graph_projection_failed", "graph_search_snapshot_expired"]},
+            "retryable": {"const": true},
+            "details": {"$ref": "#/$defs/emptyDetails"}
+          }
+        },
+        {
+          "properties": {
+            "code": {"enum": ["graph_scope_mismatch", "graph_entrypoint_not_found", "graph_query_invalid", "graph_projection_partial", "graph_handle_invalid", "graph_cursor_invalid"]},
+            "retryable": {"const": false},
+            "details": {"$ref": "#/$defs/emptyDetails"}
+          }
+        },
+        {
+          "properties": {
+            "code": {"const": "graph_maintenance"},
+            "retryable": {"const": true},
+            "details": {"$ref": "#/$defs/maintenanceDetails"}
+          }
+        }
+      ]
+    }
+  }
+}

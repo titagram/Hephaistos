@@ -1,0 +1,473 @@
+{
+  "schema": "hades.graph_v2_canonicalization_golden.v1",
+  "vectors": [
+    {
+      "kind": "unicode_nfc",
+      "input": {"label": "Cafe\u0301"},
+      "canonical_utf8_hex": "7b226c6162656c223a22436166c3a9227d",
+      "sha256": "d4ae0caadbc69f7abfcb39e11565043c49a493e3245149935d0e59d487e73562"
+    },
+    {
+      "kind": "safe_integer",
+      "input": {"maximum": 9007199254740991, "zero": 0},
+      "canonical_utf8_hex": "7b226d6178696d756d223a393030373139393235343734303939312c227a65726f223a307d",
+      "sha256": "a1c533add872f3e57047cd8a00c780361e417c469a8c485d569c9355fd6c266e"
+    },
+    {
+      "kind": "node_id",
+      "input": {
+        "variant": "source_declaration",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        "language": "php",
+        "kind": "method",
+        "namespace": "App\\Controller",
+        "qualified_name": "App\\Controller\\WorkerController::index",
+        "path": "src/Controller/WorkerController.php"
+      },
+      "canonical_utf8_hex": "7b226b696e64223a226d6574686f64222c226c616e6775616765223a22706870222c226e616d657370616365223a224170705c5c436f6e74726f6c6c6572222c2270617468223a227372632f436f6e74726f6c6c65722f576f726b6572436f6e74726f6c6c65722e706870222c227175616c69666965645f6e616d65223a224170705c5c436f6e74726f6c6c65725c5c576f726b6572436f6e74726f6c6c65723a3a696e646578222c2276617269616e74223a22736f757263655f6465636c61726174696f6e222c22776f726b73706163655f62696e64696e675f6964223a2230314b584a443142444d5132544641424d564a56364546453851227d",
+      "sha256": "de5f8b5d7fce836944b8688208542e62e5636a6fea91c4cc4e56d4b353f57303"
+    },
+    {
+      "kind": "edge_id",
+      "input": {
+        "source_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "target_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "relation": "invokes",
+        "flow": "conditional",
+        "condition_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "branch_group_id": "hades:branch:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "call_site_id": "hades:call-site:v2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "exception_scope_id": null,
+        "occurrence": {
+          "kind": "ast",
+          "owner_node_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "ast_path": "body/3/consequence/1/call/0",
+          "ordinal": 1
+        }
+      },
+      "canonical_utf8_hex": "7b226272616e63685f67726f75705f6964223a2268616465733a6272616e63683a76323a64646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c2263616c6c5f736974655f6964223a2268616465733a63616c6c2d736974653a76323a65656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565222c22636f6e646974696f6e5f68617368223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c22657863657074696f6e5f73636f70655f6964223a6e756c6c2c22666c6f77223a22636f6e646974696f6e616c222c226f6363757272656e6365223a7b226173745f70617468223a22626f64792f332f636f6e73657175656e63652f312f63616c6c2f30222c226b696e64223a22617374222c226f7264696e616c223a312c226f776e65725f6e6f64655f6964223a2268616465733a6e6f64653a76323a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d2c2272656c6174696f6e223a22696e766f6b6573222c22736f757263655f6964223a2268616465733a6e6f64653a76323a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227461726765745f6964223a2268616465733a6e6f64653a76323a62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262227d",
+      "sha256": "a804b6d687d3723b40e6c0d2471d1b7eacdfa32f821dcd033a447acfbf54a965"
+    },
+    {
+      "kind": "condition_hash",
+      "input": {"normalized_full": "user.isAdmin() && role == <redacted>"},
+      "canonical_utf8_hex": "7b226e6f726d616c697a65645f66756c6c223a22757365722e697341646d696e282920262620726f6c65203d3d203c72656461637465643e227d",
+      "sha256": "e232b3152af766a00802880c889d2761b819ca91b2b15d7233f1282db0383738"
+    },
+    {
+      "kind": "ast_source_fingerprint",
+      "input": {
+        "file_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "occurrence_kind": "ast",
+        "path": "src/Service/Example.php",
+        "structural_path": "declaration/class/Example/method/run/body/3/call/0"
+      },
+      "canonical_utf8_hex": "7b2266696c655f736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226f6363757272656e63655f6b696e64223a22617374222c2270617468223a227372632f536572766963652f4578616d706c652e706870222c227374727563747572616c5f70617468223a226465636c61726174696f6e2f636c6173732f4578616d706c652f6d6574686f642f72756e2f626f64792f332f63616c6c2f30227d",
+      "sha256": "5fe5084ccf4d14c89f770bc1fcbea3b23a6b0b8d1ed480d33589c528cc9293da"
+    },
+    {
+      "kind": "config_source_fingerprint",
+      "input": {
+        "file_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "occurrence_kind": "config",
+        "path": "config/routes.yaml",
+        "structural_pointer": "routes/admin"
+      },
+      "canonical_utf8_hex": "7b2266696c655f736861323536223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226f6363757272656e63655f6b696e64223a22636f6e666967222c2270617468223a22636f6e6669672f726f757465732e79616d6c222c227374727563747572616c5f706f696e746572223a22726f757465732f61646d696e227d",
+      "sha256": "4ee4564b1990832777ff106348a98cd81a1abc93fea072844f4bac897ce701f2"
+    },
+    {
+      "kind": "file_source_fingerprint",
+      "input": {
+        "file_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "occurrence_kind": "file",
+        "path": "src/Empty.php"
+      },
+      "canonical_utf8_hex": "7b2266696c655f736861323536223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c226f6363757272656e63655f6b696e64223a2266696c65222c2270617468223a227372632f456d7074792e706870227d",
+      "sha256": "8ae5520db22b543f517040e5a55df69002af48cc9a0e493fd72c0aa94b8b7402"
+    },
+    {
+      "kind": "flow_id",
+      "input": {
+        "entrypoint_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "root_node_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "request_lifecycle"
+      },
+      "canonical_utf8_hex": "7b22656e747279706f696e745f6964223a2268616465733a6e6f64653a76323a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226b696e64223a22726571756573745f6c6966656379636c65222c22726f6f745f6e6f64655f6964223a2268616465733a6e6f64653a76323a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d",
+      "sha256": "796f24d84faec07641d66acd1deb6feda876318ae39ee18f004fb52e744eef2b"
+    },
+    {
+      "kind": "flow_step_id",
+      "input": {
+        "flow_id": "hades:flow:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "stage_from": "handler",
+        "stage_to": "domain",
+        "async_context": "synchronous"
+      },
+      "canonical_utf8_hex": "7b226173796e635f636f6e74657874223a2273796e6368726f6e6f7573222c22656467655f6964223a2268616465733a656467653a76323a63636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c22666c6f775f6964223a2268616465733a666c6f773a76323a64646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c2273746167655f66726f6d223a2268616e646c6572222c2273746167655f746f223a22646f6d61696e227d",
+      "sha256": "fa60c069b71e71f3cee33feb3fb75f8663cf3d29ad63a2aa7897f30a49c5efd2"
+    },
+    {
+      "kind": "uncertainty_id",
+      "input": {
+        "domain": "graph",
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        "subject": {"call_site_id": "hades:call-site:v2:1111111111111111111111111111111111111111111111111111111111111111"},
+        "resolution_kind": "call_target",
+        "reason_code": "dynamic_dispatch",
+        "question": "Which implementation can this call site invoke in this source snapshot?"
+      },
+      "canonical_utf8_hex": "7b22646f6d61696e223a226772617068222c2270726f6a6563745f6964223a2230314b584a443053563733454247574b4e4532454b334d344b44222c227175657374696f6e223a22576869636820696d706c656d656e746174696f6e2063616e20746869732063616c6c207369746520696e766f6b6520696e207468697320736f7572636520736e617073686f743f222c22726561736f6e5f636f6465223a2264796e616d69635f6469737061746368222c227265736f6c7574696f6e5f6b696e64223a2263616c6c5f746172676574222c227375626a656374223a7b2263616c6c5f736974655f6964223a2268616465733a63616c6c2d736974653a76323a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c22776f726b73706163655f62696e64696e675f6964223a2230314b584a443142444d5132544641424d564a56364546453851227d",
+      "sha256": "22d9f3f474fa86ed9db9968c4dfbc85bb8c85bad60e670aaea967a04b09aff82"
+    },
+    {
+      "kind": "evidence_digest",
+      "input": [
+        {
+          "kind": "source_ref",
+          "path": "src/Service/Example.php",
+          "line_start": 10,
+          "line_end": 20,
+          "file_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "source_tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      ],
+      "canonical_utf8_hex": "5b7b2266696c655f736861323536223a2265656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565222c226b696e64223a22736f757263655f726566222c226c696e655f656e64223a32302c226c696e655f7374617274223a31302c2270617468223a227372632f536572766963652f4578616d706c652e706870222c22736f757263655f747265655f736861323536223a2266666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666227d5d",
+      "sha256": "89912ec45f288667c33de456d8cb2589735310ec1810b4cf80c4eb3bb29890e3"
+    },
+    {
+      "kind": "verification_set_hash",
+      "input": [],
+      "canonical_utf8_hex": "5b5d",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "kind": "verification_dedupe",
+      "input": {
+        "kind": "hades.verification.graph.v1",
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        "target_id": "hades:uncertainty:v2:2222222222222222222222222222222222222222222222222222222222222222",
+        "target_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "assertion_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+        "attempt_generation": 1
+      },
+      "canonical_utf8_hex": "7b22617373657274696f6e5f66696e6765727072696e74223a2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232222c22617474656d70745f67656e65726174696f6e223a312c226b696e64223a2268616465732e766572696669636174696f6e2e67726170682e7631222c2270726f6a6563745f6964223a2230314b584a443053563733454247574b4e4532454b334d344b44222c227461726765745f6964223a2268616465733a756e6365727461696e74793a76323a32323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232222c227461726765745f76657273696f6e223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22776f726b73706163655f62696e64696e675f6964223a2230314b584a443142444d5132544641424d564a56364546453851227d",
+      "sha256": "e5d99b6197a2fc3943fea1d3b8fe06e034534ad8376a492dccb5fa6218e5d241"
+    },
+    {
+      "kind": "result_digest",
+      "input": {
+        "schema": "hades.verification_result.v1",
+        "domain": "graph",
+        "verdict": "verified",
+        "target": {
+          "type": "graph_assertion",
+          "id": "hades:uncertainty:v2:2222222222222222222222222222222222222222222222222222222222222222",
+          "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "reason": "The configured service binding proves the callable target.",
+        "evidence": [
+          {
+            "kind": "source_ref",
+            "path": "config/services.yaml",
+            "line_start": 10,
+            "line_end": 20,
+            "file_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "source_tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        ],
+        "graph": {
+          "operation": "resolve_call_targets",
+          "uncertainty_id": "hades:uncertainty:v2:2222222222222222222222222222222222222222222222222222222222222222",
+          "promoted_edge_ids": [],
+          "suppressed_edge_ids": [],
+          "call_site_id": "hades:call-site:v2:1111111111111111111111111111111111111111111111111111111111111111",
+          "subject_edge_id": null,
+          "target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+        },
+        "wiki": null,
+        "deferred": null
+      },
+      "canonical_utf8_hex": "7b226465666572726564223a6e756c6c2c22646f6d61696e223a226772617068222c2265766964656e6365223a5b7b2266696c655f736861323536223a2265656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565222c226b696e64223a22736f757263655f726566222c226c696e655f656e64223a32302c226c696e655f7374617274223a31302c2270617468223a22636f6e6669672f73657276696365732e79616d6c222c22736f757263655f747265655f736861323536223a2266666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666227d5d2c226772617068223a7b2263616c6c5f736974655f6964223a2268616465733a63616c6c2d736974653a76323a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c226f7065726174696f6e223a227265736f6c76655f63616c6c5f74617267657473222c2270726f6d6f7465645f656467655f696473223a5b5d2c227375626a6563745f656467655f6964223a6e756c6c2c22737570707265737365645f656467655f696473223a5b5d2c227461726765745f6e6f64655f696473223a5b2268616465733a6e6f64653a76323a62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262225d2c22756e6365727461696e74795f6964223a2268616465733a756e6365727461696e74793a76323a32323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232227d2c22726561736f6e223a2254686520636f6e6669677572656420736572766963652062696e64696e672070726f766573207468652063616c6c61626c65207461726765742e222c22736368656d61223a2268616465732e766572696669636174696f6e5f726573756c742e7631222c22746172676574223a7b226964223a2268616465733a756e6365727461696e74793a76323a32323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232222c2274797065223a2267726170685f617373657274696f6e222c2276657273696f6e223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d2c2276657264696374223a227665726966696564222c2277696b69223a6e756c6c7d",
+      "sha256": "4d7900ffa2760c46afa00eac4c61180bc743ecf2e67895d66d8d1ec41f67e501"
+    },
+    {
+      "kind": "artifact_digest",
+      "input": {
+        "schema": "hades.code_graph.v2",
+        "project": {
+          "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+          "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+        },
+        "source": {
+          "head_commit": null,
+          "tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dirty": false,
+          "branch": null
+        },
+        "graph_contract_version": "hades.graph_artifact.v2",
+        "frameworks": [],
+        "languages": [],
+        "entrypoints": [],
+        "nodes": [],
+        "structures": [],
+        "edges": [],
+        "flows": [],
+        "flow_steps": [],
+        "uncertainties": [],
+        "completeness": {
+          "status": "full",
+          "capabilities": {
+            "inventory": {"status": "full", "reasons": []},
+            "entrypoint_discovery": {"status": "full", "reasons": []},
+            "symbol_resolution": {"status": "full", "reasons": []},
+            "call_graph": {"status": "full", "reasons": []},
+            "control_flow": {"status": "full", "reasons": []},
+            "framework_lifecycle": {"status": "not_applicable", "reasons": []},
+            "exceptions": {"status": "full", "reasons": []},
+            "async": {"status": "full", "reasons": []},
+            "data_access": {"status": "full", "reasons": []}
+          },
+          "languages": []
+        },
+        "coverage": {
+          "scope": {
+            "included_roots": ["."],
+            "excluded_config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "excluded_path_count": 0
+          },
+          "files": {
+            "discovered": 0,
+            "hashed": 0,
+            "parser_candidates": 0,
+            "analyzed": 0,
+            "unsupported": 0,
+            "failed": 0,
+            "too_large": 0,
+            "budget_omitted": 0
+          },
+          "entrypoints": {"detected": 0, "analyzed": 0, "partial": 0, "by_kind": {}},
+          "records": {
+            "nodes": 0,
+            "structures": 0,
+            "edges": 0,
+            "flows": 0,
+            "flow_steps": 0,
+            "uncertainties": 0,
+            "omitted_by_bundle_budget": 0
+          }
+        }
+      },
+      "canonical_utf8_hex": "7b22636f6d706c6574656e657373223a7b226361706162696c6974696573223a7b226173796e63223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c2263616c6c5f6772617068223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c22636f6e74726f6c5f666c6f77223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c22646174615f616363657373223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c22656e747279706f696e745f646973636f76657279223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c22657863657074696f6e73223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c226672616d65776f726b5f6c6966656379636c65223a7b22726561736f6e73223a5b5d2c22737461747573223a226e6f745f6170706c696361626c65227d2c22696e76656e746f7279223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d2c2273796d626f6c5f7265736f6c7574696f6e223a7b22726561736f6e73223a5b5d2c22737461747573223a2266756c6c227d7d2c226c616e677561676573223a5b5d2c22737461747573223a2266756c6c227d2c22636f766572616765223a7b22656e747279706f696e7473223a7b22616e616c797a6564223a302c2262795f6b696e64223a7b7d2c226465746563746564223a302c227061727469616c223a307d2c2266696c6573223a7b22616e616c797a6564223a302c226275646765745f6f6d6974746564223a302c22646973636f7665726564223a302c226661696c6564223a302c22686173686564223a302c227061727365725f63616e64696461746573223a302c22746f6f5f6c61726765223a302c22756e737570706f72746564223a307d2c227265636f726473223a7b226564676573223a302c22666c6f775f7374657073223a302c22666c6f7773223a302c226e6f646573223a302c226f6d69747465645f62795f62756e646c655f627564676574223a302c2273747275637475726573223a302c22756e6365727461696e74696573223a307d2c2273636f7065223a7b226578636c756465645f636f6e6669675f736861323536223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c226578636c756465645f706174685f636f756e74223a302c22696e636c756465645f726f6f7473223a5b222e225d7d7d2c226564676573223a5b5d2c22656e747279706f696e7473223a5b5d2c22666c6f775f7374657073223a5b5d2c22666c6f7773223a5b5d2c226672616d65776f726b73223a5b5d2c2267726170685f636f6e74726163745f76657273696f6e223a2268616465732e67726170685f61727469666163742e7632222c226c616e677561676573223a5b5d2c226e6f646573223a5b5d2c2270726f6a656374223a7b2270726f6a6563745f6964223a2230314b584a443053563733454247574b4e4532454b334d344b44222c22776f726b73706163655f62696e64696e675f6964223a2230314b584a443142444d5132544641424d564a56364546453851227d2c22736368656d61223a2268616465732e636f64655f67726170682e7632222c22736f75726365223a7b226272616e6368223a6e756c6c2c226469727479223a66616c73652c22686561645f636f6d6d6974223a6e756c6c2c22747265655f736861323536223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d2c2273747275637475726573223a5b5d2c22756e6365727461696e74696573223a5b5d7d",
+      "sha256": "9594c6583497eab5300ddf320cc5252475049065e9e980aaeb176af763980f10"
+    }
+  ],
+  "path_vectors": [
+    {
+      "input": "src\\Cafe\u0301.php",
+      "normalized": "src/Caf\u00e9.php",
+      "normalized_utf8_hex": "7372632f436166c3a92e706870"
+    }
+  ],
+  "projection_versions": [
+    {
+      "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verification_set_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "preimage_utf8_hex": "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161613a62626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262",
+      "projection_version": "6173cf9d3267e6b926102c8b149812658d05d834916fd23f7451c48c888147ab"
+    }
+  ],
+  "contract_examples": {
+    "bundle": {
+      "schema": "hades.graph_bundle.v2",
+      "artifact_schema": "hades.code_graph.v2",
+      "artifact_graph_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "generated_at": "2026-07-16T12:00:00Z",
+      "source": {
+        "head_commit": null,
+        "tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dirty": false,
+        "branch": null
+      },
+      "project": {
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+      },
+      "graph_contract": {
+        "version": "hades.graph_artifact.v2",
+        "artifact_graph_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "projection_state": "queued",
+        "completeness": {
+          "status": "full",
+          "capabilities": {
+            "inventory": {"status": "full", "reasons": []},
+            "entrypoint_discovery": {"status": "full", "reasons": []},
+            "symbol_resolution": {"status": "full", "reasons": []},
+            "call_graph": {"status": "full", "reasons": []},
+            "control_flow": {"status": "full", "reasons": []},
+            "framework_lifecycle": {"status": "not_applicable", "reasons": []},
+            "exceptions": {"status": "full", "reasons": []},
+            "async": {"status": "full", "reasons": []},
+            "data_access": {"status": "full", "reasons": []}
+          },
+          "languages": []
+        },
+        "coverage": {
+          "scope": {"included_roots": ["."], "excluded_config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "excluded_path_count": 0},
+          "files": {"discovered": 0, "hashed": 0, "parser_candidates": 0, "analyzed": 0, "unsupported": 0, "failed": 0, "too_large": 0, "budget_omitted": 0},
+          "entrypoints": {"detected": 0, "analyzed": 0, "partial": 0, "by_kind": {}},
+          "records": {"nodes": 0, "structures": 0, "edges": 0, "flows": 0, "flow_steps": 0, "uncertainties": 0, "omitted_by_bundle_budget": 0}
+        }
+      },
+      "frameworks": [],
+      "languages": [],
+      "counts": {"frameworks": 0, "languages": 0, "entrypoints": 0, "nodes": 0, "structures": 0, "edges": 0, "flows": 0, "flow_steps": 0, "uncertainties": 0},
+      "chunks": []
+    },
+    "entrypoints": [
+      {
+        "id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "entrypoint_kind": "http_route",
+        "label": "GET /",
+        "framework": null,
+        "method_semantics": "explicit",
+        "methods": ["GET"],
+        "public_path": "/",
+        "public_name": null,
+        "handler_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "uncertainty_id": null,
+        "trigger": {"kind": "http", "value": "GET /"},
+        "match_constraints": {"host": null, "schemes": [], "condition_hash": null},
+        "registration_occurrence": {"kind": "ast", "path": "src/routes.php", "structural_path": "routes/0", "ordinal": 0},
+        "evidence": {
+          "primary": {"origin": "verified_from_code", "extractor": "php.generic.v2", "source_locator": {"kind": "ast", "path": "src/routes.php", "structural_path": "routes/0"}, "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "inference_rule": null},
+          "supporting": [],
+          "supporting_omitted_count": 0
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "identity": {"variant": "file", "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q", "language": "php", "kind": "file", "path": "src/routes.php"},
+        "kind": "file",
+        "language": "php",
+        "framework": null,
+        "name": "routes.php",
+        "qualified_name": "src/routes.php",
+        "namespace": null,
+        "uncertainty_id": null,
+        "location": null,
+        "properties": {"file_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "byte_size": 0, "analysis_status": "analyzed", "omission_reason": null, "is_test": false, "is_generated": false},
+        "evidence": {
+          "primary": {"origin": "verified_from_code", "extractor": "inventory.v2", "source_locator": {"kind": "file", "path": "src/routes.php"}, "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "inference_rule": null},
+          "supporting": [],
+          "supporting_omitted_count": 0
+        }
+      }
+    ],
+    "structures": [
+      {
+        "id": "hades:call-site:v2:1111111111111111111111111111111111111111111111111111111111111111",
+        "kind": "call_site",
+        "owner_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "structural_path": "body/call/0",
+        "ordinal": 0,
+        "subtype": "call",
+        "continuation_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "parent_structure_id": null,
+        "evidence": {
+          "primary": {"origin": "verified_from_code", "extractor": "php.cfg.v2", "source_locator": {"kind": "ast", "path": "src/routes.php", "structural_path": "body/call/0"}, "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "inference_rule": null},
+          "supporting": [],
+          "supporting_omitted_count": 0
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "source_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "target_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "relation": "routes_to",
+        "flow": "always",
+        "condition": null,
+        "branch_group_id": null,
+        "call_site_id": null,
+        "exception_scope_id": null,
+        "order": 0,
+        "uncertainty_id": null,
+        "occurrence": {"kind": "ast", "owner_node_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ast_path": "routes/0/handler", "ordinal": 0},
+        "evidence": {
+          "primary": {"origin": "verified_from_code", "extractor": "php.generic.v2", "source_locator": {"kind": "ast", "path": "src/routes.php", "structural_path": "routes/0/handler"}, "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "inference_rule": null},
+          "supporting": [],
+          "supporting_omitted_count": 0
+        },
+        "location": {"path": "src/routes.php", "line": 1, "ordinal": 0}
+      }
+    ],
+    "flows": [
+      {
+        "id": "hades:flow:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "entrypoint_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "root_node_id": "hades:node:v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "request_lifecycle",
+        "represented_step_count": 1,
+        "terminal_count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+        "linked_async_flow_count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+        "stage_counts": {"entry": {"represented": 1, "value": 1, "knowledge": "exact", "reason": null}},
+        "completeness": {
+          "status": "full",
+          "capabilities": {
+            "inventory": {"status": "full", "reasons": []},
+            "entrypoint_discovery": {"status": "full", "reasons": []},
+            "symbol_resolution": {"status": "full", "reasons": []},
+            "call_graph": {"status": "full", "reasons": []},
+            "control_flow": {"status": "full", "reasons": []},
+            "framework_lifecycle": {"status": "not_applicable", "reasons": []},
+            "exceptions": {"status": "full", "reasons": []},
+            "async": {"status": "full", "reasons": []},
+            "data_access": {"status": "full", "reasons": []}
+          }
+        },
+        "uncertainty_count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}
+      }
+    ],
+    "flow_steps": [
+      {
+        "id": "hades:flow-step:v2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "flow_id": "hades:flow:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "stage_from": "entry",
+        "stage_to": "routing",
+        "min_depth": 0,
+        "branch_group_id": null,
+        "async_context": "synchronous",
+        "async_child_flow_id": null,
+        "async_cycle": false,
+        "backbone_role": "mandatory",
+        "order_key": "00:000000:entry:routing:edge"
+      }
+    ],
+    "uncertainties": [
+      {
+        "id": "hades:uncertainty:v2:2222222222222222222222222222222222222222222222222222222222222222",
+        "domain": "graph",
+        "subject": {"edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+        "resolution_kind": "entrypoint_handler",
+        "reason_code": "entrypoint_unresolved",
+        "question": "Which handler owns this entrypoint in this source snapshot?",
+        "evidence_requirements": ["inspect_route_registration"],
+        "source_refs": [{"path": "src/routes.php", "line": 1}],
+        "candidate_target_node_ids": [],
+        "candidate_edge_ids": [],
+        "candidate_set_knowledge": "not_applicable",
+        "priority": "high",
+        "impact": "May change the request lifecycle handler.",
+        "fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ]
+  }
+}

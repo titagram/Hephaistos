@@ -1,0 +1,205 @@
+{
+  "schema": "hades.dashboard_protocol_golden.v1",
+  "cases": [
+    {
+      "name": "scopes",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "scopes"}},
+      "response": {
+        "protocol_version": "hades.dashboard_graph.v2",
+        "graph_context": null,
+        "projection": null,
+        "data": {
+          "items": [
+            {
+              "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"},
+              "label": "Carnovali workspace",
+              "workspace_name": "Carnovali",
+              "ready": true,
+              "active_projection_generated_at": "2026-07-16T12:00:00Z",
+              "completeness": "full",
+              "entrypoint_discovery": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "overview",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "overview", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}}},
+      "response": {
+        "protocol_version": "hades.dashboard_graph.v2",
+        "graph_context": "context_v2",
+        "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"},
+        "data": {
+          "counts": {
+            "nodes": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "relationships": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "entrypoints": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "flows": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "uncertainties": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}
+          },
+          "completeness": {
+            "status": "full",
+            "capabilities": {
+              "inventory": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "entrypoint_discovery": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "symbol_resolution": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "call_graph": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "control_flow": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "framework_lifecycle": {"status": "not_applicable", "plain_summary": "Not applicable.", "reason_count": 0},
+              "exceptions": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "async": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+              "data_access": {"status": "full", "plain_summary": "Complete.", "reason_count": 0}
+            }
+          },
+          "coverage": {
+            "files": {"discovered": 0, "hashed": 0, "parser_candidates": 0, "analyzed": 0, "unsupported": 0, "failed": 0, "too_large": 0, "budget_omitted": 0},
+            "entrypoints": {"detected": 0, "analyzed": 0, "partial": 0, "by_kind": {}},
+            "records": {"nodes": 0, "structures": 0, "edges": 0, "flows": 0, "flow_steps": 0, "uncertainties": 0, "omitted_by_bundle_budget": 0},
+            "omitted_reason_counts": []
+          },
+          "recommended_mode": "analyze_element"
+        }
+      }
+    },
+    {
+      "name": "entrypoints",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "entrypoints", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "limit": 50}},
+      "response": {
+        "protocol_version": "hades.dashboard_graph.v2",
+        "graph_context": "context_v2",
+        "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"},
+        "data": {
+          "items": [],
+          "counts_by_kind": {
+            "http_route": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "process_main": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "cli_command": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "scheduled_job": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "queue_consumer": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "event_listener": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "rpc_method": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "public_api": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}
+          },
+          "discovery_knowledge": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+          "next_cursor": null,
+          "recommended_mode": "analyze_element"
+        }
+      }
+    },
+    {
+      "name": "lifecycle",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "lifecycle", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "entrypoint_handle": "entrypoint_handle", "include_async": true, "graph_context": "context_v2", "include_technical": false}},
+      "response": {
+        "protocol_version": "hades.dashboard_graph.v2",
+        "graph_context": "context_v2",
+        "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"},
+        "data": {
+          "entrypoint": {
+            "handle": "entrypoint_handle",
+            "entrypoint_kind": "http_route",
+            "label": "GET /",
+            "method_semantics": "explicit",
+            "methods": ["GET"],
+            "public_path": "/",
+            "public_name": null,
+            "effective_handler_handle": null,
+            "handler_label": null,
+            "framework": null,
+            "evidence_badge": "verified_from_code",
+            "verification_state": "not_applicable",
+            "flow_completeness": {
+              "status": "full",
+              "capabilities": {
+                "inventory": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "entrypoint_discovery": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "symbol_resolution": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "call_graph": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "control_flow": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "framework_lifecycle": {"status": "not_applicable", "plain_summary": "Not applicable.", "reason_count": 0},
+                "exceptions": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "async": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+                "data_access": {"status": "full", "plain_summary": "Complete.", "reason_count": 0}
+              }
+            }
+          },
+          "mode_label": "Request lifecycle",
+          "stage_counts": [],
+          "backbone": {"nodes": [], "edges": []},
+          "collapsed_groups": [],
+          "async_flow_summaries": [],
+          "terminal_outcomes": [],
+          "completeness_by_capability": {
+            "inventory": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "entrypoint_discovery": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "symbol_resolution": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "call_graph": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "control_flow": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "framework_lifecycle": {"status": "not_applicable", "plain_summary": "Not applicable.", "reason_count": 0},
+            "exceptions": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "async": {"status": "full", "plain_summary": "Complete.", "reason_count": 0},
+            "data_access": {"status": "full", "plain_summary": "Complete.", "reason_count": 0}
+          },
+          "uncertainty_counts": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+          "technical_summary": null
+        }
+      }
+    },
+    {
+      "name": "lifecycle_expand",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "lifecycle_expand", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "entrypoint_handle": "entrypoint_handle", "stage": "handler", "limit": 50}},
+      "response": {"protocol_version": "hades.dashboard_graph.v2", "graph_context": "context_v2", "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"}, "data": {"nodes": [], "edges": [], "collapsed_groups": [], "next_cursor": null}}
+    },
+    {
+      "name": "search",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "search", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "query": "AdminController", "graph_context": "context_v2", "limit": 50}},
+      "response": {"protocol_version": "hades.dashboard_graph.v2", "graph_context": "context_v2", "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"}, "data": {"items": [], "next_cursor": null}}
+    },
+    {
+      "name": "detail",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "detail", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "node_handle": "node_handle", "include_technical": false}},
+      "response": {
+        "protocol_version": "hades.dashboard_graph.v2",
+        "graph_context": "context_v2",
+        "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"},
+        "data": {
+          "node": {"handle": "node_handle", "kind": "service", "label": "ExampleService", "qualified_name": null, "role_label": "Service", "stage": null, "layout": null, "source_location": null, "evidence_badge": "verified_from_code", "verification_state": "not_applicable", "uncertainty_count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}, "expandable": false},
+          "relationships": [],
+          "effects": [],
+          "integrations": [],
+          "entrypoint_memberships": [],
+          "uncertainties": [],
+          "counts": {
+            "incoming": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "outgoing": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "callers": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "callees": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "effects": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "integrations": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "entrypoint_memberships": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null},
+            "uncertainties": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}
+          }
+        }
+      }
+    },
+    {
+      "name": "neighborhood",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "neighborhood", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "node_handle": "node_handle", "depth": 1}},
+      "response": {"protocol_version": "hades.dashboard_graph.v2", "graph_context": "context_v2", "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"}, "data": {"nodes": [], "edges": [], "count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}, "next_cursor": null}}
+    },
+    {
+      "name": "impact",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "impact", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "node_handle": "node_handle"}},
+      "response": {"protocol_version": "hades.dashboard_graph.v2", "graph_context": "context_v2", "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"}, "data": {"entrypoints": [], "nodes": [], "count": {"represented": 0, "value": 0, "knowledge": "absence_verified", "reason": null}, "next_cursor": null}}
+    },
+    {
+      "name": "path",
+      "request": {"protocol_version": "hades.dashboard_graph.v2", "query": {"type": "path", "scope": {"type": "workspace_binding", "id": "01KXJD1BDMQ2TFABMVJV6EFE8Q"}, "graph_context": "context_v2", "from_handle": "from_handle", "to_handle": "to_handle", "relation_scope": "structural"}},
+      "response": {"protocol_version": "hades.dashboard_graph.v2", "graph_context": "context_v2", "projection": {"state": "ready", "completeness": "full", "generated_at": "2026-07-16T12:00:00Z", "source_label": "Carnovali workspace"}, "data": {"state": "not_found", "nodes": [], "edges": [], "reason": null}}
+    }
+  ],
+  "errors": [
+    {"protocol_version": "hades.dashboard_graph.v2", "error": {"code": "graph_context_stale", "message": "The graph changed. Reload this exploration.", "retryable": true, "details": {}}},
+    {"protocol_version": "hades.dashboard_graph.v2", "error": {"code": "graph_maintenance", "message": "Graph maintenance is in progress.", "retryable": true, "details": {"reason": "backup", "retry_after_seconds": 30}}}
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/graph-overlay.schema.json",
+  "title": "Hades Graph Verification Overlay v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifact_graph_version",
+    "uncertainty_id",
+    "assertion_fingerprint",
+    "operation",
+    "subject_edge_id",
+    "promoted_edge_ids",
+    "suppressed_edge_ids",
+    "suppressed_node_ids",
+    "suppressed_structure_ids",
+    "target_node_ids",
+    "effective_edge_ids",
+    "effective_structure_ids",
+    "effective_entrypoint_handler_node_id",
+    "evidence_digest",
+    "result_digest"
+  ],
+  "properties": {
+    "schema": {"const": "hades.graph_overlay.v1"},
+    "artifact_graph_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+    "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+    "assertion_fingerprint": {"$ref": "artifact.schema.json#/$defs/digest"},
+    "operation": {"enum": ["resolve_candidate_set", "resolve_call_targets", "resolve_edge_targets", "reject_unresolved_subject"]},
+    "subject_edge_id": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/edgeId"}, {"type": "null"}]},
+    "promoted_edge_ids": {"$ref": "#/$defs/edgeIds"},
+    "suppressed_edge_ids": {"$ref": "#/$defs/edgeIds"},
+    "suppressed_node_ids": {"$ref": "#/$defs/nodeIds"},
+    "suppressed_structure_ids": {"$ref": "#/$defs/structureIds"},
+    "target_node_ids": {"$ref": "#/$defs/nodeIds"},
+    "effective_edge_ids": {"$ref": "#/$defs/edgeIds"},
+    "effective_structure_ids": {"$ref": "#/$defs/structureIds"},
+    "effective_entrypoint_handler_node_id": {"oneOf": [{"$ref": "artifact.schema.json#/$defs/nodeId"}, {"type": "null"}]},
+    "evidence_digest": {"$ref": "artifact.schema.json#/$defs/digest"},
+    "result_digest": {"$ref": "artifact.schema.json#/$defs/digest"}
+  },
+  "$defs": {
+    "edgeIds": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}
+    },
+    "nodeIds": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/nodeId"}
+    },
+    "structureIds": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/structureId"}
+    }
+  }
+}
