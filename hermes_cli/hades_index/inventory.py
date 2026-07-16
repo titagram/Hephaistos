@@ -1,8 +1,78 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import fnmatch
+import hashlib
 import json
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
+import subprocess
 from typing import Any
+import unicodedata
+
+
+class SourceIdentityError(RuntimeError):
+    """A source snapshot cannot safely identify the indexed workspace."""
+
+    def __init__(self, code: str, safe_path: str | None = None):
+        self.code = code
+        self.safe_path = safe_path
+        super().__init__(f"{code}:{safe_path}" if safe_path else code)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSnapshot:
+    """Private inventory result used to populate the public v2 source identity."""
+
+    tree_sha256: str
+    head_commit: str | None
+    dirty: bool
+    branch: str | None
+    excluded_count: int
+    partial_reasons: tuple[str, ...]
+
+
+# These are source-scope policy, not user-configurable defaults.  A user may
+# add exclusions but can never opt a credential back into the graph snapshot.
+_DEFAULT_EXCLUDED_DIRECTORY_NAMES = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".hg",
+        ".svn",
+        ".next",
+        ".nuxt",
+        ".venv",
+        "build",
+        "coverage",
+        "dist",
+        "node_modules",
+        "out",
+        "target",
+        "vendor",
+        "venv",
+        "__pycache__",
+    }
+)
+_DEFAULT_EXCLUDED_DIRECTORY_SEQUENCES = (
+    ("var", "cache"),
+    ("storage", "framework", "cache"),
+)
+_COMPULSORY_SECRET_NAMES = frozenset(
+    {
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
+    }
+)
+_COMPULSORY_SECRET_SUFFIXES = frozenset({".cert", ".crt", ".der", ".key", ".p12", ".pem", ".pfx"})
+_INVALID_SYMLINK_PREFIX = b"SYMLINK_INVALID\0"
+_UNAVAILABLE_SUBMODULE_PREFIX = b"SUBMODULE_UNAVAILABLE\0"
 
 
 _ROUTE_FIELDS = (
@@ -360,3 +430,294 @@ def promote_graph_inventories(graph: dict[str, Any]) -> dict[str, dict[str, int]
             "merged": test_merged,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Graph v2 source identity
+# ---------------------------------------------------------------------------
+
+
+def _safe_source_relative_path(raw: str) -> str:
+    """Return the canonical safe path, without ever accepting an absolute one."""
+
+    normalized = unicodedata.normalize("NFC", raw)
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or "\\" in normalized
+        or len(normalized.encode("utf-8")) > 4_096
+    ):
+        raise SourceIdentityError("source_path_invalid")
+    parts = normalized.split("/")
+    if any(
+        not part
+        or part in {".", ".."}
+        or "\x00" in part
+        or "\\" in part
+        or any(ord(character) < 32 or ord(character) == 127 for character in part)
+        for part in parts
+    ):
+        raise SourceIdentityError("source_path_invalid")
+    # A Windows drive must not become a legal artifact source path on POSIX.
+    if len(parts[0]) >= 2 and parts[0][1] == ":":
+        raise SourceIdentityError("source_path_invalid")
+    return normalized
+
+
+def validate_normalized_source_paths(paths: list[str]) -> tuple[str, ...]:
+    """Normalize a candidate inventory and fail on NFC identity collisions."""
+
+    normalized_paths: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        normalized = _safe_source_relative_path(raw)
+        if normalized in seen:
+            # The normalized path is safe.  Do not surface the raw spelling:
+            # one form can contain a credential-like filename.
+            raise SourceIdentityError("source_path_normalization_collision", normalized)
+        seen.add(normalized)
+        normalized_paths.append(normalized)
+    return tuple(normalized_paths)
+
+
+def _is_compulsory_secret(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    if name == ".env":
+        return True
+    if name.startswith(".env.") and name != ".env.example":
+        return True
+    if name in _COMPULSORY_SECRET_NAMES or name.startswith("secret") or name.startswith("secrets."):
+        return True
+    return PurePosixPath(name).suffix.lower() in _COMPULSORY_SECRET_SUFFIXES
+
+
+def _is_baseline_excluded(path: str) -> bool:
+    parts = tuple(PurePosixPath(path).parts)
+    if any(part in _DEFAULT_EXCLUDED_DIRECTORY_NAMES for part in parts[:-1]):
+        return True
+    if any(
+        parts[index : index + len(sequence)] == sequence
+        for sequence in _DEFAULT_EXCLUDED_DIRECTORY_SEQUENCES
+        for index in range(0, len(parts) - len(sequence) + 1)
+    ):
+        return True
+    return _is_compulsory_secret(path)
+
+
+def _is_user_excluded(path: str, user_excluded_paths: tuple[str, ...]) -> bool:
+    for pattern in user_excluded_paths:
+        if path == pattern or path.startswith(pattern + "/"):
+            return True
+        if any(token in pattern for token in "*?[") and fnmatch.fnmatchcase(path, pattern):
+            return True
+    return False
+
+
+def _stream_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise SourceIdentityError("source_snapshot_unreadable") from exc
+    return digest.hexdigest()
+
+
+def _invalid_symlink_sha256(path: Path) -> str:
+    try:
+        target = os.fsencode(os.readlink(path))
+    except OSError as exc:
+        raise SourceIdentityError("source_snapshot_unreadable") from exc
+    return hashlib.sha256(_INVALID_SYMLINK_PREFIX + target).hexdigest()
+
+
+def _symlink_file_sha256(path: Path, root: Path) -> tuple[str, bool]:
+    """Return ``(file_digest, is_invalid)`` without leaking the link target."""
+
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        if resolved.is_file():
+            return _stream_file_sha256(resolved), False
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return _invalid_symlink_sha256(path), True
+
+
+def _git_command(root: Path, *args: str) -> bytes | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def _git_submodules(root: Path) -> dict[str, str]:
+    output = _git_command(root, "ls-files", "--stage", "-z")
+    if output is None:
+        return {}
+    result: dict[str, str] = {}
+    for entry in output.split(b"\0"):
+        if not entry or b"\t" not in entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[0] != b"160000":
+            continue
+        try:
+            path = _safe_source_relative_path(os.fsdecode(raw_path))
+            commit = fields[1].decode("ascii")
+        except (UnicodeError, SourceIdentityError):
+            continue
+        if len(commit) == 40 and all(character in "0123456789abcdef" for character in commit):
+            result[path] = commit
+    return result
+
+
+def _submodule_is_available(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    try:
+        return any(child.name != ".git" for child in path.iterdir())
+    except OSError:
+        return False
+
+
+def _git_metadata(root: Path, user_excluded_paths: tuple[str, ...]) -> tuple[str | None, bool, str | None]:
+    inside = _git_command(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.strip() != b"true":
+        return None, False, None
+
+    raw_head = _git_command(root, "rev-parse", "HEAD")
+    head = raw_head.decode("ascii", errors="ignore").strip() if raw_head else ""
+    if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
+        head = ""
+    raw_branch = _git_command(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = raw_branch.decode("utf-8", errors="replace").strip() if raw_branch else None
+    if branch is not None and (not branch or len(branch.encode("utf-8")) > 255):
+        branch = None
+
+    status = _git_command(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    dirty = False
+    if status:
+        rows = status.split(b"\0")
+        index = 0
+        while index < len(rows):
+            row = rows[index]
+            index += 1
+            if len(row) < 4:
+                continue
+            try:
+                path = _safe_source_relative_path(os.fsdecode(row[3:]))
+            except (UnicodeError, SourceIdentityError):
+                continue
+            if not _is_baseline_excluded(path) and not _is_user_excluded(path, user_excluded_paths):
+                dirty = True
+                break
+            # Rename/copy records contain one more NUL-delimited pathname.
+            if row[:1] in {b"R", b"C"} or row[1:2] in {b"R", b"C"}:
+                index += 1
+    return head or None, dirty, branch
+
+
+def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = ()) -> SourceSnapshot:
+    """Build the deterministic source inventory used by graph v2.
+
+    File content is deliberately hashed before extraction budgets are applied:
+    an oversized or binary source file still participates in the source
+    identity even if a later adapter cannot parse it.
+    """
+
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise SourceIdentityError("source_root_unavailable")
+
+    records: list[tuple[str, str]] = []
+    raw_paths: list[str] = []
+    excluded_count = 0
+    partial_reasons: set[str] = set()
+    submodules = _git_submodules(root)
+    unavailable_submodules: set[str] = set()
+    for path, commit in sorted(submodules.items()):
+        candidate = root / path
+        if not _submodule_is_available(candidate):
+            unavailable_submodules.add(path)
+            raw_paths.append(path)
+            records.append(
+                (
+                    path,
+                    hashlib.sha256(_UNAVAILABLE_SUBMODULE_PREFIX + commit.encode("ascii")).hexdigest(),
+                )
+            )
+            partial_reasons.add("submodule_unavailable")
+
+    for current, dirs, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        retained_dirs: list[str] = []
+        for name in dirs:
+            entry = current_path / name
+            raw = entry.relative_to(root).as_posix()
+            normalized = _safe_source_relative_path(raw)
+            if _is_baseline_excluded(normalized) or _is_user_excluded(normalized, user_excluded_paths):
+                excluded_count += 1
+                continue
+            if normalized in unavailable_submodules:
+                continue
+            if entry.is_symlink():
+                raw_paths.append(raw)
+                records.append((normalized, _invalid_symlink_sha256(entry)))
+                partial_reasons.add("invalid_symlink")
+                continue
+            retained_dirs.append(name)
+        dirs[:] = retained_dirs
+
+        for name in files:
+            entry = current_path / name
+            raw = entry.relative_to(root).as_posix()
+            normalized = _safe_source_relative_path(raw)
+            if _is_baseline_excluded(normalized) or _is_user_excluded(normalized, user_excluded_paths):
+                excluded_count += 1
+                continue
+            raw_paths.append(raw)
+            if entry.is_symlink():
+                digest, invalid = _symlink_file_sha256(entry, root)
+                if invalid:
+                    partial_reasons.add("invalid_symlink")
+            elif entry.is_file():
+                digest = _stream_file_sha256(entry)
+            else:
+                # A non-regular entry does not have a safe file-byte identity.
+                continue
+            records.append((normalized, digest))
+
+    normalized_paths = validate_normalized_source_paths(raw_paths)
+    normalized_by_raw = dict(zip(raw_paths, normalized_paths, strict=True))
+    # The path used in each record is normalized above; re-create the pairs
+    # from raw paths to make collisions a preimage-level failure, not a sort
+    # accident.  Unavailable submodules have already supplied normalized paths.
+    checked_records: list[tuple[str, str]] = []
+    for path, digest in records:
+        checked_records.append((normalized_by_raw.get(path, _safe_source_relative_path(path)), digest))
+    checked_records.sort(key=lambda item: item[0])
+
+    tree = hashlib.sha256()
+    for path, file_digest in checked_records:
+        tree.update(path.encode("utf-8"))
+        tree.update(b"\0")
+        tree.update(file_digest.encode("ascii"))
+        tree.update(b"\n")
+    head_commit, dirty, branch = _git_metadata(root, user_excluded_paths)
+    return SourceSnapshot(
+        tree_sha256=tree.hexdigest(),
+        head_commit=head_commit,
+        dirty=dirty,
+        branch=branch,
+        excluded_count=excluded_count,
+        partial_reasons=tuple(sorted(partial_reasons)),
+    )

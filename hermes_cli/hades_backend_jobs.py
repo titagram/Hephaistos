@@ -1635,9 +1635,17 @@ def _split_top_level_items(body: str) -> list[tuple[str, int]]:
 
 
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+        verify_source_unchanged,
+    )
     from hermes_cli.hades_index import build_graph_for_workspace
 
     payload = job.get("payload") or {}
+    graph_index_config = load_hades_graph_index_config(load_config_readonly())
+    source_before = build_source_identity(workspace_root, graph_index_config)
     max_files = min(int(payload.get("max_files") or 10_000), 10_000)
     max_total_bytes = min(
         int(payload.get("max_total_bytes") or 134_217_728),
@@ -1652,6 +1660,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     # Dispatch to pluggable indexer (currently a seam over existing functions)
     artifact = build_graph_for_workspace(workspace_root, candidates, omitted, payload)
     artifact["truncated"] = bool(artifact.get("truncated")) or truncated
+    verify_source_unchanged(workspace_root, graph_index_config, source_before)
 
     return {
         "status": "completed",

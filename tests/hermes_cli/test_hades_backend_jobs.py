@@ -167,6 +167,33 @@ def test_sync_git_tree_returns_bounded_manifest(tmp_path):
     assert all(not path.startswith(".git") for path in paths)
 
 
+def test_populate_backend_ast_rejects_source_change_during_extraction(tmp_path, monkeypatch):
+    """The job boundary must not publish a graph from a moving workspace."""
+    from hermes_cli.hades_graph_config import SourceIdentityError
+    import hermes_cli.hades_index as hades_index
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    source = tmp_path / "src" / "app.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n", encoding="utf-8")
+
+    def mutating_builder(workspace_root, candidates, omitted, payload):
+        source.write_text("after\n", encoding="utf-8")
+        return {"summary": "synthetic graph", "symbols": []}
+
+    monkeypatch.setattr(hades_index, "build_graph_for_workspace", mutating_builder)
+
+    with pytest.raises(SourceIdentityError, match="source_changed_during_index"):
+        execute_job(
+            {
+                "job_id": "job_source_change",
+                "capability": "populate_backend_ast",
+                "payload": {"max_files": 10},
+            },
+            workspace_root=tmp_path,
+        )
+
+
 def test_sync_git_tree_includes_dirty_worktree_metadata_without_sensitive_paths(tmp_path):
     try:
         subprocess.run(["git", "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -158,6 +158,26 @@ model:
 #   response_cache_ttl: 300      # Cache TTL in seconds, 1-86400 (default: 300)
 
 # =============================================================================
+# Hades Graph Lifecycle v2 Indexing
+# =============================================================================
+#
+# These limits apply only when Hades creates a v2 code-graph artifact. The
+# compiled exclusions for dependency/build directories and secret files are
+# always enforced; excluded_paths only adds source-relative paths to that
+# baseline. There is intentionally no HADES_* environment-variable override.
+#
+# hades:
+#   graph_index:
+#     max_file_bytes: 8388608
+#     max_total_source_bytes: 2147483648
+#     max_wall_seconds: 3600
+#     max_chunk_uncompressed_bytes: 8388608
+#     max_bundle_uncompressed_bytes: 536870912
+#     spool_ttl_seconds: 86400
+#     graphify_candidates: false
+#     excluded_paths: []
+
+# =============================================================================
 # Git Worktree Isolation
 # =============================================================================
 # When enabled, each CLI session creates an isolated git worktree so multiple

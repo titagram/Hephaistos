@@ -1063,6 +1063,22 @@ DEFAULT_CONFIG = {
         "disabled_toolsets": [],
     },
     
+    # Graph lifecycle v2 reads this closed subsection at the explicit index
+    # boundary.  It has no HERMES_* environment bridge: configuration remains
+    # profile-aware and visible in config.yaml.
+    "hades": {
+        "graph_index": {
+            "max_file_bytes": 8_388_608,
+            "max_total_source_bytes": 2_147_483_648,
+            "max_wall_seconds": 3_600,
+            "max_chunk_uncompressed_bytes": 8_388_608,
+            "max_bundle_uncompressed_bytes": 536_870_912,
+            "spool_ttl_seconds": 86_400,
+            "graphify_candidates": False,
+            "excluded_paths": [],
+        },
+    },
+
     "terminal": {
         "backend": "local",
         "modal_mode": "auto",
@@ -4701,7 +4717,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
-    "sessions", "streaming", "updates", "mcp_servers",
+    "sessions", "streaming", "updates", "mcp_servers", "hades",
 }
 
 # Valid fields inside a custom_providers list entry
