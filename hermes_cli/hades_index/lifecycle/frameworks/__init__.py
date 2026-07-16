@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from hermes_cli.hades_index.lifecycle.model import (
+    CoverageEvent,
     EntrypointCandidate,
     ExtractionContext,
     FrameworkPipelineSegment,
@@ -63,6 +64,7 @@ class FrameworkAdapterRun:
     detections: tuple[FrameworkDetection, ...]
     candidates: tuple[EntrypointCandidate, ...]
     framework_segments: tuple[FrameworkPipelineSegment, ...]
+    coverage_events: tuple[CoverageEvent, ...] = ()
 
 
 class FrameworkAdapterRegistry:
@@ -107,6 +109,7 @@ def run_framework_adapters(
     detections: list[FrameworkDetection] = []
     candidates: list[EntrypointCandidate] = []
     segments: list[FrameworkPipelineSegment] = []
+    coverage_events: list[CoverageEvent] = []
     seen_segments: set[str] = set()
 
     for adapter in registry.adapters:
@@ -132,7 +135,18 @@ def run_framework_adapters(
         if not detection.detected:
             continue
         detections.append(detection)
-        for candidate in adapter.entrypoints(context, relevant_syntax):
+        adapter_candidates = adapter.entrypoints(context, relevant_syntax)
+        coverage_getter = getattr(adapter, "coverage_events", None)
+        if callable(coverage_getter):
+            adapter_coverage = coverage_getter(context)
+            if type(adapter_coverage) is not tuple or any(
+                type(event) is not CoverageEvent for event in adapter_coverage
+            ):
+                raise FrameworkAdapterError(
+                    "framework adapter emitted invalid coverage events"
+                )
+            coverage_events.extend(adapter_coverage)
+        for candidate in adapter_candidates:
             if type(candidate) is not EntrypointCandidate:
                 raise FrameworkAdapterError(
                     "framework adapter emitted a non-entrypoint candidate"
@@ -161,7 +175,12 @@ def run_framework_adapters(
                 segments.append(segment)
             candidates.append(candidate)
 
-    return FrameworkAdapterRun(tuple(detections), tuple(candidates), tuple(segments))
+    return FrameworkAdapterRun(
+        tuple(detections),
+        tuple(candidates),
+        tuple(segments),
+        tuple(coverage_events),
+    )
 
 
 __all__ = [

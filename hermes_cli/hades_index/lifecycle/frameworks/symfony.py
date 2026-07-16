@@ -14,6 +14,7 @@ import xml.etree.ElementTree as element_tree
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 try:  # PyYAML is already a project dependency; retain a safe failure mode.
@@ -21,9 +22,9 @@ try:  # PyYAML is already a project dependency; retain a safe failure mode.
 except ImportError:  # pragma: no cover - exercised by integration environments.
     yaml = None  # type: ignore[assignment]
 
-from hermes_cli.hades_graph_v2.identity import condition_hash
+from hermes_cli.hades_graph_v2.identity import condition_hash, normalize_source_path
+from hermes_cli.hades_graph_v2.schema import GraphContractError
 from hermes_cli.hades_graph_v2.model import (
-    EdgeFlow,
     EntrypointKind,
     EvidenceOrigin,
     MethodSemantics,
@@ -33,7 +34,11 @@ from hermes_cli.hades_index.lifecycle.frameworks import FrameworkDetection
 from hermes_cli.hades_index.lifecycle.model import (
     AlwaysSuccessor,
     ConfigLocatorIR,
+    CoverageCapability,
+    CoverageEvent,
+    CoverageOutcome,
     EntrypointCandidate,
+    ExceptionSuccessor,
     ExtractionContext,
     FrameworkBoundaryDescriptor,
     FrameworkBoundaryTarget,
@@ -42,6 +47,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     IREvidence,
     MatchConstraints,
     ReturnSuccessor,
+    Successor,
     SourceLocationIR,
     local_record_key,
 )
@@ -141,6 +147,7 @@ class _RouteContext:
     methods: tuple[str, ...] | None = None
     host: str | None = None
     condition: str | None = None
+    unresolved: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +173,7 @@ class _Listener:
     priority: int
     source_path: str
     source_order: int
+    method_name: str
     returns_response: bool
 
 
@@ -177,11 +185,69 @@ class _ServiceFacts:
     exception_handlers: tuple[_Listener, ...]
 
 
-def _text(context, path: str) -> str | None:
-    """Read a known source-relative path with no filesystem fallback."""
+@dataclass(frozen=True, slots=True)
+class _ControllerOutcome:
+    returns_response: bool
+    throws: bool
 
+
+@dataclass(frozen=True, slots=True)
+class _ExtractionSnapshot:
+    services: _ServiceFacts
+    controller_outcomes: Mapping[str, _ControllerOutcome]
+    coverage_events: tuple[CoverageEvent, ...]
+
+
+@dataclass(slots=True)
+class _Diagnostics:
+    """Collect safe, typed omissions while preserving successful facts."""
+
+    paths: dict[str, set[CoverageCapability]]
+
+    def mark(
+        self,
+        path: str,
+        capability: CoverageCapability = CoverageCapability.ENTRYPOINT_DISCOVERY,
+    ) -> None:
+        safe = _workspace_path(path)
+        if safe is not None:
+            self.paths.setdefault(safe, set()).add(capability)
+
+    def events(self) -> tuple[CoverageEvent, ...]:
+        return tuple(
+            CoverageEvent(
+                "php",
+                capability,
+                CoverageOutcome.PARTIAL,
+                "framework_config_unresolved",
+                path,
+                0,
+                1,
+            )
+            for path, capabilities in sorted(self.paths.items())
+            for capability in sorted(capabilities, key=lambda value: value.value)
+        )
+
+
+def _workspace_path(path: str) -> str | None:
+    """Return one canonical workspace-relative path or reject it before I/O."""
+
+    if not isinstance(path, str) or not path:
+        return None
     try:
-        return context.file_accessor(Path(path)).decode("utf-8")
+        return normalize_source_path(path)
+    except GraphContractError:
+        return None
+
+
+def _text(context: ExtractionContext, path: str) -> str | None:
+    """Read only a canonical source-relative path through the scoped accessor."""
+
+    safe_path = _workspace_path(path)
+    if safe_path is None:
+        return None
+    try:
+        return context.file_accessor(Path(safe_path)).decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -208,6 +274,8 @@ def _normalize_methods(value: object) -> tuple[str, ...] | None:
     if value is None:
         return None
     if isinstance(value, str):
+        if _is_computed(value):
+            return None
         values = re.findall(r"[A-Za-z]+", value)
     elif isinstance(value, (list, tuple)):
         values = [item for item in value if isinstance(item, str)]
@@ -238,13 +306,17 @@ def _as_mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _safe_yaml(content: str) -> Mapping[str, object]:
+def _safe_yaml(
+    content: str, path: str, diagnostics: _Diagnostics
+) -> Mapping[str, object] | None:
     if yaml is None:
-        return {}
+        diagnostics.mark(path, CoverageCapability.FRAMEWORK_LIFECYCLE)
+        return None
     try:
         loaded = yaml.safe_load(content)
     except yaml.YAMLError:
-        return {}
+        diagnostics.mark(path)
+        return None
     return _as_mapping(loaded)
 
 
@@ -297,20 +369,33 @@ def _route_from_mapping(
     source_path: str,
     content: str,
     source_order: int,
+    diagnostics: _Diagnostics,
 ) -> _RouteSpec | None:
     raw_path = value.get("path")
-    if not isinstance(raw_path, str) or not raw_path.startswith("/"):
+    own_name = value.get("name") if "name" in value else key
+    raw_host = value.get("host") if "host" in value else context.host
+    raw_condition = (
+        value.get("condition") if "condition" in value else context.condition
+    )
+    raw_methods = value.get("methods") if "methods" in value else context.methods
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path.startswith("/")
+        or context.unresolved
+        or _is_computed(raw_path)
+        or (own_name is not None and _is_computed(own_name))
+        or (raw_host is not None and _is_computed(raw_host))
+        or (raw_condition is not None and _is_computed(raw_condition))
+        or (raw_methods is not None and _normalize_methods(raw_methods) is None)
+    ):
+        diagnostics.mark(source_path)
         return None
     controller_value = value.get("controller", value.get("_controller"))
     controller = controller_value if isinstance(controller_value, str) else None
-    own_methods = _normalize_methods(value.get("methods"))
-    own_name = value.get("name") if isinstance(value.get("name"), str) else key
-    host = value.get("host") if isinstance(value.get("host"), str) else context.host
-    condition = (
-        value.get("condition")
-        if isinstance(value.get("condition"), str)
-        else context.condition
-    )
+    own_methods = _normalize_methods(raw_methods)
+    host = raw_host if isinstance(raw_host, str) else None
+    condition = raw_condition if isinstance(raw_condition, str) else None
+    name = own_name if isinstance(own_name, str) else None
     name = f"{context.name_prefix}{own_name}" if own_name else None
     line = _line(content, content.find(key))
     return _RouteSpec(
@@ -332,7 +417,10 @@ def _route_from_mapping(
 
 
 def _import_context(
-    value: Mapping[str, object], parent: _RouteContext
+    value: Mapping[str, object],
+    parent: _RouteContext,
+    diagnostics: _Diagnostics,
+    path: str,
 ) -> _RouteContext:
     prefix = value.get("prefix") if isinstance(value.get("prefix"), str) else ""
     name_prefix = value.get("name_prefix", value.get("name-prefix", ""))
@@ -342,6 +430,15 @@ def _import_context(
         if isinstance(value.get("condition"), str)
         else parent.condition
     )
+    unresolved = parent.unresolved or any(
+        not isinstance(value.get(field), str) or _is_computed(value.get(field))
+        for field in ("prefix", "name_prefix", "name-prefix", "host", "condition")
+        if field in value
+    )
+    if "methods" in value and _normalize_methods(value.get("methods")) is None:
+        unresolved = True
+    if unresolved:
+        diagnostics.mark(path)
     return _RouteContext(
         prefix=_join_path(parent.prefix, prefix),
         name_prefix=parent.name_prefix
@@ -349,17 +446,23 @@ def _import_context(
         methods=_normalize_methods(value.get("methods")) or parent.methods,
         host=host,
         condition=condition,
+        unresolved=unresolved,
     )
 
 
-def _resource_path(base_path: str, resource: str) -> str | None:
-    if resource.startswith(("@", "%")) or _is_computed(resource):
+def _resource_path(
+    base_path: str, resource: str, diagnostics: _Diagnostics
+) -> str | None:
+    if resource.startswith("@") or _is_computed(resource):
+        diagnostics.mark(base_path)
         return None
     parent = Path(base_path).parent
     candidate = (parent / resource).as_posix()
-    if candidate.startswith("../") or "/../" in candidate:
+    safe_candidate = _workspace_path(candidate)
+    if safe_candidate is None:
+        diagnostics.mark(base_path)
         return None
-    return candidate
+    return safe_candidate
 
 
 def _yaml_routes(
@@ -367,15 +470,18 @@ def _yaml_routes(
     path: str,
     route_context: _RouteContext,
     order: list[int],
-    seen: set[str],
+    active: frozenset[str],
+    diagnostics: _Diagnostics,
 ) -> list[_RouteSpec]:
-    if path in seen:
+    if path in active:
+        diagnostics.mark(path)
         return []
-    seen.add(path)
     content = _text(context, path)
     if content is None:
         return []
-    document = _safe_yaml(content)
+    document = _safe_yaml(content, path, diagnostics)
+    if document is None:
+        return []
     routes: list[_RouteSpec] = []
     for key, raw_value in document.items():
         if not isinstance(key, str) or not isinstance(raw_value, Mapping):
@@ -383,15 +489,16 @@ def _yaml_routes(
         value = _as_mapping(raw_value)
         resource = value.get("resource")
         if isinstance(resource, str):
-            child = _resource_path(path, resource)
+            child = _resource_path(path, resource, diagnostics)
             if child is not None:
                 routes.extend(
                     _routes_from_path(
                         context,
                         child,
-                        _import_context(value, route_context),
+                        _import_context(value, route_context, diagnostics, path),
                         order,
-                        seen,
+                        active | {path},
+                        diagnostics,
                     )
                 )
             continue
@@ -402,6 +509,7 @@ def _yaml_routes(
             source_path=path,
             content=content,
             source_order=order[0],
+            diagnostics=diagnostics,
         )
         if spec is not None:
             order[0] += 1
@@ -414,17 +522,19 @@ def _xml_routes(
     path: str,
     route_context: _RouteContext,
     order: list[int],
-    seen: set[str],
+    active: frozenset[str],
+    diagnostics: _Diagnostics,
 ) -> list[_RouteSpec]:
-    if path in seen:
+    if path in active:
+        diagnostics.mark(path)
         return []
-    seen.add(path)
     content = _text(context, path)
     if content is None:
         return []
     try:
         root = element_tree.fromstring(content)
     except element_tree.ParseError:
+        diagnostics.mark(path)
         return []
     routes: list[_RouteSpec] = []
     for node in root:
@@ -432,16 +542,17 @@ def _xml_routes(
         if name == "import":
             resource = node.attrib.get("resource")
             if resource:
-                child = _resource_path(path, resource)
+                child = _resource_path(path, resource, diagnostics)
                 if child:
                     data: dict[str, object] = dict(node.attrib)
                     routes.extend(
                         _routes_from_path(
                             context,
                             child,
-                            _import_context(data, route_context),
+                            _import_context(data, route_context, diagnostics, path),
                             order,
-                            seen,
+                            active | {path},
+                            diagnostics,
                         )
                     )
             continue
@@ -457,13 +568,19 @@ def _xml_routes(
             for child in node
             if child.tag.rsplit("}", 1)[-1] == "requirement"
         }
+        priority_text = node.attrib.get("priority", "0")
+        try:
+            priority = int(priority_text)
+        except ValueError:
+            diagnostics.mark(path)
+            continue
         value: dict[str, object] = {
             "path": node.attrib.get("path"),
             "controller": node.attrib.get("controller", defaults.get("_controller")),
             "methods": node.attrib.get("methods", requirements.get("_method")),
             "host": node.attrib.get("host"),
             "condition": node.attrib.get("condition"),
-            "priority": int(node.attrib.get("priority", "0")),
+            "priority": priority,
         }
         spec = _route_from_mapping(
             value,
@@ -472,6 +589,7 @@ def _xml_routes(
             source_path=path,
             content=content,
             source_order=order[0],
+            diagnostics=diagnostics,
         )
         if spec:
             order[0] += 1
@@ -484,11 +602,12 @@ def _php_routes(
     path: str,
     route_context: _RouteContext,
     order: list[int],
-    seen: set[str],
+    active: frozenset[str],
+    diagnostics: _Diagnostics,
 ) -> list[_RouteSpec]:
-    if path in seen:
+    if path in active:
+        diagnostics.mark(path)
         return []
-    seen.add(path)
     content = _text(context, path)
     if content is None:
         return []
@@ -502,7 +621,7 @@ def _php_routes(
     for _offset, operation, match in sorted(operations, key=lambda item: item[0]):
         chain = match.group("chain")
         if operation == "import":
-            resource = _resource_path(path, match.group("resource"))
+            resource = _resource_path(path, match.group("resource"), diagnostics)
             if resource is None:
                 continue
             prefix = _php_chain_string(chain, "prefix") or ""
@@ -517,6 +636,15 @@ def _php_routes(
                 if methods_match
                 else route_context.methods
             )
+            unresolved = route_context.unresolved or any(
+                _is_computed(value)
+                for value in (prefix, name_prefix, host, condition)
+                if value is not None
+            )
+            if methods_match is not None and methods is None:
+                unresolved = True
+            if unresolved:
+                diagnostics.mark(path)
             routes.extend(
                 _routes_from_path(
                     context,
@@ -527,9 +655,11 @@ def _php_routes(
                         methods=methods,
                         host=host,
                         condition=condition,
+                        unresolved=unresolved,
                     ),
                     order,
-                    seen,
+                    active | {path},
+                    diagnostics,
                 )
             )
             continue
@@ -543,10 +673,25 @@ def _php_routes(
             if methods_match
             else route_context.methods
         )
+        route_name = match.group("name")
+        route_path = match.group("path")
+        if (
+            route_context.unresolved
+            or _is_computed(route_name)
+            or _is_computed(route_path)
+            or (route_context.host is not None and _is_computed(route_context.host))
+            or (
+                route_context.condition is not None
+                and _is_computed(route_context.condition)
+            )
+            or (methods_match is not None and methods is None)
+        ):
+            diagnostics.mark(path)
+            continue
         routes.append(
             _RouteSpec(
-                path=_join_path(route_context.prefix, match.group("path")),
-                name=route_context.name_prefix + match.group("name"),
+                path=_join_path(route_context.prefix, route_path),
+                name=route_context.name_prefix + route_name,
                 methods=methods,
                 host=route_context.host,
                 condition=route_context.condition,
@@ -568,14 +713,16 @@ def _routes_from_path(
     path: str,
     route_context: _RouteContext,
     order: list[int],
-    seen: set[str],
+    active: frozenset[str],
+    diagnostics: _Diagnostics,
 ) -> list[_RouteSpec]:
     if path.endswith((".yaml", ".yml")):
-        return _yaml_routes(context, path, route_context, order, seen)
+        return _yaml_routes(context, path, route_context, order, active, diagnostics)
     if path.endswith(".xml"):
-        return _xml_routes(context, path, route_context, order, seen)
+        return _xml_routes(context, path, route_context, order, active, diagnostics)
     if path.endswith(".php"):
-        return _php_routes(context, path, route_context, order, seen)
+        return _php_routes(context, path, route_context, order, active, diagnostics)
+    diagnostics.mark(path)
     return []
 
 
@@ -602,7 +749,10 @@ def _class_for_offset(
 
 
 def _attribute_routes(
-    context, syntax: Sequence[SyntaxIR], order: list[int]
+    context,
+    syntax: Sequence[SyntaxIR],
+    order: list[int],
+    diagnostics: _Diagnostics,
 ) -> list[_RouteSpec]:
     """Read supported Route attributes/annotations from already parsed PHP files."""
 
@@ -641,7 +791,15 @@ def _attribute_routes(
             if declaration is None or declaration.start() - offset > 2_000:
                 continue
             path, name, methods, host, condition, priority = _route_arguments(args)
-            if path is None or not path.startswith("/"):
+            if (
+                path is None
+                or not path.startswith("/")
+                or _is_computed(path)
+                or (name is not None and _is_computed(name))
+                or (host is not None and _is_computed(host))
+                or (condition is not None and _is_computed(condition))
+            ):
+                diagnostics.mark(item.path)
                 continue
             locator_path = item.path
             spec = _RouteSpec(
@@ -722,7 +880,107 @@ def _attribute_routes(
     return all_routes
 
 
-def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
+def _default_listener_method(event: str) -> str:
+    """Symfony's omitted tag method is the invokable listener, never a guess."""
+
+    _ = event
+    return "__invoke"
+
+
+def _class_body(content: str, class_name: str) -> str | None:
+    """Return the one balanced body for an exact PHP class declaration."""
+
+    pattern = re.compile(rf"\bclass\s+{re.escape(class_name)}\b")
+    match = pattern.search(content)
+    if match is None:
+        return None
+    opening = content.find("{", match.end())
+    if opening < 0:
+        return None
+    depth = 0
+    for index in range(opening, len(content)):
+        character = content[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return content[opening + 1 : index]
+    return None
+
+
+def _method_body(content: str, class_name: str, method_name: str) -> str | None:
+    """Prove behaviour from the registered method in the owning class only."""
+
+    class_body = _class_body(content, class_name)
+    if class_body is None:
+        return None
+    method = re.compile(
+        rf"\bfunction\s+{re.escape(method_name)}\s*\([^)]*\)"
+        r"\s*(?::\s*[A-Za-z_\\][A-Za-z0-9_\\|? ]*)?\s*\{",
+        re.MULTILINE,
+    ).search(class_body)
+    if method is None:
+        return None
+    opening = method.end() - 1
+    depth = 0
+    for index in range(opening, len(class_body)):
+        character = class_body[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return class_body[opening + 1 : index]
+    return None
+
+
+def _class_sources(
+    context: ExtractionContext,
+    class_name: str,
+    source_texts: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Find only source files that declare the requested class, never a tail match."""
+
+    tail = class_name.rsplit("\\", 1)[-1]
+    candidates = {
+        path: content
+        for path, content in source_texts.items()
+        if _class_body(content, tail) is not None
+    }
+    normalized = class_name.lstrip("\\")
+    if normalized.startswith("App\\"):
+        relative = normalized[len("App\\") :].replace("\\", "/")
+        inferred_path = f"src/{relative}.php"
+        inferred = _text(context, inferred_path)
+        if inferred is not None and _class_body(inferred, tail) is not None:
+            candidates[inferred_path] = inferred
+    # A duplicate declaration cannot prove which runtime class is registered.
+    return tuple(candidates.values()) if len(candidates) == 1 else ()
+
+
+def _service_method_matches(
+    context: ExtractionContext,
+    service: str,
+    bindings: Mapping[str, str],
+    source_texts: Mapping[str, str],
+    method_name: str,
+    pattern: re.Pattern[str],
+) -> bool:
+    class_name = bindings.get(service, service).lstrip("\\")
+    class_tail = class_name.rsplit("\\", 1)[-1]
+    return any(
+        body is not None and bool(pattern.search(body))
+        for content in _class_sources(context, class_name, source_texts)
+        for body in (_method_body(content, class_tail, method_name),)
+    )
+
+
+def _service_facts(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    diagnostics: _Diagnostics,
+) -> _ServiceFacts:
     bindings: dict[str, str] = {}
     listeners: list[_Listener] = []
     voters: list[str] = []
@@ -738,7 +996,10 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
         if content is None:
             continue
         if path.endswith((".yaml", ".yml")):
-            services = _as_mapping(_safe_yaml(content).get("services"))
+            document = _safe_yaml(content, path, diagnostics)
+            if document is None:
+                continue
+            services = _as_mapping(document.get("services"))
             for service, raw in services.items():
                 if not isinstance(service, str) or not isinstance(raw, Mapping):
                     continue
@@ -769,14 +1030,23 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
                     }:
                         continue
                     priority = tag_data.get("priority", 0)
+                    method_name = tag_data.get("method")
+                    if not isinstance(method_name, str) or _is_computed(method_name):
+                        method_name = _default_listener_method(str(event))
                     listener = _Listener(
                         event=str(event),
                         service=service,
                         priority=priority if isinstance(priority, int) else 0,
                         source_path=path,
                         source_order=order,
-                        returns_response=_service_returns_response(
-                            service, bindings, source_texts, context
+                        method_name=method_name,
+                        returns_response=_service_method_matches(
+                            context,
+                            service,
+                            bindings,
+                            source_texts,
+                            method_name,
+                            _RESPONSE_RE,
                         ),
                     )
                     order += 1
@@ -788,6 +1058,7 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
             try:
                 root = element_tree.fromstring(content)
             except element_tree.ParseError:
+                diagnostics.mark(path)
                 continue
             for service_node in root.iter():
                 if service_node.tag.rsplit("}", 1)[-1] != "service":
@@ -814,15 +1085,28 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
                     try:
                         priority = int(tag_node.attrib.get("priority", "0"))
                     except ValueError:
+                        diagnostics.mark(path)
                         priority = 0
+                    method_name = tag_node.attrib.get(
+                        "method"
+                    ) or _default_listener_method(event)
+                    if _is_computed(method_name):
+                        diagnostics.mark(path)
+                        continue
                     listener = _Listener(
                         event=event,
                         service=service,
                         priority=priority,
                         source_path=path,
                         source_order=order,
-                        returns_response=_service_returns_response(
-                            service, bindings, source_texts, context
+                        method_name=method_name,
+                        returns_response=_service_method_matches(
+                            context,
+                            service,
+                            bindings,
+                            source_texts,
+                            method_name,
+                            _RESPONSE_RE,
                         ),
                     )
                     order += 1
@@ -862,14 +1146,32 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
                     priority = (
                         int(priority_match.group("value")) if priority_match else 0
                     )
+                    method_match = re.search(
+                        r"['\"]method['\"]\s*=>\s*['\"](?P<value>[^'\"]+)['\"]",
+                        attributes,
+                    )
+                    method_name = (
+                        method_match.group("value")
+                        if method_match is not None
+                        else _default_listener_method(event)
+                    )
+                    if _is_computed(method_name):
+                        diagnostics.mark(path)
+                        continue
                     listener = _Listener(
                         event=event,
                         service=service,
                         priority=priority,
                         source_path=path,
                         source_order=order,
-                        returns_response=_service_returns_response(
-                            service, bindings, source_texts, context
+                        method_name=method_name,
+                        returns_response=_service_method_matches(
+                            context,
+                            service,
+                            bindings,
+                            source_texts,
+                            method_name,
+                            _RESPONSE_RE,
                         ),
                     )
                     order += 1
@@ -890,7 +1192,15 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
                 priority=priority,
                 source_path=path,
                 source_order=order,
-                returns_response=bool(_RESPONSE_RE.search(content)),
+                method_name=event_match.group("method"),
+                returns_response=_service_method_matches(
+                    context,
+                    service,
+                    bindings,
+                    source_texts,
+                    event_match.group("method"),
+                    _RESPONSE_RE,
+                ),
             )
             order += 1
             (
@@ -901,84 +1211,284 @@ def _service_facts(context, syntax: Sequence[SyntaxIR]) -> _ServiceFacts:
             rows,
             key=lambda item: (
                 -item.priority,
-                item.service,
-                item.source_path,
                 item.source_order,
+                item.source_path,
+                item.service,
             ),
         )
     )
     return _ServiceFacts(
-        bindings,
+        MappingProxyType(dict(bindings)),
         ordered(listeners),
         tuple(sorted(set(voters))),
         ordered(exception_handlers),
     )
 
 
-def _service_returns_response(
-    service: str,
-    bindings: Mapping[str, str],
-    source_texts: Mapping[str, str],
-    context,
-) -> bool:
-    class_tail = bindings.get(service, service).rsplit("\\", 1)[-1]
-    texts = list(source_texts.values())
-    class_name = bindings.get(service, service).lstrip("\\")
-    if class_name.startswith("App\\"):
-        relative_class = class_name[len("App\\") :].replace("\\", "/")
-        inferred_path = f"src/{relative_class}.php"
-        inferred = _text(context, inferred_path)
-        if inferred is not None:
-            texts.append(inferred)
-    return any(
-        class_tail in content and bool(_RESPONSE_RE.search(content))
-        for content in texts
-    )
+@dataclass(frozen=True, slots=True)
+class _SecurityRule:
+    pattern: str
+    decision: str
+    source_path: str
+    source_order: int
 
 
-def _security_for_route(context, path: str) -> tuple[bool, bool]:
-    """Return only statically applicable firewall/access-control facts."""
+@dataclass(frozen=True, slots=True)
+class _FirewallRule:
+    pattern: str | None
+    enabled: bool
+    uncertain: bool
+    source_path: str
+    source_order: int
 
-    firewall = False
-    access = False
+
+def _security_decision(rule: Mapping[str, object]) -> str:
+    """Classify only the outcome Symfony can establish without evaluating PHP."""
+
+    allow_if = rule.get("allow_if")
+    if allow_if in {"true", True}:
+        return "allow"
+    if allow_if in {"false", False}:
+        return "deny"
+    roles = rule.get("roles", rule.get("role"))
+    if isinstance(roles, str):
+        role_values = {roles}
+    elif isinstance(roles, (list, tuple)) and all(
+        isinstance(item, str) for item in roles
+    ):
+        role_values = set(roles)
+    else:
+        return "boundary"
+    if role_values and role_values <= {
+        "PUBLIC_ACCESS",
+        "IS_AUTHENTICATED_ANONYMOUSLY",
+    }:
+        return "allow"
+    return "boundary"
+
+
+def _matching_security_rule(
+    path: str,
+    rules: Sequence[_SecurityRule],
+    diagnostics: _Diagnostics,
+) -> _SecurityRule | None:
+    """Apply Symfony access controls in declared first-match order."""
+
+    for rule in rules:
+        if _is_computed(rule.pattern):
+            continue
+        try:
+            if re.search(rule.pattern, path) is not None:
+                return rule
+        except re.error:
+            diagnostics.mark(rule.source_path)
+            continue
+    return None
+
+
+def _matching_firewall(
+    path: str,
+    rules: Sequence[_FirewallRule],
+    diagnostics: _Diagnostics,
+) -> tuple[bool, bool]:
+    """Return (proven firewall, uncertain matcher) using first-match semantics."""
+
+    for rule in rules:
+        if rule.uncertain:
+            diagnostics.mark(rule.source_path)
+            return False, True
+        if rule.pattern is None:
+            return rule.enabled, False
+        try:
+            if re.search(rule.pattern, path) is not None:
+                return rule.enabled, False
+        except re.error:
+            diagnostics.mark(rule.source_path)
+            return False, True
+    return False, False
+
+
+def _security_for_route(
+    context: ExtractionContext,
+    path: str,
+    diagnostics: _Diagnostics,
+) -> tuple[bool, _SecurityRule | None]:
+    """Read bounded YAML/XML/PHP security facts without changing their order."""
+
+    firewall_rules: list[_FirewallRule] = []
+    rules: list[_SecurityRule] = []
+    access_order = 0
+    firewall_order = 0
     for config_path in _SECURITY_FILES:
         content = _text(context, config_path)
-        if content is None or not config_path.endswith((".yaml", ".yml")):
+        if content is None:
             continue
-        security = _as_mapping(_safe_yaml(content).get("security"))
-        firewall = firewall or bool(_as_mapping(security.get("firewalls")))
-        controls = security.get("access_control", ())
-        if not isinstance(controls, (tuple, list)):
-            continue
-        for rule in controls:
-            pattern = _as_mapping(rule).get("path")
-            if not isinstance(pattern, str) or _is_computed(pattern):
+        if config_path.endswith((".yaml", ".yml")):
+            document = _safe_yaml(content, config_path, diagnostics)
+            if document is None:
                 continue
-            if pattern.startswith("^") and path.startswith(pattern[1:]):
-                access = True
-            elif pattern == path:
-                access = True
-    return firewall, access
+            security = _as_mapping(document.get("security"))
+            firewalls = _as_mapping(security.get("firewalls"))
+            for _name, raw_firewall in firewalls.items():
+                firewall_data = _as_mapping(raw_firewall)
+                raw_pattern = firewall_data.get("pattern")
+                has_custom_matcher = any(
+                    field in firewall_data
+                    for field in ("request_matcher", "matcher", "host", "methods")
+                )
+                if raw_pattern is None and not has_custom_matcher:
+                    firewall_rules.append(
+                        _FirewallRule(
+                            None,
+                            firewall_data.get("security") is not False,
+                            False,
+                            config_path,
+                            firewall_order,
+                        )
+                    )
+                elif isinstance(raw_pattern, str) and not _is_computed(raw_pattern):
+                    firewall_rules.append(
+                        _FirewallRule(
+                            raw_pattern,
+                            firewall_data.get("security") is not False,
+                            False,
+                            config_path,
+                            firewall_order,
+                        )
+                    )
+                else:
+                    firewall_rules.append(
+                        _FirewallRule(
+                            None,
+                            False,
+                            True,
+                            config_path,
+                            firewall_order,
+                        )
+                    )
+                firewall_order += 1
+            controls = security.get("access_control", ())
+            if not isinstance(controls, (tuple, list)):
+                diagnostics.mark(config_path)
+                continue
+            for raw_rule in controls:
+                rule = _as_mapping(raw_rule)
+                pattern = rule.get("path")
+                if not isinstance(pattern, str) or _is_computed(pattern):
+                    diagnostics.mark(config_path)
+                    continue
+                rules.append(
+                    _SecurityRule(
+                        pattern,
+                        _security_decision(rule),
+                        config_path,
+                        access_order,
+                    )
+                )
+                access_order += 1
+            continue
+        if config_path.endswith(".xml"):
+            try:
+                root = element_tree.fromstring(content)
+            except element_tree.ParseError:
+                diagnostics.mark(config_path)
+                continue
+            for node in root.iter():
+                tag = node.tag.rsplit("}", 1)[-1]
+                if tag == "firewall":
+                    pattern = node.attrib.get("pattern")
+                    has_custom_matcher = any(
+                        attribute in node.attrib
+                        for attribute in ("request-matcher", "matcher", "host")
+                    )
+                    firewall_rules.append(
+                        _FirewallRule(
+                            pattern if pattern and not _is_computed(pattern) else None,
+                            node.attrib.get("security") != "false",
+                            has_custom_matcher
+                            or (pattern is not None and _is_computed(pattern)),
+                            config_path,
+                            firewall_order,
+                        )
+                    )
+                    firewall_order += 1
+                if tag not in {"access-control", "access_control"}:
+                    continue
+                pattern = node.attrib.get("path")
+                if not pattern or _is_computed(pattern):
+                    diagnostics.mark(config_path)
+                    continue
+                roles = node.attrib.get("roles", node.attrib.get("role"))
+                decision = _security_decision({
+                    "roles": roles.split(",") if isinstance(roles, str) else roles,
+                    "allow_if": node.attrib.get("allow-if"),
+                })
+                rules.append(
+                    _SecurityRule(pattern, decision, config_path, access_order)
+                )
+                access_order += 1
+            continue
+        # PHP configuration is intentionally bounded to literal path + role calls.
+        for match in re.finditer(
+            r"->path\s*\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)"
+            r"(?P<chain>[^;]{0,800})",
+            content,
+            re.DOTALL,
+        ):
+            roles_match = re.search(
+                r"->roles\s*\(\s*\[(?P<roles>[^]]*)\]\s*\)",
+                match.group("chain"),
+            )
+            roles = (
+                re.findall(r"['\"]([^'\"]+)['\"]", roles_match.group("roles"))
+                if roles_match is not None
+                else ()
+            )
+            rules.append(
+                _SecurityRule(
+                    match.group("path"),
+                    _security_decision({"roles": roles}),
+                    config_path,
+                    access_order,
+                )
+            )
+            access_order += 1
+        if "firewall" in content:
+            # PHP builder calls outside the tiny literal grammar are not a
+            # proven matcher, so they cannot create an exact firewall stage.
+            firewall_rules.append(
+                _FirewallRule(None, False, True, config_path, firewall_order)
+            )
+            firewall_order += 1
+    firewall, firewall_uncertain = _matching_firewall(path, firewall_rules, diagnostics)
+    rule = _matching_security_rule(path, rules, diagnostics)
+    if firewall_uncertain and rule is None:
+        rule = _SecurityRule("", "boundary", "config/packages/security", -1)
+    return firewall, rule
 
 
-def _handler_keys(syntax: Sequence[SyntaxIR]) -> dict[str, str]:
-    keys: dict[str, str] = {}
+def _handler_keys(syntax: Sequence[SyntaxIR]) -> Mapping[str, frozenset[str]]:
+    """Index only class-qualified declarations; bare method names are ambiguous."""
+
+    keys: dict[str, set[str]] = {}
     for item in syntax:
         for index, symbol in enumerate(item.symbols):
             key = local_record_key(
                 "php", item.path, "executable_declaration", "ast", f"symbols/{index}", 0
             )
-            names = {symbol.name, symbol.name.replace("::", ".")}
+            names = {symbol.name.replace("::", ".")}
             if symbol.container:
                 names.add(f"{symbol.container}.{symbol.name.rsplit('.', 1)[-1]}")
             for name in names:
-                keys[name.casefold()] = key
-                keys[name.rsplit(".", 1)[-1].casefold()] = key
-    return keys
+                if "." in name:
+                    keys.setdefault(name.casefold(), set()).add(key)
+    return MappingProxyType({name: frozenset(values) for name, values in keys.items()})
 
 
 def _resolve_handler(
-    controller: str | None, bindings: Mapping[str, str], keys: Mapping[str, str]
+    controller: str | None,
+    bindings: Mapping[str, str],
+    keys: Mapping[str, frozenset[str]],
 ) -> str | None:
     if controller is None or _is_computed(controller):
         return None
@@ -989,12 +1499,13 @@ def _resolve_handler(
     if _is_computed(class_name) or _is_computed(method):
         return None
     class_tail = class_name.rsplit("\\", 1)[-1]
-    candidates = (
+    candidates = {
         f"{class_tail}.{method}",
         f"{class_name}.{method}",
-        method,
-    )
-    matched = {keys[item.casefold()] for item in candidates if item.casefold() in keys}
+    }
+    matched = {
+        key for item in candidates for key in keys.get(item.casefold(), frozenset())
+    }
     return next(iter(matched)) if len(matched) == 1 else None
 
 
@@ -1011,7 +1522,7 @@ def _controller_has(
     target = bindings.get(controller, controller).lstrip("\\")
     if "::" not in target:
         return False
-    class_name, _method = target.rsplit("::", 1)
+    class_name, method_name = target.rsplit("::", 1)
     paths: tuple[str, ...]
     if class_name.startswith("App\\"):
         relative_class = class_name[len("App\\") :].replace("\\", "/")
@@ -1023,9 +1534,12 @@ def _controller_has(
         paths = (f"src/Controller/{class_name}.php",)
     else:
         return False
+    class_tail = class_name.rsplit("\\", 1)[-1]
     return any(
-        source is not None and bool(pattern.search(source))
+        body is not None and bool(pattern.search(body))
         for source in (_text(context, path) for path in paths)
+        if source is not None
+        for body in (_method_body(source, class_tail, method_name),)
     )
 
 
@@ -1041,7 +1555,10 @@ def _route_locator(context, spec: _RouteSpec) -> ConfigLocatorIR:
 
 
 def _candidate_from_spec(
-    context, spec: _RouteSpec, bindings: Mapping[str, str], keys: Mapping[str, str]
+    context,
+    spec: _RouteSpec,
+    bindings: Mapping[str, str],
+    keys: Mapping[str, frozenset[str]],
 ) -> EntrypointCandidate:
     locator = _route_locator(context, spec)
     handler = (
@@ -1122,6 +1639,18 @@ def _terminal_key(candidate: EntrypointCandidate, role: str, ordinal: int) -> st
     )
 
 
+def _exception_scope_key(candidate: EntrypointCandidate) -> str:
+    locator = candidate.registration_locator
+    return local_record_key(
+        "php",
+        locator.source_location.path,
+        "framework_exception_scope",
+        "config",
+        f"{locator.structural_pointer}/exceptions",
+        locator.ordinal,
+    )
+
+
 class SymfonyLifecycleAdapter:
     """FrameworkAdapter implementation for statically provable Symfony facts."""
 
@@ -1129,11 +1658,41 @@ class SymfonyLifecycleAdapter:
     framework = "symfony"
 
     def __init__(self) -> None:
-        # ``pipeline`` receives only a normalized candidate, so retain the two
-        # facts already proven while extracting this context.  The cache is
-        # reset per extraction and never contains source text or guesses.
-        self._response_handler_keys: set[str] = set()
-        self._exception_handler_keys: set[str] = set()
+        # ``pipeline`` only receives normalized candidates.  Preserve immutable,
+        # source-derived facts per extraction context, never source text or
+        # mutable cross-project state.
+        self._snapshots: Mapping[tuple[str, str, str, str], _ExtractionSnapshot] = (
+            MappingProxyType({})
+        )
+
+    @staticmethod
+    def _snapshot_key(context: ExtractionContext) -> tuple[str, str, str, str]:
+        return (
+            str(context.workspace_root),
+            context.project_id,
+            context.workspace_binding_id,
+            context.source_identity.tree_sha256,
+        )
+
+    def _snapshot(self, context: ExtractionContext) -> _ExtractionSnapshot:
+        snapshot = self._snapshots.get(self._snapshot_key(context))
+        if snapshot is not None:
+            return snapshot
+        return _ExtractionSnapshot(
+            _ServiceFacts(MappingProxyType({}), (), (), ()),
+            MappingProxyType({}),
+            (),
+        )
+
+    def _remember(
+        self, context: ExtractionContext, snapshot: _ExtractionSnapshot
+    ) -> None:
+        snapshots = dict(self._snapshots)
+        snapshots[self._snapshot_key(context)] = snapshot
+        self._snapshots = MappingProxyType(snapshots)
+
+    def coverage_events(self, context: ExtractionContext) -> tuple[CoverageEvent, ...]:
+        return self._snapshot(context).coverage_events
 
     def detected_version(self, context: ExtractionContext) -> str | None:
         for record in context.detected_frameworks:
@@ -1178,19 +1737,25 @@ class SymfonyLifecycleAdapter:
     def entrypoints(
         self, context: ExtractionContext, syntax: Sequence[SyntaxIR]
     ) -> tuple[EntrypointCandidate, ...]:
-        services = _service_facts(context, syntax)
+        diagnostics = _Diagnostics({})
+        services = _service_facts(context, syntax, diagnostics)
         order = [0]
         routes: list[_RouteSpec] = []
-        seen: set[str] = set()
         for path in _ROUTE_FILES:
             routes.extend(
-                _routes_from_path(context, path, _RouteContext(), order, seen)
+                _routes_from_path(
+                    context,
+                    path,
+                    _RouteContext(),
+                    order,
+                    frozenset(),
+                    diagnostics,
+                )
             )
-        routes.extend(_attribute_routes(context, syntax, order))
+        routes.extend(_attribute_routes(context, syntax, order, diagnostics))
         keys = _handler_keys(syntax)
-        self._response_handler_keys.clear()
-        self._exception_handler_keys.clear()
         candidates: list[EntrypointCandidate] = []
+        outcomes: dict[str, _ControllerOutcome] = {}
         for spec in sorted(
             routes,
             key=lambda item: (
@@ -1202,15 +1767,31 @@ class SymfonyLifecycleAdapter:
         ):
             candidate = _candidate_from_spec(context, spec, services.bindings, keys)
             if candidate.handler_local_key is not None:
-                if _controller_has(
-                    context, spec.controller, services.bindings, _RESPONSE_RE
-                ):
-                    self._response_handler_keys.add(candidate.handler_local_key)
-                if _controller_has(
-                    context, spec.controller, services.bindings, _THROW_RE
-                ):
-                    self._exception_handler_keys.add(candidate.handler_local_key)
+                previous = outcomes.get(
+                    candidate.handler_local_key, _ControllerOutcome(False, False)
+                )
+                outcomes[candidate.handler_local_key] = _ControllerOutcome(
+                    previous.returns_response
+                    or _controller_has(
+                        context, spec.controller, services.bindings, _RESPONSE_RE
+                    ),
+                    previous.throws
+                    or _controller_has(
+                        context, spec.controller, services.bindings, _THROW_RE
+                    ),
+                )
+            # Parse security now so typed diagnostics are part of this immutable
+            # extraction snapshot, rather than a side effect of display order.
+            _security_for_route(context, candidate.public_path or "/", diagnostics)
             candidates.append(candidate)
+        self._remember(
+            context,
+            _ExtractionSnapshot(
+                services,
+                MappingProxyType(dict(outcomes)),
+                diagnostics.events(),
+            ),
+        )
         completed: list[EntrypointCandidate] = []
         for candidate in candidates:
             segments = self.pipeline(context, candidate)
@@ -1228,9 +1809,10 @@ class SymfonyLifecycleAdapter:
     def pipeline(
         self, context: ExtractionContext, candidate: EntrypointCandidate
     ) -> tuple[FrameworkPipelineSegment, ...]:
-        services = _service_facts(context, ())
-        firewall, access_control = _security_for_route(
-            context, candidate.public_path or "/"
+        snapshot = self._snapshot(context)
+        services = snapshot.services
+        firewall, access_rule = _security_for_route(
+            context, candidate.public_path or "/", _Diagnostics({})
         )
         roles: list[tuple[str, str | None, bool]] = [("router", None, False)]
         roles.extend(
@@ -1240,19 +1822,25 @@ class SymfonyLifecycleAdapter:
         )
         if firewall:
             roles.append(("firewall", None, False))
-        if access_control:
-            roles.append(("access_control", None, True))
+        if access_rule is not None:
+            if access_rule.decision == "allow":
+                roles.append(("access_control_allow", None, False))
+            elif access_rule.decision == "deny":
+                roles.append(("access_control_deny", None, True))
+            else:
+                roles.append(("security_unresolved_boundary", None, False))
         roles.extend(("voter", voter, False) for voter in services.voters)
         roles.append(("argument_resolver", None, False))
+        outcome = (
+            snapshot.controller_outcomes.get(candidate.handler_local_key)
+            if candidate.handler_local_key is not None
+            else None
+        )
         handler_has_response = (
-            candidate.handler_local_key is not None
-            and candidate.handler_local_key in self._response_handler_keys
+            outcome.returns_response if outcome is not None else False
         )
-        handler_has_exception = (
-            candidate.handler_local_key is not None
-            and candidate.handler_local_key in self._exception_handler_keys
-        )
-        roles.append(("controller", None, handler_has_response))
+        handler_has_exception = outcome.throws if outcome is not None else False
+        roles.append(("controller", None, False))
         response_listeners = tuple(
             listener
             for listener in services.listeners
@@ -1268,20 +1856,24 @@ class SymfonyLifecycleAdapter:
             # assertion that a user listener is registered.  Keeping this
             # boundary makes the response phase visible without inventing one.
             roles.append(("response_listener", None, False))
-        roles.extend(
-            ("exception_listener", listener.service, listener.returns_response)
-            for listener in services.exception_handlers
-        )
-        if handler_has_exception and not services.exception_handlers:
-            roles.append(("unhandled_exception", None, True))
         if candidate.unresolved_fact_local_key is not None:
             roles.append(("unresolved_boundary", None, False))
+        exception_roles: list[tuple[str, str | None, bool]] = []
+        if handler_has_exception:
+            exception_roles.extend(
+                ("exception_listener", listener.service, listener.returns_response)
+                for listener in services.exception_handlers
+            )
+            if not services.exception_handlers:
+                exception_roles.append(("unhandled_exception", None, True))
+        all_roles = roles + exception_roles
         keys = [
             _pipeline_key(candidate, role, ordinal)
-            for ordinal, (role, _name, _short) in enumerate(roles)
+            for ordinal, (role, _name, _short) in enumerate(all_roles)
         ]
         segments: list[FrameworkPipelineSegment] = []
-        for ordinal, (role, name, short_circuit) in enumerate(roles):
+        main_count = len(roles)
+        for ordinal, (role, name, short_circuit) in enumerate(all_roles):
             locator = candidate.registration_locator
             target = (
                 FrameworkLocalTarget(candidate.handler_local_key)
@@ -1292,16 +1884,37 @@ class SymfonyLifecycleAdapter:
                     )
                 )
             )
-            next_key = (
-                keys[ordinal + 1]
-                if ordinal + 1 < len(keys)
-                else _terminal_key(candidate, "response", ordinal)
-            )
-            shortcuts: tuple[ReturnSuccessor, ...] = ()
-            if short_circuit or role in {"access_control", "exception_listener"}:
-                shortcuts = (
-                    ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0),
+            if ordinal < main_count:
+                next_key = (
+                    keys[ordinal + 1]
+                    if ordinal + 1 < main_count
+                    else _terminal_key(candidate, "response", ordinal)
                 )
+            else:
+                next_key = (
+                    keys[ordinal + 1]
+                    if ordinal + 1 < len(keys)
+                    else _terminal_key(candidate, "exception", ordinal)
+                )
+            shortcuts: list[Successor] = []
+            if short_circuit:
+                shortcuts.append(
+                    ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0)
+                )
+            if role == "controller":
+                if handler_has_response:
+                    shortcuts.append(
+                        ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0)
+                    )
+                if handler_has_exception and exception_roles:
+                    shortcuts.append(
+                        ExceptionSuccessor(
+                            keys[main_count],
+                            _exception_scope_key(candidate),
+                            None,
+                            1,
+                        )
+                    )
             segments.append(
                 FrameworkPipelineSegment(
                     local_key=keys[ordinal],
@@ -1309,7 +1922,15 @@ class SymfonyLifecycleAdapter:
                     pipeline_order=ordinal,
                     target=target,
                     success_successor=AlwaysSuccessor(next_key, ordinal),
-                    short_circuit_successors=shortcuts,
+                    short_circuit_successors=tuple(
+                        sorted(
+                            shortcuts,
+                            key=lambda successor: (
+                                successor.order,
+                                successor.kind,
+                            ),
+                        )
+                    ),
                     evidence=candidate.evidence,
                 )
             )

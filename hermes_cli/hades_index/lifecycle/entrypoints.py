@@ -390,7 +390,7 @@ def extract_languages_entrypoints(
         framework = EntrypointExtraction(
             framework_run.candidates,
             framework_run.framework_segments,
-            (),
+            framework_run.coverage_events,
         )
     else:
         framework = EntrypointExtraction((), (), ())

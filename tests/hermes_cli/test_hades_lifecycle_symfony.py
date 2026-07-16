@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Callable
 
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
@@ -16,6 +17,8 @@ from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
 from hermes_cli.hades_index.lifecycle.frameworks.symfony import SymfonyLifecycleAdapter
 from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
+    CoverageOutcome,
+    ExceptionSuccessor,
     ExtractionContext,
     SourceLocationIR,
 )
@@ -42,7 +45,9 @@ def _location(root: Path, path: str) -> SourceLocationIR:
     )
 
 
-def _context(root: Path) -> ExtractionContext:
+def _context(
+    root: Path, *, file_accessor: Callable[[Path], bytes] | None = None
+) -> ExtractionContext:
     composer = _location(root, "composer.json")
     return ExtractionContext(
         workspace_root=root,
@@ -65,7 +70,7 @@ def _context(root: Path) -> ExtractionContext:
         python_metadata=(),
         package_metadata=(),
         tsconfig_metadata=(),
-        file_accessor=lambda path: (root / path).read_bytes(),
+        file_accessor=file_accessor or (lambda path: (root / path).read_bytes()),
     )
 
 
@@ -188,7 +193,7 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
   firewalls:
     main: { lazy: true }
   access_control:
-    - { path: ^/admin, roles: ROLE_ADMIN }
+    - { path: ^/admin, allow_if: 'false' }
 """,
     )
     _write(
@@ -197,13 +202,13 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
         """services:
   App\\Listener\\SlowListener:
     tags:
-      - { name: kernel.event_listener, event: kernel.request, priority: 1 }
+      - { name: kernel.event_listener, event: kernel.request, priority: 1, method: onRequest }
   App\\Listener\\EarlyListener:
     tags:
-      - { name: kernel.event_listener, event: kernel.request, priority: 100 }
+      - { name: kernel.event_listener, event: kernel.request, priority: 100, method: onRequest }
   App\\Listener\\ExceptionListener:
     tags:
-      - { name: kernel.event_listener, event: kernel.exception, priority: 5 }
+      - { name: kernel.event_listener, event: kernel.exception, priority: 5, method: onException }
   App\\Security\\AdminVoter:
     tags: [security.voter]
 """,
@@ -221,7 +226,7 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
     _write(
         tmp_path,
         "src/Controller/AdminController.php",
-        "<?php final class AdminController { public function dashboard() { return new Response(); } }",
+        "<?php final class AdminController { public function dashboard() { if ($failed) { throw new RuntimeException(); } return new Response(); } }",
     )
     context = _context(tmp_path)
     adapter = SymfonyLifecycleAdapter()
@@ -243,7 +248,7 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
         "kernel_request_listener",
         "kernel_request_listener",
         "firewall",
-        "access_control",
+        "access_control_deny",
         "voter",
         "argument_resolver",
         "controller",
@@ -384,6 +389,28 @@ def test_registry_runs_symfony_adapter_without_legacy_fallback(tmp_path: Path) -
     assert result.framework_segments
 
 
+def test_registry_propagates_partial_symfony_configuration_coverage(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(tmp_path, "config/routes.yaml", "routes: [unterminated")
+    registry = FrameworkAdapterRegistry()
+    registry.register(SymfonyLifecycleAdapter())
+
+    from hermes_cli.hades_index.lifecycle.frameworks import run_framework_adapters
+
+    result = run_framework_adapters(
+        registry,
+        _context(tmp_path),
+        (_syntax(tmp_path, "src/Controller/HealthController.php"),),
+    )
+
+    assert result.coverage_events
+    assert all(
+        event.outcome is CoverageOutcome.PARTIAL for event in result.coverage_events
+    )
+
+
 def test_php_route_import_applies_static_context_without_executing_configuration(
     tmp_path: Path,
 ) -> None:
@@ -450,7 +477,7 @@ def test_php_service_configuration_registers_ordered_kernel_listener(
         """<?php
 return static function ($services): void {
     $services->set(App\\Listener\\PhpRequestListener::class)
-        ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 50]);
+        ->tag('kernel.event_listener', ['event' => 'kernel.request', 'priority' => 50, 'method' => 'onRequest']);
 };
 """,
     )
@@ -482,3 +509,328 @@ return static function ($services): void {
     assert listener.framework_role == "kernel_request_listener"
     assert listener.target.descriptor.public_name == "App\\Listener\\PhpRequestListener"
     assert listener.short_circuit_successors
+
+
+def test_imports_never_send_absolute_or_traversal_paths_to_the_accessor(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "outside: { resource: /private/secret-routes.yaml }\n",
+    )
+    _write(
+        tmp_path,
+        "config/routes.xml",
+        '<routes><import resource="../../secret-routes.xml" /></routes>',
+    )
+    _write(
+        tmp_path,
+        "config/routes.php",
+        "$routes->import('/private/secret-routes.php');",
+    )
+    paths: list[Path] = []
+
+    def accessor(path: Path) -> bytes:
+        paths.append(path)
+        assert not path.is_absolute()
+        assert ".." not in path.parts
+        return (tmp_path / path).read_bytes()
+
+    SymfonyLifecycleAdapter().entrypoints(
+        _context(tmp_path, file_accessor=accessor), ()
+    )
+
+    assert paths
+    assert all(not path.is_absolute() and ".." not in path.parts for path in paths)
+
+
+def test_handler_needs_one_class_qualified_proof_not_a_bare_method_match(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "missing:\n  path: /missing\n  controller: App\\Controller\\MissingController::index\n",
+    )
+    route = SymfonyLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(tmp_path, "src/A.php", "A.index"),
+            _syntax(tmp_path, "src/B.php", "B.index"),
+        ),
+    )[0]
+
+    assert route.handler_local_key is None
+    assert route.unresolved_fact_local_key is not None
+
+
+def test_computed_route_fields_are_partial_coverage_not_exact_public_endpoints(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "computed:\n  path: /%kernel.route_path%\n  name: '%kernel.route_name%'\n  host: '%kernel.route_host%'\n  condition: '%kernel.route_condition%'\n  controller: App\\Controller\\HealthController::check\nimported: { resource: '%kernel.route_resource%' }\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "src/Controller/HealthController.php",
+                "HealthController.check",
+            ),
+        ),
+    )
+
+    assert routes == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        and event.reason_code == "framework_config_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_same_imported_resource_is_retained_for_each_declared_context(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "one: { resource: routes/shared.yaml, prefix: /one }\n"
+        "two: { resource: routes/shared.yaml, prefix: /two }\n",
+    )
+    _write(
+        tmp_path,
+        "config/routes/shared.yaml",
+        "health:\n  path: /health\n  controller: App\\Controller\\HealthController::check\n",
+    )
+
+    routes = SymfonyLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "src/Controller/HealthController.php",
+                "HealthController.check",
+            ),
+        ),
+    )
+
+    assert [route.public_path for route in routes] == ["/one/health", "/two/health"]
+
+
+def test_equal_priority_listener_source_order_and_subscriber_survive_pipeline(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "health:\n  path: /health\n  controller: App\\Controller\\HealthController::check\n",
+    )
+    _write(
+        tmp_path,
+        "config/services.yaml",
+        "services:\n"
+        "  App\\Listener\\ZFirst:\n"
+        "    tags: [{ name: kernel.event_listener, event: kernel.request, priority: 10, method: onRequest }]\n"
+        "  App\\Listener\\ASecond:\n"
+        "    tags: [{ name: kernel.event_listener, event: kernel.request, priority: 10, method: onRequest }]\n",
+    )
+    _write(
+        tmp_path,
+        "src/Listener/Subscriber.php",
+        "<?php class Subscriber { public static function getSubscribedEvents() { return [KernelEvents::REQUEST => ['onRequest', 5]]; } public function onRequest() {} }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "src/Controller/HealthController.php",
+                "HealthController.check",
+            ),
+            _syntax(tmp_path, "src/Listener/Subscriber.php", "Subscriber.onRequest"),
+        ),
+    )[0]
+
+    names = [
+        segment.target.descriptor.public_name
+        for segment in adapter.pipeline(context, route)
+        if segment.framework_role == "kernel_request_listener"
+    ]
+
+    assert names == ["App\\Listener\\ZFirst", "App\\Listener\\ASecond", "Subscriber"]
+
+
+def test_response_shortcuts_require_the_exact_listener_and_controller_method(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "go:\n  path: /go\n  controller: App\\Controller\\NoResponseController::go\n",
+    )
+    _write(
+        tmp_path,
+        "config/services.yaml",
+        "services:\n  App\\Listener\\NoResponse:\n    tags: [{ name: kernel.event_listener, event: kernel.request, method: onRequest }]\n",
+    )
+    _write(
+        tmp_path,
+        "src/Listener/NoResponse.php",
+        "<?php class NoResponse { public function onRequest() {} public function unrelated() { return new Response(); } }",
+    )
+    _write(
+        tmp_path,
+        "src/Controller/NoResponseController.php",
+        "<?php class NoResponseController { public function go() {} public function unrelated() { return new Response(); } }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "src/Controller/NoResponseController.php",
+                "NoResponseController.go",
+            ),
+        ),
+    )[0]
+
+    pipeline = adapter.pipeline(context, route)
+    listener = next(
+        item for item in pipeline if item.framework_role == "kernel_request_listener"
+    )
+    controller = next(item for item in pipeline if item.framework_role == "controller")
+
+    assert listener.short_circuit_successors == ()
+    assert controller.short_circuit_successors == ()
+
+
+def test_security_first_match_distinguishes_public_allow_from_runtime_boundary(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "public:\n  path: /public/info\n  controller: App\\Controller\\HealthController::check\nadmin:\n  path: /admin/users\n  controller: App\\Controller\\HealthController::check\n",
+    )
+    _write(
+        tmp_path,
+        "config/packages/security.yaml",
+        "security:\n  access_control:\n    - { path: ^/public, roles: PUBLIC_ACCESS }\n    - { path: ^/admin/.*, roles: ROLE_ADMIN }\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "src/Controller/HealthController.php",
+                "HealthController.check",
+            ),
+        ),
+    )
+
+    public_pipeline = adapter.pipeline(context, routes[0])
+    admin_pipeline = adapter.pipeline(context, routes[1])
+    public_access = next(
+        item
+        for item in public_pipeline
+        if item.framework_role == "access_control_allow"
+    )
+
+    assert public_access.short_circuit_successors == ()
+    assert any(
+        item.framework_role == "security_unresolved_boundary" for item in admin_pipeline
+    )
+
+
+def test_exception_listener_is_reached_only_by_a_proven_throw_arm(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "ok:\n  path: /ok\n  controller: App\\Controller\\OkController::show\nboom:\n  path: /boom\n  controller: App\\Controller\\BoomController::show\n",
+    )
+    _write(
+        tmp_path,
+        "config/services.yaml",
+        "services:\n  App\\Listener\\ExceptionListener:\n    tags: [{ name: kernel.event_listener, event: kernel.exception, method: onException }]\n",
+    )
+    _write(
+        tmp_path,
+        "src/Controller/OkController.php",
+        "<?php class OkController { public function show() {} }",
+    )
+    _write(
+        tmp_path,
+        "src/Controller/BoomController.php",
+        "<?php class BoomController { public function show() { throw new RuntimeException(); } }",
+    )
+    _write(
+        tmp_path,
+        "src/Listener/ExceptionListener.php",
+        "<?php class ExceptionListener { public function onException() { return new Response(); } }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "src/Controller/OkController.php", "OkController.show"),
+            _syntax(
+                tmp_path, "src/Controller/BoomController.php", "BoomController.show"
+            ),
+        ),
+    )
+
+    ok_pipeline = adapter.pipeline(context, routes[0])
+    boom_pipeline = adapter.pipeline(context, routes[1])
+    boom_controller = next(
+        item for item in boom_pipeline if item.framework_role == "controller"
+    )
+
+    assert not any(item.framework_role == "exception_listener" for item in ok_pipeline)
+    assert any(item.framework_role == "exception_listener" for item in boom_pipeline)
+    assert any(
+        isinstance(item, ExceptionSuccessor)
+        for item in boom_controller.short_circuit_successors
+    )
+
+
+def test_malformed_or_invalid_configuration_becomes_partial_coverage_not_crash(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(tmp_path, "config/routes.yaml", "routes: [unterminated")
+    _write(
+        tmp_path,
+        "config/routes.xml",
+        '<routes><route id="bad" path="/bad" priority="not-an-int" /></routes>',
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    events = adapter.coverage_events(context)
+    assert len(events) >= 2
+    assert all(event.outcome is CoverageOutcome.PARTIAL for event in events)
