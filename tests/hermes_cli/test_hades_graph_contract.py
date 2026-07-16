@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -605,3 +606,919 @@ def test_projection_version_rejects_noncanonical_digests() -> None:
         with pytest.raises(GraphContractError) as exc_info:
             projection_version(artifact_version, overlay_hash)
         assert exc_info.value.code == "invalid_digest"
+
+
+def _task3_api() -> tuple[Any, Any, Any]:
+    from hermes_cli.hades_graph_v2 import coverage, model, validation
+
+    return coverage, model, validation
+
+
+def _capabilities(status: str = "full") -> dict[str, Any]:
+    return {
+        name: {"status": status, "reasons": []}
+        for name in (
+            "inventory",
+            "entrypoint_discovery",
+            "symbol_resolution",
+            "call_graph",
+            "control_flow",
+            "framework_lifecycle",
+            "exceptions",
+            "async",
+            "data_access",
+        )
+    }
+
+
+def _valid_semantic_artifact() -> dict[str, Any]:
+    binding_id = "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+    path = "src/Example.php"
+    file_digest = "e" * 64
+    identity = {
+        "variant": "file",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "file",
+        "path": path,
+    }
+    file_node_id = node_id(identity)
+    capabilities = _capabilities()
+    capabilities["framework_lifecycle"] = {
+        "status": "not_applicable",
+        "reasons": [],
+    }
+    artifact = {
+        "schema": "hades.code_graph.v2",
+        "generated_at": "2026-07-16T12:00:00Z",
+        "project": {
+            "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+            "workspace_binding_id": binding_id,
+        },
+        "source": {
+            "head_commit": None,
+            "tree_sha256": "a" * 64,
+            "dirty": False,
+            "branch": None,
+        },
+        "graph_contract": {
+            "version": "hades.graph_artifact.v2",
+            "artifact_graph_version": "0" * 64,
+            "projection_state": "queued",
+            "completeness": {
+                "status": "full",
+                "capabilities": capabilities,
+                "languages": [
+                    {
+                        "language": "php",
+                        "status": "full",
+                        "capabilities": capabilities,
+                    }
+                ],
+            },
+            "coverage": {
+                "scope": {
+                    "included_roots": ["."],
+                    "excluded_config_sha256": "d" * 64,
+                    "excluded_path_count": 0,
+                },
+                "files": {
+                    "discovered": 1,
+                    "hashed": 1,
+                    "parser_candidates": 1,
+                    "analyzed": 1,
+                    "unsupported": 0,
+                    "failed": 0,
+                    "too_large": 0,
+                    "budget_omitted": 0,
+                },
+                "entrypoints": {
+                    "detected": 0,
+                    "analyzed": 0,
+                    "partial": 0,
+                    "by_kind": {},
+                },
+                "records": {
+                    "nodes": 1,
+                    "structures": 0,
+                    "edges": 0,
+                    "flows": 0,
+                    "flow_steps": 0,
+                    "uncertainties": 0,
+                    "omitted_by_bundle_budget": 0,
+                },
+            },
+        },
+        "frameworks": [],
+        "languages": [
+            {
+                "name": "php",
+                "extractor": "php.generic.v2",
+                "extractor_version": "2",
+                "detected_file_count": 1,
+                "analyzed_file_count": 1,
+            }
+        ],
+        "entrypoints": [],
+        "nodes": [
+            {
+                "id": file_node_id,
+                "identity": identity,
+                "kind": "file",
+                "language": "php",
+                "framework": None,
+                "name": "Example.php",
+                "qualified_name": path,
+                "namespace": None,
+                "uncertainty_id": None,
+                "location": None,
+                "properties": {
+                    "file_sha256": file_digest,
+                    "byte_size": 0,
+                    "analysis_status": "analyzed",
+                    "omission_reason": None,
+                    "is_test": False,
+                    "is_generated": False,
+                },
+                "evidence": {
+                    "primary": {
+                        "origin": "verified_from_code",
+                        "extractor": "inventory.v2",
+                        "source_locator": {"kind": "file", "path": path},
+                        "source_fingerprint": file_source_fingerprint(
+                            file_digest, path
+                        ),
+                        "inference_rule": None,
+                    },
+                    "supporting": [],
+                    "supporting_omitted_count": 0,
+                },
+            }
+        ],
+        "structures": [],
+        "edges": [],
+        "flows": [],
+        "flow_steps": [],
+        "uncertainties": [],
+    }
+    artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        artifact
+    )
+    return artifact
+
+
+def _with_external_uncertainty() -> dict[str, Any]:
+    artifact = _valid_semantic_artifact()
+    binding_id = artifact["project"]["workspace_binding_id"]
+    path = artifact["nodes"][0]["identity"]["path"]
+    file_digest = artifact["nodes"][0]["properties"]["file_sha256"]
+    declaration_identity = {
+        "variant": "source_declaration",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "method",
+        "namespace": "App",
+        "qualified_name": "App\\Example::run",
+        "path": path,
+    }
+    declaration_id = node_id(declaration_identity)
+    boundary_identity = {
+        "variant": "source_occurrence",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "unknown_boundary",
+        "owner_node_id": declaration_id,
+        "structural_path": "body/call/0/unknown_target",
+        "ordinal": 0,
+        "semantic_role": "external_target",
+    }
+    boundary_id = node_id(boundary_identity)
+    occurrence = {
+        "kind": "ast",
+        "owner_node_id": declaration_id,
+        "ast_path": "body/call/0",
+        "ordinal": 0,
+    }
+    edge_identity = {
+        "source_id": declaration_id,
+        "target_id": boundary_id,
+        "relation": "calls_external",
+        "flow": "always",
+        "condition_hash": None,
+        "branch_group_id": None,
+        "call_site_id": None,
+        "exception_scope_id": None,
+        "occurrence": occurrence,
+    }
+    subject_edge_id = edge_id(edge_identity)
+    question = "Which external target does this source occurrence reach?"
+    uncertainty_preimage = {
+        "domain": "graph",
+        "project_id": artifact["project"]["project_id"],
+        "workspace_binding_id": binding_id,
+        "subject": {"edge_id": subject_edge_id},
+        "resolution_kind": "external_target",
+        "reason_code": "external_boundary_unresolved",
+        "question": question,
+    }
+    unresolved_id = uncertainty_id(uncertainty_preimage)
+    locator = {"kind": "ast", "path": path, "structural_path": "body/call/0"}
+    source_fingerprint = ast_source_fingerprint(
+        file_digest, path, locator["structural_path"]
+    )
+
+    def evidence(origin: str) -> dict[str, Any]:
+        return {
+            "primary": {
+                "origin": origin,
+                "extractor": "php.generic.v2",
+                "source_locator": locator,
+                "source_fingerprint": source_fingerprint,
+                "inference_rule": None,
+            },
+            "supporting": [],
+            "supporting_omitted_count": 0,
+        }
+
+    artifact["nodes"].extend([
+        {
+            "id": declaration_id,
+            "identity": declaration_identity,
+            "kind": "method",
+            "language": "php",
+            "framework": None,
+            "name": "run",
+            "qualified_name": "App\\Example::run",
+            "namespace": "App",
+            "uncertainty_id": None,
+            "location": {"path": path, "start_line": 1, "end_line": 2},
+            "properties": {},
+            "evidence": evidence("verified_from_code"),
+        },
+        {
+            "id": boundary_id,
+            "identity": boundary_identity,
+            "kind": "unknown_boundary",
+            "language": "php",
+            "framework": None,
+            "name": "Unresolved external target",
+            "qualified_name": None,
+            "namespace": None,
+            "uncertainty_id": unresolved_id,
+            "location": {"path": path, "start_line": 2, "end_line": 2},
+            "properties": {"reason_code": "external_boundary_unresolved"},
+            "evidence": evidence("unresolved"),
+        },
+    ])
+    artifact["nodes"].sort(key=lambda record: record["id"])
+    artifact["edges"] = [
+        {
+            "id": subject_edge_id,
+            "source_id": declaration_id,
+            "target_id": boundary_id,
+            "relation": "calls_external",
+            "flow": "always",
+            "condition": None,
+            "branch_group_id": None,
+            "call_site_id": None,
+            "exception_scope_id": None,
+            "order": 0,
+            "uncertainty_id": unresolved_id,
+            "occurrence": occurrence,
+            "evidence": evidence("unresolved"),
+            "location": {"path": path, "line": 2, "ordinal": 0},
+        }
+    ]
+    artifact["uncertainties"] = [
+        {
+            "id": unresolved_id,
+            **{key: uncertainty_preimage[key] for key in ("domain", "subject")},
+            "resolution_kind": "external_target",
+            "reason_code": "external_boundary_unresolved",
+            "question": question,
+            "evidence_requirements": ["inspect_external_configuration"],
+            "source_refs": [{"path": path, "line": 2}],
+            "candidate_target_node_ids": [],
+            "candidate_edge_ids": [],
+            "candidate_set_knowledge": "not_applicable",
+            "priority": "normal",
+            "impact": "May change the external data effect.",
+            "fingerprint": unresolved_id.removeprefix("hades:uncertainty:v2:"),
+        }
+    ]
+    records = artifact["graph_contract"]["coverage"]["records"]
+    records.update(nodes=3, edges=1, uncertainties=1)
+    artifact["graph_contract"]["completeness"]["status"] = "partial"
+    artifact["graph_contract"]["completeness"]["capabilities"]["data_access"] = {
+        "status": "partial",
+        "reasons": [
+            {
+                "code": "external_boundary_unresolved",
+                "count": 1,
+                "language": "php",
+                "paths_sample": [path],
+            }
+        ],
+    }
+    artifact["graph_contract"]["completeness"]["languages"][0]["status"] = "partial"
+    artifact["graph_contract"]["completeness"]["languages"][0]["capabilities"][
+        "data_access"
+    ] = copy.deepcopy(
+        artifact["graph_contract"]["completeness"]["capabilities"]["data_access"]
+    )
+    artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        artifact
+    )
+    return artifact
+
+
+def _append_executable_node(
+    artifact: dict[str, Any],
+    *,
+    kind: str,
+    structural_path: str,
+    owner_node_id: str | None = None,
+) -> str:
+    file_node = artifact["nodes"][0]
+    path = file_node["identity"]["path"]
+    binding_id = artifact["project"]["workspace_binding_id"]
+    if owner_node_id is None:
+        qualified_name = f"App\\Example::{kind}"
+        identity = {
+            "variant": "source_declaration",
+            "workspace_binding_id": binding_id,
+            "language": "php",
+            "kind": kind,
+            "namespace": "App",
+            "qualified_name": qualified_name,
+            "path": path,
+        }
+        name = kind
+        namespace = "App"
+    else:
+        qualified_name = None
+        identity = {
+            "variant": "source_occurrence",
+            "workspace_binding_id": binding_id,
+            "language": "php",
+            "kind": kind,
+            "owner_node_id": owner_node_id,
+            "structural_path": structural_path,
+            "ordinal": 0,
+            "semantic_role": "continuation",
+        }
+        name = "Continuation"
+        namespace = None
+    public_id = node_id(identity)
+    artifact["nodes"].append({
+        "id": public_id,
+        "identity": identity,
+        "kind": kind,
+        "language": "php",
+        "framework": None,
+        "name": name,
+        "qualified_name": qualified_name,
+        "namespace": namespace,
+        "uncertainty_id": None,
+        "location": {"path": path, "start_line": 1, "end_line": 1},
+        "properties": {},
+        "evidence": _producer_evidence(artifact, structural_path),
+    })
+    artifact["nodes"].sort(key=lambda record: record["id"])
+    return public_id
+
+
+def _producer_evidence(
+    artifact: dict[str, Any], structural_path: str
+) -> dict[str, Any]:
+    file_node = next(
+        node for node in artifact["nodes"] if node["identity"]["variant"] == "file"
+    )
+    path = file_node["identity"]["path"]
+    return {
+        "primary": {
+            "origin": "verified_from_code",
+            "extractor": "php.generic.v2",
+            "source_locator": {
+                "kind": "ast",
+                "path": path,
+                "structural_path": structural_path,
+            },
+            "source_fingerprint": ast_source_fingerprint(
+                file_node["properties"]["file_sha256"], path, structural_path
+            ),
+            "inference_rule": None,
+        },
+        "supporting": [],
+        "supporting_omitted_count": 0,
+    }
+
+
+def test_partial_family_never_returns_verified_zero() -> None:
+    coverage, model, _ = _task3_api()
+
+    count = coverage.count_knowledge(
+        represented=0,
+        omitted=2,
+        capability_status="partial",
+    )
+
+    assert count == model.CountKnowledge(
+        represented=0,
+        value=None,
+        knowledge=model.Knowledge.UNKNOWN,
+        reason=model.ReasonCode.RESOURCE_BUDGET_REACHED,
+    )
+
+
+def test_count_knowledge_uses_only_frozen_exact_absent_unknown_union() -> None:
+    coverage, model, _ = _task3_api()
+
+    assert coverage.count_knowledge(3, 0, "full") == model.CountKnowledge(
+        represented=3,
+        value=3,
+        knowledge=model.Knowledge.EXACT,
+        reason=None,
+    )
+    assert coverage.count_knowledge(0, 0, "full") == model.CountKnowledge(
+        represented=0,
+        value=0,
+        knowledge=model.Knowledge.ABSENCE_VERIFIED,
+        reason=None,
+    )
+    assert {member.value for member in model.Knowledge} == {
+        "exact",
+        "absence_verified",
+        "unknown",
+    }
+    assert not hasattr(model.CountKnowledge, "exact_value")
+
+
+def test_artifact_payload_round_trip_is_schema_gated_and_frozen() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+
+    artifact = model.artifact_from_payload(payload)
+    assert model.artifact_to_payload(artifact) == payload
+    assert isinstance(artifact.nodes, tuple)
+    assert all(
+        dataclasses.is_dataclass(instance)
+        and instance.__dataclass_params__.frozen
+        and hasattr(instance, "__slots__")
+        for instance in (artifact, artifact.project, artifact.nodes[0])
+    )
+    validation.validate_artifact(artifact)
+
+
+def test_artifact_payload_round_trip_preserves_explicit_null_property() -> None:
+    _, model, _ = _task3_api()
+    payload = _valid_semantic_artifact()
+    file_node = payload["nodes"][0]
+    identity = {
+        "variant": "source_declaration",
+        "workspace_binding_id": payload["project"]["workspace_binding_id"],
+        "language": "php",
+        "kind": "module",
+        "namespace": None,
+        "qualified_name": "App\\Example",
+        "path": file_node["identity"]["path"],
+    }
+    module_node = copy.deepcopy(file_node)
+    module_node.update({
+        "id": node_id(identity),
+        "identity": identity,
+        "kind": "module",
+        "name": "Example",
+        "qualified_name": "App\\Example",
+        "properties": {"package": None},
+    })
+    module_node["evidence"]["primary"].update({
+        "extractor": "php.generic.v2",
+        "source_locator": {
+            "kind": "ast",
+            "path": file_node["identity"]["path"],
+            "structural_path": "declaration[0]",
+        },
+        "source_fingerprint": ast_source_fingerprint(
+            file_node["properties"]["file_sha256"],
+            file_node["identity"]["path"],
+            "declaration[0]",
+        ),
+    })
+    payload["nodes"].append(module_node)
+
+    parsed = model.artifact_from_payload(payload)
+
+    assert model.artifact_to_payload(parsed) == payload
+
+
+def test_schema_and_dataclass_public_field_inventories_match() -> None:
+    _, model, _ = _task3_api()
+    artifact_schema = json.loads(
+        (CONTRACT_ROOT / "artifact.schema.json").read_text(encoding="utf-8")
+    )
+    definitions = artifact_schema["$defs"]
+    inventory = {
+        "GraphArtifactV2": (None, artifact_schema),
+        "ProjectIdentity": ("project", definitions["project"]),
+        "SourceIdentity": ("source", definitions["source"]),
+        "GraphContractMetadata": ("graphContract", definitions["graphContract"]),
+        "LanguageRecord": ("language", definitions["language"]),
+        "FrameworkRecord": ("framework", definitions["framework"]),
+        "CapabilityReason": ("capabilityReason", definitions["capabilityReason"]),
+        "Capability": ("capability", definitions["capabilityIncomplete"]),
+        "Capabilities": ("capabilities", definitions["capabilities"]),
+        "LanguageCompleteness": (
+            "languageCompleteness",
+            definitions["languageCompleteness"],
+        ),
+        "Completeness": ("completeness", definitions["completeness"]),
+        "FlowCompleteness": ("flowCompleteness", definitions["flowCompleteness"]),
+        "CoverageScope": ("coverageScope", definitions["coverageScope"]),
+        "FileCoverage": ("fileCoverage", definitions["fileCoverage"]),
+        "EntrypointKindCounts": (
+            "entrypointKindCounts",
+            definitions["entrypointKindCounts"],
+        ),
+        "EntrypointCoverage": (
+            "entrypointCoverage",
+            definitions["entrypointCoverage"],
+        ),
+        "RecordCoverage": ("recordCoverage", definitions["recordCoverage"]),
+        "Coverage": ("coverage", definitions["coverage"]),
+        "RegistrationAst": ("registrationAst", definitions["registrationAst"]),
+        "RegistrationConfig": (
+            "registrationConfig",
+            definitions["registrationConfig"],
+        ),
+        "Trigger": ("trigger", definitions["trigger"]),
+        "MatchConstraints": ("matchConstraints", definitions["matchConstraints"]),
+        "EntrypointIdentity": (
+            "entrypointIdentity",
+            definitions["entrypointIdentity"],
+        ),
+        "SourceDeclarationIdentity": (
+            "sourceDeclarationIdentity",
+            definitions["sourceDeclarationIdentity"],
+        ),
+        "FileIdentity": ("fileIdentity", definitions["fileIdentity"]),
+        "SourceOccurrenceIdentity": (
+            "sourceOccurrenceIdentity",
+            definitions["sourceOccurrenceIdentity"],
+        ),
+        "AnonymousCallableIdentity": (
+            "anonymousCallableIdentity",
+            definitions["anonymousCallableIdentity"],
+        ),
+        "EntrypointNodeIdentity": (
+            "entrypointNodeIdentity",
+            definitions["entrypointNodeIdentity"],
+        ),
+        "SemanticResourceIdentity": (
+            "semanticResourceIdentity",
+            definitions["semanticResourceIdentity"],
+        ),
+        "FileSourceLocator": ("fileLocator", definitions["fileLocator"]),
+        "AstSourceLocator": ("astLocator", definitions["astLocator"]),
+        "ConfigSourceLocator": ("configLocator", definitions["configLocator"]),
+        "EvidenceItem": ("producerEvidenceItem", definitions["producerEvidenceItem"]),
+        "EvidenceEnvelope": (
+            "producerEvidenceEnvelope",
+            definitions["producerEvidenceEnvelope"],
+        ),
+        "SourceLocation": ("sourceLocation", definitions["sourceLocation"]),
+        "FileProperties": ("fileProperties", definitions["fileProperties"]),
+        "ModuleProperties": ("moduleProperties", definitions["moduleProperties"]),
+        "TypeProperties": ("typeProperties", definitions["typeProperties"]),
+        "CallableProperties": (
+            "callableProperties",
+            definitions["callableProperties"],
+        ),
+        "ControlProperties": ("controlProperties", definitions["controlProperties"]),
+        "FrameworkProperties": (
+            "frameworkProperties",
+            definitions["frameworkProperties"],
+        ),
+        "DataProperties": ("dataProperties", definitions["dataProperties"]),
+        "IntegrationProperties": (
+            "integrationProperties",
+            definitions["integrationProperties"],
+        ),
+        "TerminalProperties": (
+            "terminalProperties",
+            definitions["terminalProperties"],
+        ),
+        "AsyncProperties": ("asyncProperties", definitions["asyncProperties"]),
+        "TestProperties": ("testProperties", definitions["testProperties"]),
+        "BoundaryProperties": (
+            "boundaryProperties",
+            definitions["boundaryProperties"],
+        ),
+        "Entrypoint": ("entrypoint", definitions["entrypoint"]),
+        "Node": ("node", definitions["node"]),
+        "Structure": ("structure", definitions["structure"]),
+        "Condition": ("condition", definitions["condition"]),
+        "EdgeAstOccurrence": (
+            "edgeAstOccurrence",
+            definitions["edgeAstOccurrence"],
+        ),
+        "EdgeConfigOccurrence": (
+            "edgeConfigOccurrence",
+            definitions["edgeConfigOccurrence"],
+        ),
+        "EdgeLocation": ("edgeLocation", definitions["edgeLocation"]),
+        "Edge": ("edge", definitions["edge"]),
+        "StageCounts": ("stageCounts", definitions["stageCounts"]),
+        "Flow": ("flow", definitions["flow"]),
+        "FlowStep": ("flowStep", definitions["flowStep"]),
+        "CallSiteSubject": ("callSiteSubject", definitions["callSiteSubject"]),
+        "EdgeSubject": ("edgeSubject", definitions["edgeSubject"]),
+        "SourceRef": ("sourceRef", definitions["sourceRef"]),
+        "Uncertainty": ("uncertainty", definitions["uncertainty"]),
+        "CountKnowledge": ("countKnowledge", definitions["countUnknown"]),
+    }
+    for class_name, (_, schema) in inventory.items():
+        field_names = model.dataclass_wire_fields(getattr(model, class_name))
+        assert field_names == set(schema["properties"]), class_name
+    public_dataclasses = {
+        name
+        for name, value in vars(model).items()
+        if not name.startswith("_")
+        and isinstance(value, type)
+        and dataclasses.is_dataclass(value)
+    }
+    assert public_dataclasses == set(inventory)
+    assert all(
+        getattr(model, name).__dataclass_params__.frozen
+        and hasattr(getattr(model, name), "__slots__")
+        for name in public_dataclasses
+    )
+
+
+def test_base_artifact_rejects_agent_verified_evidence() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    payload["nodes"][0]["evidence"]["primary"]["origin"] = "agent_verified"
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "base_evidence_origin"
+    assert "base artifact evidence origin" in exc_info.value.message
+
+
+def test_unresolved_target_requires_exact_uncertainty_subject() -> None:
+    _, _, validation = _task3_api()
+    payload = _with_external_uncertainty()
+    payload["edges"][0]["uncertainty_id"] = None
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "uncertainty_ownership"
+    assert "uncertainty ownership" in exc_info.value.message
+
+
+def test_dangling_evidence_locator_is_rejected_without_path_disclosure() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    private_path = "private/credentials.php"
+    evidence = payload["nodes"][0]["evidence"]["primary"]
+    evidence["source_locator"]["path"] = private_path
+    evidence["source_fingerprint"] = file_source_fingerprint("e" * 64, private_path)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "dangling_file_locator"
+    assert private_path not in str(exc_info.value)
+
+
+def test_serialized_ids_are_recomputed_not_trusted() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    payload["nodes"][0]["id"] = "hades:node:v2:" + "f" * 64
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "node_id_mismatch"
+
+
+def test_references_are_isolated_to_the_current_artifact() -> None:
+    _, _, validation = _task3_api()
+    other = _valid_semantic_artifact()
+    other["nodes"][0]["identity"]["path"] = "src/Elsewhere.php"
+    other["nodes"][0]["qualified_name"] = "src/Elsewhere.php"
+    other["nodes"][0]["name"] = "Elsewhere.php"
+    other["nodes"][0]["evidence"]["primary"]["source_locator"]["path"] = (
+        "src/Elsewhere.php"
+    )
+    other["nodes"][0]["id"] = node_id(other["nodes"][0]["identity"])
+    other["nodes"][0]["evidence"]["primary"]["source_fingerprint"] = (
+        file_source_fingerprint("e" * 64, "src/Elsewhere.php")
+    )
+    other["graph_contract"]["artifact_graph_version"] = artifact_graph_version(other)
+    validation.validate_artifact(other)
+
+    payload = _valid_semantic_artifact()
+    evidence = payload["nodes"][0]["evidence"]["primary"]
+    evidence["source_locator"]["path"] = "src/Elsewhere.php"
+    evidence["source_fingerprint"] = file_source_fingerprint(
+        "e" * 64, "src/Elsewhere.php"
+    )
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+    assert exc_info.value.code == "dangling_file_locator"
+
+
+def test_return_edge_requires_a_matching_invocation() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    caller_id = _append_executable_node(
+        payload,
+        kind="method",
+        structural_path="declaration/method/caller",
+    )
+    continuation_id = _append_executable_node(
+        payload,
+        kind="basic_block",
+        structural_path="body/call/0/continuation",
+        owner_node_id=caller_id,
+    )
+    structure_identity = {
+        "kind": "call_site",
+        "owner_node_id": caller_id,
+        "structural_path": "body/call/0",
+        "ordinal": 0,
+        "subtype": "call",
+    }
+    structure_id = call_site_id(structure_identity)
+    payload["structures"] = [
+        {
+            "id": structure_id,
+            **structure_identity,
+            "continuation_node_id": continuation_id,
+            "parent_structure_id": None,
+            "evidence": _producer_evidence(payload, "body/call/0"),
+        }
+    ]
+    occurrence = {
+        "kind": "ast",
+        "owner_node_id": caller_id,
+        "ast_path": "body/call/0/return",
+        "ordinal": 0,
+    }
+    identity = {
+        "source_id": caller_id,
+        "target_id": continuation_id,
+        "relation": "returns_to",
+        "flow": "always",
+        "condition_hash": None,
+        "branch_group_id": None,
+        "call_site_id": structure_id,
+        "exception_scope_id": None,
+        "occurrence": occurrence,
+    }
+    payload["edges"] = [
+        {
+            "id": edge_id(identity),
+            **{key: identity[key] for key in ("source_id", "target_id", "relation")},
+            "flow": "always",
+            "condition": None,
+            "branch_group_id": None,
+            "call_site_id": structure_id,
+            "exception_scope_id": None,
+            "order": None,
+            "uncertainty_id": None,
+            "occurrence": occurrence,
+            "evidence": _producer_evidence(payload, "body/call/0/return"),
+            "location": {
+                "path": next(
+                    node["identity"]["path"]
+                    for node in payload["nodes"]
+                    if node["identity"]["variant"] == "file"
+                ),
+                "line": 1,
+                "ordinal": 0,
+            },
+        }
+    ]
+    artifact = model.artifact_from_payload(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_references(
+            artifact, validation.build_record_index(artifact)
+        )
+
+    assert exc_info.value.code == "return_invocation_missing"
+
+
+def test_structure_parent_chain_cannot_cycle() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    owner_id = _append_executable_node(
+        payload,
+        kind="method",
+        structural_path="declaration/method/owner",
+    )
+    first_identity = {
+        "kind": "branch_group",
+        "owner_node_id": owner_id,
+        "structural_path": "body/branch/0",
+        "ordinal": 0,
+        "subtype": "if",
+    }
+    second_identity = {
+        "kind": "branch_group",
+        "owner_node_id": owner_id,
+        "structural_path": "body/branch/0/branch/0",
+        "ordinal": 0,
+        "subtype": "if",
+    }
+    first_id = branch_group_id(first_identity)
+    second_id = branch_group_id(second_identity)
+    payload["structures"] = sorted(
+        [
+            {
+                "id": first_id,
+                **first_identity,
+                "continuation_node_id": None,
+                "parent_structure_id": second_id,
+                "evidence": _producer_evidence(payload, "body/branch/0"),
+            },
+            {
+                "id": second_id,
+                **second_identity,
+                "continuation_node_id": None,
+                "parent_structure_id": first_id,
+                "evidence": _producer_evidence(payload, "body/branch/0/branch/0"),
+            },
+        ],
+        key=lambda record: record["id"],
+    )
+    artifact = model.artifact_from_payload(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_references(
+            artifact, validation.build_record_index(artifact)
+        )
+
+    assert exc_info.value.code == "structure_parent_cycle"
+
+
+def test_flow_step_membership_cannot_reference_another_artifact() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    external_flow_id = "hades:flow:v2:" + "a" * 64
+    external_edge_id = "hades:edge:v2:" + "b" * 64
+    payload["flow_steps"] = [
+        {
+            "id": flow_step_id(
+                external_flow_id,
+                external_edge_id,
+                "entry",
+                "routing",
+                "synchronous",
+            ),
+            "flow_id": external_flow_id,
+            "edge_id": external_edge_id,
+            "stage_from": "entry",
+            "stage_to": "routing",
+            "min_depth": 0,
+            "branch_group_id": None,
+            "async_context": "synchronous",
+            "async_child_flow_id": None,
+            "async_cycle": False,
+            "backbone_role": "mandatory",
+            "order_key": "00:000000:entry:routing:edge",
+        }
+    ]
+    payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 1
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "dangling_flow_reference"
+
+
+def test_coverage_record_counts_close_over_represented_records() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    payload["graph_contract"]["coverage"]["records"]["nodes"] = 0
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "record_coverage_mismatch"
+
+
+def test_artifact_digest_is_the_last_semantic_closure_check() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    payload["graph_contract"]["artifact_graph_version"] = "f" * 64
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "artifact_digest_mismatch"

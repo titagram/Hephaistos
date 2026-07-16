@@ -43,6 +43,15 @@ from .identity import (
     verification_deduplication_key,
     verification_set_hash,
 )
+from .coverage import count_knowledge
+from .model import (
+    CountKnowledge,
+    GraphArtifactV2,
+    Knowledge,
+    ReasonCode,
+    artifact_from_payload,
+    artifact_to_payload,
+)
 from .schema import (
     BUNDLE_SCHEMA,
     CHUNK_SCHEMA,
@@ -58,6 +67,7 @@ from .schema import (
     validate_json_bytes,
     validate_schema,
 )
+from .validation import GraphValidationError, validate_artifact
 
 
 __all__ = [
@@ -76,12 +86,16 @@ __all__ = [
     "SCHEMA_NAMES",
     "UNCERTAINTY_PREFIX",
     "GraphContractError",
+    "GraphArtifactV2",
     "GraphIdentityCollision",
+    "GraphValidationError",
     "JsonScalar",
     "JsonValue",
     "artifact_digest",
     "artifact_graph_version",
+    "artifact_from_payload",
     "artifact_semantic_preimage",
+    "artifact_to_payload",
     "ast_source_fingerprint",
     "branch_group_id",
     "call_site_id",
@@ -90,6 +104,8 @@ __all__ = [
     "canonicalize_verification_evidence",
     "canonicalize_verification_set",
     "condition_hash",
+    "count_knowledge",
+    "CountKnowledge",
     "config_source_fingerprint",
     "edge_id",
     "evidence_digest",
@@ -98,6 +114,7 @@ __all__ = [
     "flow_id",
     "flow_step_id",
     "load_json_bytes",
+    "Knowledge",
     "node_id",
     "normalize_contract_value",
     "normalize_source_path",
@@ -105,11 +122,13 @@ __all__ = [
     "prefixed_id",
     "projection_version",
     "require_utc_timestamp",
+    "ReasonCode",
     "result_digest",
     "sha256_jcs",
     "uncertainty_fingerprint",
     "uncertainty_id",
     "validate_json_bytes",
+    "validate_artifact",
     "validate_schema",
     "verification_deduplication_key",
     "verification_set_hash",
