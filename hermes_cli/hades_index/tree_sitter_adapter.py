@@ -81,6 +81,24 @@ ParseFailureCode: TypeAlias = Literal[
     "file_too_large",
     "file_read_failed",
 ]
+_SYNTAX_CONTROL_KINDS = frozenset({
+    "branch",
+    "merge",
+    "loop",
+    "return",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "async_dispatch",
+    "call",
+})
+_PARSE_FAILURE_CODES = frozenset({
+    "parser_unavailable",
+    "parser_failed",
+    "file_too_large",
+    "file_read_failed",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +142,8 @@ class SyntaxControl:
     end_line: int
 
     def __post_init__(self) -> None:
+        if self.kind not in _SYNTAX_CONTROL_KINDS:
+            raise ValueError("syntax control kind must be a closed variant")
         if not self.structural_path or self.structural_path.startswith("/"):
             raise ValueError("syntax control must use a relative structural path")
         if self.line < 1 or self.end_line < self.line:
@@ -171,6 +191,10 @@ class ParseFailure:
     path: str
     language: str
 
+    def __post_init__(self) -> None:
+        if self.code not in _PARSE_FAILURE_CODES:
+            raise ValueError("parse failure code must be a closed variant")
+
 
 @dataclass(frozen=True, slots=True)
 class ParseResult:
@@ -182,6 +206,8 @@ class ParseResult:
     coverage_event: CoverageEvent | None
 
     def __post_init__(self) -> None:
+        if self.status not in {"parsed", "failed"}:
+            raise ValueError("parse result status must be a closed variant")
         parsed = self.status == "parsed"
         if parsed != (self.syntax is not None) or parsed == (self.failure is not None):
             raise ValueError("parse result must contain exactly syntax or failure")

@@ -91,22 +91,30 @@ def _has_cycle(edges: tuple[ControlFlowEdge, ...], block_keys: frozenset[str]) -
         )
         for key in block_keys
     }
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(node: str) -> bool:
-        if node in visiting:
-            return True
-        if node in visited:
-            return False
-        visiting.add(node)
-        if any(visit(target) for target in adjacency[node]):
-            return True
-        visiting.remove(node)
-        visited.add(node)
-        return False
-
-    return any(visit(node) for node in sorted(block_keys) if node not in visited)
+    # 0 = unvisited, 1 = on the explicit DFS stack, 2 = completed.  Keeping
+    # the traversal iterative avoids turning Python's recursion limit into an
+    # accidental CFG-depth limit for an otherwise finite, valid program.
+    color = {key: 0 for key in block_keys}
+    for root in sorted(block_keys):
+        if color[root] != 0:
+            continue
+        color[root] = 1
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            node, index = stack[-1]
+            targets = adjacency[node]
+            if index >= len(targets):
+                color[node] = 2
+                stack.pop()
+                continue
+            target = targets[index]
+            stack[-1] = (node, index + 1)
+            if color[target] == 1:
+                return True
+            if color[target] == 0:
+                color[target] = 1
+                stack.append((target, 0))
+    return False
 
 
 def build_control_flow(result: AdapterResult) -> ControlFlowResult:

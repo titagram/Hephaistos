@@ -111,6 +111,10 @@ def _fixture(
         _key("executable_declaration", f"declaration/worker/{index}")
         for index in range(workers)
     )
+    worker_entry_keys = tuple(
+        _key("basic_block", f"declaration/worker/{index}/entry")
+        for index in range(workers)
+    )
     entry = _key("basic_block", "body/entry")
     branch = _key("basic_block", "body/if")
     true_block = _key("basic_block", "body/true")
@@ -164,8 +168,8 @@ def _fixture(
                 parameters=(),
                 return_type=None,
                 locator=_ast(f"declaration/worker/{index}"),
-                entry_block_key=entry,
-                normal_exit_block_keys=tuple(sorted((finally_block,))),
+                entry_block_key=worker_entry_keys[index],
+                normal_exit_block_keys=(worker_entry_keys[index],),
                 exception_exit_block_keys=(),
             )
         )
@@ -248,6 +252,17 @@ def _fixture(
             7,
             _ast("body/finally"),
             (ReturnSuccessor(terminal_key, 0),),
+        ),
+        *(
+            BasicBlock(
+                worker_entry_keys[index],
+                key,
+                ControlKind.ENTRY,
+                0,
+                _ast(f"declaration/worker/{index}/entry"),
+                (),
+            )
+            for index, key in enumerate(worker_keys)
         ),
     ]
     structures = [
@@ -625,3 +640,303 @@ def test_graphify_never_creates_a_subject_without_native_uncertainty():
         attach_graphify_hints(result, {"anything": ("anything",)}, enabled=True)
         is result
     )
+
+
+@pytest.mark.parametrize(
+    "call_kind",
+    (
+        TargetExpressionKind.DYNAMIC_MEMBER,
+        TargetExpressionKind.REFLECTION,
+        TargetExpressionKind.EVAL,
+    ),
+)
+def test_dynamic_reflection_and_eval_never_become_exact_from_one_visible_target(
+    call_kind: TargetExpressionKind,
+):
+    from hermes_cli.hades_index.lifecycle.interprocedural import (
+        ResolutionDisposition,
+        resolve_call_sites,
+    )
+
+    unproven = resolve_call_sites((_fixture(call_kind=call_kind, workers=1),))
+    assert unproven.calls[0].disposition is ResolutionDisposition.UNRESOLVED_FRONTIER
+
+    proven = resolve_call_sites((
+        _fixture(
+            call_kind=call_kind,
+            workers=1,
+            symbol_resolution_full=True,
+        ),
+    ))
+    expected = (
+        ResolutionDisposition.EXHAUSTIVE_CANDIDATES
+        if call_kind is TargetExpressionKind.DYNAMIC_MEMBER
+        else ResolutionDisposition.UNRESOLVED_FRONTIER
+    )
+    assert proven.calls[0].disposition is expected
+
+
+def test_unscoped_cross_file_lexical_name_is_not_an_exact_call_target():
+    from hermes_cli.hades_index.lifecycle.interprocedural import (
+        ResolutionDisposition,
+        resolve_call_sites,
+    )
+
+    result = _fixture(target="worker")
+    worker = next(item for item in result.declarations if item.name == "worker")
+    other_location = SourceLocationIR("src/other.py", 1, 2, _DIGEST)
+    other_locator = AstLocatorIR(other_location, "declaration/worker/0", 0)
+    site = replace(
+        result.call_sites[0], lexical_target="worker", fully_qualified_target=None
+    )
+    separated = replace(
+        result,
+        declarations=_sort(
+            replace(item, locator=other_locator)
+            if item.local_key == worker.local_key
+            else item
+            for item in result.declarations
+        ),
+        call_sites=(site,),
+    )
+    separated.validate()
+
+    decision = resolve_call_sites((separated,)).calls[0]
+    assert decision.disposition is ResolutionDisposition.UNRESOLVED_FRONTIER
+
+
+def test_cfg_cycle_detection_is_iterative_for_a_deep_acyclic_graph():
+    from hermes_cli.hades_index.lifecycle.control_flow import build_control_flow
+
+    result = _fixture()
+    handler = next(item for item in result.declarations if item.name == "handler")
+    entry = next(
+        item for item in result.blocks if item.local_key == handler.entry_block_key
+    )
+    branch = next(
+        item for item in result.blocks if item.control_kind is ControlKind.BRANCH
+    )
+    deep_keys = tuple(_key("basic_block", f"deep/{index:04d}") for index in range(1200))
+    deep_blocks = tuple(
+        BasicBlock(
+            key,
+            handler.local_key,
+            ControlKind.STRAIGHT_LINE,
+            100 + index,
+            _ast(f"deep/{index:04d}"),
+            (
+                AlwaysSuccessor(
+                    deep_keys[index + 1]
+                    if index + 1 < len(deep_keys)
+                    else branch.local_key,
+                    0,
+                ),
+            ),
+        )
+        for index, key in enumerate(deep_keys)
+    )
+    loop = next(
+        item for item in result.blocks if item.control_kind is ControlKind.LOOP_HEADER
+    )
+    acyclic = replace(
+        result,
+        blocks=_sort((
+            replace(entry, successors=(AlwaysSuccessor(deep_keys[0], 0),)),
+            replace(
+                loop,
+                successors=(
+                    LoopSuccessor(handler.normal_exit_block_keys[0], LoopRole.EXIT, 0),
+                ),
+            ),
+            *(
+                item
+                for item in result.blocks
+                if item.local_key not in {entry.local_key, loop.local_key}
+            ),
+            *deep_blocks,
+        )),
+    )
+    acyclic.validate()
+
+    control = build_control_flow(acyclic)
+    assert len(control.blocks) >= 1200
+    assert control.has_cycles is False
+    assert control.path_count is None
+
+
+def test_cross_declaration_synchronous_successor_is_rejected():
+    result = _fixture(workers=1)
+    handler = next(item for item in result.declarations if item.name == "handler")
+    worker = next(item for item in result.declarations if item.name == "worker")
+    entry = next(
+        item for item in result.blocks if item.local_key == handler.entry_block_key
+    )
+    cross = replace(entry, successors=(AlwaysSuccessor(worker.entry_block_key, 0),))
+    invalid = replace(
+        result,
+        blocks=_sort(
+            cross if item.local_key == entry.local_key else item
+            for item in result.blocks
+        ),
+    )
+
+    with pytest.raises(ValueError, match="declaration"):
+        invalid.validate()
+
+
+def test_cross_declaration_non_call_edge_is_rejected():
+    result = _fixture(workers=1)
+    handler = next(item for item in result.declarations if item.name == "handler")
+    worker = next(item for item in result.declarations if item.name == "worker")
+    invalid = replace(
+        result,
+        edge_facts=(
+            replace(
+                result.edge_facts[0],
+                relation=Relation.ROUTES_TO,
+                source_node_local_key=handler.local_key,
+                target=LocalNodeTarget(worker.local_key),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cross declarations"):
+        invalid.validate()
+
+
+def _complete_native_candidate_result() -> AdapterResult:
+    result = _fixture(unresolved=True, workers=2)
+    fact = result.unresolved_facts[0]
+    subject = result.edge_facts[0]
+    workers = tuple(item for item in result.declarations if item.name == "worker")
+    candidates = tuple(
+        replace(
+            subject,
+            local_key=_key("complete_candidate", "body/call", index),
+            target=LocalNodeTarget(worker.local_key),
+            evidence=_evidence(_ast("body/call"), origin=EvidenceOrigin.INFERRED),
+        )
+        for index, worker in enumerate(workers)
+    )
+    complete = replace(
+        fact,
+        candidate_set_knowledge=CandidateSetKnowledge.COMPLETE,
+        candidate_target_local_keys=tuple(
+            sorted(worker.local_key for worker in workers)
+        ),
+        candidate_edge_local_keys=tuple(sorted(edge.local_key for edge in candidates)),
+    )
+    complete_result = replace(
+        result,
+        edge_facts=_sort(candidates),
+        unresolved_facts=(complete,),
+    )
+    complete_result.validate()
+    return complete_result
+
+
+def test_graphify_preserves_native_complete_candidate_sets_as_a_noop():
+    from hermes_cli.hades_index.graphify_candidates import attach_graphify_hints
+
+    result = _complete_native_candidate_result()
+    fact = result.unresolved_facts[0]
+    target = next(
+        item.local_key for item in result.declarations if item.name == "worker"
+    )
+    assert (
+        attach_graphify_hints(result, {fact.local_key: (target,)}, enabled=True)
+        is result
+    )
+
+
+def test_graphify_adds_incremental_hints_without_ordinal_collision():
+    from hermes_cli.hades_index.graphify_candidates import attach_graphify_hints
+
+    result = _fixture(unresolved=True, workers=3)
+    fact = result.unresolved_facts[0]
+    workers = tuple(
+        item.local_key for item in result.declarations if item.name == "worker"
+    )
+    first = attach_graphify_hints(result, {fact.local_key: (workers[0],)}, enabled=True)
+    second = attach_graphify_hints(first, {fact.local_key: (workers[1],)}, enabled=True)
+    updated = second.unresolved_facts[0]
+
+    assert updated.candidate_set_knowledge is CandidateSetKnowledge.INCOMPLETE
+    assert updated.candidate_target_local_keys == tuple(sorted(workers[:2]))
+    assert len(updated.candidate_edge_local_keys) == 2
+    second.validate()
+
+
+def test_graphify_preserves_native_incomplete_candidates_when_adding_hints():
+    from hermes_cli.hades_index.graphify_candidates import attach_graphify_hints
+
+    result = _fixture(unresolved=True, workers=2)
+    fact = result.unresolved_facts[0]
+    subject = result.edge_facts[0]
+    workers = tuple(
+        item.local_key for item in result.declarations if item.name == "worker"
+    )
+    native_candidate = replace(
+        subject,
+        local_key=_key("native_candidate", "body/call"),
+        target=LocalNodeTarget(workers[0]),
+        evidence=IREvidence(
+            origin=EvidenceOrigin.INFERRED,
+            extractor="resolver.static-candidates",
+            locator=_ast("body/call"),
+            inference_rule="static_candidate",
+        ),
+    )
+    incomplete = replace(
+        fact,
+        candidate_set_knowledge=CandidateSetKnowledge.INCOMPLETE,
+        candidate_target_local_keys=(workers[0],),
+        candidate_edge_local_keys=(native_candidate.local_key,),
+    )
+    native = replace(
+        result,
+        edge_facts=_sort((*result.edge_facts, native_candidate)),
+        unresolved_facts=(incomplete,),
+    )
+    native.validate()
+
+    enriched = attach_graphify_hints(
+        native, {incomplete.local_key: (workers[1],)}, enabled=True
+    )
+    updated = enriched.unresolved_facts[0]
+    assert updated.candidate_target_local_keys == tuple(sorted(workers))
+    assert native_candidate.local_key in updated.candidate_edge_local_keys
+    assert (
+        next(
+            edge
+            for edge in enriched.edge_facts
+            if edge.local_key == native_candidate.local_key
+        )
+        == native_candidate
+    )
+    enriched.validate()
+
+
+def test_parser_closed_discriminators_reject_unknown_variants():
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        ParseFailure,
+        ParseResult,
+        SyntaxControl,
+    )
+
+    with pytest.raises(ValueError, match="kind"):
+        SyntaxControl("other", "root/node/0", 1, 1)
+    with pytest.raises(ValueError, match="code"):
+        ParseFailure("other", "src/app.py", "python")
+    failure = ParseFailure("parser_failed", "src/app.py", "python")
+    coverage = CoverageEvent(
+        "python",
+        CoverageCapability.CONTROL_FLOW,
+        CoverageOutcome.PARTIAL,
+        "parser_failed",
+        "src/app.py",
+        0,
+        1,
+    )
+    with pytest.raises(ValueError, match="status"):
+        ParseResult("other", None, failure, coverage)

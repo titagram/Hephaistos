@@ -1876,17 +1876,34 @@ class AdapterResult:
                 )
             return nodes[key]
 
+        def need_local_block(key: str, declaration_key: str, label: str) -> BasicBlock:
+            block = need(blocks, key, label)
+            if block.declaration_key != declaration_key:
+                _fail(
+                    "cross_declaration_control_flow",
+                    f"{label} must belong to the same declaration",
+                )
+            return block
+
         for declaration in self.declarations:
             if declaration.owner_declaration_key is not None:
                 need(
                     declarations, declaration.owner_declaration_key, "owner declaration"
                 )
-            need(blocks, declaration.entry_block_key, "entry block")
+            need_local_block(
+                declaration.entry_block_key,
+                declaration.local_key,
+                "entry block",
+            )
             for block_key in (
                 declaration.normal_exit_block_keys
                 + declaration.exception_exit_block_keys
             ):
-                need(blocks, block_key, "declaration exit block")
+                need_local_block(
+                    block_key,
+                    declaration.local_key,
+                    "declaration exit block",
+                )
 
         for arm in self.branch_arms:
             structure = need(structures, arm.branch_local_key, "branch arm structure")
@@ -1895,15 +1912,34 @@ class AdapterResult:
                     "invalid_structure",
                     "branch arm must reference branch_group structure",
                 )
-            need(blocks, arm.source_block_key, "branch arm source block")
-            need(blocks, arm.target_block_key, "branch arm target block")
+            need_local_block(
+                arm.source_block_key,
+                structure.owner_declaration_key,
+                "branch arm source block",
+            )
+            need_local_block(
+                arm.target_block_key,
+                structure.owner_declaration_key,
+                "branch arm target block",
+            )
 
         for structure in self.structures:
             need(declarations, structure.owner_declaration_key, "structure owner")
             if structure.continuation_block_key is not None:
-                need(blocks, structure.continuation_block_key, "structure continuation")
+                need_local_block(
+                    structure.continuation_block_key,
+                    structure.owner_declaration_key,
+                    "structure continuation",
+                )
             if structure.parent_structure_key is not None:
-                need(structures, structure.parent_structure_key, "parent structure")
+                parent = need(
+                    structures, structure.parent_structure_key, "parent structure"
+                )
+                if parent.owner_declaration_key != structure.owner_declaration_key:
+                    _fail(
+                        "cross_declaration_control_flow",
+                        "parent structure must belong to the same declaration",
+                    )
 
         call_site_structure_by_site: dict[str, StructureIR] = {}
         for site in self.call_sites:
@@ -1912,8 +1948,16 @@ class AdapterResult:
                 site.caller_declaration_key,
                 "call-site caller declaration",
             )
-            need(blocks, site.source_block_key, "call-site source block")
-            need(blocks, site.continuation_block_key, "call-site continuation block")
+            need_local_block(
+                site.source_block_key,
+                site.caller_declaration_key,
+                "call-site source block",
+            )
+            need_local_block(
+                site.continuation_block_key,
+                site.caller_declaration_key,
+                "call-site continuation block",
+            )
             matching = [
                 structure
                 for structure in self.structures
@@ -1939,16 +1983,34 @@ class AdapterResult:
                         "invalid_structure",
                         "call-site exception reference must be exception_scope structure",
                     )
+                if structure.owner_declaration_key != site.caller_declaration_key:
+                    _fail(
+                        "cross_declaration_control_flow",
+                        "call-site exception scope must belong to its caller declaration",
+                    )
 
         scope_structure_by_scope: dict[str, StructureIR] = {}
         for scope in self.exception_scopes:
             need(declarations, scope.declaration_key, "exception scope declaration")
             for block_key in scope.catch_block_keys:
-                need(blocks, block_key, "exception catch block")
+                need_local_block(
+                    block_key, scope.declaration_key, "exception catch block"
+                )
             if scope.finally_block_key is not None:
-                need(blocks, scope.finally_block_key, "exception finally block")
+                need_local_block(
+                    scope.finally_block_key,
+                    scope.declaration_key,
+                    "exception finally block",
+                )
             if scope.parent_scope_key is not None:
-                need(scopes, scope.parent_scope_key, "exception parent scope")
+                parent_scope = need(
+                    scopes, scope.parent_scope_key, "exception parent scope"
+                )
+                if parent_scope.declaration_key != scope.declaration_key:
+                    _fail(
+                        "cross_declaration_control_flow",
+                        "exception parent scope must belong to the same declaration",
+                    )
             matching = [
                 structure
                 for structure in self.structures
@@ -1973,11 +2035,22 @@ class AdapterResult:
                     ExceptionSuccessor,
                     LoopSuccessor,
                 }:
-                    need(blocks, successor.target_block_key, "successor block")
+                    need_local_block(
+                        successor.target_block_key,
+                        block.declaration_key,
+                        "successor block",
+                    )
                 elif type(successor) is AsyncSuccessor:
                     need_node(successor.target_local_key, "async successor target")
                 else:
-                    need(terminals, successor.terminal_local_key, "return terminal")
+                    terminal = need(
+                        terminals, successor.terminal_local_key, "return terminal"
+                    )
+                    if terminal.source_block_key != block.local_key:
+                        _fail(
+                            "invalid_return",
+                            "return successor must reference a terminal from its source block",
+                        )
                 if type(successor) is BranchSuccessor:
                     matching_arms = [
                         arm
@@ -2001,6 +2074,11 @@ class AdapterResult:
                         _fail(
                             "invalid_structure",
                             "exception successor must reference exception_scope structure",
+                        )
+                    if structure.owner_declaration_key != block.declaration_key:
+                        _fail(
+                            "cross_declaration_control_flow",
+                            "exception successor scope must belong to the same declaration",
                         )
 
         def validate_edge_condition(edge: EdgeFactIR) -> None:
@@ -2058,6 +2136,27 @@ class AdapterResult:
                     "async and loop edges cannot carry a condition",
                 )
 
+        def node_declaration_key(node_key: str) -> str | None:
+            if node_key in declarations:
+                return node_key
+            if node_key in blocks:
+                return blocks[node_key].declaration_key
+            if node_key in terminals:
+                terminal = terminals[node_key]
+                source_block = blocks.get(terminal.source_block_key)
+                return (
+                    source_block.declaration_key if source_block is not None else None
+                )
+            return None
+
+        cross_declaration_relations = frozenset({
+            Relation.INVOKES,
+            Relation.RETURNS_TO,
+            Relation.EMITS,
+            Relation.DISPATCHES,
+            Relation.SCHEDULES,
+        })
+
         for edge in self.edge_facts:
             need_node(edge.source_node_local_key, "edge source")
             if type(edge.target) is LocalNodeTarget:
@@ -2079,6 +2178,20 @@ class AdapterResult:
                             f"edge {field_name} reference requires matching StructureIR",
                         )
             validate_edge_condition(edge)
+            if type(edge.target) is LocalNodeTarget:
+                source_owner = node_declaration_key(edge.source_node_local_key)
+                target_owner = node_declaration_key(edge.target.local_key)
+                if (
+                    source_owner is not None
+                    and target_owner is not None
+                    and source_owner != target_owner
+                    and edge.flow is not EdgeFlow.ASYNC
+                    and edge.relation not in cross_declaration_relations
+                ):
+                    _fail(
+                        "cross_declaration_control_flow",
+                        "only explicit call or async edges may cross declarations",
+                    )
 
             if edge.relation is Relation.INVOKES:
                 if edge.call_site_key is None:

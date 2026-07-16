@@ -138,7 +138,9 @@ def _native_subject_edge(
     matches = tuple(
         edge
         for edge in result.edge_facts
-        if edge.relation is Relation.INVOKES and edge.call_site_key == structure_key
+        if edge.relation is Relation.INVOKES
+        and edge.call_site_key == structure_key
+        and edge.evidence.origin is not EvidenceOrigin.INFERRED
     )
     return matches[0] if len(matches) == 1 else None
 
@@ -175,16 +177,23 @@ def attach_graphify_hints(
         declaration.local_key: declaration.declaration_kind
         for declaration in result.declarations
     }
-    by_key = {fact.local_key: fact for fact in result.unresolved_facts}
     added_edges: list[EdgeFactIR] = []
     replacements: dict[str, UnresolvedFact] = {}
 
     for fact in result.unresolved_facts:
+        # A complete set is an adapter assertion, not an invitation for an
+        # optional enricher to weaken it.  Likewise Graphify can extend only
+        # an unresolved frontier, never an already inferred subject edge.
+        if fact.candidate_set_knowledge is CandidateSetKnowledge.COMPLETE:
+            continue
         raw_values = _mapping_values(candidates, fact)
         if raw_values is None:
             continue
         subject_edge = _native_subject_edge(result, fact)
-        if subject_edge is None:
+        if (
+            subject_edge is None
+            or subject_edge.evidence.origin is EvidenceOrigin.INFERRED
+        ):
             # No native v2 subject means only a local caller diagnostic is
             # permissible.  Do not manufacture graph topology or uncertainty.
             continue
@@ -213,26 +222,26 @@ def attach_graphify_hints(
             ),
             "unknown",
         )
-        for ordinal, target_key in enumerate(target_keys):
+        used_edge_keys = {edge.local_key for edge in (*result.edge_facts, *added_edges)}
+        ordinal = 0
+        for target_key in target_keys:
             if target_key in existing_targets:
                 continue
             locator = subject_edge.locator
-            local_key = local_record_key(
-                language,
-                locator.source_location.path,
-                "graphify_hint_edge",
-                locator.kind,
-                locator.structural_path
-                if hasattr(locator, "structural_path")
-                else locator.structural_pointer,
-                ordinal,
-            )
-            # A collision cannot be repaired by choosing a different semantic
-            # identity.  Skip it rather than overwriting an existing fact.
-            if any(edge.local_key == local_key for edge in result.edge_facts) or any(
-                edge.local_key == local_key for edge in added_edges
-            ):
-                continue
+            while True:
+                local_key = local_record_key(
+                    language,
+                    locator.source_location.path,
+                    "graphify_hint_edge",
+                    locator.kind,
+                    locator.structural_path
+                    if hasattr(locator, "structural_path")
+                    else locator.structural_pointer,
+                    ordinal,
+                )
+                ordinal += 1
+                if local_key not in used_edge_keys:
+                    break
             edge = EdgeFactIR(
                 local_key=local_key,
                 source_node_local_key=subject_edge.source_node_local_key,
@@ -253,6 +262,7 @@ def attach_graphify_hints(
                 ),
             )
             added_edges.append(edge)
+            used_edge_keys.add(local_key)
             existing_targets.add(target_key)
             existing_edge_keys.add(local_key)
         if existing_targets and existing_edge_keys:

@@ -92,6 +92,12 @@ _DYNAMIC_KINDS = frozenset({
     TargetExpressionKind.DYNAMIC_MEMBER,
     TargetExpressionKind.FRAMEWORK_SERVICE,
 })
+_STATIC_EXACT_KINDS = frozenset({
+    TargetExpressionKind.DIRECT_FUNCTION,
+    TargetExpressionKind.DIRECT_STATIC_METHOD,
+    TargetExpressionKind.DIRECT_INSTANCE_METHOD,
+    TargetExpressionKind.CONSTRUCTOR,
+})
 
 
 def _declaration_names(declaration: ExecutableDeclaration) -> frozenset[str]:
@@ -105,10 +111,10 @@ def _declaration_names(declaration: ExecutableDeclaration) -> frozenset[str]:
     )
 
 
-def _targets_for(
+def _static_exact_targets(
     site: CallSite, declarations: tuple[ExecutableDeclaration, ...]
 ) -> tuple[ExecutableDeclaration, ...]:
-    """Apply only available static identity facts in fixed precedence order.
+    """Return only target sets supported by an exact static proof.
 
     Import/namespace/container proof is deliberately absent from this frozen
     IR until the language/framework adapters emit it.  In that situation this
@@ -116,6 +122,8 @@ def _targets_for(
     is imported or registered.
     """
 
+    if site.target_expression_kind not in _STATIC_EXACT_KINDS:
+        return ()
     call_path = site.locator.source_location.path
 
     # 1. An explicit fully qualified/static target is authoritative.
@@ -158,25 +166,33 @@ def _targets_for(
         if typed:
             return typed
 
-    exact = tuple(
+    return ()
+
+
+def _dynamic_candidate_targets(
+    site: CallSite, declarations: tuple[ExecutableDeclaration, ...]
+) -> tuple[ExecutableDeclaration, ...]:
+    """Return every in-scope textual candidate without promoting any one.
+
+    This function is only called for the dynamic expression variants.  The
+    caller subsequently requires explicit full symbol-resolution coverage
+    before representing even a singleton as a complete candidate set.
+    """
+
+    reference = site.fully_qualified_target or site.lexical_target
+    if reference is None:
+        return ()
+    direct = tuple(
         declaration
         for declaration in declarations
-        if site.lexical_target in _declaration_names(declaration)
+        if reference in _declaration_names(declaration)
     )
-    # A unique static lexical fact is exact.  Multiple direct homonyms lack an
-    # import/namespace proof and therefore cannot be silently treated as a
-    # dynamic complete set.
-    if len(exact) == 1:
-        return exact
-    if site.target_expression_kind in _DYNAMIC_KINDS:
-        # A dynamic member can name an implementation method without encoding
-        # its owner.  This is closed-world only: keep every name match, never
-        # rank or discard one.  The twenty-target contract cap is enforced by
-        # the caller, which otherwise returns an unresolved frontier.
-        return tuple(
-            declaration for declaration in declarations if declaration.name == leaf
-        )
-    return ()
+    if direct:
+        return direct
+    leaf = reference.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+    return tuple(
+        declaration for declaration in declarations if declaration.name == leaf
+    )
 
 
 def _coverage_event(
@@ -259,10 +275,39 @@ def resolve_call_sites(results: Sequence[AdapterResult]) -> ResolutionResult:
             coverage.append(_coverage_event(site, caller, reason))
             continue
 
-        targets = tuple(
-            sorted(_targets_for(site, declarations), key=lambda item: item.local_key)
-        )
-        if len(targets) == 1:
+        if site.target_expression_kind in _DYNAMIC_KINDS:
+            targets = tuple(
+                sorted(
+                    _dynamic_candidate_targets(site, declarations),
+                    key=lambda item: item.local_key,
+                )
+            )
+            if (
+                1 <= len(targets) <= 20
+                and caller is not None
+                and _closed_world_symbol_resolution_proven(collected, caller.language)
+            ):
+                decisions.append(
+                    CallResolution(
+                        site.local_key,
+                        ResolutionDisposition.EXHAUSTIVE_CANDIDATES,
+                        tuple(target.local_key for target in targets),
+                        CandidateSetKnowledge.COMPLETE,
+                        None,
+                        True,
+                    )
+                )
+                continue
+            reason = "dynamic_dispatch"
+        else:
+            targets = tuple(
+                sorted(
+                    _static_exact_targets(site, declarations),
+                    key=lambda item: item.local_key,
+                )
+            )
+            reason = "call_target_unresolved"
+        if len(targets) == 1 and site.target_expression_kind in _STATIC_EXACT_KINDS:
             decisions.append(
                 CallResolution(
                     site.local_key,
@@ -275,7 +320,7 @@ def resolve_call_sites(results: Sequence[AdapterResult]) -> ResolutionResult:
             )
             continue
         if (
-            1 < len(targets) <= 20
+            1 <= len(targets) <= 20
             and caller is not None
             and _closed_world_symbol_resolution_proven(collected, caller.language)
         ):
@@ -290,12 +335,6 @@ def resolve_call_sites(results: Sequence[AdapterResult]) -> ResolutionResult:
                 )
             )
             continue
-
-        reason = (
-            "dynamic_dispatch"
-            if site.target_expression_kind in _DYNAMIC_KINDS
-            else "call_target_unresolved"
-        )
         decisions.append(
             CallResolution(
                 site.local_key,
