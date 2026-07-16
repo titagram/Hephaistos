@@ -843,6 +843,28 @@ def test_condition_ir_rejects_raw_literals_and_secret_assignments_without_echoin
         assert normalized not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "normalized",
+    (
+        "password == supplied_password",
+        "user.api_key != request.api_key",
+        "token == provided_token",
+    ),
+)
+def test_condition_ir_preserves_redacted_identifier_operator_expressions(
+    normalized: str,
+) -> None:
+    result = _valid_result()
+    condition = ConditionIR(
+        "predicate",
+        normalized,
+        _DIGEST,
+        ConditionPolarity.TRUE,
+    )
+    arm = replace(result.branch_arms[0], condition=condition)
+    assert replace(result, branch_arms=(arm,)).validate() is None
+
+
 def test_non_key_families_and_pipeline_orders_are_unique() -> None:
     result = _valid_result()
     with pytest.raises(IRValidationError, match="duplicate"):

@@ -50,9 +50,6 @@ _REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]{0,31}$")
 _CONDITION_SAFE_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_.$:\s()\[\]!<>=&|+*/%?,\-]*$")
 _CONDITION_LITERAL_RE = re.compile(r"(?<![A-Za-z_$])\d+(?:\.\d+)?(?![A-Za-z_])")
-_CONDITION_SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:password|secret|token|api[_-]?key|credential)\b\s*(?:={1,3}|!={1,2})"
-)
 
 
 class IRValidationError(ValueError):
@@ -414,7 +411,6 @@ class ConditionIR:
             not _CONDITION_SAFE_RE.fullmatch(normalized)
             or any(mark in normalized for mark in ("'", '"', "`"))
             or _CONDITION_LITERAL_RE.search(normalized)
-            or _CONDITION_SENSITIVE_ASSIGNMENT_RE.search(normalized)
         ):
             _fail(
                 "invalid_condition",
