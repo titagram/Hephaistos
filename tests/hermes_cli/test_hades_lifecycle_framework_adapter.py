@@ -36,6 +36,9 @@ from hermes_cli.hades_index.python import (
     extract_lifecycle_entrypoints as python_entrypoints,
 )
 from hermes_cli.hades_index.sql import extract_lifecycle_entrypoints as sql_entrypoints
+from hermes_cli.hades_index.typescript import (
+    extract_lifecycle_entrypoints as typescript_entrypoints,
+)
 from hermes_cli.hades_index.tree_sitter_adapter import (
     ParsedFile,
     StructuralSymbol,
@@ -239,6 +242,27 @@ def test_language_delegates_never_run_foreign_or_unknown_registry_adapters(
     assert unknown.candidates == ()
     assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
     assert php_adapter.calls == ["detect", "entrypoints", "pipeline"]
+
+
+def test_composite_language_delegate_skips_registered_adapter_without_syntax(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path, languages=("javascript", "typescript"))
+    registry = FrameworkAdapterRegistry()
+    typescript_adapter = _Adapter("typescript", "nextjs", "typescript-main")
+    javascript_adapter = _Adapter("javascript", "express", "javascript-main")
+    registry.register(typescript_adapter)
+    registry.register(javascript_adapter)
+
+    result = typescript_entrypoints(
+        context,
+        (_syntax(language="typescript", names=("main",)),),
+        registry=registry,
+    )
+
+    assert any(candidate.framework == "nextjs" for candidate in result.candidates)
+    assert typescript_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert javascript_adapter.calls == []
 
 
 def test_generic_entrypoints_cover_non_http_runtime_roots(tmp_path: Path) -> None:

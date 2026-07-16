@@ -112,6 +112,11 @@ def run_framework_adapters(
     for adapter in registry.adapters:
         if languages is not None and adapter.language not in languages:
             continue
+        relevant_syntax = tuple(
+            item for item in syntax if item.language == adapter.language
+        )
+        if not relevant_syntax:
+            continue
         detection = adapter.detect(context)
         if type(detection) is not FrameworkDetection:
             raise FrameworkAdapterError(
@@ -127,9 +132,6 @@ def run_framework_adapters(
         if not detection.detected:
             continue
         detections.append(detection)
-        relevant_syntax = tuple(
-            item for item in syntax if item.language == adapter.language
-        )
         for candidate in adapter.entrypoints(context, relevant_syntax):
             if type(candidate) is not EntrypointCandidate:
                 raise FrameworkAdapterError(
