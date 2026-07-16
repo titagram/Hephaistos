@@ -26,6 +26,7 @@ from hermes_cli.hades_index.lifecycle.frameworks import (
     run_framework_adapters,
 )
 from hermes_cli.hades_index.lifecycle.model import (
+    CoverageEvent,
     EntrypointCandidate,
     ExtractionContext,
     FrameworkPipelineSegment,
@@ -146,6 +147,15 @@ class _Adapter:
         self.calls.append("pipeline")
         return ()
 
+    def coverage_events(self, context: ExtractionContext) -> tuple[CoverageEvent, ...]:
+        return ()
+
+
+@dataclass
+class _LegacyAdapterWithoutCoverage:
+    language: str = "python"
+    framework: str = "legacy"
+
 
 def test_registry_preserves_registration_order_and_rejects_duplicate_framework() -> (
     None
@@ -160,6 +170,11 @@ def test_registry_preserves_registration_order_and_rejects_duplicate_framework()
     assert registry.adapters == (first, second)
     with pytest.raises(FrameworkAdapterError, match="duplicate framework adapter"):
         registry.register(_Adapter("python", "fastapi", "duplicate"))
+
+
+def test_registry_requires_the_formal_coverage_events_adapter_method() -> None:
+    with pytest.raises(FrameworkAdapterError, match="coverage_events"):
+        FrameworkAdapterRegistry().register(_LegacyAdapterWithoutCoverage())
 
 
 def test_all_detected_framework_adapters_run_in_registration_order(

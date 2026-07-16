@@ -86,6 +86,10 @@ _CLASS_RE = re.compile(
     r"(?:\s+extends\s+(?P<parent>[A-Za-z_\\][A-Za-z0-9_\\]*))?",
     re.MULTILINE,
 )
+_NAMESPACE_RE = re.compile(
+    r"\bnamespace\s+(?P<name>[A-Za-z_][A-Za-z0-9_\\]*)\s*;",
+    re.MULTILINE,
+)
 _METHOD_RE = re.compile(
     r"\b(?:public|protected|private)?\s*(?:static\s+)?function\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -147,6 +151,7 @@ class _RouteContext:
     methods: tuple[str, ...] | None = None
     host: str | None = None
     condition: str | None = None
+    priority: int = 0
     unresolved: bool = False
 
 
@@ -178,10 +183,17 @@ class _Listener:
 
 
 @dataclass(frozen=True, slots=True)
+class _Voter:
+    service: str
+    attributes: frozenset[str]
+    subject_types: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class _ServiceFacts:
     bindings: Mapping[str, str]
     listeners: tuple[_Listener, ...]
-    voters: tuple[str, ...]
+    voters: tuple[_Voter, ...]
     exception_handlers: tuple[_Listener, ...]
 
 
@@ -189,6 +201,7 @@ class _ServiceFacts:
 class _ControllerOutcome:
     returns_response: bool
     throws: bool
+    authorization_needs: frozenset[tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,9 +289,18 @@ def _normalize_methods(value: object) -> tuple[str, ...] | None:
     if isinstance(value, str):
         if _is_computed(value):
             return None
+        if not re.fullmatch(r"\s*[A-Za-z]+(?:[\s,|]+[A-Za-z]+)*\s*", value):
+            return None
         values = re.findall(r"[A-Za-z]+", value)
     elif isinstance(value, (list, tuple)):
-        values = [item for item in value if isinstance(item, str)]
+        if not value or any(
+            not isinstance(item, str)
+            or _is_computed(item)
+            or re.fullmatch(r"[A-Za-z]+", item) is None
+            for item in value
+        ):
+            return None
+        values = list(value)
     else:
         return None
     methods = tuple(sorted({item.upper() for item in values if item}))
@@ -324,41 +346,130 @@ def _is_computed(value: object) -> bool:
     return not isinstance(value, str) or bool(_COMPUTED_RE.search(value))
 
 
-def _php_string_argument(args: str, name: str) -> str | None:
-    pattern = re.compile(
-        rf"\b{re.escape(name)}\s*[:=]\s*(['\"])(?P<value>.*?)\1", re.DOTALL
-    )
+def _php_quoted_literal(value: str, offset: int = 0) -> tuple[str, int] | None:
+    """Read one PHP single/double quoted literal without evaluating it."""
+
+    index = offset
+    while index < len(value) and value[index].isspace():
+        index += 1
+    if index >= len(value) or value[index] not in {"'", '"'}:
+        return None
+    quote = value[index]
+    start = index + 1
+    index = start
+    while index < len(value):
+        if value[index] == "\\":
+            index += 2
+            continue
+        if value[index] == quote:
+            return value[start:index], index + 1
+        index += 1
+    return None
+
+
+def _php_literal_argument(args: str, name: str) -> tuple[bool, str | None]:
+    """Return whether a named argument exists and its closed string literal."""
+
+    pattern = re.compile(rf"\b{re.escape(name)}\s*[:=]\s*", re.DOTALL)
     match = pattern.search(args)
-    return match.group("value") if match else None
+    if match is None:
+        return False, None
+    literal = _php_quoted_literal(args, match.end())
+    if literal is None:
+        return True, None
+    _value, end = literal
+    tail = args[end:].lstrip()
+    # A literal followed by an expression operator is not a literal argument:
+    # recording its prefix would fabricate a concrete route constraint.
+    if tail and not tail.startswith(","):
+        return True, None
+    return True, literal[0]
 
 
-def _php_positional_path(args: str) -> str | None:
-    match = re.match(r"\s*(['\"])(?P<value>.*?)\1", args, re.DOTALL)
-    return match.group("value") if match else None
+def _php_positional_path(args: str) -> tuple[bool, str | None]:
+    match = re.match(r"\s*(?P<value>[^,)]*)", args, re.DOTALL)
+    if match is None:
+        return False, None
+    value = match.group("value").strip()
+    literal = re.fullmatch(r"(['\"])(?P<value>.*?)\1", value, re.DOTALL)
+    return True, literal.group("value") if literal is not None else None
 
 
-def _php_methods_argument(args: str) -> tuple[str, ...] | None:
-    match = re.search(r"\bmethods\s*[:=]\s*\[(?P<items>[^]]*)\]", args, re.DOTALL)
-    if match:
-        return _normalize_methods(
-            re.findall(r"['\"]([A-Za-z]+)['\"]", match.group("items"))
-        )
-    single = _php_string_argument(args, "methods")
-    return _normalize_methods(single)
+def _php_methods_argument(args: str) -> tuple[bool, tuple[str, ...] | None]:
+    """Parse only a complete literal method list, never a partial regex match."""
 
-
-def _php_chain_string(chain: str, method: str) -> str | None:
     match = re.search(
-        rf"->{re.escape(method)}\s*\(\s*(['\"])(?P<value>.*?)\1\s*\)",
-        chain,
-        re.DOTALL,
+        r"\bmethods\s*[:=]\s*(?P<value>\[[^]]*\]|[^,)]*)", args, re.DOTALL
     )
-    return match.group("value") if match else None
+    if match is None:
+        return False, None
+    value = match.group("value").strip()
+    if (value.startswith("[") and value.endswith("]")) or (
+        value.startswith("{") and value.endswith("}")
+    ):
+        items = value[1:-1].strip()
+        if not items:
+            return True, None
+        if (
+            re.fullmatch(
+                r"\s*(['\"])[A-Za-z]+\1(?:\s*,\s*(['\"])[A-Za-z]+\2)*\s*",
+                items,
+            )
+            is None
+        ):
+            return True, None
+        return True, _normalize_methods(re.findall(r"['\"]([A-Za-z]+)['\"]", items))
+    literal = re.fullmatch(r"(['\"])(?P<method>[A-Za-z]+)\1", value)
+    return True, _normalize_methods(literal.group("method") if literal else None)
 
 
-def _php_priority_argument(args: str) -> int:
-    match = re.search(r"\bpriority\s*[:=]\s*(?P<value>-?\d+)", args)
-    return int(match.group("value")) if match else 0
+def _php_chain_string(chain: str, method: str) -> tuple[bool, str | None]:
+    """Distinguish an absent fluent option from a dynamic/non-literal one."""
+
+    match = re.search(rf"->{re.escape(method)}\s*\(\s*", chain, re.DOTALL)
+    if match is None:
+        return False, None
+    literal = _php_quoted_literal(chain, match.end())
+    if literal is None:
+        return True, None
+    _value, end = literal
+    return True, literal[0] if chain[end:].lstrip().startswith(")") else None
+
+
+def _php_chain_methods(chain: str) -> tuple[bool, tuple[str, ...] | None]:
+    match = re.search(r"->methods\s*\((?P<value>[^)]*)\)", chain, re.DOTALL)
+    if match is None:
+        return False, None
+    value = match.group("value").strip()
+    if value.startswith("[") and value.endswith("]"):
+        items = value[1:-1].strip()
+        if (
+            re.fullmatch(
+                r"\s*(['\"])[A-Za-z]+\1(?:\s*,\s*(['\"])[A-Za-z]+\2)*\s*",
+                items,
+            )
+            is None
+        ):
+            return True, None
+        return True, _normalize_methods(re.findall(r"['\"]([A-Za-z]+)['\"]", items))
+    literal = re.fullmatch(r"(['\"])(?P<method>[A-Za-z]+)\1", value)
+    return True, _normalize_methods(literal.group("method") if literal else None)
+
+
+def _php_chain_priority(chain: str) -> tuple[bool, int | None]:
+    match = re.search(r"->priority\s*\((?P<value>[^)]*)\)", chain)
+    if match is None:
+        return False, None
+    value = match.group("value").strip()
+    return True, int(value) if re.fullmatch(r"-?\d+", value) else None
+
+
+def _php_priority_argument(args: str) -> tuple[bool, int | None]:
+    match = re.search(r"\bpriority\s*[:=]\s*(?P<value>[^,)]*)", args)
+    if match is None:
+        return False, None
+    value = match.group("value").strip()
+    return True, int(value) if re.fullmatch(r"-?\d+", value) else None
 
 
 def _route_from_mapping(
@@ -377,7 +488,11 @@ def _route_from_mapping(
     raw_condition = (
         value.get("condition") if "condition" in value else context.condition
     )
-    raw_methods = value.get("methods") if "methods" in value else context.methods
+    own_methods = (
+        _normalize_methods(value.get("methods")) if "methods" in value else None
+    )
+    methods = own_methods if "methods" in value else context.methods
+    raw_priority = value.get("priority") if "priority" in value else None
     if (
         not isinstance(raw_path, str)
         or not raw_path.startswith("/")
@@ -386,13 +501,13 @@ def _route_from_mapping(
         or (own_name is not None and _is_computed(own_name))
         or (raw_host is not None and _is_computed(raw_host))
         or (raw_condition is not None and _is_computed(raw_condition))
-        or (raw_methods is not None and _normalize_methods(raw_methods) is None)
+        or ("methods" in value and own_methods is None)
+        or ("priority" in value and type(raw_priority) is not int)
     ):
         diagnostics.mark(source_path)
         return None
     controller_value = value.get("controller", value.get("_controller"))
     controller = controller_value if isinstance(controller_value, str) else None
-    own_methods = _normalize_methods(raw_methods)
     host = raw_host if isinstance(raw_host, str) else None
     condition = raw_condition if isinstance(raw_condition, str) else None
     name = own_name if isinstance(own_name, str) else None
@@ -401,13 +516,11 @@ def _route_from_mapping(
     return _RouteSpec(
         path=_join_path(context.prefix, raw_path),
         name=name,
-        methods=own_methods if own_methods is not None else context.methods,
+        methods=methods,
         host=host,
         condition=condition,
         controller=controller,
-        priority=int(value.get("priority", 0))
-        if isinstance(value.get("priority", 0), int)
-        else 0,
+        priority=context.priority + (raw_priority if raw_priority is not None else 0),
         source_path=source_path,
         source_line=line,
         structural_pointer=f"routes/{source_order}",
@@ -437,6 +550,9 @@ def _import_context(
     )
     if "methods" in value and _normalize_methods(value.get("methods")) is None:
         unresolved = True
+    raw_priority = value.get("priority") if "priority" in value else 0
+    if type(raw_priority) is not int:
+        unresolved = True
     if unresolved:
         diagnostics.mark(path)
     return _RouteContext(
@@ -446,6 +562,7 @@ def _import_context(
         methods=_normalize_methods(value.get("methods")) or parent.methods,
         host=host,
         condition=condition,
+        priority=parent.priority + raw_priority,
         unresolved=unresolved,
     )
 
@@ -545,6 +662,12 @@ def _xml_routes(
                 child = _resource_path(path, resource, diagnostics)
                 if child:
                     data: dict[str, object] = dict(node.attrib)
+                    if "priority" in data:
+                        try:
+                            data["priority"] = int(str(data["priority"]))
+                        except ValueError:
+                            diagnostics.mark(path)
+                            continue
                     routes.extend(
                         _routes_from_path(
                             context,
@@ -624,27 +747,36 @@ def _php_routes(
             resource = _resource_path(path, match.group("resource"), diagnostics)
             if resource is None:
                 continue
-            prefix = _php_chain_string(chain, "prefix") or ""
-            name_prefix = _php_chain_string(chain, "namePrefix") or ""
-            host = _php_chain_string(chain, "host") or route_context.host
-            condition = _php_chain_string(chain, "condition") or route_context.condition
-            methods_match = _PHP_METHODS_RE.search(chain)
-            methods = (
-                _normalize_methods(
-                    re.findall(r"['\"]([A-Za-z]+)['\"]", methods_match.group("items"))
-                )
-                if methods_match
-                else route_context.methods
+            prefix_present, prefix_value = _php_chain_string(chain, "prefix")
+            name_present, name_value = _php_chain_string(chain, "namePrefix")
+            host_present, host_value = _php_chain_string(chain, "host")
+            condition_present, condition_value = _php_chain_string(chain, "condition")
+            methods_present, methods_value = _php_chain_methods(chain)
+            priority_present, priority_value = _php_chain_priority(chain)
+            prefix = prefix_value if prefix_present else ""
+            name_prefix = name_value if name_present else ""
+            host = host_value if host_present else route_context.host
+            condition = (
+                condition_value if condition_present else route_context.condition
             )
+            methods = methods_value if methods_present else route_context.methods
+            priority = priority_value if priority_present else 0
             unresolved = route_context.unresolved or any(
-                _is_computed(value)
-                for value in (prefix, name_prefix, host, condition)
-                if value is not None
+                present and (value is None or _is_computed(value))
+                for present, value in (
+                    (prefix_present, prefix_value),
+                    (name_present, name_value),
+                    (host_present, host_value),
+                    (condition_present, condition_value),
+                )
             )
-            if methods_match is not None and methods is None:
+            if methods_present and methods_value is None:
+                unresolved = True
+            if priority_present and priority_value is None:
                 unresolved = True
             if unresolved:
                 diagnostics.mark(path)
+                continue
             routes.extend(
                 _routes_from_path(
                     context,
@@ -655,6 +787,7 @@ def _php_routes(
                         methods=methods,
                         host=host,
                         condition=condition,
+                        priority=route_context.priority + priority,
                         unresolved=unresolved,
                     ),
                     order,
@@ -664,15 +797,10 @@ def _php_routes(
             )
             continue
         controller_match = _PHP_CONTROLLER_RE.search(chain)
-        methods_match = _PHP_METHODS_RE.search(chain)
         controller = controller_match.group("controller") if controller_match else None
-        methods = (
-            _normalize_methods(
-                re.findall(r"['\"]([A-Za-z]+)['\"]", methods_match.group("items"))
-            )
-            if methods_match
-            else route_context.methods
-        )
+        methods_present, methods_value = _php_chain_methods(chain)
+        priority_present, priority_value = _php_chain_priority(chain)
+        methods = methods_value if methods_present else route_context.methods
         route_name = match.group("name")
         route_path = match.group("path")
         if (
@@ -684,7 +812,8 @@ def _php_routes(
                 route_context.condition is not None
                 and _is_computed(route_context.condition)
             )
-            or (methods_match is not None and methods is None)
+            or (methods_present and methods_value is None)
+            or (priority_present and priority_value is None)
         ):
             diagnostics.mark(path)
             continue
@@ -696,7 +825,8 @@ def _php_routes(
                 host=route_context.host,
                 condition=route_context.condition,
                 controller=controller,
-                priority=0,
+                priority=route_context.priority
+                + (priority_value if priority_value is not None else 0),
                 source_path=path,
                 source_line=_line(content, match.start()),
                 structural_pointer=f"routes/{order[0]}",
@@ -728,14 +858,42 @@ def _routes_from_path(
 
 def _route_arguments(
     args: str,
-) -> tuple[str | None, str | None, tuple[str, ...] | None, str | None, str | None, int]:
+) -> tuple[
+    str | None,
+    str | None,
+    tuple[str, ...] | None,
+    str | None,
+    str | None,
+    int,
+    bool,
+]:
+    path_present, named_path = _php_literal_argument(args, "path")
+    positional_present, positional_path = _php_positional_path(args)
+    name_present, name = _php_literal_argument(args, "name")
+    methods_present, methods = _php_methods_argument(args)
+    host_present, host = _php_literal_argument(args, "host")
+    condition_present, condition = _php_literal_argument(args, "condition")
+    priority_present, priority = _php_priority_argument(args)
+    path = named_path if path_present else positional_path
+    unresolved = any(
+        present and (value is None or _is_computed(value))
+        for present, value in (
+            (path_present or positional_present, path),
+            (name_present, name),
+            (host_present, host),
+            (condition_present, condition),
+        )
+    )
+    unresolved = unresolved or (methods_present and methods is None)
+    unresolved = unresolved or (priority_present and priority is None)
     return (
-        _php_string_argument(args, "path") or _php_positional_path(args),
-        _php_string_argument(args, "name"),
-        _php_methods_argument(args),
-        _php_string_argument(args, "host"),
-        _php_string_argument(args, "condition"),
-        _php_priority_argument(args),
+        path,
+        name,
+        methods,
+        host,
+        condition,
+        priority if priority is not None else 0,
+        unresolved,
     )
 
 
@@ -790,10 +948,13 @@ def _attribute_routes(
             declaration = _DECLARATION_RE.search(content, offset)
             if declaration is None or declaration.start() - offset > 2_000:
                 continue
-            path, name, methods, host, condition, priority = _route_arguments(args)
+            path, name, methods, host, condition, priority, unresolved = (
+                _route_arguments(args)
+            )
             if (
                 path is None
                 or not path.startswith("/")
+                or unresolved
                 or _is_computed(path)
                 or (name is not None and _is_computed(name))
                 or (host is not None and _is_computed(host))
@@ -935,28 +1096,88 @@ def _method_body(content: str, class_name: str, method_name: str) -> str | None:
     return None
 
 
+def _class_source_items(
+    context: ExtractionContext,
+    class_name: str,
+    source_texts: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """Find only source files that declare the requested class, never a tail match."""
+
+    normalized = class_name.lstrip("\\")
+    namespace, separator, tail = normalized.rpartition("\\")
+
+    def declares_requested_class(content: str) -> bool:
+        if _class_body(content, tail) is None:
+            return False
+        if not separator:
+            return True
+        namespace_match = _NAMESPACE_RE.search(content)
+        return (
+            namespace_match is not None and namespace_match.group("name") == namespace
+        )
+
+    candidates = {
+        path: content
+        for path, content in source_texts.items()
+        if declares_requested_class(content)
+    }
+    if normalized.startswith("App\\"):
+        relative = normalized[len("App\\") :].replace("\\", "/")
+        inferred_path = f"src/{relative}.php"
+        inferred = _text(context, inferred_path)
+        if inferred is not None and declares_requested_class(inferred):
+            candidates[inferred_path] = inferred
+    # A duplicate declaration cannot prove which runtime class is registered.
+    return tuple(candidates.items()) if len(candidates) == 1 else ()
+
+
 def _class_sources(
     context: ExtractionContext,
     class_name: str,
     source_texts: Mapping[str, str],
 ) -> tuple[str, ...]:
-    """Find only source files that declare the requested class, never a tail match."""
+    return tuple(
+        content
+        for _path, content in _class_source_items(context, class_name, source_texts)
+    )
 
-    tail = class_name.rsplit("\\", 1)[-1]
-    candidates = {
-        path: content
-        for path, content in source_texts.items()
-        if _class_body(content, tail) is not None
-    }
-    normalized = class_name.lstrip("\\")
-    if normalized.startswith("App\\"):
-        relative = normalized[len("App\\") :].replace("\\", "/")
-        inferred_path = f"src/{relative}.php"
-        inferred = _text(context, inferred_path)
-        if inferred is not None and _class_body(inferred, tail) is not None:
-            candidates[inferred_path] = inferred
-    # A duplicate declaration cannot prove which runtime class is registered.
-    return tuple(candidates.values()) if len(candidates) == 1 else ()
+
+def _implements_event_subscriber(content: str, class_name: str) -> bool:
+    declaration = re.search(
+        rf"\bclass\s+{re.escape(class_name)}\b(?P<tail>[^{{]*)\{{",
+        content,
+        re.DOTALL,
+    )
+    return bool(
+        declaration
+        and re.search(
+            r"\b(?:[A-Za-z_\\]+\\)?EventSubscriberInterface\b",
+            declaration.group("tail"),
+        )
+    )
+
+
+def _voter_supports(
+    context: ExtractionContext,
+    service: str,
+    bindings: Mapping[str, str],
+    source_texts: Mapping[str, str],
+) -> _Voter:
+    class_name = bindings.get(service, service).lstrip("\\")
+    class_tail = class_name.rsplit("\\", 1)[-1]
+    attributes: set[str] = set()
+    subject_types: set[str] = set()
+    for content in _class_sources(context, class_name, source_texts):
+        body = _method_body(content, class_tail, "supports")
+        if body is None:
+            continue
+        attributes.update(
+            re.findall(r"\$attribute\s*={2,3}\s*['\"]([A-Za-z0-9_.:-]+)['\"]", body)
+        )
+        subject_types.update(
+            re.findall(r"\$subject\s+instanceof\s+([A-Za-z_\\][A-Za-z0-9_\\]*)", body)
+        )
+    return _Voter(service, frozenset(attributes), frozenset(subject_types))
 
 
 def _service_method_matches(
@@ -983,7 +1204,8 @@ def _service_facts(
 ) -> _ServiceFacts:
     bindings: dict[str, str] = {}
     listeners: list[_Listener] = []
-    voters: list[str] = []
+    voter_services: list[str] = []
+    subscriber_registrations: dict[str, str] = {}
     exception_handlers: list[_Listener] = []
     order = 0
     source_texts: dict[str, str] = {}
@@ -1000,8 +1222,14 @@ def _service_facts(
             if document is None:
                 continue
             services = _as_mapping(document.get("services"))
+            defaults = _as_mapping(services.get("_defaults"))
+            default_autoconfigure = defaults.get("autoconfigure") is True
             for service, raw in services.items():
-                if not isinstance(service, str) or not isinstance(raw, Mapping):
+                if (
+                    service == "_defaults"
+                    or not isinstance(service, str)
+                    or not isinstance(raw, Mapping)
+                ):
                     continue
                 data = _as_mapping(raw)
                 class_name = data.get("class")
@@ -1011,7 +1239,21 @@ def _service_facts(
                 if isinstance(tags, str):
                     tags = (tags,)
                 if not isinstance(tags, (list, tuple)):
-                    continue
+                    tags = ()
+                tag_names = {
+                    name
+                    for tag in tags
+                    for name in (
+                        tag if isinstance(tag, str) else _as_mapping(tag).get("name"),
+                    )
+                    if isinstance(name, str)
+                }
+                registered_class = bindings.get(service, service)
+                if (
+                    "kernel.event_subscriber" in tag_names
+                    or data.get("autoconfigure", default_autoconfigure) is True
+                ) and (service in bindings or "\\" in registered_class):
+                    subscriber_registrations[service] = registered_class
                 for tag in tags:
                     if isinstance(tag, str):
                         tag_data: Mapping[str, object] = {"name": tag}
@@ -1019,7 +1261,7 @@ def _service_facts(
                         tag_data = _as_mapping(tag)
                     tag_name = tag_data.get("name")
                     if tag_name == "security.voter":
-                        voters.append(service)
+                        voter_services.append(service)
                     if tag_name != "kernel.event_listener":
                         continue
                     event = tag_data.get("event")
@@ -1069,12 +1311,19 @@ def _service_facts(
                 class_name = service_node.attrib.get("class")
                 if class_name and not _is_computed(class_name):
                     bindings[service] = class_name
+                registered_class = bindings.get(service, service)
+                if service_node.attrib.get("autoconfigure") == "true" and (
+                    service in bindings or "\\" in registered_class
+                ):
+                    subscriber_registrations[service] = registered_class
                 for tag_node in service_node:
                     if tag_node.tag.rsplit("}", 1)[-1] != "tag":
                         continue
                     tag_name = tag_node.attrib.get("name")
                     if tag_name == "security.voter":
-                        voters.append(service)
+                        voter_services.append(service)
+                    if tag_name == "kernel.event_subscriber":
+                        subscriber_registrations[service] = registered_class
                     event = tag_node.attrib.get("event")
                     if tag_name != "kernel.event_listener" or event not in {
                         "kernel.request",
@@ -1119,10 +1368,14 @@ def _service_facts(
             for match in _PHP_SET_CLASS_RE.finditer(content):
                 service = match.group("class")
                 bindings[service] = service
+                if re.search(r"->autoconfigure\s*\(\s*\)", match.group("chain")):
+                    subscriber_registrations[service] = service
                 for tag_match in _PHP_TAG_RE.finditer(match.group("chain")):
                     tag_name = tag_match.group("name")
                     if tag_name == "security.voter":
-                        voters.append(service)
+                        voter_services.append(service)
+                    if tag_name == "kernel.event_subscriber":
+                        subscriber_registrations[service] = service
                     if tag_name != "kernel.event_listener":
                         continue
                     attributes = tag_match.group("attrs") or ""
@@ -1178,34 +1431,38 @@ def _service_facts(
                     (
                         exception_handlers if event == "kernel.exception" else listeners
                     ).append(listener)
-    for path, content in source_texts.items():
-        class_match = _CLASS_RE.search(content)
-        if class_match is None or "getSubscribedEvents" not in content:
-            continue
-        service = class_match.group("name")
-        for event_match in _SUBSCRIBED_EVENT_RE.finditer(content):
-            event_name = f"kernel.{event_match.group('event').lower()}"
-            priority = int(event_match.group("priority") or 0)
-            listener = _Listener(
-                event=event_name,
-                service=service,
-                priority=priority,
-                source_path=path,
-                source_order=order,
-                method_name=event_match.group("method"),
-                returns_response=_service_method_matches(
-                    context,
-                    service,
-                    bindings,
-                    source_texts,
-                    event_match.group("method"),
-                    _RESPONSE_RE,
-                ),
-            )
-            order += 1
-            (
-                exception_handlers if event_name == "kernel.exception" else listeners
-            ).append(listener)
+    for service, class_name in subscriber_registrations.items():
+        class_tail = class_name.rsplit("\\", 1)[-1]
+        for source_path, content in _class_source_items(
+            context, class_name, source_texts
+        ):
+            if not _implements_event_subscriber(content, class_tail):
+                continue
+            for event_match in _SUBSCRIBED_EVENT_RE.finditer(content):
+                event_name = f"kernel.{event_match.group('event').lower()}"
+                priority = int(event_match.group("priority") or 0)
+                listener = _Listener(
+                    event=event_name,
+                    service=service,
+                    priority=priority,
+                    source_path=source_path,
+                    source_order=order,
+                    method_name=event_match.group("method"),
+                    returns_response=_service_method_matches(
+                        context,
+                        service,
+                        bindings,
+                        source_texts,
+                        event_match.group("method"),
+                        _RESPONSE_RE,
+                    ),
+                )
+                order += 1
+                (
+                    exception_handlers
+                    if event_name == "kernel.exception"
+                    else listeners
+                ).append(listener)
     ordered = lambda rows: tuple(
         sorted(
             rows,
@@ -1220,7 +1477,10 @@ def _service_facts(
     return _ServiceFacts(
         MappingProxyType(dict(bindings)),
         ordered(listeners),
-        tuple(sorted(set(voters))),
+        tuple(
+            _voter_supports(context, service, bindings, source_texts)
+            for service in dict.fromkeys(voter_services)
+        ),
         ordered(exception_handlers),
     )
 
@@ -1467,18 +1727,34 @@ def _security_for_route(
     return firewall, rule
 
 
-def _handler_keys(syntax: Sequence[SyntaxIR]) -> Mapping[str, frozenset[str]]:
-    """Index only class-qualified declarations; bare method names are ambiguous."""
+def _handler_keys(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+) -> Mapping[str, frozenset[str]]:
+    """Index method keys only when their class namespace is source-proven."""
 
     keys: dict[str, set[str]] = {}
     for item in syntax:
+        content = _text(context, item.path)
+        namespace_match = _NAMESPACE_RE.search(content) if content is not None else None
+        namespace = (
+            namespace_match.group("name") if namespace_match is not None else None
+        )
         for index, symbol in enumerate(item.symbols):
             key = local_record_key(
                 "php", item.path, "executable_declaration", "ast", f"symbols/{index}", 0
             )
-            names = {symbol.name.replace("::", ".")}
+            normalized_name = symbol.name.replace("::", ".")
+            names = {normalized_name}
             if symbol.container:
                 names.add(f"{symbol.container}.{symbol.name.rsplit('.', 1)[-1]}")
+            qualified_name = next(
+                (name for name in names if "." in name), normalized_name
+            )
+            method_name = qualified_name.rsplit(".", 1)[-1]
+            class_tail = qualified_name.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+            if namespace is not None:
+                names.add(f"{namespace}\\{class_tail}.{method_name}")
             for name in names:
                 if "." in name:
                     keys.setdefault(name.casefold(), set()).add(key)
@@ -1498,11 +1774,7 @@ def _resolve_handler(
     class_name, method = value.rsplit("::", 1)
     if _is_computed(class_name) or _is_computed(method):
         return None
-    class_tail = class_name.rsplit("\\", 1)[-1]
-    candidates = {
-        f"{class_tail}.{method}",
-        f"{class_name}.{method}",
-    }
+    candidates = {f"{class_name}.{method}"}
     matched = {
         key for item in candidates for key in keys.get(item.casefold(), frozenset())
     }
@@ -1540,6 +1812,38 @@ def _controller_has(
         for source in (_text(context, path) for path in paths)
         if source is not None
         for body in (_method_body(source, class_tail, method_name),)
+    )
+
+
+def _controller_authorization_needs(
+    context: ExtractionContext,
+    controller: str | None,
+    bindings: Mapping[str, str],
+) -> frozenset[tuple[str, str]]:
+    """Prove a literal voter attribute and subject construction in this method."""
+
+    if controller is None or _is_computed(controller):
+        return frozenset()
+    target = bindings.get(controller, controller).lstrip("\\")
+    if "::" not in target:
+        return frozenset()
+    class_name, method_name = target.rsplit("::", 1)
+    if not class_name.startswith("App\\"):
+        return frozenset()
+    relative_class = class_name[len("App\\") :].replace("\\", "/")
+    content = _text(context, f"src/{relative_class}.php")
+    if content is None:
+        return frozenset()
+    body = _method_body(content, class_name.rsplit("\\", 1)[-1], method_name)
+    if body is None:
+        return frozenset()
+    return frozenset(
+        re.findall(
+            r"(?:denyAccessUnlessGranted|isGranted)\s*\(\s*"
+            r"['\"](?P<attribute>[A-Za-z0-9_.:-]+)['\"]\s*,\s*"
+            r"new\s+(?P<subject>[A-Za-z_\\][A-Za-z0-9_\\]*)\s*\(",
+            body,
+        )
     )
 
 
@@ -1753,7 +2057,7 @@ class SymfonyLifecycleAdapter:
                 )
             )
         routes.extend(_attribute_routes(context, syntax, order, diagnostics))
-        keys = _handler_keys(syntax)
+        keys = _handler_keys(context, syntax)
         candidates: list[EntrypointCandidate] = []
         outcomes: dict[str, _ControllerOutcome] = {}
         for spec in sorted(
@@ -1768,7 +2072,8 @@ class SymfonyLifecycleAdapter:
             candidate = _candidate_from_spec(context, spec, services.bindings, keys)
             if candidate.handler_local_key is not None:
                 previous = outcomes.get(
-                    candidate.handler_local_key, _ControllerOutcome(False, False)
+                    candidate.handler_local_key,
+                    _ControllerOutcome(False, False, frozenset()),
                 )
                 outcomes[candidate.handler_local_key] = _ControllerOutcome(
                     previous.returns_response
@@ -1778,6 +2083,10 @@ class SymfonyLifecycleAdapter:
                     previous.throws
                     or _controller_has(
                         context, spec.controller, services.bindings, _THROW_RE
+                    ),
+                    previous.authorization_needs
+                    | _controller_authorization_needs(
+                        context, spec.controller, services.bindings
                     ),
                 )
             # Parse security now so typed diagnostics are part of this immutable
@@ -1829,8 +2138,6 @@ class SymfonyLifecycleAdapter:
                 roles.append(("access_control_deny", None, True))
             else:
                 roles.append(("security_unresolved_boundary", None, False))
-        roles.extend(("voter", voter, False) for voter in services.voters)
-        roles.append(("argument_resolver", None, False))
         outcome = (
             snapshot.controller_outcomes.get(candidate.handler_local_key)
             if candidate.handler_local_key is not None
@@ -1840,6 +2147,21 @@ class SymfonyLifecycleAdapter:
             outcome.returns_response if outcome is not None else False
         )
         handler_has_exception = outcome.throws if outcome is not None else False
+        authorization_needs = (
+            outcome.authorization_needs if outcome is not None else frozenset()
+        )
+        matching_voters = tuple(
+            voter
+            for voter in services.voters
+            if any(
+                attribute in voter.attributes and subject in voter.subject_types
+                for attribute, subject in authorization_needs
+            )
+        )
+        roles.extend(("voter", voter.service, False) for voter in matching_voters)
+        if services.voters and not matching_voters:
+            roles.append(("authorization_unresolved_boundary", None, False))
+        roles.append(("argument_resolver", None, False))
         roles.append(("controller", None, False))
         response_listeners = tuple(
             listener

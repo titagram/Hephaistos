@@ -216,17 +216,17 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
     _write(
         tmp_path,
         "src/Listener/EarlyListener.php",
-        "<?php final class EarlyListener { public function onRequest() { return new Response(); } }",
+        "<?php namespace App\\Listener; final class EarlyListener { public function onRequest() { return new Response(); } }",
     )
     _write(
         tmp_path,
         "src/Listener/ExceptionListener.php",
-        "<?php final class ExceptionListener { public function onException() { return new Response(); } }",
+        "<?php namespace App\\Listener; final class ExceptionListener { public function onException() { return new Response(); } }",
     )
     _write(
         tmp_path,
         "src/Controller/AdminController.php",
-        "<?php final class AdminController { public function dashboard() { if ($failed) { throw new RuntimeException(); } return new Response(); } }",
+        "<?php namespace App\\Controller; final class AdminController { public function dashboard() { if ($failed) { throw new RuntimeException(); } return new Response(); } }",
     )
     context = _context(tmp_path)
     adapter = SymfonyLifecycleAdapter()
@@ -249,7 +249,7 @@ def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(
         "kernel_request_listener",
         "firewall",
         "access_control_deny",
-        "voter",
+        "authorization_unresolved_boundary",
         "argument_resolver",
         "controller",
         "response_listener",
@@ -323,7 +323,7 @@ class ChildController extends ParentController {}
     _write(
         tmp_path,
         "src/Controller/StatusController.php",
-        "<?php class StatusController { public function show() {} }",
+        "<?php namespace App\\Controller; class StatusController { public function show() {} }",
     )
     adapter = SymfonyLifecycleAdapter()
     context = _context(tmp_path)
@@ -484,7 +484,7 @@ return static function ($services): void {
     _write(
         tmp_path,
         "src/Listener/PhpRequestListener.php",
-        "<?php class PhpRequestListener { public function onRequest() { return new Response(); } }",
+        "<?php namespace App\\Listener; class PhpRequestListener { public function onRequest() { return new Response(); } }",
     )
     _write(
         tmp_path,
@@ -644,12 +644,14 @@ def test_equal_priority_listener_source_order_and_subscriber_survive_pipeline(
         "  App\\Listener\\ZFirst:\n"
         "    tags: [{ name: kernel.event_listener, event: kernel.request, priority: 10, method: onRequest }]\n"
         "  App\\Listener\\ASecond:\n"
-        "    tags: [{ name: kernel.event_listener, event: kernel.request, priority: 10, method: onRequest }]\n",
+        "    tags: [{ name: kernel.event_listener, event: kernel.request, priority: 10, method: onRequest }]\n"
+        "  App\\Listener\\Subscriber:\n"
+        "    autoconfigure: true\n",
     )
     _write(
         tmp_path,
         "src/Listener/Subscriber.php",
-        "<?php class Subscriber { public static function getSubscribedEvents() { return [KernelEvents::REQUEST => ['onRequest', 5]]; } public function onRequest() {} }",
+        "<?php namespace App\\Listener; class Subscriber implements EventSubscriberInterface { public static function getSubscribedEvents() { return [KernelEvents::REQUEST => ['onRequest', 5]]; } public function onRequest() {} }",
     )
     adapter = SymfonyLifecycleAdapter()
     context = _context(tmp_path)
@@ -671,7 +673,11 @@ def test_equal_priority_listener_source_order_and_subscriber_survive_pipeline(
         if segment.framework_role == "kernel_request_listener"
     ]
 
-    assert names == ["App\\Listener\\ZFirst", "App\\Listener\\ASecond", "Subscriber"]
+    assert names == [
+        "App\\Listener\\ZFirst",
+        "App\\Listener\\ASecond",
+        "App\\Listener\\Subscriber",
+    ]
 
 
 def test_response_shortcuts_require_the_exact_listener_and_controller_method(
@@ -779,12 +785,12 @@ def test_exception_listener_is_reached_only_by_a_proven_throw_arm(
     _write(
         tmp_path,
         "src/Controller/OkController.php",
-        "<?php class OkController { public function show() {} }",
+        "<?php namespace App\\Controller; class OkController { public function show() {} }",
     )
     _write(
         tmp_path,
         "src/Controller/BoomController.php",
-        "<?php class BoomController { public function show() { throw new RuntimeException(); } }",
+        "<?php namespace App\\Controller; class BoomController { public function show() { throw new RuntimeException(); } }",
     )
     _write(
         tmp_path,
@@ -834,3 +840,226 @@ def test_malformed_or_invalid_configuration_becomes_partial_coverage_not_crash(
     events = adapter.coverage_events(context)
     assert len(events) >= 2
     assert all(event.outcome is CoverageOutcome.PARTIAL for event in events)
+
+
+def test_dynamic_yaml_methods_list_is_partial_coverage_not_an_invalid_route(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  methods: ['%kernel.method%']\n"
+        "  controller: App\\Controller\\C::go\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_dynamic_yaml_priority_is_partial_coverage_not_guessed_order(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  priority: '%kernel.priority%'\n"
+        "  controller: App\\Controller\\C::go\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_dynamic_php_import_prefix_is_partial_coverage_not_an_empty_prefix(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.php",
+        "<?php $routes->import('routes/x.yaml')->prefix($dynamic);",
+    )
+    _write(
+        tmp_path,
+        "config/routes/x.yaml",
+        "x:\n  path: /x\n  controller: App\\Controller\\C::go\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_dynamic_attribute_methods_is_partial_coverage_not_unrestricted(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "src/Controller/C.php",
+        "<?php class C { #[Route('/x', methods: $methods)] public function go() {} }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert (
+        adapter.entrypoints(
+            context, (_syntax(tmp_path, "src/Controller/C.php", "C.go"),)
+        )
+        == ()
+    )
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_dynamic_named_attribute_path_is_partial_coverage_not_a_literal_prefix(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "src/Controller/C.php",
+        "<?php class C { #[Route(path: '/x' . $suffix)] public function go() {} }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert (
+        adapter.entrypoints(
+            context, (_syntax(tmp_path, "src/Controller/C.php", "C.go"),)
+        )
+        == ()
+    )
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_fqcn_handler_requires_a_matching_php_namespace_proof(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  controller: App\\Controller\\AdminController::index\n",
+    )
+    _write(
+        tmp_path,
+        "vendor/X/AdminController.php",
+        "<?php namespace Vendor\\X; class AdminController { public function index() {} }",
+    )
+
+    route = SymfonyLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (_syntax(tmp_path, "vendor/X/AdminController.php", "AdminController.index"),),
+    )[0]
+
+    assert route.handler_local_key is None
+    assert route.unresolved_fact_local_key is not None
+
+
+def test_registered_fqcn_subscriber_requires_matching_namespace_proof(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  controller: App\\Controller\\C::go\n",
+    )
+    _write(
+        tmp_path,
+        "config/services.yaml",
+        "services:\n  App\\Listener\\Subscriber:\n    autoconfigure: true\n",
+    )
+    _write(
+        tmp_path,
+        "vendor/X/Subscriber.php",
+        "<?php namespace Vendor\\X; class Subscriber implements EventSubscriberInterface { public static function getSubscribedEvents() { return [KernelEvents::REQUEST => 'onRequest']; } public function onRequest() {} }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "vendor/X/Subscriber.php", "Subscriber.onRequest"),),
+    )[0]
+
+    assert not any(
+        segment.framework_role == "kernel_request_listener"
+        for segment in adapter.pipeline(context, route)
+    )
+
+
+def test_unregistered_event_subscriber_is_not_a_request_listener(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  controller: App\\Controller\\C::go\n",
+    )
+    _write(
+        tmp_path,
+        "src/Utility/Helper.php",
+        "<?php class Helper implements EventSubscriberInterface { public static function getSubscribedEvents() { return [KernelEvents::REQUEST => 'onRequest']; } public function onRequest() {} }",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "src/Controller/C.php", "C.go"),
+            _syntax(tmp_path, "src/Utility/Helper.php", "Helper.onRequest"),
+        ),
+    )[0]
+
+    assert not any(
+        segment.framework_role == "kernel_request_listener"
+        for segment in adapter.pipeline(context, route)
+    )
+
+
+def test_unused_voter_is_a_boundary_not_a_success_pipeline_stage(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.yaml",
+        "x:\n  path: /x\n  controller: App\\Controller\\C::go\n",
+    )
+    _write(
+        tmp_path,
+        "config/services.yaml",
+        "services:\n  App\\Security\\UnusedVoter:\n    tags: [security.voter]\n",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "src/Controller/C.php", "C.go"),),
+    )[0]
+
+    roles = [segment.framework_role for segment in adapter.pipeline(context, route)]
+
+    assert "voter" not in roles
+    assert "authorization_unresolved_boundary" in roles

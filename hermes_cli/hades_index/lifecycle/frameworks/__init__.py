@@ -39,6 +39,10 @@ class FrameworkAdapter(Protocol):
         candidate: EntrypointCandidate,
     ) -> tuple[FrameworkPipelineSegment, ...]: ...
 
+    def coverage_events(
+        self, context: ExtractionContext
+    ) -> tuple[CoverageEvent, ...]: ...
+
 
 class FrameworkAdapterError(ValueError):
     """A deterministic failure at the closed framework-adapter boundary."""
@@ -89,6 +93,8 @@ class FrameworkAdapterRegistry:
             raise FrameworkAdapterError(
                 "framework adapter requires lower language and framework names"
             )
+        if not callable(getattr(adapter, "coverage_events", None)):
+            raise FrameworkAdapterError("framework adapter requires coverage_events")
         key = (language, framework)
         if any((item.language, item.framework) == key for item in self._adapters):
             raise FrameworkAdapterError(
@@ -136,16 +142,14 @@ def run_framework_adapters(
             continue
         detections.append(detection)
         adapter_candidates = adapter.entrypoints(context, relevant_syntax)
-        coverage_getter = getattr(adapter, "coverage_events", None)
-        if callable(coverage_getter):
-            adapter_coverage = coverage_getter(context)
-            if type(adapter_coverage) is not tuple or any(
-                type(event) is not CoverageEvent for event in adapter_coverage
-            ):
-                raise FrameworkAdapterError(
-                    "framework adapter emitted invalid coverage events"
-                )
-            coverage_events.extend(adapter_coverage)
+        adapter_coverage = adapter.coverage_events(context)
+        if type(adapter_coverage) is not tuple or any(
+            type(event) is not CoverageEvent for event in adapter_coverage
+        ):
+            raise FrameworkAdapterError(
+                "framework adapter emitted invalid coverage events"
+            )
+        coverage_events.extend(adapter_coverage)
         for candidate in adapter_candidates:
             if type(candidate) is not EntrypointCandidate:
                 raise FrameworkAdapterError(
