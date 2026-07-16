@@ -191,6 +191,17 @@ _DOMAIN_STAGE_KINDS = frozenset({
     NodeKind.SERVICE,
     NodeKind.DOMAIN,
 })
+_FLOW_FRONTIER_REASON_CODES = frozenset({
+    ReasonCode.ENTRYPOINT_UNRESOLVED,
+    ReasonCode.CALL_TARGET_UNRESOLVED,
+    ReasonCode.DYNAMIC_DISPATCH,
+    ReasonCode.REFLECTION_OR_GENERATED_CODE,
+    ReasonCode.FRAMEWORK_CONFIG_UNRESOLVED,
+    ReasonCode.EXCEPTION_TARGET_UNRESOLVED,
+    ReasonCode.ASYNC_TARGET_UNRESOLVED,
+    ReasonCode.EXTERNAL_BOUNDARY_UNRESOLVED,
+    ReasonCode.GRAPHIFY_CANDIDATE,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +359,12 @@ def validate_sorted_unique_records(artifact: GraphArtifactV2) -> None:
         key=lambda record: record.name,
         code="record_order",
         message="language records must be unique and canonically sorted",
+    )
+    _require_sorted_unique(
+        artifact.graph_contract.completeness.languages,
+        key=lambda record: record.language,
+        code="language_completeness_order",
+        message="language completeness records must be unique and sorted",
     )
     for records in (
         artifact.entrypoints,
@@ -715,6 +732,18 @@ def _validate_entrypoint(
     ):
         if getattr(identity, name) != getattr(record, name):
             _fail("entrypoint_identity_mismatch", "entrypoint identity fields disagree")
+    expected_qualified_name = getattr(record, "public_name") or getattr(
+        getattr(record, "trigger"), "value"
+    )
+    if (
+        node.name != getattr(record, "label")
+        or expected_qualified_name is None
+        or node.qualified_name != expected_qualified_name
+    ):
+        _fail(
+            "entrypoint_display_mismatch",
+            "entrypoint node display fields disagree with its record",
+        )
     occurrence = cast(
         RegistrationAst | RegistrationConfig, getattr(record, "registration_occurrence")
     )
@@ -1059,6 +1088,7 @@ def _subject_edge(
 
 
 def _validate_resolution_edge(
+    artifact: GraphArtifactV2,
     uncertainty: Uncertainty,
     edge: Edge,
     index: _RecordIndex,
@@ -1102,6 +1132,33 @@ def _validate_resolution_edge(
             _fail(
                 "uncertainty_structure",
                 "handler uncertainty source is not an entrypoint",
+            )
+    if uncertainty.resolution_kind is ResolutionKind.FRAMEWORK_TARGET:
+        source = _node(index, edge.source_id)
+        target = _node(index, edge.target_id)
+        asserted_frameworks = {
+            framework
+            for framework in (source.framework, target.framework)
+            if framework is not None
+        }
+        asserted_frameworks.update(
+            entrypoint.framework
+            for entrypoint in artifact.entrypoints
+            if entrypoint.id == source.id and entrypoint.framework is not None
+        )
+        compatible_languages = {
+            language
+            for language in (source.language, target.language)
+            if language is not None
+        }
+        if not any(
+            framework.language in compatible_languages
+            and (not asserted_frameworks or framework.name in asserted_frameworks)
+            for framework in artifact.frameworks
+        ):
+            _fail(
+                "uncertainty_framework_missing",
+                "framework-target uncertainty requires a compatible detected framework",
             )
 
 
@@ -1230,7 +1287,9 @@ def validate_uncertainty_ownership(
                     "edge subject is not the canonical first candidate",
                 )
             for edge in candidate_edges:
-                _validate_resolution_edge(uncertainty, edge, index, placeholder=False)
+                _validate_resolution_edge(
+                    artifact, uncertainty, edge, index, placeholder=False
+                )
                 expected_origin = (
                     EvidenceOrigin.UNRESOLVED
                     if isinstance(uncertainty.subject, EdgeSubject)
@@ -1317,7 +1376,9 @@ def validate_uncertainty_ownership(
                     "uncertainty_ownership",
                     "semantic subject evidence must be unresolved",
                 )
-            _validate_resolution_edge(uncertainty, subject, index, placeholder=True)
+            _validate_resolution_edge(
+                artifact, uncertainty, subject, index, placeholder=True
+            )
             if (
                 uncertainty.candidate_set_knowledge
                 is CandidateSetKnowledge.NOT_APPLICABLE
@@ -1356,7 +1417,9 @@ def validate_uncertainty_ownership(
                         "uncertainty_ownership",
                         "candidate edge target is not a listed hint",
                     )
-                _validate_resolution_edge(uncertainty, edge, index, placeholder=False)
+                _validate_resolution_edge(
+                    artifact, uncertainty, edge, index, placeholder=False
+                )
             incoming = tuple(
                 edge for edge in artifact.edges if edge.target_id == boundaries[0].id
             )
@@ -1395,17 +1458,12 @@ def validate_uncertainty_ownership(
 def _expected_stage_to(
     step: FlowStep,
     edge: Edge,
-    flow_steps: tuple[FlowStep, ...],
+    invocation_steps_by_call_site: Mapping[str, tuple[FlowStep, ...]],
     index: _RecordIndex,
 ) -> Stage:
     target_kind = _node(index, edge.target_id).kind
     if edge.relation is Relation.RETURNS_TO:
-        invocations = tuple(
-            candidate
-            for candidate in flow_steps
-            if index.edges[candidate.edge_id].relation is Relation.INVOKES
-            and index.edges[candidate.edge_id].call_site_id == edge.call_site_id
-        )
+        invocations = invocation_steps_by_call_site.get(edge.call_site_id or "", ())
         if len(invocations) != 1:
             _fail(
                 "flow_stage_mismatch",
@@ -1467,27 +1525,66 @@ def _is_flow_stop(edge: Edge, index: _RecordIndex) -> bool:
     )
 
 
-def _invocation_is_recursive(
-    edge: Edge, steps: tuple[FlowStep, ...], index: _RecordIndex
-) -> bool:
-    if edge.relation is not Relation.INVOKES:
-        return False
-    invocation_targets: dict[str, set[str]] = defaultdict(set)
-    for step in steps:
-        candidate = index.edges[step.edge_id]
-        if candidate.relation is Relation.INVOKES:
-            invocation_targets[candidate.source_id].add(candidate.target_id)
-    pending = [edge.target_id]
+def _recursive_invocation_edge_ids(
+    flow_steps: tuple[FlowStep, ...], index: _RecordIndex
+) -> set[str]:
+    invocation_edges = [
+        index.edges[step.edge_id]
+        for step in flow_steps
+        if index.edges[step.edge_id].relation is Relation.INVOKES
+    ]
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    reverse_adjacency: dict[str, set[str]] = defaultdict(set)
+    nodes: set[str] = set()
+    for edge in invocation_edges:
+        adjacency[edge.source_id].add(edge.target_id)
+        reverse_adjacency[edge.target_id].add(edge.source_id)
+        nodes.update((edge.source_id, edge.target_id))
+
+    finish_order: list[str] = []
     seen: set[str] = set()
-    while pending:
-        node_id_value = pending.pop()
-        if node_id_value == edge.source_id:
-            return True
-        if node_id_value in seen:
+    for start in nodes:
+        if start in seen:
             continue
-        seen.add(node_id_value)
-        pending.extend(invocation_targets[node_id_value] - seen)
-    return False
+        seen.add(start)
+        pending = [(start, iter(adjacency[start]))]
+        while pending:
+            node_id_value, targets = pending[-1]
+            try:
+                target_id = next(targets)
+            except StopIteration:
+                finish_order.append(node_id_value)
+                pending.pop()
+                continue
+            if target_id not in seen:
+                seen.add(target_id)
+                pending.append((target_id, iter(adjacency[target_id])))
+
+    component_by_node: dict[str, int] = {}
+    component_sizes: Counter[int] = Counter()
+    for start in reversed(finish_order):
+        if start in component_by_node:
+            continue
+        component_id = len(component_sizes)
+        pending_nodes = [start]
+        component_by_node[start] = component_id
+        while pending_nodes:
+            node_id_value = pending_nodes.pop()
+            component_sizes[component_id] += 1
+            for source_id in reverse_adjacency[node_id_value]:
+                if source_id not in component_by_node:
+                    component_by_node[source_id] = component_id
+                    pending_nodes.append(source_id)
+
+    return {
+        edge.id
+        for edge in invocation_edges
+        if component_by_node[edge.source_id] == component_by_node[edge.target_id]
+        and (
+            edge.source_id == edge.target_id
+            or component_sizes[component_by_node[edge.source_id]] > 1
+        )
+    }
 
 
 def _validate_flow_topology(
@@ -1495,10 +1592,22 @@ def _validate_flow_topology(
     flow_steps: tuple[FlowStep, ...],
     index: _RecordIndex,
 ) -> None:
+    mutable_invocations_by_call_site: dict[str, list[FlowStep]] = defaultdict(list)
+    for step in flow_steps:
+        edge = index.edges[step.edge_id]
+        if edge.relation is Relation.INVOKES and edge.call_site_id is not None:
+            mutable_invocations_by_call_site[edge.call_site_id].append(step)
+    invocation_steps_by_call_site = {
+        call_site_id_value: tuple(invocations)
+        for call_site_id_value, invocations in mutable_invocations_by_call_site.items()
+    }
+    recursive_invocation_edge_ids = _recursive_invocation_edge_ids(flow_steps, index)
     adjacency: dict[tuple[str, Stage], list[FlowStep]] = defaultdict(list)
     for step in flow_steps:
         edge = index.edges[step.edge_id]
-        expected_stage = _expected_stage_to(step, edge, flow_steps, index)
+        expected_stage = _expected_stage_to(
+            step, edge, invocation_steps_by_call_site, index
+        )
         if step.stage_to is not expected_stage:
             _fail(
                 "flow_stage_mismatch",
@@ -1557,8 +1666,13 @@ def _validate_flow_topology(
         ):
             terminal_states.add(target_state)
 
+    step_bits = {
+        step_id_value: 1 << ordinal
+        for ordinal, step_id_value in enumerate(sorted(non_async_step_ids))
+    }
+    all_step_bits = (1 << len(step_bits)) - 1
     dominators = {
-        state: (set() if state == root_state else set(non_async_step_ids))
+        state: (0 if state == root_state else all_step_bits)
         for state in reachable_states
     }
     changed = True
@@ -1572,30 +1686,32 @@ def _validate_flow_topology(
             incoming = predecessors[state]
             if not incoming:
                 continue
-            incoming_dominators = [
-                dominators[source_state] | {step_id_value}
-                for source_state, step_id_value in incoming
-            ]
-            updated = set.intersection(*incoming_dominators)
+            updated = all_step_bits
+            for source_state, step_id_value in incoming:
+                updated &= dominators[source_state] | step_bits[step_id_value]
             if updated != dominators[state]:
                 dominators[state] = updated
                 changed = True
 
-    mandatory_ids = {
-        step.id
-        for step in flow_steps
+    mandatory_bits = all_step_bits
+    for state in terminal_states:
+        mandatory_bits &= dominators[state]
+    mandatory_ids = (
+        {
+            step_id_value
+            for step_id_value, bit in step_bits.items()
+            if mandatory_bits & bit
+        }
         if terminal_states
-        and all(step.id in dominators[state] for state in terminal_states)
-    }
+        else set()
+    )
     for step in flow_steps:
         edge = index.edges[step.edge_id]
         if edge.flow is EdgeFlow.ASYNC:
             expected_role = BackboneRole.ASYNC
         elif edge.flow is EdgeFlow.EXCEPTION:
             expected_role = BackboneRole.EXCEPTION
-        elif edge.flow is EdgeFlow.LOOP or _invocation_is_recursive(
-            edge, flow_steps, index
-        ):
+        elif edge.flow is EdgeFlow.LOOP or edge.id in recursive_invocation_edge_ids:
             expected_role = BackboneRole.LOOP
         elif edge.flow is EdgeFlow.ALWAYS and step.id in mandatory_ids:
             expected_role = BackboneRole.MANDATORY
@@ -1606,6 +1722,49 @@ def _validate_flow_topology(
                 "flow_backbone",
                 "flow-step backbone role does not match canonical topology",
             )
+
+
+def _validate_full_flow_edge_closure(
+    flow: Flow,
+    flow_steps: tuple[FlowStep, ...],
+    edges_by_source: Mapping[str, tuple[Edge, ...]],
+    index: _RecordIndex,
+) -> None:
+    if flow.completeness.status is not CompletenessStatus.FULL:
+        return
+
+    serialized_edge_ids = {step.edge_id for step in flow_steps}
+    steps_by_source: dict[str, list[FlowStep]] = defaultdict(list)
+    for step in flow_steps:
+        edge = index.edges[step.edge_id]
+        steps_by_source[edge.source_id].append(step)
+
+    reachable_nodes = {flow.root_node_id}
+    pending = [flow.root_node_id]
+    while pending:
+        source_id = pending.pop()
+        for step in steps_by_source[source_id]:
+            edge = index.edges[step.edge_id]
+            if _is_flow_stop(edge, index):
+                continue
+            if edge.target_id not in reachable_nodes:
+                reachable_nodes.add(edge.target_id)
+                pending.append(edge.target_id)
+
+    required_edge_ids = {
+        edge.id
+        for source_id in reachable_nodes
+        for edge in edges_by_source.get(source_id, ())
+        if edge.relation not in _STRUCTURAL_RELATIONS
+        and edge.relation is not Relation.RETURNS_TO
+        and edge.uncertainty_id is None
+        and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
+    }
+    if not required_edge_ids.issubset(serialized_edge_ids):
+        _fail(
+            "flow_edge_omission",
+            "full flow omits a reachable verified lifecycle edge",
+        )
 
 
 def _has_flow_path(
@@ -1710,6 +1869,12 @@ def _validate_async_flow_links(
 
 
 def validate_flow_membership(artifact: GraphArtifactV2, index: _RecordIndex) -> None:
+    mutable_edges_by_source: dict[str, list[Edge]] = defaultdict(list)
+    for edge in artifact.edges:
+        mutable_edges_by_source[edge.source_id].append(edge)
+    edges_by_source = {
+        source_id: tuple(edges) for source_id, edges in mutable_edges_by_source.items()
+    }
     mutable_steps_by_flow: dict[str, list[FlowStep]] = defaultdict(list)
     for step in artifact.flow_steps:
         flow = index.flows[step.flow_id]
@@ -1823,6 +1988,9 @@ def validate_flow_membership(artifact: GraphArtifactV2, index: _RecordIndex) -> 
     _validate_async_flow_links(artifact, steps_by_flow, index)
     for flow in artifact.flows:
         _validate_flow_topology(flow, steps_by_flow[flow.id], index)
+        _validate_full_flow_edge_closure(
+            flow, steps_by_flow[flow.id], edges_by_source, index
+        )
     synchronous = Counter(
         flow.entrypoint_id
         for flow in artifact.flows
@@ -2062,6 +2230,77 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
                     )
 
 
+def _validate_flow_reason_counts_and_scopes(artifact: GraphArtifactV2) -> None:
+    edges = {edge.id: edge for edge in artifact.edges}
+    nodes = {node.id: node for node in artifact.nodes}
+    uncertainties = {
+        uncertainty.id: uncertainty for uncertainty in artifact.uncertainties
+    }
+    steps_by_flow: dict[str, list[FlowStep]] = defaultdict(list)
+    for step in artifact.flow_steps:
+        steps_by_flow[step.flow_id].append(step)
+
+    completeness = artifact.graph_contract.completeness
+    global_counts = _capability_reason_scope_counts(completeness.capabilities)
+    language_counts = {
+        (language.language, name, reason.code): reason.count
+        for language in completeness.languages
+        for name in _CAPABILITY_ORDER
+        for reason in getattr(language.capabilities, name).reasons
+    }
+    for flow in artifact.flows:
+        frontier_counts: Counter[tuple[ReasonCode, str | None]] = Counter()
+        uncertainty_ids = {
+            uncertainty_id
+            for step in steps_by_flow[flow.id]
+            if (uncertainty_id := edges[step.edge_id].uncertainty_id) is not None
+        }
+        for uncertainty_id in uncertainty_ids:
+            uncertainty = uncertainties[uncertainty_id]
+            language = _uncertainty_language(uncertainty, edges, nodes)
+            frontier_counts[(uncertainty.reason_code, language)] += 1
+
+        for name in _CAPABILITY_ORDER:
+            capability = getattr(flow.completeness.capabilities, name)
+            for reason in capability.reasons:
+                if reason.code in _FLOW_FRONTIER_REASON_CODES:
+                    expected = (
+                        sum(
+                            count
+                            for (code, _), count in frontier_counts.items()
+                            if code is reason.code
+                        )
+                        if reason.language is None
+                        else frontier_counts[(reason.code, reason.language)]
+                    )
+                    if reason.count != expected:
+                        _fail(
+                            "flow_capability_reason_count_mismatch",
+                            "flow capability reason count does not match its frontiers",
+                        )
+
+                global_count = global_counts.get(
+                    (name, reason.code, reason.language),
+                    global_counts.get((name, reason.code, None)),
+                )
+                if global_count is None or global_count < reason.count:
+                    _fail(
+                        "flow_capability_reason_scope_mismatch",
+                        "flow capability reason has no containing global scope",
+                    )
+                if reason.language is not None:
+                    language_count = language_counts.get((
+                        reason.language,
+                        name,
+                        reason.code,
+                    ))
+                    if language_count is None or language_count < reason.count:
+                        _fail(
+                            "flow_capability_reason_scope_mismatch",
+                            "flow capability reason has no containing language scope",
+                        )
+
+
 def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
     contract = artifact.graph_contract
     all_capabilities = [contract.completeness.capabilities]
@@ -2074,6 +2313,7 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
             _validate_capability(getattr(capabilities, name))
     _validate_global_language_reason_scopes(artifact)
     _validate_reason_record_counts(artifact)
+    _validate_flow_reason_counts_and_scopes(artifact)
     for language in contract.completeness.languages:
         if not _status_matches_capabilities(language.status, language.capabilities):
             _fail(
@@ -2296,12 +2536,13 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
                 }[stage]
                 _validate_count_relation(count, represented, stage_capabilities)
 
-    omitted_reasons: set[ReasonCode] = set()
-    if coverage.failed:
-        omitted_reasons.add(ReasonCode.FILE_READ_FAILED)
-    if coverage.too_large:
-        omitted_reasons.add(ReasonCode.FILE_TOO_LARGE)
-    if coverage.budget_omitted or record_counts.omitted_by_bundle_budget:
+    omitted_reasons = {
+        omission_reason
+        for node in files
+        if (omission_reason := cast(FileProperties, node.properties).omission_reason)
+        is not None
+    }
+    if record_counts.omitted_by_bundle_budget:
         omitted_reasons.add(ReasonCode.RESOURCE_BUDGET_REACHED)
     global_reason_codes = {
         reason.code

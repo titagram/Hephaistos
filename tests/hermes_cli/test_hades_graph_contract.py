@@ -2282,3 +2282,500 @@ def test_global_and_language_capability_reason_counts_reconcile() -> None:
         validation.validate_artifact(payload)
 
     assert exc_info.value.code == "capability_reason_scope_mismatch"
+
+
+def _unknown_count(represented: int, reason: str) -> dict[str, Any]:
+    return {
+        "represented": represented,
+        "value": None,
+        "knowledge": "unknown",
+        "reason": reason,
+    }
+
+
+def test_full_flow_rejects_omitted_reachable_verified_async_dispatch() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    child_flow = _flow_by_kind(payload, "async_flow")
+    dispatch_step = _step_by_relation(
+        payload, "dispatches", flow_kind="request_lifecycle"
+    )
+    payload["flows"] = [sync_flow]
+    payload["flow_steps"] = [
+        step
+        for step in payload["flow_steps"]
+        if step["flow_id"] != child_flow["id"] and step["id"] != dispatch_step["id"]
+    ]
+    sync_flow["represented_step_count"] = 2
+    sync_flow["linked_async_flow_count"] = _exact_count(0)
+    sync_flow["stage_counts"].pop("async")
+    payload["graph_contract"]["coverage"]["records"].update(
+        flows=1,
+        flow_steps=2,
+    )
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_edge_omission"
+
+
+def test_full_flow_rejects_omitted_reachable_verified_branch() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    response_step = _step_by_relation(
+        payload, "responds_with", flow_kind="request_lifecycle"
+    )
+    payload["flow_steps"].remove(response_step)
+    sync_flow["represented_step_count"] = 2
+    sync_flow["terminal_count"] = _exact_count(0)
+    sync_flow["stage_counts"].pop("response")
+    _step_by_relation(payload, "routes_to")["backbone_role"] = "branch"
+    payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 3
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_edge_omission"
+
+
+def test_partial_flow_can_count_a_verified_target_not_materialized() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_flow_artifact()))
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    response_step = _step_by_relation(
+        payload, "responds_with", flow_kind="request_lifecycle"
+    )
+    payload["flow_steps"].remove(response_step)
+    reason = {
+        "code": "verified_target_not_materialized",
+        "count": 1,
+        "language": "php",
+        "paths_sample": ["src/Example.php"],
+    }
+    sync_flow["represented_step_count"] = 2
+    sync_flow["terminal_count"] = _unknown_count(0, "verified_target_not_materialized")
+    sync_flow["uncertainty_count"] = _unknown_count(
+        0, "verified_target_not_materialized"
+    )
+    sync_flow["stage_counts"].pop("response")
+    sync_flow["completeness"]["status"] = "partial"
+    sync_flow["completeness"]["capabilities"]["control_flow"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    _step_by_relation(payload, "routes_to")["backbone_role"] = "branch"
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    completeness["capabilities"]["control_flow"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    completeness["languages"][0]["status"] = "partial"
+    completeness["languages"][0]["capabilities"]["control_flow"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    payload["graph_contract"]["coverage"]["entrypoints"].update(
+        analyzed=0,
+        partial=1,
+    )
+    payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 3
+    _rehash_artifact(payload)
+
+    validation.validate_artifact(payload)
+
+
+def test_parser_failed_file_closes_coverage_over_its_actual_reason() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_semantic_artifact()))
+    path = payload["nodes"][0]["identity"]["path"]
+    payload["nodes"][0]["properties"].update(
+        analysis_status="failed",
+        omission_reason="parser_failed",
+    )
+    payload["graph_contract"]["coverage"]["files"].update(analyzed=0, failed=1)
+    payload["languages"][0]["analyzed_file_count"] = 0
+    reason = {
+        "code": "parser_failed",
+        "count": 1,
+        "language": "php",
+        "paths_sample": [path],
+    }
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    completeness["capabilities"]["symbol_resolution"] = {
+        "status": "partial",
+        "reasons": [reason],
+    }
+    completeness["languages"][0]["status"] = "partial"
+    completeness["languages"][0]["capabilities"]["symbol_resolution"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    _rehash_artifact(payload)
+
+    validation.validate_artifact(payload)
+
+
+def test_entrypoint_node_display_closes_over_its_record() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    entrypoint_node = next(
+        node for node in payload["nodes"] if node["kind"] == "entrypoint"
+    )
+    entrypoint_node["name"] = "Unrelated route label"
+    entrypoint_node["qualified_name"] = "Unrelated\\Route::name"
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "entrypoint_display_mismatch"
+
+
+def _with_framework_uncertainty() -> dict[str, Any]:
+    payload = json.loads(json.dumps(_with_external_uncertainty()))
+    boundary = next(
+        node for node in payload["nodes"] if node["kind"] == "unknown_boundary"
+    )
+    source = next(node for node in payload["nodes"] if node["kind"] == "method")
+    edge = payload["edges"][0]
+    boundary["identity"]["semantic_role"] = "framework_target"
+    boundary["id"] = node_id(boundary["identity"])
+    boundary["name"] = "Unresolved framework target"
+    boundary["properties"]["reason_code"] = "framework_config_unresolved"
+    edge["target_id"] = boundary["id"]
+    edge["relation"] = "passes_through"
+    edge_identity = {
+        "source_id": source["id"],
+        "target_id": boundary["id"],
+        "relation": edge["relation"],
+        "flow": edge["flow"],
+        "condition_hash": None,
+        "branch_group_id": edge["branch_group_id"],
+        "call_site_id": edge["call_site_id"],
+        "exception_scope_id": edge["exception_scope_id"],
+        "occurrence": edge["occurrence"],
+    }
+    edge["id"] = edge_id(edge_identity)
+    question = "Which detected framework target handles this source occurrence?"
+    uncertainty_preimage = {
+        "domain": "graph",
+        "project_id": payload["project"]["project_id"],
+        "workspace_binding_id": payload["project"]["workspace_binding_id"],
+        "subject": {"edge_id": edge["id"]},
+        "resolution_kind": "framework_target",
+        "reason_code": "framework_config_unresolved",
+        "question": question,
+    }
+    public_uncertainty_id = uncertainty_id(uncertainty_preimage)
+    boundary["uncertainty_id"] = public_uncertainty_id
+    edge["uncertainty_id"] = public_uncertainty_id
+    uncertainty = payload["uncertainties"][0]
+    uncertainty.update({
+        "id": public_uncertainty_id,
+        "subject": {"edge_id": edge["id"]},
+        "resolution_kind": "framework_target",
+        "reason_code": "framework_config_unresolved",
+        "question": question,
+        "fingerprint": public_uncertainty_id.removeprefix("hades:uncertainty:v2:"),
+    })
+    reason = {
+        "code": "framework_config_unresolved",
+        "count": 1,
+        "language": "php",
+        "paths_sample": [
+            next(
+                node["identity"]["path"]
+                for node in payload["nodes"]
+                if node["kind"] == "file"
+            )
+        ],
+    }
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["capabilities"]["data_access"] = {
+        "status": "full",
+        "reasons": [],
+    }
+    completeness["capabilities"]["framework_lifecycle"] = {
+        "status": "partial",
+        "reasons": [reason],
+    }
+    language = completeness["languages"][0]
+    language["capabilities"]["data_access"] = {"status": "full", "reasons": []}
+    language["capabilities"]["framework_lifecycle"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    payload["nodes"].sort(key=lambda record: record["id"])
+    _rehash_artifact(payload)
+    return payload
+
+
+def test_framework_target_requires_a_compatible_detected_framework() -> None:
+    _, _, validation = _task3_api()
+    payload = _with_framework_uncertainty()
+    assert payload["frameworks"] == []
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "uncertainty_framework_missing"
+
+
+def test_flow_capability_reason_count_matches_its_frontier_records() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_flow_artifact()))
+    flow = _flow_by_kind(payload, "request_lifecycle")
+    reason = {
+        "code": "call_target_unresolved",
+        "count": 999,
+        "language": "php",
+        "paths_sample": ["src/Example.php"],
+    }
+    flow["completeness"]["status"] = "partial"
+    flow["completeness"]["capabilities"]["call_graph"] = {
+        "status": "partial",
+        "reasons": [reason],
+    }
+    flow["linked_async_flow_count"] = _unknown_count(1, "call_target_unresolved")
+    flow["terminal_count"] = _unknown_count(1, "call_target_unresolved")
+    flow["uncertainty_count"] = _unknown_count(0, "call_target_unresolved")
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    payload["graph_contract"]["coverage"]["entrypoints"].update(
+        analyzed=0,
+        partial=1,
+    )
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_capability_reason_count_mismatch"
+
+
+def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_flow_artifact()))
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    handler_id = payload["entrypoints"][0]["handler_node_id"]
+    response_edge = next(
+        edge for edge in payload["edges"] if edge["relation"] == "responds_with"
+    )
+    old_edge_id = response_edge["id"]
+    binding_id = payload["project"]["workspace_binding_id"]
+    boundary_identity = {
+        "variant": "source_occurrence",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "unknown_boundary",
+        "owner_node_id": handler_id,
+        "structural_path": "body/response/0/unknown_target",
+        "ordinal": 0,
+        "semantic_role": "external_target",
+    }
+    boundary_id = node_id(boundary_identity)
+    response_edge["target_id"] = boundary_id
+    response_edge["relation"] = "calls_external"
+    edge_identity = {
+        "source_id": handler_id,
+        "target_id": boundary_id,
+        "relation": "calls_external",
+        "flow": response_edge["flow"],
+        "condition_hash": None,
+        "branch_group_id": response_edge["branch_group_id"],
+        "call_site_id": response_edge["call_site_id"],
+        "exception_scope_id": response_edge["exception_scope_id"],
+        "occurrence": response_edge["occurrence"],
+    }
+    response_edge["id"] = edge_id(edge_identity)
+    question = "Which external target does this handler occurrence reach?"
+    uncertainty_preimage = {
+        "domain": "graph",
+        "project_id": payload["project"]["project_id"],
+        "workspace_binding_id": binding_id,
+        "subject": {"edge_id": response_edge["id"]},
+        "resolution_kind": "external_target",
+        "reason_code": "external_boundary_unresolved",
+        "question": question,
+    }
+    public_uncertainty_id = uncertainty_id(uncertainty_preimage)
+    response_edge["uncertainty_id"] = public_uncertainty_id
+    response_edge["evidence"] = _producer_evidence(
+        payload, response_edge["occurrence"]["ast_path"]
+    )
+    response_edge["evidence"]["primary"]["origin"] = "unresolved"
+    path = response_edge["location"]["path"]
+    payload["nodes"].append({
+        "id": boundary_id,
+        "identity": boundary_identity,
+        "kind": "unknown_boundary",
+        "language": "php",
+        "framework": None,
+        "name": "Unresolved external target",
+        "qualified_name": None,
+        "namespace": None,
+        "uncertainty_id": public_uncertainty_id,
+        "location": {"path": path, "start_line": 1, "end_line": 1},
+        "properties": {"reason_code": "external_boundary_unresolved"},
+        "evidence": copy.deepcopy(response_edge["evidence"]),
+    })
+    payload["uncertainties"] = [
+        {
+            "id": public_uncertainty_id,
+            "domain": "graph",
+            "subject": {"edge_id": response_edge["id"]},
+            "resolution_kind": "external_target",
+            "reason_code": "external_boundary_unresolved",
+            "question": question,
+            "evidence_requirements": ["inspect_external_configuration"],
+            "source_refs": [{"path": path, "line": 1}],
+            "candidate_target_node_ids": [],
+            "candidate_edge_ids": [],
+            "candidate_set_knowledge": "not_applicable",
+            "priority": "normal",
+            "impact": "May change the external data effect.",
+            "fingerprint": public_uncertainty_id.removeprefix("hades:uncertainty:v2:"),
+        }
+    ]
+    step = next(
+        step for step in payload["flow_steps"] if step["edge_id"] == old_edge_id
+    )
+    step.update(
+        edge_id=response_edge["id"],
+        stage_to="handler",
+        min_depth=1,
+        async_child_flow_id=None,
+        async_cycle=False,
+        backbone_role="mandatory",
+    )
+    step["id"] = flow_step_id(
+        step["flow_id"],
+        step["edge_id"],
+        step["stage_from"],
+        step["stage_to"],
+        step["async_context"],
+    )
+    step["order_key"] = _order_key(
+        step["stage_from"],
+        step["min_depth"],
+        response_edge["source_id"],
+        response_edge["target_id"],
+        response_edge["id"],
+    )
+    reason = {
+        "code": "external_boundary_unresolved",
+        "count": 1,
+        "language": "php",
+        "paths_sample": [path],
+    }
+    sync_flow["completeness"]["status"] = "partial"
+    sync_flow["completeness"]["capabilities"]["data_access"] = {
+        "status": "partial",
+        "reasons": [reason],
+    }
+    sync_flow["terminal_count"] = _exact_count(1)
+    sync_flow["uncertainty_count"] = _unknown_count(1, "external_boundary_unresolved")
+    sync_flow["stage_counts"]["handler"] = _exact_count(2)
+    sync_flow["stage_counts"].pop("response")
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    coverage = payload["graph_contract"]["coverage"]
+    coverage["entrypoints"].update(
+        analyzed=0,
+        partial=1,
+    )
+    coverage["records"].update(
+        nodes=len(payload["nodes"]),
+        uncertainties=1,
+    )
+    payload["nodes"].sort(key=lambda record: record["id"])
+    payload["edges"].sort(key=lambda record: record["id"])
+    payload["flow_steps"].sort(key=lambda record: record["id"])
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_capability_reason_scope_mismatch"
+
+
+def test_language_completeness_records_are_unique_and_sorted() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_semantic_artifact()))
+    binding_id = payload["project"]["workspace_binding_id"]
+    path = "src/example.py"
+    digest = "f" * 64
+    identity = {
+        "variant": "file",
+        "workspace_binding_id": binding_id,
+        "language": "python",
+        "kind": "file",
+        "path": path,
+    }
+    payload["nodes"].append({
+        "id": node_id(identity),
+        "identity": identity,
+        "kind": "file",
+        "language": "python",
+        "framework": None,
+        "name": "example.py",
+        "qualified_name": path,
+        "namespace": None,
+        "uncertainty_id": None,
+        "location": None,
+        "properties": {
+            "file_sha256": digest,
+            "byte_size": 0,
+            "analysis_status": "analyzed",
+            "omission_reason": None,
+            "is_test": False,
+            "is_generated": False,
+        },
+        "evidence": {
+            "primary": {
+                "origin": "verified_from_code",
+                "extractor": "inventory.v2",
+                "source_locator": {"kind": "file", "path": path},
+                "source_fingerprint": file_source_fingerprint(digest, path),
+                "inference_rule": None,
+            },
+            "supporting": [],
+            "supporting_omitted_count": 0,
+        },
+    })
+    payload["nodes"].sort(key=lambda record: record["id"])
+    payload["languages"].append({
+        "name": "python",
+        "extractor": "python.generic.v2",
+        "extractor_version": "2",
+        "detected_file_count": 1,
+        "analyzed_file_count": 1,
+    })
+    payload["languages"].sort(key=lambda record: record["name"])
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["languages"].append({
+        "language": "python",
+        "status": "full",
+        "capabilities": copy.deepcopy(completeness["capabilities"]),
+    })
+    completeness["languages"].sort(key=lambda record: record["language"], reverse=True)
+    payload["graph_contract"]["coverage"]["files"].update(
+        discovered=2,
+        hashed=2,
+        parser_candidates=2,
+        analyzed=2,
+    )
+    payload["graph_contract"]["coverage"]["records"]["nodes"] = 2
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "language_completeness_order"
