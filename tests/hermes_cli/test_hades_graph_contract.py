@@ -1893,6 +1893,182 @@ def _valid_flow_artifact() -> dict[str, Any]:
     return artifact
 
 
+def _valid_call_return_flow_artifact() -> dict[str, Any]:
+    artifact = json.loads(json.dumps(_valid_flow_artifact()))
+    sync_flow = _flow_by_kind(artifact, "request_lifecycle")
+    async_flow = _flow_by_kind(artifact, "async_flow")
+    handler_id = artifact["entrypoints"][0]["handler_node_id"]
+    dispatch_edge = next(
+        edge for edge in artifact["edges"] if edge["relation"] == "dispatches"
+    )
+    async_exit_edge = next(
+        edge for edge in artifact["edges"] if edge["relation"] == "exits_at"
+    )
+    removed_edge_ids = {dispatch_edge["id"], async_exit_edge["id"]}
+    artifact["flows"] = [sync_flow]
+    artifact["edges"] = [
+        edge for edge in artifact["edges"] if edge["id"] not in removed_edge_ids
+    ]
+    artifact["flow_steps"] = [
+        step
+        for step in artifact["flow_steps"]
+        if step["flow_id"] != async_flow["id"]
+        and step["edge_id"] != dispatch_edge["id"]
+    ]
+
+    path = next(
+        node["identity"]["path"] for node in artifact["nodes"] if node["kind"] == "file"
+    )
+    callee_identity = {
+        "variant": "source_declaration",
+        "workspace_binding_id": artifact["project"]["workspace_binding_id"],
+        "language": "php",
+        "kind": "method",
+        "namespace": "App",
+        "qualified_name": "App\\Example::callee",
+        "path": path,
+    }
+    callee_id = node_id(callee_identity)
+    artifact["nodes"].append({
+        "id": callee_id,
+        "identity": callee_identity,
+        "kind": "method",
+        "language": "php",
+        "framework": None,
+        "name": "callee",
+        "qualified_name": "App\\Example::callee",
+        "namespace": "App",
+        "uncertainty_id": None,
+        "location": {"path": path, "start_line": 1, "end_line": 1},
+        "properties": {},
+        "evidence": _producer_evidence(artifact, "declaration/service/callee"),
+    })
+    continuation_id = _append_executable_node(
+        artifact,
+        kind="basic_block",
+        structural_path="body/call/0/continuation",
+        owner_node_id=handler_id,
+    )
+    structure_identity = {
+        "kind": "call_site",
+        "owner_node_id": handler_id,
+        "structural_path": "body/call/0",
+        "ordinal": 0,
+        "subtype": "call",
+    }
+    public_call_site_id = call_site_id(structure_identity)
+    artifact["structures"] = [
+        {
+            "id": public_call_site_id,
+            **structure_identity,
+            "continuation_node_id": continuation_id,
+            "parent_structure_id": None,
+            "evidence": _producer_evidence(artifact, "body/call/0"),
+        }
+    ]
+
+    def append_call_edge(
+        *,
+        source_id: str,
+        target_id: str,
+        relation: str,
+        ast_path: str,
+        order: int,
+    ) -> str:
+        occurrence = {
+            "kind": "ast",
+            "owner_node_id": handler_id,
+            "ast_path": ast_path,
+            "ordinal": 0,
+        }
+        identity = {
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+            "flow": "always",
+            "condition_hash": None,
+            "branch_group_id": None,
+            "call_site_id": public_call_site_id,
+            "exception_scope_id": None,
+            "occurrence": occurrence,
+        }
+        public_edge_id = edge_id(identity)
+        artifact["edges"].append({
+            "id": public_edge_id,
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+            "flow": "always",
+            "condition": None,
+            "branch_group_id": None,
+            "call_site_id": public_call_site_id,
+            "exception_scope_id": None,
+            "order": None if relation == "returns_to" else order,
+            "uncertainty_id": None,
+            "occurrence": occurrence,
+            "evidence": _producer_evidence(artifact, ast_path),
+            "location": {"path": path, "line": 1, "ordinal": order},
+        })
+        return public_edge_id
+
+    invocation_edge_id = append_call_edge(
+        source_id=handler_id,
+        target_id=callee_id,
+        relation="invokes",
+        ast_path="body/call/0/invocation",
+        order=1,
+    )
+    return_edge_id = append_call_edge(
+        source_id=callee_id,
+        target_id=continuation_id,
+        relation="returns_to",
+        ast_path="body/call/0/return",
+        order=2,
+    )
+    _append_flow_step(
+        artifact,
+        public_flow_id=sync_flow["id"],
+        public_edge_id=invocation_edge_id,
+        stage_from="handler",
+        stage_to="domain",
+        min_depth=1,
+        async_context="synchronous",
+        backbone_role="branch",
+    )
+    _append_flow_step(
+        artifact,
+        public_flow_id=sync_flow["id"],
+        public_edge_id=return_edge_id,
+        stage_from="domain",
+        stage_to="handler",
+        min_depth=2,
+        async_context="synchronous",
+        backbone_role="branch",
+    )
+    sync_flow.update(
+        represented_step_count=4,
+        linked_async_flow_count=_exact_count(0),
+        stage_counts={
+            "entry": _exact_count(1),
+            "handler": _exact_count(2),
+            "domain": _exact_count(1),
+            "response": _exact_count(1),
+        },
+    )
+    artifact["edges"].sort(key=lambda record: record["id"])
+    artifact["flow_steps"].sort(key=lambda record: record["id"])
+    coverage = artifact["graph_contract"]["coverage"]
+    coverage["records"].update(
+        nodes=len(artifact["nodes"]),
+        structures=1,
+        edges=len(artifact["edges"]),
+        flows=1,
+        flow_steps=4,
+    )
+    _rehash_artifact(artifact)
+    return artifact
+
+
 def _rehash_artifact(artifact: dict[str, Any]) -> None:
     artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
         artifact
@@ -2343,7 +2519,7 @@ def test_full_flow_rejects_omitted_reachable_verified_branch() -> None:
     assert exc_info.value.code == "flow_edge_omission"
 
 
-def test_partial_flow_can_count_a_verified_target_not_materialized() -> None:
+def test_partial_flow_rejects_omitted_represented_verified_response() -> None:
     _, _, validation = _task3_api()
     payload = json.loads(json.dumps(_valid_flow_artifact()))
     sync_flow = _flow_by_kind(payload, "request_lifecycle")
@@ -2387,7 +2563,153 @@ def test_partial_flow_can_count_a_verified_target_not_materialized() -> None:
     payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 3
     _rehash_artifact(payload)
 
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_edge_omission"
+
+
+def test_partial_flow_rejects_omitted_represented_verified_async_dispatch() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_flow_artifact()))
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    child_flow = _flow_by_kind(payload, "async_flow")
+    dispatch_step = _step_by_relation(
+        payload, "dispatches", flow_kind="request_lifecycle"
+    )
+    payload["flows"] = [sync_flow]
+    payload["flow_steps"] = [
+        step
+        for step in payload["flow_steps"]
+        if step["flow_id"] != child_flow["id"] and step["id"] != dispatch_step["id"]
+    ]
+    reason = {
+        "code": "verified_target_not_materialized",
+        "count": 1,
+        "language": "php",
+        "paths_sample": ["src/Example.php"],
+    }
+    sync_flow["represented_step_count"] = 2
+    sync_flow["linked_async_flow_count"] = _unknown_count(
+        0, "verified_target_not_materialized"
+    )
+    sync_flow["uncertainty_count"] = _unknown_count(
+        0, "verified_target_not_materialized"
+    )
+    sync_flow["stage_counts"].pop("async")
+    sync_flow["completeness"]["status"] = "partial"
+    sync_flow["completeness"]["capabilities"]["async"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    completeness["capabilities"]["async"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    completeness["languages"][0]["status"] = "partial"
+    completeness["languages"][0]["capabilities"]["async"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    payload["graph_contract"]["coverage"]["entrypoints"].update(
+        analyzed=0,
+        partial=1,
+    )
+    payload["graph_contract"]["coverage"]["records"].update(
+        flows=1,
+        flow_steps=2,
+    )
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_edge_omission"
+
+
+def test_verified_matching_return_is_required_when_invocation_is_serialized() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_call_return_flow_artifact()
     validation.validate_artifact(payload)
+    return_step = _step_by_relation(
+        payload, "returns_to", flow_kind="request_lifecycle"
+    )
+    payload["flow_steps"].remove(return_step)
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    sync_flow["represented_step_count"] = 3
+    sync_flow["stage_counts"]["handler"] = _exact_count(1)
+    payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 3
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_edge_omission"
+
+
+def test_http_entrypoint_label_is_derived_from_methods_and_public_path() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    entrypoint = payload["entrypoints"][0]
+    entrypoint_node = next(
+        node for node in payload["nodes"] if node["kind"] == "entrypoint"
+    )
+    entrypoint["label"] = "Totally unrelated safe label"
+    entrypoint_node["name"] = entrypoint["label"]
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "entrypoint_http_label_mismatch"
+
+
+def test_unrestricted_http_entrypoint_uses_all_label_and_trigger() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    entrypoint = payload["entrypoints"][0]
+    entrypoint_node = next(
+        node for node in payload["nodes"] if node["kind"] == "entrypoint"
+    )
+    entrypoint.update(
+        label="ALL /jobs",
+        method_semantics="unrestricted",
+        methods=[],
+        trigger={"kind": "http", "value": "ALL /jobs"},
+    )
+    entrypoint_node["name"] = "ALL /jobs"
+    entrypoint_node["identity"]["entrypoint_identity"].update(
+        method_semantics="unrestricted",
+        methods=[],
+        trigger={"kind": "http", "value": "ALL /jobs"},
+    )
+    artifact = model.artifact_from_payload(payload)
+
+    validation.validate_references(artifact, validation.build_record_index(artifact))
+
+
+def test_explicit_multi_method_http_entrypoint_joins_methods_lexically() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    entrypoint = payload["entrypoints"][0]
+    entrypoint_node = next(
+        node for node in payload["nodes"] if node["kind"] == "entrypoint"
+    )
+    entrypoint.update(
+        label="GET|POST /jobs",
+        methods=["GET", "POST"],
+        trigger={"kind": "http", "value": "GET|POST /jobs"},
+    )
+    entrypoint_node["name"] = "GET|POST /jobs"
+    entrypoint_node["identity"]["entrypoint_identity"].update(
+        methods=["GET", "POST"],
+        trigger={"kind": "http", "value": "GET|POST /jobs"},
+    )
+    artifact = model.artifact_from_payload(payload)
+
+    validation.validate_references(artifact, validation.build_record_index(artifact))
 
 
 def test_parser_failed_file_closes_coverage_over_its_actual_reason() -> None:

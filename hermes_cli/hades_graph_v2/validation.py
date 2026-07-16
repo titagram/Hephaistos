@@ -54,6 +54,7 @@ from .model import (
     FrameworkProperties,
     GraphArtifactV2,
     Knowledge,
+    MethodSemantics,
     Node,
     NodeKind,
     ReasonCode,
@@ -68,6 +69,7 @@ from .model import (
     Structure,
     StructureKind,
     StructureSubtype,
+    TriggerKind,
     Uncertainty,
     artifact_from_payload,
     artifact_to_payload,
@@ -732,6 +734,35 @@ def _validate_entrypoint(
     ):
         if getattr(identity, name) != getattr(record, name):
             _fail("entrypoint_identity_mismatch", "entrypoint identity fields disagree")
+    if getattr(record, "entrypoint_kind") is EntrypointKind.HTTP_ROUTE:
+        method_semantics = cast(MethodSemantics, getattr(record, "method_semantics"))
+        methods = cast(tuple[str, ...], getattr(record, "methods"))
+        public_path = cast(str | None, getattr(record, "public_path"))
+        trigger = getattr(record, "trigger")
+        if method_semantics is MethodSemantics.EXPLICIT and methods:
+            method_label = "|".join(methods)
+        elif method_semantics is MethodSemantics.UNRESTRICTED and not methods:
+            method_label = "ALL"
+        else:
+            _fail(
+                "entrypoint_http_label_mismatch",
+                "HTTP entrypoint method semantics cannot produce a canonical label",
+            )
+        if public_path is None:
+            _fail(
+                "entrypoint_http_label_mismatch",
+                "HTTP entrypoint requires a public path for its canonical label",
+            )
+        expected_http_label = f"{method_label} {public_path}"
+        if (
+            getattr(record, "label") != expected_http_label
+            or getattr(trigger, "kind") is not TriggerKind.HTTP
+            or getattr(trigger, "value") != expected_http_label
+        ):
+            _fail(
+                "entrypoint_http_label_mismatch",
+                "HTTP entrypoint label and trigger are not canonical",
+            )
     expected_qualified_name = getattr(record, "public_name") or getattr(
         getattr(record, "trigger"), "value"
     )
@@ -1724,16 +1755,21 @@ def _validate_flow_topology(
             )
 
 
-def _validate_full_flow_edge_closure(
+def _validate_flow_edge_closure(
     flow: Flow,
     flow_steps: tuple[FlowStep, ...],
     edges_by_source: Mapping[str, tuple[Edge, ...]],
     index: _RecordIndex,
 ) -> None:
-    if flow.completeness.status is not CompletenessStatus.FULL:
-        return
-
     serialized_edge_ids = {step.edge_id for step in flow_steps}
+    serialized_verified_invocation_call_sites = {
+        edge.call_site_id
+        for step in flow_steps
+        if (edge := index.edges[step.edge_id]).relation is Relation.INVOKES
+        and edge.call_site_id is not None
+        and edge.uncertainty_id is None
+        and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
+    }
     steps_by_source: dict[str, list[FlowStep]] = defaultdict(list)
     for step in flow_steps:
         edge = index.edges[step.edge_id]
@@ -1756,14 +1792,17 @@ def _validate_full_flow_edge_closure(
         for source_id in reachable_nodes
         for edge in edges_by_source.get(source_id, ())
         if edge.relation not in _STRUCTURAL_RELATIONS
-        and edge.relation is not Relation.RETURNS_TO
         and edge.uncertainty_id is None
         and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
+        and (
+            edge.relation is not Relation.RETURNS_TO
+            or edge.call_site_id in serialized_verified_invocation_call_sites
+        )
     }
     if not required_edge_ids.issubset(serialized_edge_ids):
         _fail(
             "flow_edge_omission",
-            "full flow omits a reachable verified lifecycle edge",
+            "flow omits a reachable verified lifecycle edge",
         )
 
 
@@ -1988,7 +2027,7 @@ def validate_flow_membership(artifact: GraphArtifactV2, index: _RecordIndex) -> 
     _validate_async_flow_links(artifact, steps_by_flow, index)
     for flow in artifact.flows:
         _validate_flow_topology(flow, steps_by_flow[flow.id], index)
-        _validate_full_flow_edge_closure(
+        _validate_flow_edge_closure(
             flow, steps_by_flow[flow.id], edges_by_source, index
         )
     synchronous = Counter(
