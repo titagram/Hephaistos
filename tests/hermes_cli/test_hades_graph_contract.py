@@ -31,6 +31,7 @@ from hermes_cli.hades_graph_contract import (
     flow_step_id,
     load_json_bytes,
     node_id,
+    normalize_contract_value,
     normalize_source_path,
     projection_version,
     result_digest,
@@ -45,7 +46,9 @@ from hermes_cli.hades_graph_contract import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_ROOT = ROOT / "contracts" / "hades" / "graph-v2"
+PACKAGED_CONTRACT_ROOT = ROOT / "hermes_cli" / "hades_graph_v2" / "contracts"
 CANONICALIZATION_GOLDEN = CONTRACT_ROOT / "golden" / "canonicalization.json"
+VERIFICATION_GOLDEN = CONTRACT_ROOT / "golden" / "verification-results.json"
 CONTRACT_LOCK = CONTRACT_ROOT / "contract-lock.json"
 SCHEMA_SOURCE_COMMIT = "cbc07d447ad301a53468ad52093438cfe0160d1d"
 
@@ -56,6 +59,62 @@ def _golden() -> dict[str, Any]:
 
 def _vector(kind: str) -> dict[str, Any]:
     return next(item for item in _golden()["vectors"] if item["kind"] == kind)
+
+
+def _verification_golden() -> dict[str, Any]:
+    return json.loads(VERIFICATION_GOLDEN.read_text(encoding="utf-8"))
+
+
+def _direct_verification_preimage(work: dict[str, Any]) -> dict[str, Any]:
+    direct = {
+        "kind": work["kind"],
+        "project_id": work["project_id"],
+        "workspace_binding_id": work["workspace_binding_id"],
+        "target_id": work["target"]["id"],
+        "target_version": work["target"]["version"],
+        "attempt_generation": work["attempt_generation"],
+    }
+    if work["kind"] == "hades.verification.graph.v1":
+        direct["assertion_fingerprint"] = work["assertion"]["fingerprint"]
+    else:
+        direct.update({
+            "source_state": work["source_snapshot"]["state"],
+            "artifact_graph_version": work["source_snapshot"]["artifact_graph_version"],
+            "source_tree_sha256": work["source_snapshot"]["tree_sha256"],
+        })
+    return direct
+
+
+def _framework(configuration_paths: list[str]) -> dict[str, Any]:
+    return {
+        "language": "php",
+        "name": "laravel",
+        "version": None,
+        "detector": "composer.lock",
+        "configuration_paths": configuration_paths,
+        "knowledge": "verified",
+    }
+
+
+def _bundle_with_path_array(array_key: str, paths: list[str]) -> dict[str, Any]:
+    bundle = copy.deepcopy(_golden()["contract_examples"]["bundle"])
+    if array_key == "configuration_paths":
+        bundle["frameworks"] = [_framework(paths)]
+        bundle["counts"]["frameworks"] = 1
+    else:
+        bundle["graph_contract"]["completeness"]["status"] = "partial"
+        bundle["graph_contract"]["completeness"]["capabilities"]["inventory"] = {
+            "status": "partial",
+            "reasons": [
+                {
+                    "code": "unsupported_language",
+                    "count": 1,
+                    "language": "php",
+                    "paths_sample": paths,
+                }
+            ],
+        }
+    return bundle
 
 
 def test_facade_is_v2_only() -> None:
@@ -223,6 +282,16 @@ def test_contract_lock_pins_manifest_and_all_registered_schemas() -> None:
     assert set(lock["schema_digests"]) == SCHEMA_NAMES
 
 
+def test_packaged_schema_resources_are_byte_identical_to_contract_sources() -> None:
+    for schema_name in SCHEMA_NAMES:
+        source = (CONTRACT_ROOT / schema_name).read_bytes()
+        packaged = (PACKAGED_CONTRACT_ROOT / schema_name).read_bytes()
+        assert packaged == source
+        assert (
+            hashlib.sha256(packaged).hexdigest() == hashlib.sha256(source).hexdigest()
+        )
+
+
 def test_schema_facade_rejects_unknown_names_and_v1_with_typed_codes() -> None:
     with pytest.raises(GraphContractError) as exc_info:
         validate_schema("unknown.schema.json", {})
@@ -236,6 +305,32 @@ def test_schema_facade_rejects_unknown_names_and_v1_with_typed_codes() -> None:
         validate_schema("artifact-v1.schema.json", {})
     assert exc_info.value.code == "graph_v1_not_supported"
 
+    for legacy_payload in (
+        {"schema": "hades.php_graph.v1"},
+        {"graph_contract": {"version": "hades.graph_artifact.v1"}},
+    ):
+        with pytest.raises(GraphContractError) as exc_info:
+            validate_schema("artifact.schema.json", legacy_payload)
+        assert exc_info.value.code == "graph_v1_not_supported"
+
+
+@pytest.mark.parametrize(
+    "document_name",
+    [
+        "preview10.schema.json",
+        "graph-preview10.schema.json",
+        "revision1-preview.schema.json",
+        "nav1.schema.json",
+        "kv1-preview.schema.json",
+    ],
+)
+def test_schema_facade_does_not_misclassify_unknown_names_as_v1(
+    document_name: str,
+) -> None:
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema(document_name, {})
+    assert exc_info.value.code == "unknown_schema_name"
+
 
 def test_schema_boundary_rejects_non_nfc_contract_strings() -> None:
     bundle = copy.deepcopy(_golden()["contract_examples"]["bundle"])
@@ -243,6 +338,63 @@ def test_schema_boundary_rejects_non_nfc_contract_strings() -> None:
     with pytest.raises(GraphContractError) as exc_info:
         validate_schema("bundle.schema.json", bundle)
     assert exc_info.value.code == "non_nfc_string"
+
+
+@pytest.mark.parametrize("array_key", ["configuration_paths", "paths_sample"])
+def test_schema_boundary_applies_source_path_limits_inside_path_arrays(
+    array_key: str,
+) -> None:
+    bundle = _bundle_with_path_array(array_key, ["é" * 3000])
+
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("bundle.schema.json", bundle)
+    assert exc_info.value.code == "unsafe_source_path"
+
+
+@pytest.mark.parametrize("array_key", ["configuration_paths", "paths_sample"])
+def test_schema_boundary_rejects_backslashes_inside_path_arrays(
+    array_key: str,
+) -> None:
+    bundle = _bundle_with_path_array(array_key, [r"config\services.yaml"])
+
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("bundle.schema.json", bundle)
+    assert exc_info.value.code == "unsafe_source_path"
+
+
+@pytest.mark.parametrize("array_key", ["configuration_paths", "paths_sample"])
+def test_artifact_digest_normalizes_every_source_path_array(array_key: str) -> None:
+    posix = copy.deepcopy(_vector("artifact_digest")["input"])
+    backslash = copy.deepcopy(posix)
+    if array_key == "configuration_paths":
+        posix["frameworks"] = [_framework(["config/services.yaml"])]
+        backslash["frameworks"] = [_framework([r"config\services.yaml"])]
+    else:
+        reason = {
+            "code": "unsupported_language",
+            "count": 1,
+            "language": "php",
+            "paths_sample": ["src/Unsupported.php"],
+        }
+        posix["completeness"]["capabilities"]["inventory"] = {
+            "status": "partial",
+            "reasons": [reason],
+        }
+        backslash_reason = copy.deepcopy(reason)
+        backslash_reason["paths_sample"] = [r"src\Unsupported.php"]
+        backslash["completeness"]["capabilities"]["inventory"] = {
+            "status": "partial",
+            "reasons": [backslash_reason],
+        }
+
+    assert artifact_digest(posix) == artifact_digest(backslash)
+
+
+def test_included_roots_keeps_dot_semantics_and_non_path_arrays_are_untouched() -> None:
+    assert normalize_contract_value({"included_roots": ["."]}) == {
+        "included_roots": ["."]
+    }
+    assert normalize_contract_value({"methods": [r"A\B"]}) == {"methods": [r"A\B"]}
 
 
 def test_all_golden_identity_and_digest_helpers_match_exact_preimages() -> None:
@@ -338,6 +490,50 @@ def test_all_golden_identity_and_digest_helpers_match_exact_preimages() -> None:
 
     artifact = _vector("artifact_digest")
     assert artifact_digest(artifact["input"]) == artifact["sha256"]
+
+
+def test_verification_dedupe_accepts_exact_graph_and_wiki_direct_preimages() -> None:
+    work_items = _verification_golden()["work_items"]
+    for work in (work_items[0], work_items[3], work_items[4]):
+        assert (
+            verification_deduplication_key(_direct_verification_preimage(work))
+            == work["deduplication_key"]
+        )
+
+
+def test_verification_dedupe_derives_exact_preimage_from_full_work_payloads() -> None:
+    for work in _verification_golden()["work_items"]:
+        assert verification_deduplication_key(work) == work["deduplication_key"]
+
+
+def test_verification_dedupe_rejects_every_missing_or_extra_direct_field() -> None:
+    work_items = _verification_golden()["work_items"]
+    for work in (work_items[0], work_items[3], work_items[4]):
+        direct = _direct_verification_preimage(work)
+        invalid_values = [
+            {key: value for key, value in direct.items() if key != missing}
+            for missing in direct
+        ]
+        invalid_values.append({**direct, "extra": "not normative"})
+        for invalid in invalid_values:
+            with pytest.raises(GraphContractError) as exc_info:
+                verification_deduplication_key(invalid)
+            assert exc_info.value.code == "invalid_verification_preimage"
+
+
+def test_verification_dedupe_rejects_kind_and_key_set_mismatches() -> None:
+    graph, wiki = _verification_golden()["work_items"][0::3][:2]
+    graph_direct = _direct_verification_preimage(graph)
+    wiki_direct = _direct_verification_preimage(wiki)
+    invalid_values = [
+        {**graph_direct, "kind": "hades.verification.wiki.v1"},
+        {**wiki_direct, "kind": "hades.verification.graph.v1"},
+        {**graph_direct, "kind": "hades.verification.future.v2"},
+    ]
+    for invalid in invalid_values:
+        with pytest.raises(GraphContractError) as exc_info:
+            verification_deduplication_key(invalid)
+        assert exc_info.value.code == "invalid_verification_preimage"
 
 
 def test_artifact_graph_version_uses_only_exact_semantic_preimage() -> None:

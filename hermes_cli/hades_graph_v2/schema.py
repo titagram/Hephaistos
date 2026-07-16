@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unicodedata
 from functools import lru_cache
-from pathlib import Path
+from importlib.resources import files
 from typing import Any, TypeAlias
 
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
@@ -32,12 +32,24 @@ SCHEMA_NAMES = frozenset({
 })
 
 SAFE_INTEGER_MAX = 9_007_199_254_740_991
-_CONTRACT_ROOT = (
-    Path(__file__).resolve().parents[2] / "contracts" / "hades" / "graph-v2"
-)
 _GRAPH_V1_SCHEMAS = frozenset({
     "hades.code_graph.v1",
     "hades.php_graph.v1",
+})
+_GRAPH_V1_DOCUMENT_NAMES = frozenset({"artifact-v1.schema.json"})
+_SOURCE_PATH_KEYS = frozenset({"path"})
+_SOURCE_PATH_ARRAY_KEYS = frozenset({"configuration_paths", "paths_sample"})
+_INCLUDED_ROOT_ARRAY_KEYS = frozenset({"included_roots"})
+_STRUCTURAL_PATH_KEYS = frozenset({
+    "ast_path",
+    "structural_path",
+    "structural_pointer",
+})
+_UTC_TIMESTAMP_KEYS = frozenset({
+    "active_projection_generated_at",
+    "exits_at",
+    "generated_at",
+    "merges_at",
 })
 
 
@@ -78,7 +90,7 @@ def _is_graph_v1_payload(payload: object) -> bool:
 
 
 def _reject_v1(document_name: str, payload: object) -> None:
-    if "v1" in document_name.lower() or _is_graph_v1_payload(payload):
+    if document_name in _GRAPH_V1_DOCUMENT_NAMES or _is_graph_v1_payload(payload):
         raise GraphContractError(
             "graph_v1_not_supported",
             "graph v1 is not accepted by the graph v2 contract facade",
@@ -142,9 +154,12 @@ def load_json_bytes(raw: bytes | bytearray | memoryview) -> JsonValue:
 @lru_cache(maxsize=1)
 def _schema_documents() -> dict[str, dict[str, Any]]:
     documents: dict[str, dict[str, Any]] = {}
+    contract_root = files("hermes_cli.hades_graph_v2").joinpath("contracts")
     for name in sorted(SCHEMA_NAMES):
         try:
-            document = json.loads((_CONTRACT_ROOT / name).read_text(encoding="utf-8"))
+            document = json.loads(
+                contract_root.joinpath(name).read_text(encoding="utf-8")
+            )
             Draft202012Validator.check_schema(document)
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             raise GraphContractError(
@@ -204,7 +219,7 @@ def _validate_application_scalars(value: object, *, key: str | None = None) -> N
                 "string_byte_limit_exceeded",
                 "contract string exceeds its UTF-8 byte limit",
             )
-        if key == "path":
+        if key in _SOURCE_PATH_KEYS or key in _SOURCE_PATH_ARRAY_KEYS:
             from .identity import normalize_source_path
 
             if normalize_source_path(value) != value:
@@ -212,7 +227,15 @@ def _validate_application_scalars(value: object, *, key: str | None = None) -> N
                     "unsafe_source_path",
                     "source paths must already be normalized NFC POSIX paths",
                 )
-        if key in {"structural_path", "ast_path", "structural_pointer"}:
+        if key in _INCLUDED_ROOT_ARRAY_KEYS and value != ".":
+            from .identity import normalize_source_path
+
+            if normalize_source_path(value) != value:
+                raise GraphContractError(
+                    "unsafe_source_path",
+                    "included roots must be dot or normalized NFC POSIX paths",
+                )
+        if key in _STRUCTURAL_PATH_KEYS:
             from .identity import normalize_structural_path
 
             if normalize_structural_path(value) != value:
@@ -220,7 +243,7 @@ def _validate_application_scalars(value: object, *, key: str | None = None) -> N
                     "unsafe_structural_path",
                     "structural paths must already be normalized",
                 )
-        if key is not None and key.endswith("_at"):
+        if key in _UTC_TIMESTAMP_KEYS:
             from .identity import require_utc_timestamp
 
             try:
@@ -232,8 +255,13 @@ def _validate_application_scalars(value: object, *, key: str | None = None) -> N
                 ) from exc
         return
     if isinstance(value, list):
+        item_key = (
+            key
+            if key in _SOURCE_PATH_ARRAY_KEYS or key in _INCLUDED_ROOT_ARRAY_KEYS
+            else None
+        )
         for item in value:
-            _validate_application_scalars(item)
+            _validate_application_scalars(item, key=item_key)
         return
     if isinstance(value, dict):
         for child_key, item in value.items():

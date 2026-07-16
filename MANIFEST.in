@@ -6,5 +6,6 @@ graft locales
 # built from the sdist (e.g. Homebrew, downstream packagers). package-data
 # below covers the wheel; this covers the sdist. See #34034 / #28149.
 recursive-include plugins plugin.yaml plugin.yml
+recursive-include hermes_cli/hades_graph_v2/contracts *.schema.json
 global-exclude __pycache__
 global-exclude *.py[cod]

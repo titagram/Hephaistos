@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/verification-result.schema.json",
+  "title": "Hades Verification Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "domain", "verdict", "target", "reason", "evidence", "graph", "wiki", "deferred"],
+  "properties": {
+    "schema": {"const": "hades.verification_result.v1"},
+    "domain": {"enum": ["graph", "wiki"]},
+    "verdict": {"enum": ["verified", "contradicted", "deferred"]},
+    "target": {"oneOf": [{"$ref": "#/$defs/graphTarget"}, {"$ref": "#/$defs/wikiTarget"}]},
+    "reason": {"$ref": "#/$defs/reason"},
+    "evidence": {
+      "type": "array",
+      "maxItems": 80,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "graph": {
+      "oneOf": [
+        {"$ref": "#/$defs/resolveCandidateVerified"},
+        {"$ref": "#/$defs/resolveCandidateContradicted"},
+        {"$ref": "#/$defs/resolveCallTargets"},
+        {"$ref": "#/$defs/resolveEdgeTargets"},
+        {"$ref": "#/$defs/rejectCallSubject"},
+        {"$ref": "#/$defs/rejectEdgeSubject"},
+        {"type": "null"}
+      ]
+    },
+    "wiki": {"oneOf": [{"$ref": "#/$defs/wikiPayload"}, {"type": "null"}]},
+    "deferred": {"oneOf": [{"$ref": "#/$defs/deferredPayload"}, {"type": "null"}]}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "verified"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"$ref": "#/$defs/resolveCandidateVerified"},
+        "wiki": {"type": "null"},
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "verified"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"$ref": "#/$defs/resolveCallTargets"},
+        "wiki": {"type": "null"},
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "verified"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"$ref": "#/$defs/resolveEdgeTargets"},
+        "wiki": {"type": "null"},
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "contradicted"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"$ref": "#/$defs/resolveCandidateContradicted"},
+        "wiki": {"type": "null"},
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "contradicted"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"oneOf": [{"$ref": "#/$defs/rejectCallSubject"}, {"$ref": "#/$defs/rejectEdgeSubject"}]},
+        "wiki": {"type": "null"},
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "wiki"},
+        "verdict": {"const": "verified"},
+        "target": {"$ref": "#/$defs/wikiTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"type": "null"},
+        "wiki": {
+          "allOf": [
+            {"$ref": "#/$defs/wikiPayload"},
+            {"properties": {"claims": {"items": {"properties": {"verdict": {"const": "supported"}}}}}}
+          ]
+        },
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "wiki"},
+        "verdict": {"const": "contradicted"},
+        "target": {"$ref": "#/$defs/wikiTarget"},
+        "evidence": {"minItems": 1},
+        "graph": {"type": "null"},
+        "wiki": {
+          "allOf": [
+            {"$ref": "#/$defs/wikiPayload"},
+            {"properties": {"claims": {"contains": {"required": ["verdict"], "properties": {"verdict": {"const": "contradicted"}}}}}}
+          ]
+        },
+        "deferred": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "graph"},
+        "verdict": {"const": "deferred"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "graph": {"type": "null"},
+        "wiki": {"type": "null"},
+        "deferred": {"$ref": "#/$defs/deferredPayload"}
+      }
+    },
+    {
+      "properties": {
+        "domain": {"const": "wiki"},
+        "verdict": {"const": "deferred"},
+        "target": {"$ref": "#/$defs/wikiTarget"},
+        "graph": {"type": "null"},
+        "wiki": {"type": "null"},
+        "deferred": {"$ref": "#/$defs/deferredPayload"}
+      }
+    }
+  ],
+  "$defs": {
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "graphTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "graph_assertion"},
+        "id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "version": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "wikiTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "wiki_page"},
+        "id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+        "version": {"$ref": "artifact.schema.json#/$defs/ulid"}
+      }
+    },
+    "sourceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "line_start", "line_end", "file_sha256", "source_tree_sha256"],
+      "properties": {
+        "kind": {"const": "source_ref"},
+        "path": {"$ref": "artifact.schema.json#/$defs/safePath"},
+        "line_start": {"$ref": "artifact.schema.json#/$defs/positiveLine"},
+        "line_end": {"$ref": "artifact.schema.json#/$defs/positiveLine"},
+        "file_sha256": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "source_tree_sha256": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "graphNodeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "record_kind", "public_id", "artifact_graph_version", "source_fingerprint"],
+      "properties": {
+        "kind": {"const": "graph_ref"},
+        "record_kind": {"const": "node"},
+        "public_id": {"$ref": "artifact.schema.json#/$defs/nodeId"},
+        "artifact_graph_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "source_fingerprint": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "graphEdgeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "record_kind", "public_id", "artifact_graph_version", "source_fingerprint"],
+      "properties": {
+        "kind": {"const": "graph_ref"},
+        "record_kind": {"const": "edge"},
+        "public_id": {"$ref": "artifact.schema.json#/$defs/edgeId"},
+        "artifact_graph_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "source_fingerprint": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "graphEvidence": {
+      "oneOf": [
+        {"$ref": "#/$defs/graphNodeEvidence"},
+        {"$ref": "#/$defs/graphEdgeEvidence"}
+      ]
+    },
+    "evidence": {
+      "oneOf": [
+        {"$ref": "#/$defs/sourceEvidence"},
+        {"$ref": "#/$defs/graphEvidence"}
+      ]
+    },
+    "edgeIdArray": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}
+    },
+    "nodeTargetArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/nodeId"}
+    },
+    "resolveCandidateVerified": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "resolve_candidate_set"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}},
+        "suppressed_edge_ids": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}},
+        "call_site_id": {"type": "null"},
+        "subject_edge_id": {"type": "null"},
+        "target_node_ids": {"type": "array", "maxItems": 0}
+      }
+    },
+    "resolveCandidateContradicted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "resolve_candidate_set"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "maxItems": 0},
+        "suppressed_edge_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}},
+        "call_site_id": {"type": "null"},
+        "subject_edge_id": {"type": "null"},
+        "target_node_ids": {"type": "array", "maxItems": 0}
+      }
+    },
+    "resolveCallTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "resolve_call_targets"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "maxItems": 0},
+        "suppressed_edge_ids": {"type": "array", "maxItems": 0},
+        "call_site_id": {"$ref": "artifact.schema.json#/$defs/callSiteId"},
+        "subject_edge_id": {"type": "null"},
+        "target_node_ids": {"$ref": "#/$defs/nodeTargetArray"}
+      }
+    },
+    "resolveEdgeTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "resolve_edge_targets"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "maxItems": 0},
+        "suppressed_edge_ids": {"type": "array", "maxItems": 0},
+        "call_site_id": {"type": "null"},
+        "subject_edge_id": {"$ref": "artifact.schema.json#/$defs/edgeId"},
+        "target_node_ids": {"$ref": "#/$defs/nodeTargetArray"}
+      }
+    },
+    "rejectCallSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "reject_unresolved_subject"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "maxItems": 0},
+        "suppressed_edge_ids": {"type": "array", "maxItems": 0},
+        "call_site_id": {"$ref": "artifact.schema.json#/$defs/callSiteId"},
+        "subject_edge_id": {"type": "null"},
+        "target_node_ids": {"type": "array", "maxItems": 0}
+      }
+    },
+    "rejectEdgeSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "uncertainty_id", "promoted_edge_ids", "suppressed_edge_ids", "call_site_id", "subject_edge_id", "target_node_ids"],
+      "properties": {
+        "operation": {"const": "reject_unresolved_subject"},
+        "uncertainty_id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "promoted_edge_ids": {"type": "array", "maxItems": 0},
+        "suppressed_edge_ids": {"type": "array", "maxItems": 0},
+        "call_site_id": {"type": "null"},
+        "subject_edge_id": {"$ref": "artifact.schema.json#/$defs/edgeId"},
+        "target_node_ids": {"type": "array", "maxItems": 0}
+      }
+    },
+    "wikiClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_fingerprint", "verdict", "evidence_indexes", "reason"],
+      "properties": {
+        "claim_fingerprint": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "verdict": {"enum": ["supported", "contradicted"]},
+        "evidence_indexes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 80,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0, "maximum": 79}
+        },
+        "reason": {"$ref": "#/$defs/reason"}
+      }
+    },
+    "wikiPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_id", "expected_revision_id", "content_markdown", "content_sha256", "content_truncated", "claims"],
+      "properties": {
+        "page_id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+        "expected_revision_id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+        "content_markdown": {"type": "string", "minLength": 1, "maxLength": 524288},
+        "content_sha256": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "content_truncated": {"const": false},
+        "claims": {"type": "array", "minItems": 1, "maxItems": 80, "uniqueItems": true, "items": {"$ref": "#/$defs/wikiClaim"}}
+      }
+    },
+    "missingRequirement": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,79}$",
+      "maxLength": 80
+    },
+    "deferredPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocker_code", "missing_evidence_requirements", "retry_hint"],
+      "properties": {
+        "blocker_code": {"enum": ["insufficient_evidence", "source_unavailable", "ambiguous_scope", "tool_failure", "page_requires_split", "target_unreachable"]},
+        "missing_evidence_requirements": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/missingRequirement"}},
+        "retry_hint": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"},
+            {"type": "null"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"blocker_code": {"enum": ["insufficient_evidence", "source_unavailable", "ambiguous_scope", "target_unreachable"]}}},
+          "then": {"properties": {"missing_evidence_requirements": {"minItems": 1}}}
+        }
+      ]
+    }
+  }
+}

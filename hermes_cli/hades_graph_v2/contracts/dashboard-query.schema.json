@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/dashboard-query.schema.json",
+  "title": "Hades Dashboard Graph Query v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "query"],
+  "properties": {
+    "protocol_version": {"const": "hades.dashboard_graph.v2"},
+    "query": {"$ref": "#/$defs/query"}
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": {"const": "workspace_binding"},
+        "id": {"$ref": "artifact.schema.json#/$defs/ulid"}
+      }
+    },
+    "opaqueToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "nullableOpaqueToken": {
+      "oneOf": [{"$ref": "#/$defs/opaqueToken"}, {"type": "null"}]
+    },
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    "searchText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "entrypointKindArray": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/entrypointKinds"}
+    },
+    "nodeKindArray": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/nodeKinds"}
+    },
+    "scopesQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {"type": {"const": "scopes"}}
+    },
+    "overviewQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope"],
+      "properties": {
+        "type": {"const": "overview"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/nullableOpaqueToken"}
+      }
+    },
+    "entrypointsQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope"],
+      "properties": {
+        "type": {"const": "entrypoints"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "search": {"$ref": "#/$defs/searchText"},
+        "entrypoint_kinds": {"$ref": "#/$defs/entrypointKindArray"},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "lifecycleQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "entrypoint_handle"],
+      "properties": {
+        "type": {"const": "lifecycle"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"},
+        "include_async": {"type": "boolean"},
+        "graph_context": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "include_technical": {"type": "boolean"}
+      }
+    },
+    "lifecycleExpandStageQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "entrypoint_handle", "stage"],
+      "properties": {
+        "type": {"const": "lifecycle_expand"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"},
+        "stage": {"$ref": "artifact.schema.json#/$defs/stage"},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "lifecycleExpandGroupQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "entrypoint_handle", "collapsed_group_handle"],
+      "properties": {
+        "type": {"const": "lifecycle_expand"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"},
+        "collapsed_group_handle": {"$ref": "#/$defs/opaqueToken"},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "searchQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "query"],
+      "properties": {
+        "type": {"const": "search"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "query": {"$ref": "#/$defs/searchText"},
+        "graph_context": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "kinds": {"$ref": "#/$defs/nodeKindArray"},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "detailQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "node_handle"],
+      "properties": {
+        "type": {"const": "detail"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"},
+        "include_technical": {"type": "boolean"}
+      }
+    },
+    "neighborhoodQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "node_handle"],
+      "properties": {
+        "type": {"const": "neighborhood"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "depth": {"type": "integer", "minimum": 1, "maximum": 3},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "impactQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "node_handle"],
+      "properties": {
+        "type": {"const": "impact"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "node_handle": {"$ref": "#/$defs/opaqueToken"},
+        "cursor": {"$ref": "#/$defs/nullableOpaqueToken"},
+        "limit": {"$ref": "#/$defs/limit"}
+      }
+    },
+    "structuralPathQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "from_handle", "to_handle", "relation_scope"],
+      "properties": {
+        "type": {"const": "path"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "from_handle": {"$ref": "#/$defs/opaqueToken"},
+        "to_handle": {"$ref": "#/$defs/opaqueToken"},
+        "relation_scope": {"const": "structural"}
+      }
+    },
+    "lifecyclePathQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "scope", "graph_context", "from_handle", "to_handle", "relation_scope", "entrypoint_handle"],
+      "properties": {
+        "type": {"const": "path"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "graph_context": {"$ref": "#/$defs/opaqueToken"},
+        "from_handle": {"$ref": "#/$defs/opaqueToken"},
+        "to_handle": {"$ref": "#/$defs/opaqueToken"},
+        "relation_scope": {"const": "lifecycle"},
+        "entrypoint_handle": {"$ref": "#/$defs/opaqueToken"}
+      }
+    },
+    "query": {
+      "oneOf": [
+        {"$ref": "#/$defs/scopesQuery"},
+        {"$ref": "#/$defs/overviewQuery"},
+        {"$ref": "#/$defs/entrypointsQuery"},
+        {"$ref": "#/$defs/lifecycleQuery"},
+        {"$ref": "#/$defs/lifecycleExpandStageQuery"},
+        {"$ref": "#/$defs/lifecycleExpandGroupQuery"},
+        {"$ref": "#/$defs/searchQuery"},
+        {"$ref": "#/$defs/detailQuery"},
+        {"$ref": "#/$defs/neighborhoodQuery"},
+        {"$ref": "#/$defs/impactQuery"},
+        {"$ref": "#/$defs/structuralPathQuery"},
+        {"$ref": "#/$defs/lifecyclePathQuery"}
+      ]
+    }
+  }
+}

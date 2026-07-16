@@ -317,6 +317,7 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 locales = ["locales/*.yaml"]
 [tool.setuptools.package-data]
 hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
+"hermes_cli.hades_graph_v2" = ["contracts/*.schema.json"]
 gateway = ["assets/**/*"]
 plugins = [
   "*/dashboard/manifest.json",

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/chunk.schema.json",
+  "title": "Hades Code Graph Chunk v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "index", "kind", "records"],
+  "properties": {
+    "schema": {"const": "hades.graph_chunk.v2"},
+    "index": {"type": "integer", "minimum": 0, "maximum": 511},
+    "kind": {"$ref": "#/$defs/chunkKind"},
+    "records": {"type": "array", "minItems": 1, "maxItems": 9007199254740991}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {"const": "entrypoints"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/entrypoint"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "nodes"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/node"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "structures"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/structure"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "edges"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/edge"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "flows"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/flow"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "flow_steps"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/flowStep"}}
+          }
+        },
+        {
+          "properties": {
+            "kind": {"const": "uncertainties"},
+            "records": {"items": {"$ref": "artifact.schema.json#/$defs/uncertainty"}}
+          }
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "chunkKind": {
+      "enum": ["entrypoints", "nodes", "structures", "edges", "flows", "flow_steps", "uncertainties"]
+    }
+  }
+}

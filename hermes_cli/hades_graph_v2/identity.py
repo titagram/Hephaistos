@@ -49,6 +49,20 @@ _STAGES = frozenset({
     "error",
 })
 _ASYNC_CONTEXTS = frozenset({"synchronous", "linked_async"})
+_SOURCE_PATH_KEYS = frozenset({"path"})
+_SOURCE_PATH_ARRAY_KEYS = frozenset({"configuration_paths", "paths_sample"})
+_INCLUDED_ROOT_ARRAY_KEYS = frozenset({"included_roots"})
+_STRUCTURAL_PATH_KEYS = frozenset({
+    "ast_path",
+    "structural_path",
+    "structural_pointer",
+})
+_UTC_TIMESTAMP_KEYS = frozenset({
+    "active_projection_generated_at",
+    "exits_at",
+    "generated_at",
+    "merges_at",
+})
 _NODE_IDENTITY_KEYS = {
     "source_declaration": frozenset({
         "variant",
@@ -139,6 +153,45 @@ _ARTIFACT_RECORD_ARRAYS = (
     "flow_steps",
     "uncertainties",
 )
+_GRAPH_VERIFICATION_DEDUPE_KEYS = frozenset({
+    "kind",
+    "project_id",
+    "workspace_binding_id",
+    "target_id",
+    "target_version",
+    "assertion_fingerprint",
+    "attempt_generation",
+})
+_WIKI_VERIFICATION_DEDUPE_KEYS = frozenset({
+    "kind",
+    "project_id",
+    "workspace_binding_id",
+    "target_id",
+    "target_version",
+    "source_state",
+    "artifact_graph_version",
+    "source_tree_sha256",
+    "attempt_generation",
+})
+_VERIFICATION_WORK_KEYS = frozenset({
+    "schema",
+    "kind",
+    "domain",
+    "project_id",
+    "workspace_binding_id",
+    "target",
+    "assertion",
+    "source_snapshot",
+    "question",
+    "reason_code",
+    "evidence_requirements",
+    "source_refs",
+    "priority",
+    "impact",
+    "attempt_generation",
+    "retry_of_work_item_id",
+    "deduplication_key",
+})
 
 
 def _has_isolated_surrogate(value: str) -> bool:
@@ -238,15 +291,24 @@ def normalize_contract_value(value: JsonValue, *, _key: str | None = None) -> Js
         raise GraphContractError("float_not_allowed", "contract JSON forbids floats")
     if isinstance(value, str):
         normalized = _normalized_string(value)
-        if _key == "path":
+        if _key in _SOURCE_PATH_KEYS or _key in _SOURCE_PATH_ARRAY_KEYS:
             return normalize_source_path(normalized)
-        if _key in {"structural_path", "ast_path", "structural_pointer"}:
+        if _key in _INCLUDED_ROOT_ARRAY_KEYS:
+            return (
+                normalized if normalized == "." else normalize_source_path(normalized)
+            )
+        if _key in _STRUCTURAL_PATH_KEYS:
             return normalize_structural_path(normalized)
-        if _key is not None and _key.endswith("_at"):
+        if _key in _UTC_TIMESTAMP_KEYS:
             return require_utc_timestamp(normalized)
         return normalized
     if isinstance(value, list):
-        return [normalize_contract_value(item) for item in value]
+        item_key = (
+            _key
+            if _key in _SOURCE_PATH_ARRAY_KEYS or _key in _INCLUDED_ROOT_ARRAY_KEYS
+            else None
+        )
+        return [normalize_contract_value(item, _key=item_key) for item in value]
     if isinstance(value, dict):
         normalized: dict[str, JsonValue] = {}
         for key, item in value.items():
@@ -546,59 +608,81 @@ def verification_set_hash(active_overlays: Sequence[Mapping[str, Any]]) -> str:
     return sha256_jcs(canonicalize_verification_set(active_overlays))
 
 
+def _invalid_verification_preimage() -> GraphContractError:
+    return GraphContractError(
+        "invalid_verification_preimage",
+        "verification deduplication input is not an exact graph or Wiki preimage",
+    )
+
+
+def _verification_preimage_from_work(
+    item: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    target = item["target"]
+    if not isinstance(target, dict) or frozenset(target) != {
+        "type",
+        "id",
+        "version",
+    }:
+        raise _invalid_verification_preimage()
+    common: dict[str, JsonValue] = {
+        "kind": item["kind"],
+        "project_id": item["project_id"],
+        "workspace_binding_id": item["workspace_binding_id"],
+        "target_id": target["id"],
+        "target_version": target["version"],
+        "attempt_generation": item["attempt_generation"],
+    }
+    if item["kind"] == "hades.verification.graph.v1":
+        assertion = item["assertion"]
+        if (
+            item["domain"] != "graph"
+            or target["type"] != "graph_assertion"
+            or not isinstance(assertion, dict)
+            or "fingerprint" not in assertion
+        ):
+            raise _invalid_verification_preimage()
+        common["assertion_fingerprint"] = assertion["fingerprint"]
+        return common
+    if item["kind"] == "hades.verification.wiki.v1":
+        source_snapshot = item["source_snapshot"]
+        if (
+            item["domain"] != "wiki"
+            or target["type"] != "wiki_page"
+            or item["assertion"] is not None
+            or not isinstance(source_snapshot, dict)
+            or frozenset(source_snapshot)
+            != {"state", "artifact_graph_version", "tree_sha256"}
+            or source_snapshot["state"] not in {"available", "unavailable"}
+        ):
+            raise _invalid_verification_preimage()
+        common.update({
+            "source_state": source_snapshot["state"],
+            "artifact_graph_version": source_snapshot["artifact_graph_version"],
+            "source_tree_sha256": source_snapshot["tree_sha256"],
+        })
+        return common
+    raise _invalid_verification_preimage()
+
+
 def verification_deduplication_key(value: Mapping[str, Any]) -> str:
-    item = _require_mapping(value, label="verification deduplication preimage")
-    if "target_id" in item:
+    if not isinstance(value, Mapping):
+        raise _invalid_verification_preimage()
+    item = cast(dict[str, JsonValue], dict(value))
+    keys = frozenset(item)
+    if keys == _GRAPH_VERIFICATION_DEDUPE_KEYS:
+        if item["kind"] != "hades.verification.graph.v1":
+            raise _invalid_verification_preimage()
         preimage = item
+    elif keys == _WIKI_VERIFICATION_DEDUPE_KEYS:
+        if item["kind"] != "hades.verification.wiki.v1":
+            raise _invalid_verification_preimage()
+        preimage = item
+    elif keys == _VERIFICATION_WORK_KEYS:
+        preimage = _verification_preimage_from_work(item)
     else:
-        target = item.get("target")
-        source_snapshot = item.get("source_snapshot")
-        if not isinstance(target, Mapping):
-            raise GraphContractError(
-                "invalid_verification_preimage",
-                "verification target is required",
-            )
-        common: dict[str, JsonValue] = {
-            "kind": cast(JsonValue, item.get("kind")),
-            "project_id": cast(JsonValue, item.get("project_id")),
-            "workspace_binding_id": cast(JsonValue, item.get("workspace_binding_id")),
-            "target_id": cast(JsonValue, target.get("id")),
-            "target_version": cast(JsonValue, target.get("version")),
-        }
-        if item.get("domain") == "graph":
-            assertion = item.get("assertion")
-            if not isinstance(assertion, Mapping):
-                raise GraphContractError(
-                    "invalid_verification_preimage",
-                    "graph verification assertion is required",
-                )
-            common["assertion_fingerprint"] = cast(
-                JsonValue,
-                assertion.get("fingerprint"),
-            )
-        else:
-            if not isinstance(source_snapshot, Mapping):
-                raise GraphContractError(
-                    "invalid_verification_preimage",
-                    "Wiki source snapshot is required",
-                )
-            common.update({
-                "source_state": cast(JsonValue, source_snapshot.get("state")),
-                "artifact_graph_version": cast(
-                    JsonValue,
-                    source_snapshot.get("artifact_graph_version"),
-                ),
-                "source_tree_sha256": cast(
-                    JsonValue,
-                    source_snapshot.get("tree_sha256"),
-                ),
-            })
-        common["attempt_generation"] = cast(
-            JsonValue,
-            item.get("attempt_generation"),
-        )
-        preimage = common
-    return sha256_jcs(cast(JsonValue, preimage))
+        raise _invalid_verification_preimage()
+    return sha256_jcs(preimage)
 
 
 def result_digest(result: Mapping[str, Any]) -> str:

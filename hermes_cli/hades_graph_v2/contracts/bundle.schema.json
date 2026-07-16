@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/bundle.schema.json",
+  "title": "Hades Code Graph Bundle v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifact_schema",
+    "artifact_graph_version",
+    "generated_at",
+    "source",
+    "project",
+    "graph_contract",
+    "frameworks",
+    "languages",
+    "counts",
+    "chunks"
+  ],
+  "properties": {
+    "schema": {"const": "hades.graph_bundle.v2"},
+    "artifact_schema": {"const": "hades.code_graph.v2"},
+    "artifact_graph_version": {"$ref": "#/$defs/digest"},
+    "generated_at": {"$ref": "#/$defs/utcTimestamp"},
+    "source": {"$ref": "#/$defs/source"},
+    "project": {"$ref": "#/$defs/project"},
+    "graph_contract": {"$ref": "#/$defs/graphContract"},
+    "frameworks": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/framework"}
+    },
+    "languages": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/language"}
+    },
+    "counts": {"$ref": "#/$defs/counts"},
+    "chunks": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/chunkDescriptor"}
+    }
+  },
+  "$defs": {
+    "digest": {"$ref": "artifact.schema.json#/$defs/digest"},
+    "utcTimestamp": {"$ref": "artifact.schema.json#/$defs/utcTimestamp"},
+    "safeInteger": {"$ref": "artifact.schema.json#/$defs/safeInteger"},
+    "source": {"$ref": "artifact.schema.json#/$defs/source"},
+    "project": {"$ref": "artifact.schema.json#/$defs/project"},
+    "graphContract": {"$ref": "artifact.schema.json#/$defs/graphContract"},
+    "framework": {"$ref": "artifact.schema.json#/$defs/framework"},
+    "language": {"$ref": "artifact.schema.json#/$defs/language"},
+    "chunkKind": {
+      "enum": ["entrypoints", "nodes", "structures", "edges", "flows", "flow_steps", "uncertainties"]
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameworks", "languages", "entrypoints", "nodes", "structures", "edges", "flows", "flow_steps", "uncertainties"],
+      "properties": {
+        "frameworks": {"$ref": "#/$defs/safeInteger"},
+        "languages": {"$ref": "#/$defs/safeInteger"},
+        "entrypoints": {"$ref": "#/$defs/safeInteger"},
+        "nodes": {"$ref": "#/$defs/safeInteger"},
+        "structures": {"$ref": "#/$defs/safeInteger"},
+        "edges": {"$ref": "#/$defs/safeInteger"},
+        "flows": {"$ref": "#/$defs/safeInteger"},
+        "flow_steps": {"$ref": "#/$defs/safeInteger"},
+        "uncertainties": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "chunkDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "kind", "record_count", "sha256", "uncompressed_bytes", "compression", "compressed_sha256", "compressed_bytes"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 511},
+        "kind": {"$ref": "#/$defs/chunkKind"},
+        "record_count": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "uncompressed_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
+        "compression": {"const": "gzip"},
+        "compressed_sha256": {"$ref": "#/$defs/digest"},
+        "compressed_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608}
+      }
+    }
+  }
+}

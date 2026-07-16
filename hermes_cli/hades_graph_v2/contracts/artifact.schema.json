@@ -1,0 +1,1647 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/artifact.schema.json",
+  "title": "Hades Code Graph Artifact v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generated_at",
+    "project",
+    "source",
+    "graph_contract",
+    "frameworks",
+    "languages",
+    "entrypoints",
+    "nodes",
+    "structures",
+    "edges",
+    "flows",
+    "flow_steps",
+    "uncertainties"
+  ],
+  "properties": {
+    "schema": {"const": "hades.code_graph.v2"},
+    "generated_at": {"$ref": "#/$defs/utcTimestamp"},
+    "project": {"$ref": "#/$defs/project"},
+    "source": {"$ref": "#/$defs/source"},
+    "graph_contract": {"$ref": "#/$defs/graphContract"},
+    "frameworks": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/framework"}
+    },
+    "languages": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/language"}
+    },
+    "entrypoints": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/entrypoint"}
+    },
+    "nodes": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "structures": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/structure"}
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/edge"}
+    },
+    "flows": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/flow"}
+    },
+    "flow_steps": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/flowStep"}
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 9007199254740991,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/uncertainty"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
+    "gitCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
+    "ulid": {"type": "string", "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$", "maxLength": 26},
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+      "format": "date-time",
+      "maxLength": 20
+    },
+    "safeInteger": {
+      "$comment": "JSON Schema's mathematical integer model accepts a parsed lexical 1.0. Contract decoders MUST reject every lexical float with float_not_allowed before schema validation; see golden/raw_wire_negative_vectors.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveLine": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "safePath": {
+      "$comment": "JSON Schema enforces normalized POSIX path shape. UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "structuralPath": {
+      "$comment": "JSON Schema enforces printable slash-delimited normalized tokens. UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+      "maxLength": 128
+    },
+    "ruleIdentifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,79}$",
+      "maxLength": 80
+    },
+    "languageName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+      "maxLength": 32
+    },
+    "frameworkName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+      "maxLength": 128
+    },
+    "display256": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "display500": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "display1000": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "display1024": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "namespace": {
+      "$comment": "UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^hades:node:v2:[0-9a-f]{64}$",
+      "maxLength": 78
+    },
+    "edgeId": {
+      "type": "string",
+      "pattern": "^hades:edge:v2:[0-9a-f]{64}$",
+      "maxLength": 78
+    },
+    "flowId": {
+      "type": "string",
+      "pattern": "^hades:flow:v2:[0-9a-f]{64}$",
+      "maxLength": 78
+    },
+    "flowStepId": {
+      "type": "string",
+      "pattern": "^hades:flow-step:v2:[0-9a-f]{64}$",
+      "maxLength": 83
+    },
+    "branchId": {
+      "type": "string",
+      "pattern": "^hades:branch:v2:[0-9a-f]{64}$",
+      "maxLength": 80
+    },
+    "callSiteId": {
+      "type": "string",
+      "pattern": "^hades:call-site:v2:[0-9a-f]{64}$",
+      "maxLength": 83
+    },
+    "exceptionScopeId": {
+      "type": "string",
+      "pattern": "^hades:exception-scope:v2:[0-9a-f]{64}$",
+      "maxLength": 89
+    },
+    "structureId": {
+      "oneOf": [
+        {"$ref": "#/$defs/branchId"},
+        {"$ref": "#/$defs/callSiteId"},
+        {"$ref": "#/$defs/exceptionScopeId"}
+      ]
+    },
+    "uncertaintyId": {
+      "type": "string",
+      "pattern": "^hades:uncertainty:v2:[0-9a-f]{64}$",
+      "maxLength": 86
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "workspace_binding_id"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/ulid"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["head_commit", "tree_sha256", "dirty", "branch"],
+      "properties": {
+        "head_commit": {"oneOf": [{"$ref": "#/$defs/gitCommit"}, {"type": "null"}]},
+        "tree_sha256": {"$ref": "#/$defs/digest"},
+        "dirty": {"type": "boolean"},
+        "branch": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "language": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "extractor", "extractor_version", "detected_file_count", "analyzed_file_count"],
+      "properties": {
+        "name": {"$ref": "#/$defs/languageName"},
+        "extractor": {"$ref": "#/$defs/identifier"},
+        "extractor_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "detected_file_count": {"$ref": "#/$defs/safeInteger"},
+        "analyzed_file_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "framework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "name", "version", "detector", "configuration_paths", "knowledge"],
+      "properties": {
+        "language": {"$ref": "#/$defs/languageName"},
+        "name": {"$ref": "#/$defs/frameworkName"},
+        "version": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+            {"type": "null"}
+          ]
+        },
+        "detector": {"$ref": "#/$defs/identifier"},
+        "configuration_paths": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safePath"}
+        },
+        "knowledge": {"enum": ["verified", "unresolved"]}
+      }
+    },
+    "reasonCode": {
+      "enum": [
+        "parser_unavailable",
+        "parser_failed",
+        "unsupported_language",
+        "file_read_failed",
+        "file_too_large",
+        "record_too_large",
+        "resource_budget_reached",
+        "entrypoint_unresolved",
+        "call_target_unresolved",
+        "dynamic_dispatch",
+        "reflection_or_generated_code",
+        "framework_config_unresolved",
+        "exception_target_unresolved",
+        "async_target_unresolved",
+        "external_boundary_unresolved",
+        "symlink_unavailable",
+        "submodule_unavailable",
+        "graphify_candidate",
+        "invalid_source_fact",
+        "verified_target_not_materialized"
+      ]
+    },
+    "capabilityReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "count", "language", "paths_sample"],
+      "properties": {
+        "code": {"$ref": "#/$defs/reasonCode"},
+        "count": {"$ref": "#/$defs/positiveLine"},
+        "language": {"oneOf": [{"$ref": "#/$defs/languageName"}, {"type": "null"}]},
+        "paths_sample": {
+          "type": "array",
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safePath"}
+        }
+      }
+    },
+    "capabilityFull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {"enum": ["full", "not_applicable"]},
+        "reasons": {"type": "array", "maxItems": 0}
+      }
+    },
+    "capabilityIncomplete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {"enum": ["partial", "unsupported"]},
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 9007199254740991,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/capabilityReason"}
+        }
+      }
+    },
+    "capability": {
+      "oneOf": [
+        {"$ref": "#/$defs/capabilityFull"},
+        {"$ref": "#/$defs/capabilityIncomplete"}
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory",
+        "entrypoint_discovery",
+        "symbol_resolution",
+        "call_graph",
+        "control_flow",
+        "framework_lifecycle",
+        "exceptions",
+        "async",
+        "data_access"
+      ],
+      "properties": {
+        "inventory": {"$ref": "#/$defs/capability"},
+        "entrypoint_discovery": {"$ref": "#/$defs/capability"},
+        "symbol_resolution": {"$ref": "#/$defs/capability"},
+        "call_graph": {"$ref": "#/$defs/capability"},
+        "control_flow": {"$ref": "#/$defs/capability"},
+        "framework_lifecycle": {"$ref": "#/$defs/capability"},
+        "exceptions": {"$ref": "#/$defs/capability"},
+        "async": {"$ref": "#/$defs/capability"},
+        "data_access": {"$ref": "#/$defs/capability"}
+      }
+    },
+    "languageCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "status", "capabilities"],
+      "properties": {
+        "language": {"$ref": "#/$defs/languageName"},
+        "status": {"enum": ["full", "partial"]},
+        "capabilities": {"$ref": "#/$defs/capabilities"}
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "capabilities", "languages"],
+      "properties": {
+        "status": {"enum": ["full", "partial"]},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "languages": {
+          "type": "array",
+          "maxItems": 9007199254740991,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/languageCompleteness"}
+        }
+      }
+    },
+    "flowCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "capabilities"],
+      "properties": {
+        "status": {"enum": ["full", "partial"]},
+        "capabilities": {"$ref": "#/$defs/capabilities"}
+      }
+    },
+    "coverageScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included_roots", "excluded_config_sha256", "excluded_path_count"],
+      "properties": {
+        "included_roots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 9007199254740991,
+          "uniqueItems": true,
+          "items": {"oneOf": [{"const": "."}, {"$ref": "#/$defs/safePath"}]}
+        },
+        "excluded_config_sha256": {"$ref": "#/$defs/digest"},
+        "excluded_path_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "fileCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discovered", "hashed", "parser_candidates", "analyzed", "unsupported", "failed", "too_large", "budget_omitted"],
+      "properties": {
+        "discovered": {"$ref": "#/$defs/safeInteger"},
+        "hashed": {"$ref": "#/$defs/safeInteger"},
+        "parser_candidates": {"$ref": "#/$defs/safeInteger"},
+        "analyzed": {"$ref": "#/$defs/safeInteger"},
+        "unsupported": {"$ref": "#/$defs/safeInteger"},
+        "failed": {"$ref": "#/$defs/safeInteger"},
+        "too_large": {"$ref": "#/$defs/safeInteger"},
+        "budget_omitted": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "entrypointKinds": {
+      "enum": ["http_route", "process_main", "cli_command", "scheduled_job", "queue_consumer", "event_listener", "rpc_method", "public_api"]
+    },
+    "entrypointKindCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http_route": {"$ref": "#/$defs/positiveLine"},
+        "process_main": {"$ref": "#/$defs/positiveLine"},
+        "cli_command": {"$ref": "#/$defs/positiveLine"},
+        "scheduled_job": {"$ref": "#/$defs/positiveLine"},
+        "queue_consumer": {"$ref": "#/$defs/positiveLine"},
+        "event_listener": {"$ref": "#/$defs/positiveLine"},
+        "rpc_method": {"$ref": "#/$defs/positiveLine"},
+        "public_api": {"$ref": "#/$defs/positiveLine"}
+      }
+    },
+    "entrypointCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detected", "analyzed", "partial", "by_kind"],
+      "properties": {
+        "detected": {"$ref": "#/$defs/safeInteger"},
+        "analyzed": {"$ref": "#/$defs/safeInteger"},
+        "partial": {"$ref": "#/$defs/safeInteger"},
+        "by_kind": {"$ref": "#/$defs/entrypointKindCounts"}
+      }
+    },
+    "recordCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "structures", "edges", "flows", "flow_steps", "uncertainties", "omitted_by_bundle_budget"],
+      "properties": {
+        "nodes": {"$ref": "#/$defs/safeInteger"},
+        "structures": {"$ref": "#/$defs/safeInteger"},
+        "edges": {"$ref": "#/$defs/safeInteger"},
+        "flows": {"$ref": "#/$defs/safeInteger"},
+        "flow_steps": {"$ref": "#/$defs/safeInteger"},
+        "uncertainties": {"$ref": "#/$defs/safeInteger"},
+        "omitted_by_bundle_budget": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "files", "entrypoints", "records"],
+      "properties": {
+        "scope": {"$ref": "#/$defs/coverageScope"},
+        "files": {"$ref": "#/$defs/fileCoverage"},
+        "entrypoints": {"$ref": "#/$defs/entrypointCoverage"},
+        "records": {"$ref": "#/$defs/recordCoverage"}
+      }
+    },
+    "graphContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "artifact_graph_version", "projection_state", "completeness", "coverage"],
+      "properties": {
+        "version": {"const": "hades.graph_artifact.v2"},
+        "artifact_graph_version": {"$ref": "#/$defs/digest"},
+        "projection_state": {"const": "queued"},
+        "completeness": {"$ref": "#/$defs/completeness"},
+        "coverage": {"$ref": "#/$defs/coverage"}
+      }
+    },
+    "countExact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["represented", "value", "knowledge", "reason"],
+      "properties": {
+        "represented": {"$ref": "#/$defs/positiveLine"},
+        "value": {"$ref": "#/$defs/positiveLine"},
+        "knowledge": {"const": "exact"},
+        "reason": {"type": "null"}
+      }
+    },
+    "countAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["represented", "value", "knowledge", "reason"],
+      "properties": {
+        "represented": {"const": 0},
+        "value": {"const": 0},
+        "knowledge": {"const": "absence_verified"},
+        "reason": {"type": "null"}
+      }
+    },
+    "countUnknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["represented", "value", "knowledge", "reason"],
+      "properties": {
+        "represented": {"$ref": "#/$defs/safeInteger"},
+        "value": {"type": "null"},
+        "knowledge": {"const": "unknown"},
+        "reason": {"$ref": "#/$defs/reasonCode"}
+      }
+    },
+    "countKnowledge": {
+      "oneOf": [
+        {"$ref": "#/$defs/countExact"},
+        {"$ref": "#/$defs/countAbsent"},
+        {"$ref": "#/$defs/countUnknown"}
+      ]
+    },
+    "registrationAst": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "structural_path", "ordinal"],
+      "properties": {
+        "kind": {"const": "ast"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "structural_path": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "registrationConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "structural_pointer", "ordinal"],
+      "properties": {
+        "kind": {"const": "config"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "structural_pointer": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "registrationOccurrence": {
+      "oneOf": [
+        {"$ref": "#/$defs/registrationAst"},
+        {"$ref": "#/$defs/registrationConfig"}
+      ]
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": {"enum": ["http", "process", "cli", "schedule", "queue", "event", "rpc", "library"]},
+        "value": {"oneOf": [{"$ref": "#/$defs/display256"}, {"type": "null"}]}
+      }
+    },
+    "matchConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "schemes", "condition_hash"],
+      "properties": {
+        "host": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"},
+            {"type": "null"}
+          ]
+        },
+        "schemes": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"enum": ["http", "https"]}
+        },
+        "condition_hash": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+      }
+    },
+    "entrypointIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint_kind", "framework", "method_semantics", "methods", "public_path", "public_name", "trigger", "match_constraints", "registration_occurrence"],
+      "properties": {
+        "entrypoint_kind": {"$ref": "#/$defs/entrypointKinds"},
+        "framework": {"oneOf": [{"$ref": "#/$defs/frameworkName"}, {"type": "null"}]},
+        "method_semantics": {"enum": ["explicit", "unrestricted", "not_applicable"]},
+        "methods": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_-]{0,31}$", "maxLength": 32}
+        },
+        "public_path": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^?#\\u0000-\\u001f\\u007f]*$"},
+            {"type": "null"}
+          ]
+        },
+        "public_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "trigger": {"$ref": "#/$defs/trigger"},
+        "match_constraints": {"$ref": "#/$defs/matchConstraints"},
+        "registration_occurrence": {"$ref": "#/$defs/registrationOccurrence"}
+      },
+      "allOf": [{"$ref": "#/$defs/entrypointSemantics"}]
+    },
+    "entrypointSemantics": {
+      "oneOf": [
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "http_route"},
+            "method_semantics": {"const": "explicit"},
+            "methods": {"minItems": 1},
+            "public_path": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "http"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "http_route"},
+            "method_semantics": {"const": "unrestricted"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "http"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "process_main"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "process"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "cli_command"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "cli"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "scheduled_job"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "schedule"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "queue_consumer"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "queue"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "event_listener"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "event"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "rpc_method"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "rpc"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        },
+        {
+          "properties": {
+            "entrypoint_kind": {"const": "public_api"},
+            "method_semantics": {"const": "not_applicable"},
+            "methods": {"maxItems": 0},
+            "public_path": {"type": "null"},
+            "public_name": {"type": "string"},
+            "trigger": {"properties": {"kind": {"const": "library"}}},
+            "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
+          }
+        }
+      ]
+    },
+    "sourceDeclarationIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "namespace", "qualified_name", "path"],
+      "properties": {
+        "variant": {"const": "source_declaration"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"$ref": "#/$defs/languageName"},
+        "kind": {"enum": ["module", "namespace", "class", "interface", "trait", "enum", "function", "method", "middleware", "guard", "authorization", "validator", "binding", "controller", "service", "domain", "model", "repository", "event", "listener", "job", "queue", "test"]},
+        "namespace": {"oneOf": [{"$ref": "#/$defs/namespace"}, {"type": "null"}]},
+        "qualified_name": {"$ref": "#/$defs/display1024"},
+        "path": {"$ref": "#/$defs/safePath"}
+      }
+    },
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "path"],
+      "properties": {
+        "variant": {"const": "file"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"oneOf": [{"$ref": "#/$defs/languageName"}, {"type": "null"}]},
+        "kind": {"const": "file"},
+        "path": {"$ref": "#/$defs/safePath"}
+      }
+    },
+    "sourceOccurrenceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "owner_node_id", "structural_path", "ordinal", "semantic_role"],
+      "properties": {
+        "variant": {"const": "source_occurrence"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"$ref": "#/$defs/languageName"},
+        "kind": {"enum": ["basic_block", "branch", "merge", "loop", "response", "redirect", "abort", "exception", "exit", "async_boundary", "unknown_boundary", "framework_boundary", "external_boundary"]},
+        "owner_node_id": {"$ref": "#/$defs/nodeId"},
+        "structural_path": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"},
+        "semantic_role": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
+      }
+    },
+    "anonymousCallableIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "owner_node_id", "structural_path", "ordinal"],
+      "properties": {
+        "variant": {"const": "anonymous_callable"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"$ref": "#/$defs/languageName"},
+        "kind": {"const": "function"},
+        "owner_node_id": {"$ref": "#/$defs/nodeId"},
+        "structural_path": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "entrypointNodeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "path", "entrypoint_identity"],
+      "properties": {
+        "variant": {"const": "entrypoint"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"$ref": "#/$defs/languageName"},
+        "kind": {"const": "entrypoint"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "entrypoint_identity": {"$ref": "#/$defs/entrypointIdentity"}
+      }
+    },
+    "semanticResourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "workspace_binding_id", "language", "kind", "framework", "namespace", "qualified_name", "public_resource_name", "protocol", "operation"],
+      "properties": {
+        "variant": {"const": "semantic_resource"},
+        "workspace_binding_id": {"$ref": "#/$defs/ulid"},
+        "language": {"oneOf": [{"$ref": "#/$defs/languageName"}, {"type": "null"}]},
+        "kind": {"enum": ["table", "query", "cache", "storage", "integration", "external_boundary", "framework_boundary"]},
+        "framework": {"oneOf": [{"$ref": "#/$defs/frameworkName"}, {"type": "null"}]},
+        "namespace": {"oneOf": [{"$ref": "#/$defs/namespace"}, {"type": "null"}]},
+        "qualified_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "public_resource_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "protocol": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]},
+        "operation": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]}
+      },
+      "anyOf": [
+        {"required": ["qualified_name"], "properties": {"qualified_name": {"type": "string"}}},
+        {"required": ["public_resource_name"], "properties": {"public_resource_name": {"type": "string"}}}
+      ]
+    },
+    "nodeIdentity": {
+      "oneOf": [
+        {"$ref": "#/$defs/sourceDeclarationIdentity"},
+        {"$ref": "#/$defs/fileIdentity"},
+        {"$ref": "#/$defs/sourceOccurrenceIdentity"},
+        {"$ref": "#/$defs/anonymousCallableIdentity"},
+        {"$ref": "#/$defs/entrypointNodeIdentity"},
+        {"$ref": "#/$defs/semanticResourceIdentity"}
+      ]
+    },
+    "fileLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": {"const": "file"},
+        "path": {"$ref": "#/$defs/safePath"}
+      }
+    },
+    "astLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "structural_path"],
+      "properties": {
+        "kind": {"const": "ast"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "structural_path": {"$ref": "#/$defs/structuralPath"}
+      }
+    },
+    "configLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "structural_pointer"],
+      "properties": {
+        "kind": {"const": "config"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "structural_pointer": {"$ref": "#/$defs/structuralPath"}
+      }
+    },
+    "producerSourceLocator": {
+      "oneOf": [
+        {"$ref": "#/$defs/astLocator"},
+        {"$ref": "#/$defs/configLocator"}
+      ]
+    },
+    "producerEvidenceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "extractor", "source_locator", "source_fingerprint", "inference_rule"],
+      "properties": {
+        "origin": {"enum": ["verified_from_code", "inferred", "unresolved"]},
+        "extractor": {"$ref": "#/$defs/identifier"},
+        "source_locator": {"$ref": "#/$defs/producerSourceLocator"},
+        "source_fingerprint": {"$ref": "#/$defs/digest"},
+        "inference_rule": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]}
+      },
+      "oneOf": [
+        {"properties": {"origin": {"enum": ["verified_from_code", "unresolved"]}, "inference_rule": {"type": "null"}}},
+        {"properties": {"origin": {"const": "inferred"}, "inference_rule": {"$ref": "#/$defs/identifier"}}}
+      ]
+    },
+    "producerEvidenceEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "supporting", "supporting_omitted_count"],
+      "properties": {
+        "primary": {"$ref": "#/$defs/producerEvidenceItem"},
+        "supporting": {
+          "type": "array",
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/producerEvidenceItem"}
+        },
+        "supporting_omitted_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "fileEvidenceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "extractor", "source_locator", "source_fingerprint", "inference_rule"],
+      "properties": {
+        "origin": {"const": "verified_from_code"},
+        "extractor": {"$ref": "#/$defs/identifier"},
+        "source_locator": {"$ref": "#/$defs/fileLocator"},
+        "source_fingerprint": {"$ref": "#/$defs/digest"},
+        "inference_rule": {"type": "null"}
+      }
+    },
+    "fileEvidenceEnvelope": {
+      "$comment": "Only kind=file inventory nodes may use this envelope. Application-level closure MUST also prove that every locator path and fingerprint match that same node's identity path and file digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "supporting", "supporting_omitted_count"],
+      "properties": {
+        "primary": {"$ref": "#/$defs/fileEvidenceItem"},
+        "supporting": {"type": "array", "maxItems": 7, "uniqueItems": true, "items": {"$ref": "#/$defs/fileEvidenceItem"}},
+        "supporting_omitted_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "structureEvidenceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "extractor", "source_locator", "source_fingerprint", "inference_rule"],
+      "properties": {
+        "origin": {"enum": ["verified_from_code", "inferred"]},
+        "extractor": {"$ref": "#/$defs/identifier"},
+        "source_locator": {"oneOf": [{"$ref": "#/$defs/astLocator"}, {"$ref": "#/$defs/configLocator"}]},
+        "source_fingerprint": {"$ref": "#/$defs/digest"},
+        "inference_rule": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]}
+      },
+      "oneOf": [
+        {"properties": {"origin": {"const": "verified_from_code"}, "inference_rule": {"type": "null"}}},
+        {"properties": {"origin": {"const": "inferred"}, "inference_rule": {"$ref": "#/$defs/identifier"}}}
+      ]
+    },
+    "structureEvidenceEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "supporting", "supporting_omitted_count"],
+      "properties": {
+        "primary": {"$ref": "#/$defs/structureEvidenceItem"},
+        "supporting": {"type": "array", "maxItems": 7, "uniqueItems": true, "items": {"$ref": "#/$defs/structureEvidenceItem"}},
+        "supporting_omitted_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "sourceLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "start_line", "end_line"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safePath"},
+        "start_line": {"$ref": "#/$defs/positiveLine"},
+        "end_line": {"$ref": "#/$defs/positiveLine"}
+      }
+    },
+    "scalarProperty": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"},
+        {"type": "boolean"},
+        {"$ref": "#/$defs/safeInteger"},
+        {"type": "null"}
+      ]
+    },
+    "modifierArray": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/scalarProperty"}
+    },
+    "fileProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 6,
+      "required": ["file_sha256", "byte_size", "analysis_status", "omission_reason", "is_test", "is_generated"],
+      "properties": {
+        "file_sha256": {"$ref": "#/$defs/digest"},
+        "byte_size": {"$ref": "#/$defs/safeInteger"},
+        "analysis_status": {"enum": ["analyzed", "unsupported", "failed", "too_large", "budget_omitted"]},
+        "omission_reason": {"oneOf": [{"$ref": "#/$defs/reasonCode"}, {"type": "null"}]},
+        "is_test": {"type": "boolean"},
+        "is_generated": {"type": "boolean"}
+      }
+    },
+    "moduleProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "properties": {
+        "package": {"$ref": "#/$defs/scalarProperty"},
+        "module_system": {"$ref": "#/$defs/scalarProperty"},
+        "is_test": {"type": "boolean"},
+        "is_generated": {"type": "boolean"}
+      }
+    },
+    "typeProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "properties": {
+        "visibility": {"$ref": "#/$defs/scalarProperty"},
+        "abstract": {"type": "boolean"},
+        "final": {"type": "boolean"},
+        "modifiers": {"$ref": "#/$defs/modifierArray"}
+      }
+    },
+    "callableProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 7,
+      "properties": {
+        "visibility": {"$ref": "#/$defs/scalarProperty"},
+        "static": {"type": "boolean"},
+        "async": {"type": "boolean"},
+        "parameter_count": {"$ref": "#/$defs/safeInteger"},
+        "return_type": {"$ref": "#/$defs/scalarProperty"},
+        "modifiers": {"$ref": "#/$defs/modifierArray"}
+      }
+    },
+    "controlProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "properties": {
+        "control_kind": {"$ref": "#/$defs/scalarProperty"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "frameworkProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "properties": {
+        "framework_role": {"$ref": "#/$defs/scalarProperty"},
+        "pipeline_order": {"$ref": "#/$defs/safeInteger"},
+        "boundary_name": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "dataProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "properties": {
+        "operation": {"$ref": "#/$defs/scalarProperty"},
+        "public_resource_name": {"$ref": "#/$defs/scalarProperty"},
+        "query_kind": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "integrationProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "properties": {
+        "protocol": {"$ref": "#/$defs/scalarProperty"},
+        "operation": {"$ref": "#/$defs/scalarProperty"},
+        "destination_kind": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "terminalProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "properties": {
+        "status_code": {"$ref": "#/$defs/safeInteger"},
+        "exception_type": {"$ref": "#/$defs/scalarProperty"},
+        "terminal_kind": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "asyncProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "properties": {
+        "channel_kind": {"$ref": "#/$defs/scalarProperty"},
+        "public_name": {"$ref": "#/$defs/scalarProperty"},
+        "schedule": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "testProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "properties": {
+        "test_framework": {"$ref": "#/$defs/scalarProperty"},
+        "case_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "boundaryProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 1,
+      "properties": {
+        "reason_code": {"$ref": "#/$defs/scalarProperty"}
+      }
+    },
+    "nodeKinds": {
+      "enum": [
+        "entrypoint", "file", "module", "namespace", "class", "interface", "trait", "enum",
+        "function", "method", "basic_block", "branch", "merge", "loop", "middleware", "guard",
+        "authorization", "validator", "binding", "controller", "service", "domain", "model",
+        "repository", "table", "query", "cache", "storage", "integration", "external_boundary",
+        "response", "redirect", "abort", "exception", "exit", "event", "listener", "job", "queue",
+        "async_boundary", "framework_boundary", "test", "unknown_boundary"
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "identity", "kind", "language", "framework", "name", "qualified_name", "namespace", "uncertainty_id", "location", "properties", "evidence"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nodeId"},
+        "identity": {"$ref": "#/$defs/nodeIdentity"},
+        "kind": {"$ref": "#/$defs/nodeKinds"},
+        "language": {"oneOf": [{"$ref": "#/$defs/languageName"}, {"type": "null"}]},
+        "framework": {"oneOf": [{"$ref": "#/$defs/frameworkName"}, {"type": "null"}]},
+        "name": {"$ref": "#/$defs/display256"},
+        "qualified_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "namespace": {
+          "oneOf": [
+            {"$ref": "#/$defs/namespace"},
+            {"type": "null"}
+          ]
+        },
+        "uncertainty_id": {"oneOf": [{"$ref": "#/$defs/uncertaintyId"}, {"type": "null"}]},
+        "location": {"oneOf": [{"$ref": "#/$defs/sourceLocation"}, {"type": "null"}]},
+        "properties": {},
+        "evidence": {}
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {"properties": {"kind": {"const": "file"}, "properties": {"$ref": "#/$defs/fileProperties"}}},
+            {"properties": {"kind": {"enum": ["module", "namespace"]}, "properties": {"$ref": "#/$defs/moduleProperties"}}},
+            {"properties": {"kind": {"enum": ["class", "interface", "trait", "enum"]}, "properties": {"$ref": "#/$defs/typeProperties"}}},
+            {"properties": {"kind": {"enum": ["function", "method", "controller", "service", "domain", "repository"]}, "properties": {"$ref": "#/$defs/callableProperties"}}},
+            {"properties": {"kind": {"enum": ["basic_block", "branch", "merge", "loop"]}, "properties": {"$ref": "#/$defs/controlProperties"}}},
+            {"properties": {"kind": {"enum": ["middleware", "guard", "authorization", "validator", "binding", "framework_boundary"]}, "properties": {"$ref": "#/$defs/frameworkProperties"}}},
+            {"properties": {"kind": {"enum": ["model", "table", "query", "cache", "storage"]}, "properties": {"$ref": "#/$defs/dataProperties"}}},
+            {"properties": {"kind": {"enum": ["integration", "external_boundary"]}, "properties": {"$ref": "#/$defs/integrationProperties"}}},
+            {"properties": {"kind": {"enum": ["response", "redirect", "abort", "exception", "exit"]}, "properties": {"$ref": "#/$defs/terminalProperties"}}},
+            {"properties": {"kind": {"enum": ["event", "listener", "job", "queue", "async_boundary"]}, "properties": {"$ref": "#/$defs/asyncProperties"}}},
+            {"properties": {"kind": {"const": "test"}, "properties": {"$ref": "#/$defs/testProperties"}}},
+            {"properties": {"kind": {"enum": ["entrypoint", "unknown_boundary"]}, "properties": {"$ref": "#/$defs/boundaryProperties"}}}
+          ]
+        },
+        {
+          "oneOf": [
+            {"properties": {"kind": {"const": "file"}, "evidence": {"$ref": "#/$defs/fileEvidenceEnvelope"}}},
+            {"properties": {"kind": {"not": {"const": "file"}}, "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"}}}
+          ]
+        }
+      ]
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "entrypoint_kind", "label", "framework", "method_semantics", "methods", "public_path", "public_name", "handler_node_id", "uncertainty_id", "trigger", "match_constraints", "registration_occurrence", "evidence"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nodeId"},
+        "entrypoint_kind": {"$ref": "#/$defs/entrypointKinds"},
+        "label": {"$ref": "#/$defs/display1024"},
+        "framework": {"oneOf": [{"$ref": "#/$defs/frameworkName"}, {"type": "null"}]},
+        "method_semantics": {"enum": ["explicit", "unrestricted", "not_applicable"]},
+        "methods": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_-]{0,31}$", "maxLength": 32}
+        },
+        "public_path": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^?#\\u0000-\\u001f\\u007f]*$"},
+            {"type": "null"}
+          ]
+        },
+        "public_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "handler_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+        "uncertainty_id": {"oneOf": [{"$ref": "#/$defs/uncertaintyId"}, {"type": "null"}]},
+        "trigger": {"$ref": "#/$defs/trigger"},
+        "match_constraints": {"$ref": "#/$defs/matchConstraints"},
+        "registration_occurrence": {"$ref": "#/$defs/registrationOccurrence"},
+        "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"}
+      },
+      "allOf": [{"$ref": "#/$defs/entrypointSemantics"}]
+    },
+    "structureKinds": {"enum": ["call_site", "branch_group", "exception_scope"]},
+    "structureSubtype": {
+      "enum": ["call", "if", "switch", "match", "ternary", "loop", "exception_dispatch", "dynamic_dispatch", "framework_short_circuit", "try_catch", "try_finally", "try_catch_finally", "framework_exception_handler"]
+    },
+    "structure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "owner_node_id", "structural_path", "ordinal", "subtype", "continuation_node_id", "parent_structure_id", "evidence"],
+      "properties": {
+        "id": {"$ref": "#/$defs/structureId"},
+        "kind": {"$ref": "#/$defs/structureKinds"},
+        "owner_node_id": {"$ref": "#/$defs/nodeId"},
+        "structural_path": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"},
+        "subtype": {"$ref": "#/$defs/structureSubtype"},
+        "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+        "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/structureId"}, {"type": "null"}]},
+        "evidence": {"$ref": "#/$defs/structureEvidenceEnvelope"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/callSiteId"},
+            "kind": {"const": "call_site"},
+            "subtype": {"const": "call"},
+            "continuation_node_id": {"$ref": "#/$defs/nodeId"},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        },
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/branchId"},
+            "kind": {"const": "branch_group"},
+            "subtype": {"enum": ["if", "switch", "match", "ternary", "loop", "exception_dispatch", "dynamic_dispatch", "framework_short_circuit"]},
+            "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        },
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/exceptionScopeId"},
+            "kind": {"const": "exception_scope"},
+            "subtype": {"enum": ["try_catch", "try_finally", "try_catch_finally", "framework_exception_handler"]},
+            "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        }
+      ]
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "normalized", "hash", "polarity"],
+      "properties": {
+        "kind": {"const": "predicate"},
+        "normalized": {"$ref": "#/$defs/display256"},
+        "hash": {"$ref": "#/$defs/digest"},
+        "polarity": {"enum": ["true", "false", "case", "default", "loop_body", "loop_exit", "exception", "finally"]}
+      }
+    },
+    "edgeAstOccurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "owner_node_id", "ast_path", "ordinal"],
+      "properties": {
+        "kind": {"const": "ast"},
+        "owner_node_id": {"$ref": "#/$defs/nodeId"},
+        "ast_path": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "edgeConfigOccurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "owner_node_id", "path", "structural_pointer", "ordinal"],
+      "properties": {
+        "kind": {"const": "config"},
+        "owner_node_id": {"$ref": "#/$defs/nodeId"},
+        "path": {"$ref": "#/$defs/safePath"},
+        "structural_pointer": {"$ref": "#/$defs/structuralPath"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "edgeOccurrence": {
+      "oneOf": [
+        {"$ref": "#/$defs/edgeAstOccurrence"},
+        {"$ref": "#/$defs/edgeConfigOccurrence"}
+      ]
+    },
+    "edgeLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "ordinal"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safePath"},
+        "line": {"$ref": "#/$defs/positiveLine"},
+        "ordinal": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "relation": {
+      "enum": [
+        "enters", "routes_to", "passes_through", "binds", "validates", "authorizes", "invokes", "returns_to", "branches_to", "merges_at", "throws_to", "reads", "writes", "queries", "calls_external", "emits", "dispatches", "handles", "schedules", "responds_with", "redirects_to", "aborts_with", "exits_at", "declares", "contains", "imports", "inherits", "implements", "references", "tests", "documents", "maps_to"
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "target_id", "relation", "flow", "condition", "branch_group_id", "call_site_id", "exception_scope_id", "order", "uncertainty_id", "occurrence", "evidence", "location"],
+      "properties": {
+        "id": {"$ref": "#/$defs/edgeId"},
+        "source_id": {"$ref": "#/$defs/nodeId"},
+        "target_id": {"$ref": "#/$defs/nodeId"},
+        "relation": {"$ref": "#/$defs/relation"},
+        "flow": {"oneOf": [{"enum": ["always", "conditional", "alternative", "exception", "async", "loop"]}, {"type": "null"}]},
+        "condition": {"oneOf": [{"$ref": "#/$defs/condition"}, {"type": "null"}]},
+        "branch_group_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"type": "null"}]},
+        "call_site_id": {"oneOf": [{"$ref": "#/$defs/callSiteId"}, {"type": "null"}]},
+        "exception_scope_id": {"oneOf": [{"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]},
+        "order": {"oneOf": [{"$ref": "#/$defs/safeInteger"}, {"type": "null"}]},
+        "uncertainty_id": {"oneOf": [{"$ref": "#/$defs/uncertaintyId"}, {"type": "null"}]},
+        "occurrence": {"$ref": "#/$defs/edgeOccurrence"},
+        "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"},
+        "location": {"oneOf": [{"$ref": "#/$defs/edgeLocation"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "relation": {"enum": ["declares", "contains", "imports", "inherits", "implements", "references", "tests", "documents", "maps_to"]},
+                "flow": {"type": "null"},
+                "condition": {"type": "null"},
+                "branch_group_id": {"type": "null"},
+                "call_site_id": {"type": "null"},
+                "exception_scope_id": {"type": "null"},
+                "order": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["enters", "routes_to", "passes_through", "binds", "validates", "authorizes", "invokes", "returns_to", "branches_to", "merges_at", "throws_to", "reads", "writes", "queries", "calls_external", "emits", "dispatches", "handles", "schedules", "responds_with", "redirects_to", "aborts_with", "exits_at"]},
+                "flow": {"enum": ["always", "conditional", "alternative", "exception", "async", "loop"]}
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "flow": {"const": "always"},
+                "condition": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/condition", "properties": {"polarity": {"const": "finally"}}}
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "conditional"},
+                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["true", "false", "loop_body", "loop_exit"]}}}
+              }
+            },
+            {
+              "$comment": "Every alternative edge requires a branch group. A null condition or a copied outer condition with any polarity is accepted here only as a dynamic-dispatch candidate because JSON Schema cannot inspect the referenced structure. Application validation MUST resolve branch_group_id to a structure with kind=branch_group and subtype=dynamic_dispatch for those exceptions; when condition is non-null it MUST equal the enclosing outer condition. Otherwise an ordinary alternative MUST use case|default polarity.",
+              "properties": {
+                "flow": {"const": "alternative"},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
+                "condition": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/condition"}
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "exception"},
+                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"const": "exception"}}}
+              }
+            },
+            {"properties": {"flow": {"enum": ["async", "loop"]}, "condition": {"type": "null"}}},
+            {"properties": {"flow": {"type": "null"}, "condition": {"type": "null"}}}
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "relation": {"const": "invokes"},
+                "flow": {"enum": ["always", "conditional", "alternative"]},
+                "call_site_id": {"$ref": "#/$defs/callSiteId"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "returns_to"},
+                "flow": {"const": "always"},
+                "condition": {"type": "null"},
+                "branch_group_id": {"type": "null"},
+                "call_site_id": {"$ref": "#/$defs/callSiteId"},
+                "exception_scope_id": {"type": "null"},
+                "order": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "throws_to"},
+                "flow": {"const": "exception"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["emits", "dispatches", "schedules"]},
+                "flow": {"const": "async"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "branches_to"},
+                "flow": {"enum": ["conditional", "alternative", "loop"]},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "merges_at"},
+                "flow": {"const": "always"},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "enters"},
+                "flow": {"const": "always"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["routes_to", "passes_through", "binds", "validates", "authorizes", "responds_with", "redirects_to", "aborts_with", "exits_at"]},
+                "flow": {"enum": ["always", "conditional", "alternative"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["reads", "writes", "queries", "calls_external"]},
+                "flow": {"enum": ["always", "conditional", "alternative", "async"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "handles"},
+                "flow": {"enum": ["always", "conditional", "alternative", "exception"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {"properties": {"relation": {"enum": ["declares", "contains", "imports", "inherits", "implements", "references", "tests", "documents", "maps_to"]}}}
+          ]
+        }
+      ]
+    },
+    "stage": {"enum": ["entry", "routing", "middleware", "security", "input", "handler", "domain", "data", "integration", "async", "response", "error"]},
+    "stageCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entry": {"$ref": "#/$defs/countKnowledge"},
+        "routing": {"$ref": "#/$defs/countKnowledge"},
+        "middleware": {"$ref": "#/$defs/countKnowledge"},
+        "security": {"$ref": "#/$defs/countKnowledge"},
+        "input": {"$ref": "#/$defs/countKnowledge"},
+        "handler": {"$ref": "#/$defs/countKnowledge"},
+        "domain": {"$ref": "#/$defs/countKnowledge"},
+        "data": {"$ref": "#/$defs/countKnowledge"},
+        "integration": {"$ref": "#/$defs/countKnowledge"},
+        "async": {"$ref": "#/$defs/countKnowledge"},
+        "response": {"$ref": "#/$defs/countKnowledge"},
+        "error": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "entrypoint_id", "root_node_id", "kind", "represented_step_count", "terminal_count", "linked_async_flow_count", "stage_counts", "completeness", "uncertainty_count"],
+      "properties": {
+        "id": {"$ref": "#/$defs/flowId"},
+        "entrypoint_id": {"$ref": "#/$defs/nodeId"},
+        "root_node_id": {"$ref": "#/$defs/nodeId"},
+        "kind": {"enum": ["request_lifecycle", "execution_flow", "async_flow"]},
+        "represented_step_count": {"$ref": "#/$defs/safeInteger"},
+        "terminal_count": {"$ref": "#/$defs/countKnowledge"},
+        "linked_async_flow_count": {"$ref": "#/$defs/countKnowledge"},
+        "stage_counts": {"$ref": "#/$defs/stageCounts"},
+        "completeness": {"$ref": "#/$defs/flowCompleteness"},
+        "uncertainty_count": {"$ref": "#/$defs/countKnowledge"}
+      }
+    },
+    "flowStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "flow_id", "edge_id", "stage_from", "stage_to", "min_depth", "branch_group_id", "async_context", "async_child_flow_id", "async_cycle", "backbone_role", "order_key"],
+      "properties": {
+        "id": {"$ref": "#/$defs/flowStepId"},
+        "flow_id": {"$ref": "#/$defs/flowId"},
+        "edge_id": {"$ref": "#/$defs/edgeId"},
+        "stage_from": {"$ref": "#/$defs/stage"},
+        "stage_to": {"$ref": "#/$defs/stage"},
+        "min_depth": {"$ref": "#/$defs/safeInteger"},
+        "branch_group_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"type": "null"}]},
+        "async_context": {"enum": ["synchronous", "linked_async"]},
+        "async_child_flow_id": {"oneOf": [{"$ref": "#/$defs/flowId"}, {"type": "null"}]},
+        "async_cycle": {"type": "boolean"},
+        "backbone_role": {"enum": ["mandatory", "branch", "exception", "loop", "async"]},
+        "order_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "callSiteSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_site_id"],
+      "properties": {"call_site_id": {"$ref": "#/$defs/callSiteId"}}
+    },
+    "edgeSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id"],
+      "properties": {"edge_id": {"$ref": "#/$defs/edgeId"}}
+    },
+    "uncertaintySubject": {
+      "oneOf": [
+        {"$ref": "#/$defs/callSiteSubject"},
+        {"$ref": "#/$defs/edgeSubject"}
+      ]
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safePath"},
+        "line": {"$ref": "#/$defs/positiveLine"}
+      }
+    },
+    "resolutionKind": {"enum": ["call_target", "entrypoint_handler", "async_target", "exception_target", "framework_target", "external_target"]},
+    "graphResolutionSemantics": {
+      "oneOf": [
+        {
+          "properties": {
+            "resolution_kind": {"const": "call_target"},
+            "subject": {"$ref": "#/$defs/callSiteSubject"}
+          }
+        },
+        {
+          "properties": {
+            "resolution_kind": {"const": "entrypoint_handler"},
+            "subject": {"$ref": "#/$defs/edgeSubject"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"candidate_set_knowledge": {"const": "complete"}}},
+              "then": {
+                "properties": {
+                  "candidate_target_node_ids": {"minItems": 1, "maxItems": 1},
+                  "candidate_edge_ids": {"minItems": 1, "maxItems": 1}
+                }
+              }
+            }
+          ]
+        },
+        {
+          "properties": {
+            "resolution_kind": {"enum": ["async_target", "exception_target", "framework_target", "external_target"]},
+            "subject": {"$ref": "#/$defs/edgeSubject"}
+          }
+        }
+      ]
+    },
+    "uncertainty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "domain", "subject", "resolution_kind", "reason_code", "question", "evidence_requirements", "source_refs", "candidate_target_node_ids", "candidate_edge_ids", "candidate_set_knowledge", "priority", "impact", "fingerprint"],
+      "properties": {
+        "id": {"$ref": "#/$defs/uncertaintyId"},
+        "domain": {"const": "graph"},
+        "subject": {"$ref": "#/$defs/uncertaintySubject"},
+        "resolution_kind": {"$ref": "#/$defs/resolutionKind"},
+        "reason_code": {"$ref": "#/$defs/reasonCode"},
+        "question": {"$ref": "#/$defs/display500"},
+        "evidence_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ruleIdentifier"}
+        },
+        "source_refs": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceRef"}
+        },
+        "candidate_target_node_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nodeId"}
+        },
+        "candidate_edge_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/edgeId"}
+        },
+        "candidate_set_knowledge": {"enum": ["complete", "incomplete", "not_applicable"]},
+        "priority": {"enum": ["low", "normal", "high", "critical"]},
+        "impact": {"$ref": "#/$defs/display1000"},
+        "fingerprint": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [
+        {"$ref": "#/$defs/graphResolutionSemantics"},
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "complete"},
+                "candidate_target_node_ids": {"minItems": 1},
+                "candidate_edge_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "incomplete"},
+                "candidate_target_node_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "not_applicable"},
+                "candidate_target_node_ids": {"maxItems": 0},
+                "candidate_edge_ids": {"maxItems": 0}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

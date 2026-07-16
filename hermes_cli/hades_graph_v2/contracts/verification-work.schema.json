@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/verification-work.schema.json",
+  "title": "Hades Verification Work v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kind",
+    "domain",
+    "project_id",
+    "workspace_binding_id",
+    "target",
+    "assertion",
+    "source_snapshot",
+    "question",
+    "reason_code",
+    "evidence_requirements",
+    "source_refs",
+    "priority",
+    "impact",
+    "attempt_generation",
+    "retry_of_work_item_id",
+    "deduplication_key"
+  ],
+  "properties": {
+    "schema": {"const": "hades.verification_work.v1"},
+    "kind": {"enum": ["hades.verification.graph.v1", "hades.verification.wiki.v1"]},
+    "domain": {"enum": ["graph", "wiki"]},
+    "project_id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+    "workspace_binding_id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+    "target": {"oneOf": [{"$ref": "#/$defs/graphTarget"}, {"$ref": "#/$defs/wikiTarget"}]},
+    "assertion": {"oneOf": [{"$ref": "#/$defs/graphAssertion"}, {"type": "null"}]},
+    "source_snapshot": {"$ref": "#/$defs/sourceSnapshot"},
+    "question": {"$ref": "#/$defs/question"},
+    "reason_code": {
+      "oneOf": [
+        {"$ref": "artifact.schema.json#/$defs/reasonCode"},
+        {"const": "wiki_revision_needs_verification"}
+      ]
+    },
+    "evidence_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/ruleIdentifier"}
+    },
+    "source_refs": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {"$ref": "artifact.schema.json#/$defs/sourceRef"}
+    },
+    "priority": {"enum": ["low", "normal", "high", "critical"]},
+    "impact": {"$ref": "#/$defs/impact"},
+    "attempt_generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "retry_of_work_item_id": {
+      "oneOf": [{"$ref": "artifact.schema.json#/$defs/ulid"}, {"type": "null"}]
+    },
+    "deduplication_key": {"$ref": "artifact.schema.json#/$defs/digest"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {"const": "hades.verification.graph.v1"},
+        "domain": {"const": "graph"},
+        "target": {"$ref": "#/$defs/graphTarget"},
+        "assertion": {"$ref": "#/$defs/graphAssertion"},
+        "source_snapshot": {"$ref": "#/$defs/availableSnapshot"},
+        "reason_code": {"$ref": "artifact.schema.json#/$defs/reasonCode"}
+      }
+    },
+    {
+      "properties": {
+        "kind": {"const": "hades.verification.wiki.v1"},
+        "domain": {"const": "wiki"},
+        "target": {"$ref": "#/$defs/wikiTarget"},
+        "assertion": {"type": "null"},
+        "source_snapshot": {"$ref": "#/$defs/sourceSnapshot"},
+        "question": {"const": "Verify every factual claim in this Wiki revision against the current project source."},
+        "reason_code": {"const": "wiki_revision_needs_verification"},
+        "evidence_requirements": {
+          "const": ["verify_all_claims_against_current_source"]
+        },
+        "source_refs": {"maxItems": 0},
+        "priority": {"const": "normal"},
+        "impact": {"const": "Unverified project documentation may mislead humans and agents."}
+      }
+    }
+  ],
+  "$defs": {
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "impact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "graphTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "graph_assertion"},
+        "id": {"$ref": "artifact.schema.json#/$defs/uncertaintyId"},
+        "version": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "wikiTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "wiki_page"},
+        "id": {"$ref": "artifact.schema.json#/$defs/ulid"},
+        "version": {"$ref": "artifact.schema.json#/$defs/ulid"}
+      }
+    },
+    "availableSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "artifact_graph_version", "tree_sha256"],
+      "properties": {
+        "state": {"const": "available"},
+        "artifact_graph_version": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "tree_sha256": {"$ref": "artifact.schema.json#/$defs/digest"}
+      }
+    },
+    "unavailableSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "artifact_graph_version", "tree_sha256"],
+      "properties": {
+        "state": {"const": "unavailable"},
+        "artifact_graph_version": {"type": "null"},
+        "tree_sha256": {"type": "null"}
+      }
+    },
+    "sourceSnapshot": {
+      "oneOf": [
+        {"$ref": "#/$defs/availableSnapshot"},
+        {"$ref": "#/$defs/unavailableSnapshot"}
+      ]
+    },
+    "graphAssertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "subject", "resolution_kind", "candidate_set_knowledge", "candidate_target_node_ids", "candidate_edge_ids"],
+      "properties": {
+        "fingerprint": {"$ref": "artifact.schema.json#/$defs/digest"},
+        "subject": {"$ref": "artifact.schema.json#/$defs/uncertaintySubject"},
+        "resolution_kind": {"$ref": "artifact.schema.json#/$defs/resolutionKind"},
+        "candidate_set_knowledge": {"enum": ["complete", "incomplete", "not_applicable"]},
+        "candidate_target_node_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "artifact.schema.json#/$defs/nodeId"}
+        },
+        "candidate_edge_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}
+        }
+      },
+      "allOf": [
+        {"$ref": "artifact.schema.json#/$defs/graphResolutionSemantics"},
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "complete"},
+                "candidate_target_node_ids": {"minItems": 1},
+                "candidate_edge_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "incomplete"},
+                "candidate_target_node_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "not_applicable"},
+                "candidate_target_node_ids": {"maxItems": 0},
+                "candidate_edge_ids": {"maxItems": 0}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
