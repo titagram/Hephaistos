@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import fnmatch
 import hashlib
 import json
 import os
@@ -34,43 +33,6 @@ class SourceSnapshot:
 
 # These are source-scope policy, not user-configurable defaults.  A user may
 # add exclusions but can never opt a credential back into the graph snapshot.
-_DEFAULT_EXCLUDED_DIRECTORY_NAMES = frozenset(
-    {
-        ".cache",
-        ".git",
-        ".hg",
-        ".svn",
-        ".next",
-        ".nuxt",
-        ".venv",
-        "build",
-        "coverage",
-        "dist",
-        "node_modules",
-        "out",
-        "target",
-        "vendor",
-        "venv",
-        "__pycache__",
-    }
-)
-_DEFAULT_EXCLUDED_DIRECTORY_SEQUENCES = (
-    ("var", "cache"),
-    ("storage", "framework", "cache"),
-)
-_COMPULSORY_SECRET_NAMES = frozenset(
-    {
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "credentials",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-    }
-)
-_COMPULSORY_SECRET_SUFFIXES = frozenset({".cert", ".crt", ".der", ".key", ".p12", ".pem", ".pfx"})
 _INVALID_SYMLINK_PREFIX = b"SYMLINK_INVALID\0"
 _UNAVAILABLE_SUBMODULE_PREFIX = b"SUBMODULE_UNAVAILABLE\0"
 
@@ -480,37 +442,13 @@ def validate_normalized_source_paths(paths: list[str]) -> tuple[str, ...]:
     return tuple(normalized_paths)
 
 
-def _is_compulsory_secret(path: str) -> bool:
-    name = PurePosixPath(path).name.lower()
-    if name == ".env":
-        return True
-    if name.startswith(".env.") and name != ".env.example":
-        return True
-    if name in _COMPULSORY_SECRET_NAMES or name.startswith("secret") or name.startswith("secrets."):
-        return True
-    return PurePosixPath(name).suffix.lower() in _COMPULSORY_SECRET_SUFFIXES
+def _is_out_of_scope(path: str, user_excluded_paths: tuple[str, ...]) -> bool:
+    # Import lazily to keep the config reader and inventory usable without an
+    # import-time cycle.  The compiled policy itself has one source of truth in
+    # hades_graph_config as required by the v2 source-identity contract.
+    from hermes_cli.hades_graph_config import is_graph_source_excluded
 
-
-def _is_baseline_excluded(path: str) -> bool:
-    parts = tuple(PurePosixPath(path).parts)
-    if any(part in _DEFAULT_EXCLUDED_DIRECTORY_NAMES for part in parts[:-1]):
-        return True
-    if any(
-        parts[index : index + len(sequence)] == sequence
-        for sequence in _DEFAULT_EXCLUDED_DIRECTORY_SEQUENCES
-        for index in range(0, len(parts) - len(sequence) + 1)
-    ):
-        return True
-    return _is_compulsory_secret(path)
-
-
-def _is_user_excluded(path: str, user_excluded_paths: tuple[str, ...]) -> bool:
-    for pattern in user_excluded_paths:
-        if path == pattern or path.startswith(pattern + "/"):
-            return True
-        if any(token in pattern for token in "*?[") and fnmatch.fnmatchcase(path, pattern):
-            return True
-    return False
+    return is_graph_source_excluded(path, user_excluded_paths)
 
 
 def _stream_file_sha256(path: Path) -> str:
@@ -532,12 +470,19 @@ def _invalid_symlink_sha256(path: Path) -> str:
     return hashlib.sha256(_INVALID_SYMLINK_PREFIX + target).hexdigest()
 
 
-def _symlink_file_sha256(path: Path, root: Path) -> tuple[str, bool]:
+def _symlink_file_sha256(
+    path: Path,
+    root: Path,
+    user_excluded_paths: tuple[str, ...],
+) -> tuple[str | None, bool]:
     """Return ``(file_digest, is_invalid)`` without leaking the link target."""
 
     try:
         resolved = path.resolve(strict=True)
         resolved.relative_to(root)
+        target_path = _safe_source_relative_path(resolved.relative_to(root).as_posix())
+        if _is_out_of_scope(target_path, user_excluded_paths):
+            return None, False
         if resolved.is_file():
             return _stream_file_sha256(resolved), False
     except (OSError, RuntimeError, ValueError):
@@ -589,7 +534,104 @@ def _submodule_is_available(path: Path) -> bool:
         return False
 
 
-def _git_metadata(root: Path, user_excluded_paths: tuple[str, ...]) -> tuple[str | None, bool, str | None]:
+def _git_head_inventory(
+    root: Path,
+    user_excluded_paths: tuple[str, ...],
+) -> tuple[tuple[str, str], ...] | None:
+    """Return the HEAD inventory under the same source-scope rules as disk."""
+
+    output = _git_command(root, "ls-tree", "-r", "-z", "HEAD")
+    if output is None:
+        return None
+    entries: dict[str, tuple[bytes, bytes, bytes]] = {}
+    for entry in output.split(b"\0"):
+        if not entry or b"\t" not in entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3:
+            continue
+        mode, kind, object_id = fields
+        try:
+            path = _safe_source_relative_path(os.fsdecode(raw_path))
+        except (UnicodeError, SourceIdentityError):
+            continue
+        entries[path] = (mode, kind, object_id)
+
+    content_cache: dict[bytes, bytes] = {}
+
+    def blob_content(object_id: bytes) -> bytes | None:
+        cached = content_cache.get(object_id)
+        if cached is not None:
+            return cached
+        content = _git_command(root, "cat-file", "blob", object_id.decode("ascii"))
+        if content is not None:
+            content_cache[object_id] = content
+        return content
+
+    def relative_link_target(path: str, target: bytes) -> str | None:
+        try:
+            target_text = os.fsdecode(target)
+        except UnicodeError:
+            return None
+        if target_text.startswith("/") or "\\" in target_text:
+            return None
+        parts = list(PurePosixPath(path).parent.parts)
+        for part in PurePosixPath(target_text).parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                if not parts:
+                    return None
+                parts.pop()
+                continue
+            parts.append(part)
+        try:
+            return _safe_source_relative_path("/".join(parts))
+        except SourceIdentityError:
+            return None
+
+    def resolve_entry(path: str, seen: frozenset[str] = frozenset()) -> str | None:
+        entry = entries.get(path)
+        if entry is None:
+            return None
+        mode, kind, object_id = entry
+        if mode == b"160000" and kind == b"commit":
+            return hashlib.sha256(_UNAVAILABLE_SUBMODULE_PREFIX + object_id).hexdigest()
+        if kind != b"blob":
+            return None
+        content = blob_content(object_id)
+        if content is None:
+            return None
+        if mode != b"120000":
+            return hashlib.sha256(content).hexdigest()
+        if path in seen:
+            return hashlib.sha256(_INVALID_SYMLINK_PREFIX + content).hexdigest()
+        target_path = relative_link_target(path, content)
+        if target_path is None:
+            return hashlib.sha256(_INVALID_SYMLINK_PREFIX + content).hexdigest()
+        if _is_out_of_scope(target_path, user_excluded_paths):
+            return None
+        target_digest = resolve_entry(target_path, seen | {path})
+        return target_digest if target_digest is not None else hashlib.sha256(
+            _INVALID_SYMLINK_PREFIX + content
+        ).hexdigest()
+
+    records: list[tuple[str, str]] = []
+    for path in sorted(entries):
+        if _is_out_of_scope(path, user_excluded_paths):
+            continue
+        digest = resolve_entry(path)
+        if digest is not None:
+            records.append((path, digest))
+    return tuple(sorted(records))
+
+
+def _git_metadata(
+    root: Path,
+    user_excluded_paths: tuple[str, ...],
+    current_records: tuple[tuple[str, str], ...],
+) -> tuple[str | None, bool, str | None]:
     inside = _git_command(root, "rev-parse", "--is-inside-work-tree")
     if inside is None or inside.strip() != b"true":
         return None, False, None
@@ -603,26 +645,8 @@ def _git_metadata(root: Path, user_excluded_paths: tuple[str, ...]) -> tuple[str
     if branch is not None and (not branch or len(branch.encode("utf-8")) > 255):
         branch = None
 
-    status = _git_command(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    dirty = False
-    if status:
-        rows = status.split(b"\0")
-        index = 0
-        while index < len(rows):
-            row = rows[index]
-            index += 1
-            if len(row) < 4:
-                continue
-            try:
-                path = _safe_source_relative_path(os.fsdecode(row[3:]))
-            except (UnicodeError, SourceIdentityError):
-                continue
-            if not _is_baseline_excluded(path) and not _is_user_excluded(path, user_excluded_paths):
-                dirty = True
-                break
-            # Rename/copy records contain one more NUL-delimited pathname.
-            if row[:1] in {b"R", b"C"} or row[1:2] in {b"R", b"C"}:
-                index += 1
+    head_records = _git_head_inventory(root, user_excluded_paths)
+    dirty = bool(current_records) if head_records is None else current_records != head_records
     return head or None, dirty, branch
 
 
@@ -645,6 +669,8 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
     submodules = _git_submodules(root)
     unavailable_submodules: set[str] = set()
     for path, commit in sorted(submodules.items()):
+        if _is_out_of_scope(path, user_excluded_paths):
+            continue
         candidate = root / path
         if not _submodule_is_available(candidate):
             unavailable_submodules.add(path)
@@ -664,7 +690,7 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
             entry = current_path / name
             raw = entry.relative_to(root).as_posix()
             normalized = _safe_source_relative_path(raw)
-            if _is_baseline_excluded(normalized) or _is_user_excluded(normalized, user_excluded_paths):
+            if _is_out_of_scope(normalized, user_excluded_paths):
                 excluded_count += 1
                 continue
             if normalized in unavailable_submodules:
@@ -681,12 +707,19 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
             entry = current_path / name
             raw = entry.relative_to(root).as_posix()
             normalized = _safe_source_relative_path(raw)
-            if _is_baseline_excluded(normalized) or _is_user_excluded(normalized, user_excluded_paths):
+            if _is_out_of_scope(normalized, user_excluded_paths):
                 excluded_count += 1
                 continue
             raw_paths.append(raw)
             if entry.is_symlink():
-                digest, invalid = _symlink_file_sha256(entry, root)
+                digest, invalid = _symlink_file_sha256(
+                    entry,
+                    root,
+                    user_excluded_paths,
+                )
+                if digest is None:
+                    excluded_count += 1
+                    continue
                 if invalid:
                     partial_reasons.add("invalid_symlink")
             elif entry.is_file():
@@ -712,7 +745,12 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
         tree.update(b"\0")
         tree.update(file_digest.encode("ascii"))
         tree.update(b"\n")
-    head_commit, dirty, branch = _git_metadata(root, user_excluded_paths)
+    current_records = tuple(checked_records)
+    head_commit, dirty, branch = _git_metadata(
+        root,
+        user_excluded_paths,
+        current_records,
+    )
     return SourceSnapshot(
         tree_sha256=tree.hexdigest(),
         head_commit=head_commit,

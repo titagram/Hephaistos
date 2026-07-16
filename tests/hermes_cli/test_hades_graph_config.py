@@ -26,6 +26,39 @@ def _symlink_or_skip(link: Path, target: str | Path) -> None:
         pytest.skip(f"symlinks unavailable in test environment: {exc}")
 
 
+def _git_init_with_identity(root: Path) -> None:
+    try:
+        subprocess.run(
+            ["git", "init"],
+            cwd=root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "graph@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Graph Test"],
+            cwd=root,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"git unavailable in test environment: {exc}")
+
+
+def _git_commit_all(root: Path, message: str = "initial") -> None:
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def test_graph_index_config_defaults_are_exact_and_immutable():
     from hermes_cli.hades_graph_config import load_hades_graph_index_config
 
@@ -110,6 +143,40 @@ def test_graph_index_config_rejects_unsafe_user_exclusion_path():
         })
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "C:private",
+        "private\x1fpath",
+        "private\x7fpath",
+        "private\x00path",
+        "a" * 4_097,
+        "/absolute",
+        "../escape",
+    ],
+)
+def test_graph_index_config_rejects_every_unsafe_exclusion_scalar(value):
+    from hermes_cli.hades_graph_config import (
+        GraphIndexConfigError,
+        load_hades_graph_index_config,
+    )
+
+    with pytest.raises(GraphIndexConfigError, match="excluded_paths"):
+        load_hades_graph_index_config({
+            "hades": {"graph_index": {"excluded_paths": [value]}}
+        })
+
+
+def test_graph_index_config_retains_safe_glob_exclusion():
+    from hermes_cli.hades_graph_config import load_hades_graph_index_config
+
+    config = load_hades_graph_index_config({
+        "hades": {"graph_index": {"excluded_paths": ["generated/**/*.py"]}}
+    })
+
+    assert config.excluded_paths == ("generated/**/*.py",)
+
+
 def test_secret_exclusions_are_compulsory_and_user_exclusions_are_additive(tmp_path):
     from hermes_cli.hades_graph_config import (
         build_source_identity,
@@ -129,6 +196,69 @@ def test_secret_exclusions_are_compulsory_and_user_exclusions_are_additive(tmp_p
 
     assert identity.tree_sha256 == expected
     assert "top-secret" not in str(identity)
+
+
+def test_compiled_scope_excludes_git_metadata_files_and_directories(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    file_root = tmp_path / "file-worktree"
+    dir_root = tmp_path / "dir-worktree"
+    _write(file_root, "src/app.py", "pass\n")
+    _write(dir_root, "src/app.py", "pass\n")
+    _write(file_root, ".git", "gitdir: /private/one/absolute/worktree\n")
+    _write(dir_root, ".git/config", "gitdir = /private/two/absolute/worktree\n")
+
+    config = load_hades_graph_index_config({})
+    file_identity = build_source_identity(file_root, config)
+    dir_identity = build_source_identity(dir_root, config)
+    file_digest = hashlib.sha256(b"pass\n").hexdigest().encode("ascii")
+    expected = hashlib.sha256(b"src/app.py\0" + file_digest + b"\n").hexdigest()
+
+    assert file_identity.tree_sha256 == expected
+    assert dir_identity.tree_sha256 == expected
+    assert "/private/one" not in str(file_identity)
+
+
+def test_compiled_scope_reuses_hades_sensitive_directory_policy(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    _write(tmp_path, "src/app.py", "pass\n")
+    _write(tmp_path, ".aws/config", "aws_secret_access_key = top-secret\n")
+    identity = build_source_identity(tmp_path, load_hades_graph_index_config({}))
+    digest = hashlib.sha256(b"pass\n").hexdigest().encode("ascii")
+    expected = hashlib.sha256(b"src/app.py\0" + digest + b"\n").hexdigest()
+
+    assert identity.tree_sha256 == expected
+    assert "top-secret" not in str(identity)
+
+
+def test_symlink_to_excluded_secret_is_out_of_scope_not_partial(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+    from hermes_cli.hades_index.inventory import build_source_snapshot
+
+    _write(tmp_path, "src/app.py", "pass\n")
+    _write(tmp_path, ".env", "TOKEN=top-secret\n")
+    _symlink_or_skip(tmp_path / "src" / "env-link.py", "../.env")
+    config = load_hades_graph_index_config({})
+    identity = build_source_identity(tmp_path, config)
+    snapshot = build_source_snapshot(
+        tmp_path, user_excluded_paths=config.excluded_paths
+    )
+    digest = hashlib.sha256(b"pass\n").hexdigest().encode("ascii")
+    expected = hashlib.sha256(b"src/app.py\0" + digest + b"\n").hexdigest()
+
+    assert identity.tree_sha256 == expected
+    assert snapshot.partial_reasons == ()
+    assert "top-secret" not in str(snapshot)
 
 
 def test_nfc_collision_fails_without_exposing_raw_untrusted_name():
@@ -321,6 +451,96 @@ def test_unavailable_git_submodule_hashes_gitlink_and_marks_partial(tmp_path):
 
     assert snapshot.tree_sha256 == expected
     assert snapshot.partial_reasons == ("submodule_unavailable",)
+
+
+@pytest.mark.parametrize(
+    ("gitlink_path", "user_exclusions"),
+    [("vendor/lib", ()), ("custom/lib", ("custom",))],
+)
+def test_out_of_scope_unavailable_gitlink_has_no_marker_or_partial_reason(
+    tmp_path,
+    gitlink_path,
+    user_exclusions,
+):
+    from hermes_cli.hades_index.inventory import build_source_snapshot
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git_init_with_identity(workspace)
+    commit = "b" * 40
+    try:
+        subprocess.run(
+            [
+                "git",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{commit},{gitlink_path}",
+            ],
+            cwd=workspace,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"gitlink index fixture unavailable: {exc}")
+
+    snapshot = build_source_snapshot(workspace, user_excluded_paths=user_exclusions)
+
+    assert snapshot.tree_sha256 == hashlib.sha256(b"").hexdigest()
+    assert snapshot.partial_reasons == ()
+
+
+def test_dirty_when_staged_rename_moves_in_scope_file_to_excluded_path(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    _git_init_with_identity(tmp_path)
+    _write(tmp_path, "src/app.py", "pass\n")
+    _git_commit_all(tmp_path)
+    subprocess.run(["git", "mv", "src/app.py", ".env"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+    identity = build_source_identity(tmp_path, load_hades_graph_index_config({}))
+
+    assert identity.dirty is True
+
+
+def test_dirty_when_ignored_but_in_scope_file_is_present(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    _git_init_with_identity(tmp_path)
+    _write(tmp_path, "src/app.py", "pass\n")
+    _write(tmp_path, ".gitignore", "ignored.py\n")
+    _git_commit_all(tmp_path)
+    _write(tmp_path, "ignored.py", "still in source scope\n")
+
+    identity = build_source_identity(tmp_path, load_hades_graph_index_config({}))
+
+    assert identity.dirty is True
+
+
+def test_unchanged_tracked_in_scope_symlink_is_not_dirty(tmp_path):
+    from hermes_cli.hades_graph_config import (
+        build_source_identity,
+        load_hades_graph_index_config,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git_init_with_identity(workspace)
+    _write(workspace, "src/target.py", "pass\n")
+    _symlink_or_skip(workspace / "src" / "link.py", "target.py")
+    _git_commit_all(workspace)
+
+    identity = build_source_identity(workspace, load_hades_graph_index_config({}))
+
+    assert identity.dirty is False
 
 
 def test_verify_source_unchanged_raises_typed_error_on_digest_mismatch(tmp_path):

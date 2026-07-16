@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+import fnmatch
+from pathlib import Path, PurePosixPath
 from typing import Final
+import re
 import unicodedata
 
 from hermes_cli.hades_graph_v2.model import SourceIdentity
@@ -54,6 +56,94 @@ _RANGES: Final[dict[str, tuple[int, int, int]]] = {
 }
 _KNOWN_KEYS: Final = frozenset((*_RANGES, "graphify_candidates", "excluded_paths"))
 
+# Compiled source-scope policy.  This is deliberately defined here, alongside
+# the typed reader, so no config value can weaken it.  The Hades information
+# worker's conservative sensitive-path policy is represented here too: graph
+# inventory is a source producer and must not become a side door around it.
+COMPILED_EXCLUDED_DIRECTORY_NAMES: Final = frozenset({
+    ".aws",
+    ".azure",
+    ".cache",
+    ".codex",
+    ".docker",
+    ".gcp",
+    ".git",
+    ".gradle",
+    ".hades",
+    ".hermes",
+    ".hg",
+    ".m2",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".parcel-cache",
+    ".pnpm-store",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".ssh",
+    ".svn",
+    ".tox",
+    ".turbo",
+    ".venv",
+    ".yarn",
+    "__pycache__",
+    "bower_components",
+    "build",
+    "coverage",
+    "credentials",
+    "dist",
+    "node_modules",
+    "out",
+    "secrets",
+    "target",
+    "tmp",
+    "vendor",
+    "venv",
+})
+COMPILED_EXCLUDED_DIRECTORY_SEQUENCES: Final = (
+    ("var", "cache"),
+    ("storage", "framework", "cache"),
+)
+_HADES_SENSITIVE_EXTENSIONS: Final = frozenset({
+    ".cer",
+    ".cert",
+    ".crt",
+    ".der",
+    ".key",
+    ".p12",
+    ".pem",
+    ".pfx",
+})
+_HADES_SOURCE_EXTENSIONS: Final = frozenset({
+    ".bash",
+    ".c",
+    ".cc",
+    ".cjs",
+    ".cpp",
+    ".cs",
+    ".fish",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".mjs",
+    ".php",
+    ".py",
+    ".pyi",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".zsh",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class HadesGraphIndexConfig:
@@ -94,12 +184,120 @@ def _safe_user_exclusion(value: object, *, index: int) -> str:
         or normalized.startswith("/")
         or "\\" in normalized
         or "\x00" in normalized
+        or len(normalized.encode("utf-8")) > 4_096
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+        or (
+            len(normalized.split("/", 1)[0]) >= 2
+            and normalized.split("/", 1)[0][1] == ":"
+        )
     ):
         raise GraphIndexConfigError(
             f"hades.graph_index.excluded_paths[{index}] must be a safe source-relative path"
         )
     return normalized
+
+
+def _is_hades_sensitive_source_path(path: str) -> bool:
+    """Apply the existing Hades sensitive-name policy without I/O imports."""
+
+    parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+    if not parts:
+        return True
+    if any(part in COMPILED_EXCLUDED_DIRECTORY_NAMES for part in parts):
+        return True
+    name = parts[-1]
+    # The v2 specification explicitly retains example env files in scope.
+    if name == ".env.example":
+        return False
+    stem = PurePosixPath(name).stem.casefold()
+    stem_normalized = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")
+    suffix = PurePosixPath(name).suffix.casefold()
+    tokens = tuple(token for token in re.split(r"[^a-z0-9]+", stem) if token)
+    cloud_config_path = any(
+        parts[index : index + 2] == (".config", "gcloud")
+        for index in range(max(0, len(parts) - 1))
+    )
+    if suffix in _HADES_SOURCE_EXTENSIONS and not cloud_config_path:
+        return False
+    return (
+        cloud_config_path
+        or name == ".env"
+        or name.startswith(".env.")
+        or name == ".envrc"
+        or suffix == ".env"
+        or name
+        in {".netrc", ".npmrc", ".pypirc", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"}
+        or "service_account" in stem_normalized
+        or ("service" in tokens and "account" in tokens)
+        or stem_normalized == "application_default_credentials"
+        or any(
+            token
+            in {"credential", "credentials", "secret", "secrets", "token", "tokens"}
+            for token in tokens
+        )
+        or stem
+        in {
+            "credential",
+            "credentials",
+            "secret",
+            "secrets",
+            "token",
+            "tokens",
+            "auth",
+            "oauth",
+            "providers",
+        }
+        or (
+            any(
+                marker in stem_normalized.split("_")
+                for marker in ("auth", "oauth", "provider", "providers")
+            )
+            and any(
+                marker in stem_normalized.split("_")
+                for marker in (
+                    "config",
+                    "store",
+                    "credential",
+                    "credentials",
+                    "token",
+                    "tokens",
+                )
+            )
+        )
+        or suffix in _HADES_SENSITIVE_EXTENSIONS
+    )
+
+
+def is_compiled_source_excluded(path: str) -> bool:
+    """Return whether a normalized source-relative path is permanently out of scope."""
+
+    parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+    if any(
+        parts[index : index + len(sequence)] == sequence
+        for sequence in COMPILED_EXCLUDED_DIRECTORY_SEQUENCES
+        for index in range(0, len(parts) - len(sequence) + 1)
+    ):
+        return True
+    return _is_hades_sensitive_source_path(path)
+
+
+def is_graph_source_excluded(
+    path: str, user_excluded_paths: tuple[str, ...] = ()
+) -> bool:
+    """Apply compiled scope policy and additive, validated user exclusions."""
+
+    if is_compiled_source_excluded(path):
+        return True
+    return any(
+        path == pattern
+        or path.startswith(pattern + "/")
+        or (
+            any(token in pattern for token in "*?[")
+            and fnmatch.fnmatchcase(path, pattern)
+        )
+        for pattern in user_excluded_paths
+    )
 
 
 def load_hades_graph_index_config(
