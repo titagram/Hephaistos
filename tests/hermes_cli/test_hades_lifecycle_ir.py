@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,6 +89,16 @@ _DIGEST = "a" * 64
 @dataclass(frozen=True, slots=True)
 class _EffectWithPayload(Effect):
     arbitrary_payload: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalNodeTargetWithPayload(LocalNodeTarget):
+    arbitrary_payload: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _AstLocatorWithPayload(AstLocatorIR):
+    arbitrary_payload: dict[str, str] = field(default_factory=dict)
 
 
 def _key(
@@ -873,3 +883,109 @@ def test_non_key_families_and_pipeline_orders_are_unique() -> None:
                 ),
             ),
         ).validate()
+
+
+def test_nested_components_reject_subclasses_with_arbitrary_payloads() -> None:
+    result = _valid_result()
+    target = _LocalNodeTargetWithPayload(
+        result.declarations[0].local_key,
+        arbitrary_payload={"raw_source": "secret"},
+    )
+    with pytest.raises(IRValidationError, match="closed target union"):
+        replace(
+            result,
+            edge_facts=(replace(result.edge_facts[0], target=target),),
+        ).validate()
+    with pytest.raises(IRValidationError, match="terminal locator"):
+        Terminal(
+            local_key=_key("terminal", structural="body/subclass"),
+            source_block_key=result.blocks[0].local_key,
+            kind=TerminalKind.RESPONSE,
+            public_status=200,
+            exception_type=None,
+            locator=_AstLocatorWithPayload(
+                _location(),
+                "body/subclass",
+                0,
+                arbitrary_payload={"raw_source": "secret"},
+            ),
+        )
+
+
+def test_entrypoint_handler_unresolved_fact_has_exactly_one_consumer() -> None:
+    result = _valid_result()
+    duplicate_consumer = replace(
+        result.entrypoints[0],
+        public_path="/alternate",
+        registration_locator=_config("routes/alternate"),
+    )
+    entrypoints = tuple(
+        sorted(
+            (duplicate_consumer, result.entrypoints[0]),
+            key=lambda item: (
+                item.kind.value,
+                item.framework or "",
+                item.public_path or "",
+                item.public_name or "",
+                item.registration_locator.source_location.path,
+                item.registration_locator.ordinal,
+            ),
+        )
+    )
+    with pytest.raises(IRValidationError, match="exactly one entrypoint"):
+        replace(result, entrypoints=entrypoints).validate()
+
+
+def test_branch_arms_are_unambiguous_and_successors_match_the_exact_arm() -> None:
+    result = _valid_result()
+    arm = result.branch_arms[0]
+    different_block = next(
+        block for block in result.blocks if block.local_key != arm.target_block_key
+    )
+    conflicting_arm = replace(
+        arm,
+        target_block_key=different_block.local_key,
+        polarity=ConditionPolarity.FALSE,
+        condition=ConditionIR(
+            "predicate",
+            "is_not_admin",
+            _DIGEST,
+            ConditionPolarity.FALSE,
+        ),
+    )
+    arms = tuple(
+        sorted(
+            (arm, conflicting_arm),
+            key=lambda item: (
+                item.branch_local_key,
+                item.arm_ordinal,
+                item.target_block_key,
+            ),
+        )
+    )
+    with pytest.raises(IRValidationError, match="duplicate"):
+        replace(result, branch_arms=arms).validate()
+
+    entry_key = result.declarations[0].entry_block_key
+    mismatched_successors = tuple(
+        sorted(
+            (
+                replace(
+                    block,
+                    successors=(
+                        BranchSuccessor(
+                            target_block_key=different_block.local_key,
+                            branch_arm_key=arm.branch_local_key,
+                            order=0,
+                        ),
+                    ),
+                )
+                if block.local_key == entry_key
+                else block
+                for block in result.blocks
+            ),
+            key=lambda block: block.local_key,
+        )
+    )
+    with pytest.raises(IRValidationError, match="exact branch arm"):
+        replace(result, blocks=mismatched_successors).validate()

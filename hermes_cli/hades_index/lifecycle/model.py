@@ -304,7 +304,7 @@ class AstLocatorIR:
     kind: Literal["ast"] = "ast"
 
     def __post_init__(self) -> None:
-        if self.kind != "ast" or not isinstance(self.source_location, SourceLocationIR):
+        if self.kind != "ast" or type(self.source_location) is not SourceLocationIR:
             _fail(
                 "invalid_discriminator", "AST locator must carry an AST source location"
             )
@@ -320,9 +320,7 @@ class ConfigLocatorIR:
     kind: Literal["config"] = "config"
 
     def __post_init__(self) -> None:
-        if self.kind != "config" or not isinstance(
-            self.source_location, SourceLocationIR
-        ):
+        if self.kind != "config" or type(self.source_location) is not SourceLocationIR:
             _fail(
                 "invalid_discriminator", "config locator must carry a source location"
             )
@@ -571,20 +569,20 @@ def _successor_sort_key(successor: Successor) -> tuple[int, str, str]:
 def successor_to_json(successor: Successor) -> dict[str, object]:
     """Encode one closed successor without exposing an arbitrary payload API."""
 
-    if isinstance(successor, AlwaysSuccessor):
+    if type(successor) is AlwaysSuccessor:
         return {
             "kind": successor.kind,
             "target_block_key": successor.target_block_key,
             "order": successor.order,
         }
-    if isinstance(successor, BranchSuccessor):
+    if type(successor) is BranchSuccessor:
         return {
             "kind": successor.kind,
             "target_block_key": successor.target_block_key,
             "branch_arm_key": successor.branch_arm_key,
             "order": successor.order,
         }
-    if isinstance(successor, ExceptionSuccessor):
+    if type(successor) is ExceptionSuccessor:
         return {
             "kind": successor.kind,
             "target_block_key": successor.target_block_key,
@@ -592,21 +590,21 @@ def successor_to_json(successor: Successor) -> dict[str, object]:
             "caught_type_name": successor.caught_type_name,
             "order": successor.order,
         }
-    if isinstance(successor, LoopSuccessor):
+    if type(successor) is LoopSuccessor:
         return {
             "kind": successor.kind,
             "target_block_key": successor.target_block_key,
             "loop_role": successor.loop_role.value,
             "order": successor.order,
         }
-    if isinstance(successor, AsyncSuccessor):
+    if type(successor) is AsyncSuccessor:
         return {
             "kind": successor.kind,
             "target_local_key": successor.target_local_key,
             "dispatch_kind": successor.dispatch_kind.value,
             "order": successor.order,
         }
-    if isinstance(successor, ReturnSuccessor):
+    if type(successor) is ReturnSuccessor:
         return {
             "kind": successor.kind,
             "terminal_local_key": successor.terminal_local_key,
@@ -723,7 +721,7 @@ class ExecutableDeclaration:
                 "declaration.modifiers must use enum order and be unique",
             )
         parameters = _tuple(self.parameters, field_name="declaration.parameters")
-        if any(not isinstance(item, ParameterIR) for item in parameters):
+        if any(type(item) is not ParameterIR for item in parameters):
             _fail("invalid_record", "declaration.parameters must contain ParameterIR")
         if tuple(
             sorted(parameters, key=lambda item: item.position)
@@ -734,7 +732,7 @@ class ExecutableDeclaration:
                 "not_sorted_unique",
                 "declaration.parameters must be sorted by unique position",
             )
-        if not isinstance(self.locator, AstLocatorIR):
+        if type(self.locator) is not AstLocatorIR:
             _fail("invalid_locator", "declaration locator must be AST")
         _key(self.entry_block_key, field_name="declaration.entry_block_key")
         for field_name, keys in (
@@ -761,21 +759,19 @@ class BasicBlock:
         _key(self.declaration_key, field_name="block.declaration_key")
         _require_enum(self.control_kind, ControlKind, field_name="block.control_kind")
         _nonnegative(self.ordinal, field_name="block.ordinal")
-        if not isinstance(self.locator, AstLocatorIR):
+        if type(self.locator) is not AstLocatorIR:
             _fail("invalid_locator", "basic block locator must be AST")
         values = _tuple(self.successors, field_name="block.successors")
         if any(
-            not isinstance(
-                item,
-                (
-                    AlwaysSuccessor,
-                    BranchSuccessor,
-                    ExceptionSuccessor,
-                    LoopSuccessor,
-                    AsyncSuccessor,
-                    ReturnSuccessor,
-                ),
-            )
+            type(item)
+            not in {
+                AlwaysSuccessor,
+                BranchSuccessor,
+                ExceptionSuccessor,
+                LoopSuccessor,
+                AsyncSuccessor,
+                ReturnSuccessor,
+            }
             for item in values
         ):
             _fail(
@@ -809,7 +805,7 @@ class BranchArm:
             self.polarity, ConditionPolarity, field_name="branch_arm.polarity"
         )
         if (
-            not isinstance(self.condition, ConditionIR)
+            type(self.condition) is not ConditionIR
             or self.condition.polarity is not self.polarity
         ):
             _fail("invalid_condition", "branch arm condition must match its polarity")
@@ -889,7 +885,7 @@ class CallSite:
             _key(value, field_name=field_name)
         if self.exception_scope_key is not None:
             _key(self.exception_scope_key, field_name="exception_scope_key")
-        if not isinstance(self.locator, AstLocatorIR):
+        if type(self.locator) is not AstLocatorIR:
             _fail("invalid_locator", "call-site locator must be AST")
         _require_enum(
             self.target_expression_kind,
@@ -932,7 +928,7 @@ class FrameworkBoundaryDescriptor:
                 _fail("invalid_identifier", f"{field_name} must be a lower identifier")
         if self.public_name is not None:
             _nfc(self.public_name, field_name="public_name", limit=1024)
-        if not isinstance(self.locator, (AstLocatorIR, ConfigLocatorIR)):
+        if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail("invalid_locator", "framework boundary locator must be AST or config")
         _require_context_evidence(
             self.evidence, field_name="framework boundary evidence"
@@ -945,8 +941,9 @@ class BoundaryTarget:
     kind: Literal["boundary"] = "boundary"
 
     def __post_init__(self) -> None:
-        if self.kind != "boundary" or not isinstance(
-            self.descriptor, FrameworkBoundaryDescriptor
+        if (
+            self.kind != "boundary"
+            or type(self.descriptor) is not FrameworkBoundaryDescriptor
         ):
             _fail(
                 "invalid_discriminator",
@@ -975,11 +972,11 @@ class EdgeFactIR:
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="edge.local_key")
         _key(self.source_node_local_key, field_name="edge.source_node_local_key")
-        if not isinstance(self.target, (LocalNodeTarget, BoundaryTarget)):
+        if type(self.target) not in {LocalNodeTarget, BoundaryTarget}:
             _fail("invalid_discriminator", "edge target must be a closed target union")
         _require_enum(self.relation, Relation, field_name="edge.relation")
         _require_enum(self.flow, EdgeFlow, field_name="edge.flow")
-        if self.condition is not None and not isinstance(self.condition, ConditionIR):
+        if self.condition is not None and type(self.condition) is not ConditionIR:
             _fail("invalid_condition", "edge.condition must be ConditionIR or null")
         for field_name, value in (
             ("branch_group_key", self.branch_group_key),
@@ -990,7 +987,7 @@ class EdgeFactIR:
                 _key(value, field_name=field_name)
         if self.order is not None:
             _nonnegative(self.order, field_name="edge.order")
-        if not isinstance(self.locator, (AstLocatorIR, ConfigLocatorIR)):
+        if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail("invalid_locator", "edge locator must be AST or config")
         _require_context_evidence(self.evidence, field_name="edge.evidence")
 
@@ -1008,7 +1005,7 @@ class ExceptionScope:
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="exception_scope.local_key")
         _key(self.declaration_key, field_name="exception_scope.declaration_key")
-        if not isinstance(self.locator, AstLocatorIR):
+        if type(self.locator) is not AstLocatorIR:
             _fail("invalid_locator", "exception scope locator must be AST")
         caught = _tuple(self.caught_type_names, field_name="caught_type_names")
         if any(not isinstance(item, str) for item in caught):
@@ -1055,7 +1052,7 @@ class Terminal:
                 "invalid_nullability",
                 "only exception terminal can carry exception_type",
             )
-        if not isinstance(self.locator, AstLocatorIR):
+        if type(self.locator) is not AstLocatorIR:
             _fail("invalid_locator", "terminal locator must be AST")
 
 
@@ -1099,7 +1096,7 @@ class Effect:
 
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="effect.local_key")
-        if not isinstance(self.source, (BlockEffectSource, CallSiteEffectSource)):
+        if type(self.source) not in {BlockEffectSource, CallSiteEffectSource}:
             _fail(
                 "invalid_discriminator", "effect.source must be a closed source union"
             )
@@ -1111,7 +1108,7 @@ class Effect:
         ):
             if value is not None:
                 _nfc(value, field_name=field_name, limit=1024)
-        if not isinstance(self.locator, (AstLocatorIR, ConfigLocatorIR)):
+        if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail("invalid_locator", "effect locator must be AST or config")
 
 
@@ -1135,8 +1132,9 @@ class FrameworkBoundaryTarget:
     kind: Literal["boundary"] = "boundary"
 
     def __post_init__(self) -> None:
-        if self.kind != "boundary" or not isinstance(
-            self.descriptor, FrameworkBoundaryDescriptor
+        if (
+            self.kind != "boundary"
+            or type(self.descriptor) is not FrameworkBoundaryDescriptor
         ):
             _fail(
                 "invalid_discriminator", "framework boundary target requires descriptor"
@@ -1162,19 +1160,16 @@ class FrameworkPipelineSegment:
         if not _IDENTIFIER_RE.fullmatch(role):
             _fail("invalid_identifier", "framework_role must be a lower identifier")
         _nonnegative(self.pipeline_order, field_name="pipeline_order")
-        if not isinstance(self.target, (FrameworkLocalTarget, FrameworkBoundaryTarget)):
+        if type(self.target) not in {FrameworkLocalTarget, FrameworkBoundaryTarget}:
             _fail("invalid_discriminator", "framework target must be a closed union")
-        if not isinstance(
-            self.success_successor,
-            (
-                AlwaysSuccessor,
-                BranchSuccessor,
-                ExceptionSuccessor,
-                LoopSuccessor,
-                AsyncSuccessor,
-                ReturnSuccessor,
-            ),
-        ):
+        if type(self.success_successor) not in {
+            AlwaysSuccessor,
+            BranchSuccessor,
+            ExceptionSuccessor,
+            LoopSuccessor,
+            AsyncSuccessor,
+            ReturnSuccessor,
+        }:
             _fail(
                 "invalid_discriminator", "success successor must be a closed successor"
             )
@@ -1182,17 +1177,15 @@ class FrameworkPipelineSegment:
             self.short_circuit_successors, field_name="short_circuit_successors"
         )
         if any(
-            not isinstance(
-                item,
-                (
-                    AlwaysSuccessor,
-                    BranchSuccessor,
-                    ExceptionSuccessor,
-                    LoopSuccessor,
-                    AsyncSuccessor,
-                    ReturnSuccessor,
-                ),
-            )
+            type(item)
+            not in {
+                AlwaysSuccessor,
+                BranchSuccessor,
+                ExceptionSuccessor,
+                LoopSuccessor,
+                AsyncSuccessor,
+                ReturnSuccessor,
+            }
             for item in values
         ):
             _fail(
@@ -1272,12 +1265,12 @@ class EntrypointCandidate:
             if value is not None:
                 _nfc(value, field_name=field_name, limit=1024)
         _require_enum(self.trigger, TriggerKind, field_name="entrypoint.trigger")
-        if not isinstance(self.match_constraints, MatchConstraints):
+        if type(self.match_constraints) is not MatchConstraints:
             _fail(
                 "invalid_record",
                 "entrypoint.match_constraints must be MatchConstraints",
             )
-        if not isinstance(self.registration_locator, (AstLocatorIR, ConfigLocatorIR)):
+        if type(self.registration_locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail(
                 "invalid_locator",
                 "entrypoint registration locator must be AST or config",
@@ -1395,8 +1388,7 @@ class UnresolvedFact:
             not locators
             or len(locators) > 20
             or any(
-                not isinstance(item, (AstLocatorIR, ConfigLocatorIR))
-                for item in locators
+                type(item) not in {AstLocatorIR, ConfigLocatorIR} for item in locators
             )
         ):
             _fail(
@@ -1490,7 +1482,7 @@ class AdapterDiagnostic:
         code = _nfc(self.code, field_name="diagnostic.code", limit=128)
         if not _REASON_RE.fullmatch(code):
             _fail("invalid_identifier", "diagnostic code must be lower snake case")
-        if not isinstance(self.location, SourceLocationIR):
+        if type(self.location) is not SourceLocationIR:
             _fail(
                 "invalid_location", "diagnostic location must be safe SourceLocationIR"
             )
@@ -1795,11 +1787,7 @@ class AdapterResult:
             self.branch_arms,
             field_name="branch_arms",
             record_type=BranchArm,
-            key=lambda item: (
-                item.branch_local_key,
-                item.arm_ordinal,
-                item.target_block_key,
-            ),
+            key=lambda item: (item.branch_local_key, item.arm_ordinal),
         )
         _result_family(
             self.entrypoints,
@@ -1904,9 +1892,6 @@ class AdapterResult:
             ):
                 need(blocks, block_key, "declaration exit block")
 
-        branch_arms_by_structure: dict[str, BranchArm] = {
-            arm.branch_local_key: arm for arm in self.branch_arms
-        }
         for arm in self.branch_arms:
             structure = need(structures, arm.branch_local_key, "branch arm structure")
             if structure.kind is not StructureKind.BRANCH_GROUP:
@@ -1998,10 +1983,17 @@ class AdapterResult:
                 else:
                     need(terminals, successor.terminal_local_key, "return terminal")
                 if type(successor) is BranchSuccessor:
-                    if successor.branch_arm_key not in branch_arms_by_structure:
+                    matching_arms = [
+                        arm
+                        for arm in self.branch_arms
+                        if arm.branch_local_key == successor.branch_arm_key
+                        and arm.source_block_key == block.local_key
+                        and arm.target_block_key == successor.target_block_key
+                    ]
+                    if len(matching_arms) != 1:
                         _fail(
-                            "unresolved_reference",
-                            "branch successor arm does not resolve",
+                            "invalid_branch_successor",
+                            "branch successor must resolve to one exact branch arm",
                         )
                 if type(successor) is ExceptionSuccessor:
                     structure = need(
@@ -2074,6 +2066,10 @@ class AdapterResult:
             need_node(edge.source_node_local_key, "edge source")
             if type(edge.target) is LocalNodeTarget:
                 need_node(edge.target.local_key, "edge target")
+            elif type(edge.target) is not BoundaryTarget:
+                _fail(
+                    "invalid_discriminator", "edge target must be a closed target union"
+                )
             for field_name, value, expected_kind in (
                 ("branch", edge.branch_group_key, StructureKind.BRANCH_GROUP),
                 ("call_site", edge.call_site_key, StructureKind.CALL_SITE),
@@ -2157,11 +2153,17 @@ class AdapterResult:
         for effect in self.effects:
             if type(effect.source) is BlockEffectSource:
                 need(blocks, effect.source.local_key, "effect source block")
-            else:
+            elif type(effect.source) is CallSiteEffectSource:
                 need(call_sites, effect.source.local_key, "effect source call site")
+            else:
+                _fail("invalid_discriminator", "effect source must be a closed union")
         for segment in self.framework_segments:
             if type(segment.target) is FrameworkLocalTarget:
                 need_node(segment.target.local_key, "framework segment target")
+            elif type(segment.target) is not FrameworkBoundaryTarget:
+                _fail(
+                    "invalid_discriminator", "framework target must be a closed union"
+                )
             for successor in (
                 segment.success_successor,
             ) + segment.short_circuit_successors:
@@ -2200,6 +2202,11 @@ class AdapterResult:
                     _fail(
                         "invalid_entrypoint_unresolved",
                         "entrypoint unresolved fact must be an entrypoint_handler edge fact",
+                    )
+                if fact.local_key in entrypoints_by_unresolved:
+                    _fail(
+                        "invalid_entrypoint_unresolved",
+                        "entrypoint_handler fact must belong to exactly one entrypoint",
                     )
                 entrypoints_by_unresolved[fact.local_key] = entrypoint
             pipeline = tuple(
