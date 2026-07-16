@@ -29,11 +29,82 @@
     },
     {
       "schema": "hades.verification_work.v1",
+      "kind": "hades.verification.graph.v1",
+      "domain": "graph",
+      "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+      "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+      "target": {"type": "graph_assertion", "id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "assertion": {
+        "fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+        "subject": {"edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+        "resolution_kind": "entrypoint_handler",
+        "candidate_set_knowledge": "complete",
+        "candidate_target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "hades:node:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+        "candidate_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+      },
+      "source_snapshot": {"state": "available", "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+      "question": "Which handler owns this entrypoint in this source snapshot?",
+      "reason_code": "entrypoint_unresolved",
+      "evidence_requirements": ["inspect_route_registration"],
+      "source_refs": [{"path": "config/routes.yaml", "line": 1}],
+      "priority": "high",
+      "impact": "May change the request lifecycle handler.",
+      "attempt_generation": 1,
+      "retry_of_work_item_id": null,
+      "deduplication_key": "2319aadb4a103c4091642095aca18cce62ad01961a1aa99a8608caf58ca3f8a8"
+    },
+    {
+      "schema": "hades.verification_work.v1",
+      "kind": "hades.verification.graph.v1",
+      "domain": "graph",
+      "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+      "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+      "target": {"type": "graph_assertion", "id": "hades:uncertainty:v2:4444444444444444444444444444444444444444444444444444444444444444", "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "assertion": {
+        "fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+        "subject": {"edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+        "resolution_kind": "entrypoint_handler",
+        "candidate_set_knowledge": "not_applicable",
+        "candidate_target_node_ids": [],
+        "candidate_edge_ids": []
+      },
+      "source_snapshot": {"state": "available", "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+      "question": "Which handler owns this entrypoint in this source snapshot?",
+      "reason_code": "entrypoint_unresolved",
+      "evidence_requirements": ["inspect_route_registration"],
+      "source_refs": [{"path": "config/routes.yaml", "line": 1}],
+      "priority": "high",
+      "impact": "May change the request lifecycle handler.",
+      "attempt_generation": 1,
+      "retry_of_work_item_id": null,
+      "deduplication_key": "2a66c67d3a452f3e812161f02ce0f6b941ab49f7abf8c7f634aee19990ce5901"
+    },
+    {
+      "schema": "hades.verification_work.v1",
       "kind": "hades.verification.wiki.v1",
       "domain": "wiki",
       "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
       "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
       "target": {"type": "wiki_page", "id": "01KXJD2BDMQ2TFABMVJV6EFE8R", "version": "01KXJD3BDMQ2TFABMVJV6EFE8S"},
+      "assertion": null,
+      "source_snapshot": {"state": "available", "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+      "question": "Verify every factual claim in this Wiki revision against the current project source.",
+      "reason_code": "wiki_revision_needs_verification",
+      "evidence_requirements": ["verify_all_claims_against_current_source"],
+      "source_refs": [],
+      "priority": "normal",
+      "impact": "Unverified project documentation may mislead humans and agents.",
+      "attempt_generation": 1,
+      "retry_of_work_item_id": null,
+      "deduplication_key": "4431740a8189ac910c9f06be0a25d9904c640e7413a68485921f11582d6cc0a9"
+    },
+    {
+      "schema": "hades.verification_work.v1",
+      "kind": "hades.verification.wiki.v1",
+      "domain": "wiki",
+      "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+      "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+      "target": {"type": "wiki_page", "id": "01KXJD4BDMQ2TFABMVJV6EFE8V", "version": "01KXJD5BDMQ2TFABMVJV6EFE8W"},
       "assertion": null,
       "source_snapshot": {"state": "unavailable", "artifact_graph_version": null, "tree_sha256": null},
       "question": "Verify every factual claim in this Wiki revision against the current project source.",
@@ -44,7 +115,7 @@
       "impact": "Unverified project documentation may mislead humans and agents.",
       "attempt_generation": 1,
       "retry_of_work_item_id": null,
-      "deduplication_key": "ebf4e2fca9b8e4c69e129dc36f4b355c54f92556e98a976e70076551a97a9315"
+      "deduplication_key": "3df60773aa81a48be320206c0c25376e70e0c119d715e01d180d9f25fdc5ccb8"
     }
   ],
   "results": [
@@ -129,12 +200,23 @@
       "schema": "hades.verification_result.v1",
       "domain": "wiki",
       "verdict": "deferred",
-      "target": {"type": "wiki_page", "id": "01KXJD2BDMQ2TFABMVJV6EFE8R", "version": "01KXJD3BDMQ2TFABMVJV6EFE8S"},
+      "target": {"type": "wiki_page", "id": "01KXJD4BDMQ2TFABMVJV6EFE8V", "version": "01KXJD5BDMQ2TFABMVJV6EFE8W"},
       "reason": "The source snapshot is unavailable.",
       "evidence": [],
       "graph": null,
       "wiki": null,
       "deferred": {"blocker_code": "source_unavailable", "missing_evidence_requirements": ["current_source_snapshot"], "retry_hint": "Retry after a graph projection is ready."}
+    },
+    {
+      "schema": "hades.verification_result.v1",
+      "domain": "graph",
+      "verdict": "deferred",
+      "target": {"type": "graph_assertion", "id": "hades:uncertainty:v2:2222222222222222222222222222222222222222222222222222222222222222", "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "reason": "The configured service binding could not be inspected conclusively.",
+      "evidence": [],
+      "graph": null,
+      "wiki": null,
+      "deferred": {"blocker_code": "insufficient_evidence", "missing_evidence_requirements": ["inspect_service_container_configuration"], "retry_hint": "Retry when the complete container configuration is available."}
     }
   ],
   "result_digests": [
@@ -145,9 +227,10 @@
     "b0e13554423df3e553f43c55c950d494afd1bd50ac36990edeae8e786809b8c3",
     "965de5eff5a29fd09546bc9a301296b8f3462bd0843b4394f4c4c03f91c10551",
     "17e07af516c0720d71f462ffff2997ec658f31cdabc025b91b77d0973d404c47",
-    "9e37b0177c05597340021707a5ae93fb5eddad6a0874591ba1da7761629d6c18"
+    "b2972bf09681a41566305df4d3ecd11d3fac15f33b50ef6c79780339876c891c",
+    "f3eef2997a896a72dd814a63aeeb205f0dedf5a70d96c8caab1cd4588cec54bd"
   ],
-  "overlay_result_indexes": [0, 1, 3, 4],
+  "overlay_result_indexes": [0, 1, 2, 3, 4],
   "overlays": [
     {
       "schema": "hades.graph_overlay.v1",
@@ -184,6 +267,24 @@
       "effective_entrypoint_handler_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "evidence_digest": "261d8b47761209bb85d7c42fb898d7450b46695d1674f747288aab3a7164abe5",
       "result_digest": "d4cbcbec7c38ca71ebc782510fefa116563bd8ff22cdf2c6b12ebdcd45761f08"
+    },
+    {
+      "schema": "hades.graph_overlay.v1",
+      "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "uncertainty_id": "hades:uncertainty:v2:4444444444444444444444444444444444444444444444444444444444444444",
+      "assertion_fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+      "operation": "resolve_edge_targets",
+      "subject_edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "promoted_edge_ids": [],
+      "suppressed_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      "suppressed_node_ids": ["hades:node:v2:9999999999999999999999999999999999999999999999999999999999999999"],
+      "suppressed_structure_ids": [],
+      "target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      "effective_edge_ids": ["hades:edge:v2:6666666666666666666666666666666666666666666666666666666666666666"],
+      "effective_structure_ids": [],
+      "effective_entrypoint_handler_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "evidence_digest": "d899af4dfcf932d3df53ad53bd5c9992721236b77df60608b817ae29ea915303",
+      "result_digest": "5585ec9752dd17da641d80ab1e0c5bdccd91f031c4380a5a283b1af5fbfe7dfe"
     },
     {
       "schema": "hades.graph_overlay.v1",

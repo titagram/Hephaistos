@@ -3,7 +3,7 @@
   "files": [
     {
       "path": "artifact.schema.json",
-      "sha256": "3628d95735bee2196e4979b73069bd1a7b82a70ee9831ae2f9e6a1081128ebe5"
+      "sha256": "fade333a3ef4b5ef6fcd3cdf8eb784e0410e5de466a2d4c12f3c12c9baeb7c96"
     },
     {
       "path": "bundle.schema.json",
@@ -31,7 +31,7 @@
     },
     {
       "path": "verification-work.schema.json",
-      "sha256": "c7295d413d81a8f79bc9ce9adaae0b86c6ea8ab80c08e8867072815e55603e99"
+      "sha256": "2320de7e617a686444ed831cd0abe046dfc29847caf3b3b5023b4b08d09cbb4e"
     }
   ]
 }

@@ -84,25 +84,33 @@
   "$defs": {
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
     "gitCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$", "maxLength": 40},
-    "ulid": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$", "maxLength": 26},
+    "ulid": {"type": "string", "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$", "maxLength": 26},
     "utcTimestamp": {
       "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+      "format": "date-time",
       "maxLength": 20
     },
-    "safeInteger": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "safeInteger": {
+      "$comment": "JSON Schema's mathematical integer model accepts a parsed lexical 1.0. Contract decoders MUST reject every lexical float with float_not_allowed before schema validation; see golden/raw_wire_negative_vectors.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "positiveLine": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "safePath": {
+      "$comment": "JSON Schema enforces normalized POSIX path shape. UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
     },
     "structuralPath": {
+      "$comment": "JSON Schema enforces printable slash-delimited normalized tokens. UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
       "type": "string",
       "minLength": 1,
       "maxLength": 1024,
-      "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
     },
     "identifier": {
       "type": "string",
@@ -146,6 +154,13 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 1024,
+      "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
+    },
+    "namespace": {
+      "$comment": "UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
       "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"
     },
     "nodeId": {
@@ -723,7 +738,7 @@
         "workspace_binding_id": {"$ref": "#/$defs/ulid"},
         "language": {"$ref": "#/$defs/languageName"},
         "kind": {"enum": ["module", "namespace", "class", "interface", "trait", "enum", "function", "method", "middleware", "guard", "authorization", "validator", "binding", "controller", "service", "domain", "model", "repository", "event", "listener", "job", "queue", "test"]},
-        "namespace": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "namespace": {"oneOf": [{"$ref": "#/$defs/namespace"}, {"type": "null"}]},
         "qualified_name": {"$ref": "#/$defs/display1024"},
         "path": {"$ref": "#/$defs/safePath"}
       }
@@ -792,7 +807,7 @@
         "language": {"oneOf": [{"$ref": "#/$defs/languageName"}, {"type": "null"}]},
         "kind": {"enum": ["table", "query", "cache", "storage", "integration", "external_boundary", "framework_boundary"]},
         "framework": {"oneOf": [{"$ref": "#/$defs/frameworkName"}, {"type": "null"}]},
-        "namespace": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
+        "namespace": {"oneOf": [{"$ref": "#/$defs/namespace"}, {"type": "null"}]},
         "qualified_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
         "public_resource_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
         "protocol": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]},
@@ -842,21 +857,20 @@
         "structural_pointer": {"$ref": "#/$defs/structuralPath"}
       }
     },
-    "sourceLocator": {
+    "producerSourceLocator": {
       "oneOf": [
-        {"$ref": "#/$defs/fileLocator"},
         {"$ref": "#/$defs/astLocator"},
         {"$ref": "#/$defs/configLocator"}
       ]
     },
-    "evidenceItem": {
+    "producerEvidenceItem": {
       "type": "object",
       "additionalProperties": false,
       "required": ["origin", "extractor", "source_locator", "source_fingerprint", "inference_rule"],
       "properties": {
         "origin": {"enum": ["verified_from_code", "inferred", "unresolved"]},
         "extractor": {"$ref": "#/$defs/identifier"},
-        "source_locator": {"$ref": "#/$defs/sourceLocator"},
+        "source_locator": {"$ref": "#/$defs/producerSourceLocator"},
         "source_fingerprint": {"$ref": "#/$defs/digest"},
         "inference_rule": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]}
       },
@@ -865,18 +879,41 @@
         {"properties": {"origin": {"const": "inferred"}, "inference_rule": {"$ref": "#/$defs/identifier"}}}
       ]
     },
-    "evidenceEnvelope": {
+    "producerEvidenceEnvelope": {
       "type": "object",
       "additionalProperties": false,
       "required": ["primary", "supporting", "supporting_omitted_count"],
       "properties": {
-        "primary": {"$ref": "#/$defs/evidenceItem"},
+        "primary": {"$ref": "#/$defs/producerEvidenceItem"},
         "supporting": {
           "type": "array",
           "maxItems": 7,
           "uniqueItems": true,
-          "items": {"$ref": "#/$defs/evidenceItem"}
+          "items": {"$ref": "#/$defs/producerEvidenceItem"}
         },
+        "supporting_omitted_count": {"$ref": "#/$defs/safeInteger"}
+      }
+    },
+    "fileEvidenceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "extractor", "source_locator", "source_fingerprint", "inference_rule"],
+      "properties": {
+        "origin": {"const": "verified_from_code"},
+        "extractor": {"$ref": "#/$defs/identifier"},
+        "source_locator": {"$ref": "#/$defs/fileLocator"},
+        "source_fingerprint": {"$ref": "#/$defs/digest"},
+        "inference_rule": {"type": "null"}
+      }
+    },
+    "fileEvidenceEnvelope": {
+      "$comment": "Only kind=file inventory nodes may use this envelope. Application-level closure MUST also prove that every locator path and fingerprint match that same node's identity path and file digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "supporting", "supporting_omitted_count"],
+      "properties": {
+        "primary": {"$ref": "#/$defs/fileEvidenceItem"},
+        "supporting": {"type": "array", "maxItems": 7, "uniqueItems": true, "items": {"$ref": "#/$defs/fileEvidenceItem"}},
         "supporting_omitted_count": {"$ref": "#/$defs/safeInteger"}
       }
     },
@@ -1079,14 +1116,14 @@
         "qualified_name": {"oneOf": [{"$ref": "#/$defs/display1024"}, {"type": "null"}]},
         "namespace": {
           "oneOf": [
-            {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^<>\\u0000-\\u001f\\u007f]+$"},
+            {"$ref": "#/$defs/namespace"},
             {"type": "null"}
           ]
         },
         "uncertainty_id": {"oneOf": [{"$ref": "#/$defs/uncertaintyId"}, {"type": "null"}]},
         "location": {"oneOf": [{"$ref": "#/$defs/sourceLocation"}, {"type": "null"}]},
         "properties": {},
-        "evidence": {"$ref": "#/$defs/evidenceEnvelope"}
+        "evidence": {}
       },
       "allOf": [
         {
@@ -1103,6 +1140,12 @@
             {"properties": {"kind": {"enum": ["event", "listener", "job", "queue", "async_boundary"]}, "properties": {"$ref": "#/$defs/asyncProperties"}}},
             {"properties": {"kind": {"const": "test"}, "properties": {"$ref": "#/$defs/testProperties"}}},
             {"properties": {"kind": {"enum": ["entrypoint", "unknown_boundary"]}, "properties": {"$ref": "#/$defs/boundaryProperties"}}}
+          ]
+        },
+        {
+          "oneOf": [
+            {"properties": {"kind": {"const": "file"}, "evidence": {"$ref": "#/$defs/fileEvidenceEnvelope"}}},
+            {"properties": {"kind": {"not": {"const": "file"}}, "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"}}}
           ]
         }
       ]
@@ -1135,7 +1178,7 @@
         "trigger": {"$ref": "#/$defs/trigger"},
         "match_constraints": {"$ref": "#/$defs/matchConstraints"},
         "registration_occurrence": {"$ref": "#/$defs/registrationOccurrence"},
-        "evidence": {"$ref": "#/$defs/evidenceEnvelope"}
+        "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"}
       },
       "allOf": [{"$ref": "#/$defs/entrypointSemantics"}]
     },
@@ -1157,7 +1200,36 @@
         "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
         "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/structureId"}, {"type": "null"}]},
         "evidence": {"$ref": "#/$defs/structureEvidenceEnvelope"}
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/callSiteId"},
+            "kind": {"const": "call_site"},
+            "subtype": {"const": "call"},
+            "continuation_node_id": {"$ref": "#/$defs/nodeId"},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        },
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/branchId"},
+            "kind": {"const": "branch_group"},
+            "subtype": {"enum": ["if", "switch", "match", "ternary", "loop", "exception_dispatch", "dynamic_dispatch", "framework_short_circuit"]},
+            "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        },
+        {
+          "properties": {
+            "id": {"$ref": "#/$defs/exceptionScopeId"},
+            "kind": {"const": "exception_scope"},
+            "subtype": {"enum": ["try_catch", "try_finally", "try_catch_finally", "framework_exception_handler"]},
+            "continuation_node_id": {"oneOf": [{"$ref": "#/$defs/nodeId"}, {"type": "null"}]},
+            "parent_structure_id": {"oneOf": [{"$ref": "#/$defs/branchId"}, {"$ref": "#/$defs/exceptionScopeId"}, {"type": "null"}]}
+          }
+        }
+      ]
     },
     "condition": {
       "type": "object",
@@ -1231,9 +1303,160 @@
         "order": {"oneOf": [{"$ref": "#/$defs/safeInteger"}, {"type": "null"}]},
         "uncertainty_id": {"oneOf": [{"$ref": "#/$defs/uncertaintyId"}, {"type": "null"}]},
         "occurrence": {"$ref": "#/$defs/edgeOccurrence"},
-        "evidence": {"$ref": "#/$defs/evidenceEnvelope"},
+        "evidence": {"$ref": "#/$defs/producerEvidenceEnvelope"},
         "location": {"oneOf": [{"$ref": "#/$defs/edgeLocation"}, {"type": "null"}]}
-      }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "relation": {"enum": ["declares", "contains", "imports", "inherits", "implements", "references", "tests", "documents", "maps_to"]},
+                "flow": {"type": "null"},
+                "condition": {"type": "null"},
+                "branch_group_id": {"type": "null"},
+                "call_site_id": {"type": "null"},
+                "exception_scope_id": {"type": "null"},
+                "order": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["enters", "routes_to", "passes_through", "binds", "validates", "authorizes", "invokes", "returns_to", "branches_to", "merges_at", "throws_to", "reads", "writes", "queries", "calls_external", "emits", "dispatches", "handles", "schedules", "responds_with", "redirects_to", "aborts_with", "exits_at"]},
+                "flow": {"enum": ["always", "conditional", "alternative", "exception", "async", "loop"]}
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "flow": {"const": "always"},
+                "condition": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/condition", "properties": {"polarity": {"const": "finally"}}}
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "conditional"},
+                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["true", "false", "loop_body", "loop_exit"]}}}
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "alternative"},
+                "condition": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["case", "default"]}}}
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "alternative"},
+                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["true", "false", "loop_body", "loop_exit", "exception", "finally"]}}},
+                "branch_group_id": {"$ref": "#/$defs/branchId"}
+              }
+            },
+            {
+              "properties": {
+                "flow": {"const": "exception"},
+                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"const": "exception"}}}
+              }
+            },
+            {"properties": {"flow": {"enum": ["async", "loop"]}, "condition": {"type": "null"}}},
+            {"properties": {"flow": {"type": "null"}, "condition": {"type": "null"}}}
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "relation": {"const": "invokes"},
+                "flow": {"enum": ["always", "conditional", "alternative"]},
+                "call_site_id": {"$ref": "#/$defs/callSiteId"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "returns_to"},
+                "flow": {"const": "always"},
+                "condition": {"type": "null"},
+                "branch_group_id": {"type": "null"},
+                "call_site_id": {"$ref": "#/$defs/callSiteId"},
+                "exception_scope_id": {"type": "null"},
+                "order": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "throws_to"},
+                "flow": {"const": "exception"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["emits", "dispatches", "schedules"]},
+                "flow": {"const": "async"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "branches_to"},
+                "flow": {"enum": ["conditional", "alternative", "loop"]},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "merges_at"},
+                "flow": {"const": "always"},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "enters"},
+                "flow": {"const": "always"},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["routes_to", "passes_through", "binds", "validates", "authorizes", "responds_with", "redirects_to", "aborts_with", "exits_at"]},
+                "flow": {"enum": ["always", "conditional", "alternative"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"enum": ["reads", "writes", "queries", "calls_external"]},
+                "flow": {"enum": ["always", "conditional", "alternative", "async"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "relation": {"const": "handles"},
+                "flow": {"enum": ["always", "conditional", "alternative", "exception"]},
+                "call_site_id": {"type": "null"}
+              }
+            },
+            {"properties": {"relation": {"enum": ["declares", "contains", "imports", "inherits", "implements", "references", "tests", "documents", "maps_to"]}}}
+          ]
+        }
+      ]
     },
     "stage": {"enum": ["entry", "routing", "middleware", "security", "input", "handler", "domain", "data", "integration", "async", "response", "error"]},
     "stageCounts": {
@@ -1363,7 +1586,29 @@
         "priority": {"enum": ["low", "normal", "high", "critical"]},
         "impact": {"$ref": "#/$defs/display1000"},
         "fingerprint": {"$ref": "#/$defs/digest"}
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "candidate_set_knowledge": {"const": "complete"},
+            "candidate_target_node_ids": {"minItems": 1},
+            "candidate_edge_ids": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "candidate_set_knowledge": {"const": "incomplete"},
+            "candidate_target_node_ids": {"minItems": 1}
+          }
+        },
+        {
+          "properties": {
+            "candidate_set_knowledge": {"const": "not_applicable"},
+            "candidate_target_node_ids": {"maxItems": 0},
+            "candidate_edge_ids": {"maxItems": 0}
+          }
+        }
+      ]
     }
   }
 }
