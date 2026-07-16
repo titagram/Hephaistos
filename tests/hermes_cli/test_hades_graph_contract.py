@@ -1522,3 +1522,763 @@ def test_artifact_digest_is_the_last_semantic_closure_check() -> None:
         validation.validate_artifact(payload)
 
     assert exc_info.value.code == "artifact_digest_mismatch"
+
+
+def _exact_count(value: int) -> dict[str, Any]:
+    return {
+        "represented": value,
+        "value": value,
+        "knowledge": "exact" if value else "absence_verified",
+        "reason": None,
+    }
+
+
+def _order_key(
+    stage_from: str,
+    min_depth: int,
+    source_id: str,
+    target_id: str,
+    public_edge_id: str,
+) -> str:
+    stage_ordinal = [
+        "entry",
+        "routing",
+        "middleware",
+        "security",
+        "input",
+        "handler",
+        "domain",
+        "data",
+        "integration",
+        "async",
+        "response",
+        "error",
+    ].index(stage_from)
+    return (
+        f"{stage_ordinal:02d}:{min_depth:06d}:{source_id}:{target_id}:{public_edge_id}"
+    )
+
+
+def _append_edge(
+    artifact: dict[str, Any],
+    *,
+    source_id: str,
+    target_id: str,
+    relation: str,
+    flow: str,
+    owner_node_id: str,
+    ast_path: str,
+    order: int,
+) -> str:
+    occurrence = {
+        "kind": "ast",
+        "owner_node_id": owner_node_id,
+        "ast_path": ast_path,
+        "ordinal": 0,
+    }
+    identity = {
+        "source_id": source_id,
+        "target_id": target_id,
+        "relation": relation,
+        "flow": flow,
+        "condition_hash": None,
+        "branch_group_id": None,
+        "call_site_id": None,
+        "exception_scope_id": None,
+        "occurrence": occurrence,
+    }
+    public_id = edge_id(identity)
+    file_path = next(
+        node["identity"]["path"]
+        for node in artifact["nodes"]
+        if node["identity"]["variant"] == "file"
+    )
+    artifact["edges"].append({
+        "id": public_id,
+        "source_id": source_id,
+        "target_id": target_id,
+        "relation": relation,
+        "flow": flow,
+        "condition": None,
+        "branch_group_id": None,
+        "call_site_id": None,
+        "exception_scope_id": None,
+        "order": order,
+        "uncertainty_id": None,
+        "occurrence": occurrence,
+        "evidence": _producer_evidence(artifact, ast_path),
+        "location": {"path": file_path, "line": 1, "ordinal": order},
+    })
+    return public_id
+
+
+def _append_flow_step(
+    artifact: dict[str, Any],
+    *,
+    public_flow_id: str,
+    public_edge_id: str,
+    stage_from: str,
+    stage_to: str,
+    min_depth: int,
+    async_context: str,
+    child_flow_id: str | None = None,
+    async_cycle: bool = False,
+    backbone_role: str = "mandatory",
+) -> None:
+    edge = next(
+        record for record in artifact["edges"] if record["id"] == public_edge_id
+    )
+    artifact["flow_steps"].append({
+        "id": flow_step_id(
+            public_flow_id,
+            public_edge_id,
+            stage_from,
+            stage_to,
+            async_context,
+        ),
+        "flow_id": public_flow_id,
+        "edge_id": public_edge_id,
+        "stage_from": stage_from,
+        "stage_to": stage_to,
+        "min_depth": min_depth,
+        "branch_group_id": edge["branch_group_id"],
+        "async_context": async_context,
+        "async_child_flow_id": child_flow_id,
+        "async_cycle": async_cycle,
+        "backbone_role": backbone_role,
+        "order_key": _order_key(
+            stage_from,
+            min_depth,
+            edge["source_id"],
+            edge["target_id"],
+            public_edge_id,
+        ),
+    })
+
+
+def _valid_flow_artifact() -> dict[str, Any]:
+    artifact = _valid_semantic_artifact()
+    binding_id = artifact["project"]["workspace_binding_id"]
+    path = artifact["nodes"][0]["identity"]["path"]
+
+    entrypoint_identity = {
+        "entrypoint_kind": "http_route",
+        "framework": None,
+        "method_semantics": "explicit",
+        "methods": ["GET"],
+        "public_path": "/jobs",
+        "public_name": "App\\Http\\jobs",
+        "trigger": {"kind": "http", "value": "GET /jobs"},
+        "match_constraints": {
+            "host": None,
+            "schemes": [],
+            "condition_hash": None,
+        },
+        "registration_occurrence": {
+            "kind": "ast",
+            "path": path,
+            "structural_path": "routes/jobs",
+            "ordinal": 0,
+        },
+    }
+    entrypoint_node_identity = {
+        "variant": "entrypoint",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "entrypoint",
+        "path": path,
+        "entrypoint_identity": entrypoint_identity,
+    }
+    entrypoint_id = node_id(entrypoint_node_identity)
+    handler_id = _append_executable_node(
+        artifact,
+        kind="method",
+        structural_path="declaration/controller/jobs",
+    )
+    job_id = _append_executable_node(
+        artifact,
+        kind="job",
+        structural_path="declaration/job/send",
+    )
+    response_id = _append_executable_node(
+        artifact,
+        kind="response",
+        structural_path="body/response/0",
+        owner_node_id=handler_id,
+    )
+    async_exit_id = _append_executable_node(
+        artifact,
+        kind="exit",
+        structural_path="body/exit/0",
+        owner_node_id=job_id,
+    )
+    artifact["nodes"].append({
+        "id": entrypoint_id,
+        "identity": entrypoint_node_identity,
+        "kind": "entrypoint",
+        "language": "php",
+        "framework": None,
+        "name": "GET /jobs",
+        "qualified_name": "App\\Http\\jobs",
+        "namespace": None,
+        "uncertainty_id": None,
+        "location": {"path": path, "start_line": 1, "end_line": 1},
+        "properties": {},
+        "evidence": _producer_evidence(artifact, "routes/jobs"),
+    })
+    artifact["nodes"].sort(key=lambda record: record["id"])
+    artifact["entrypoints"] = [
+        {
+            "id": entrypoint_id,
+            "entrypoint_kind": "http_route",
+            "label": "GET /jobs",
+            "framework": None,
+            "method_semantics": "explicit",
+            "methods": ["GET"],
+            "public_path": "/jobs",
+            "public_name": "App\\Http\\jobs",
+            "handler_node_id": handler_id,
+            "uncertainty_id": None,
+            "trigger": entrypoint_identity["trigger"],
+            "match_constraints": entrypoint_identity["match_constraints"],
+            "registration_occurrence": entrypoint_identity["registration_occurrence"],
+            "evidence": _producer_evidence(artifact, "routes/jobs"),
+        }
+    ]
+
+    route_edge_id = _append_edge(
+        artifact,
+        source_id=entrypoint_id,
+        target_id=handler_id,
+        relation="routes_to",
+        flow="always",
+        owner_node_id=entrypoint_id,
+        ast_path="routes/jobs/handler",
+        order=0,
+    )
+    dispatch_edge_id = _append_edge(
+        artifact,
+        source_id=handler_id,
+        target_id=job_id,
+        relation="dispatches",
+        flow="async",
+        owner_node_id=handler_id,
+        ast_path="body/dispatch/0",
+        order=1,
+    )
+    response_edge_id = _append_edge(
+        artifact,
+        source_id=handler_id,
+        target_id=response_id,
+        relation="responds_with",
+        flow="always",
+        owner_node_id=handler_id,
+        ast_path="body/response/0",
+        order=2,
+    )
+    async_exit_edge_id = _append_edge(
+        artifact,
+        source_id=job_id,
+        target_id=async_exit_id,
+        relation="exits_at",
+        flow="always",
+        owner_node_id=job_id,
+        ast_path="body/exit/0",
+        order=0,
+    )
+    artifact["edges"].sort(key=lambda record: record["id"])
+
+    sync_flow_id = flow_id(entrypoint_id, entrypoint_id, "request_lifecycle")
+    child_flow_id = flow_id(entrypoint_id, job_id, "async_flow")
+    capabilities = copy.deepcopy(
+        artifact["graph_contract"]["completeness"]["capabilities"]
+    )
+    artifact["flows"] = [
+        {
+            "id": sync_flow_id,
+            "entrypoint_id": entrypoint_id,
+            "root_node_id": entrypoint_id,
+            "kind": "request_lifecycle",
+            "represented_step_count": 3,
+            "terminal_count": _exact_count(1),
+            "linked_async_flow_count": _exact_count(1),
+            "stage_counts": {
+                "entry": _exact_count(1),
+                "handler": _exact_count(1),
+                "async": _exact_count(1),
+                "response": _exact_count(1),
+            },
+            "completeness": {"status": "full", "capabilities": capabilities},
+            "uncertainty_count": _exact_count(0),
+        },
+        {
+            "id": child_flow_id,
+            "entrypoint_id": entrypoint_id,
+            "root_node_id": job_id,
+            "kind": "async_flow",
+            "represented_step_count": 1,
+            "terminal_count": _exact_count(1),
+            "linked_async_flow_count": _exact_count(0),
+            "stage_counts": {
+                "entry": _exact_count(1),
+                "response": _exact_count(1),
+            },
+            "completeness": {
+                "status": "full",
+                "capabilities": copy.deepcopy(capabilities),
+            },
+            "uncertainty_count": _exact_count(0),
+        },
+    ]
+    artifact["flows"].sort(key=lambda record: record["id"])
+    artifact["flow_steps"] = []
+    _append_flow_step(
+        artifact,
+        public_flow_id=sync_flow_id,
+        public_edge_id=route_edge_id,
+        stage_from="entry",
+        stage_to="handler",
+        min_depth=0,
+        async_context="synchronous",
+    )
+    _append_flow_step(
+        artifact,
+        public_flow_id=sync_flow_id,
+        public_edge_id=dispatch_edge_id,
+        stage_from="handler",
+        stage_to="async",
+        min_depth=1,
+        async_context="synchronous",
+        child_flow_id=child_flow_id,
+        backbone_role="async",
+    )
+    _append_flow_step(
+        artifact,
+        public_flow_id=sync_flow_id,
+        public_edge_id=response_edge_id,
+        stage_from="handler",
+        stage_to="response",
+        min_depth=1,
+        async_context="synchronous",
+    )
+    _append_flow_step(
+        artifact,
+        public_flow_id=child_flow_id,
+        public_edge_id=async_exit_edge_id,
+        stage_from="entry",
+        stage_to="response",
+        min_depth=0,
+        async_context="linked_async",
+    )
+    artifact["flow_steps"].sort(key=lambda record: record["id"])
+
+    coverage = artifact["graph_contract"]["coverage"]
+    coverage["entrypoints"].update(
+        detected=1,
+        analyzed=1,
+        partial=0,
+        by_kind={"http_route": 1},
+    )
+    coverage["records"].update(
+        nodes=len(artifact["nodes"]),
+        structures=0,
+        edges=len(artifact["edges"]),
+        flows=len(artifact["flows"]),
+        flow_steps=len(artifact["flow_steps"]),
+        uncertainties=0,
+    )
+    artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        artifact
+    )
+    return artifact
+
+
+def _rehash_artifact(artifact: dict[str, Any]) -> None:
+    artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        artifact
+    )
+
+
+def test_valid_semantic_sync_and_async_flow_fixture() -> None:
+    _, _, validation = _task3_api()
+
+    validation.validate_artifact(_valid_flow_artifact())
+
+
+def _flow_by_kind(artifact: dict[str, Any], kind: str) -> dict[str, Any]:
+    return next(flow for flow in artifact["flows"] if flow["kind"] == kind)
+
+
+def _step_by_relation(
+    artifact: dict[str, Any], relation: str, *, flow_kind: str | None = None
+) -> dict[str, Any]:
+    edge_ids = {
+        edge["id"] for edge in artifact["edges"] if edge["relation"] == relation
+    }
+    flow_id_value = (
+        None if flow_kind is None else _flow_by_kind(artifact, flow_kind)["id"]
+    )
+    return next(
+        step
+        for step in artifact["flow_steps"]
+        if step["edge_id"] in edge_ids
+        and (flow_id_value is None or step["flow_id"] == flow_id_value)
+    )
+
+
+def test_unknown_boundary_requires_unresolved_primary_evidence() -> None:
+    _, _, validation = _task3_api()
+    payload = _with_external_uncertainty()
+    boundary = next(
+        node for node in payload["nodes"] if node["kind"] == "unknown_boundary"
+    )
+    unresolved = copy.deepcopy(boundary["evidence"]["primary"])
+    boundary["evidence"]["primary"]["origin"] = "verified_from_code"
+    boundary["evidence"]["supporting"] = [unresolved]
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "unknown_boundary_primary"
+
+
+def test_file_inventory_evidence_authenticates_its_own_record() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    binding_id = payload["project"]["workspace_binding_id"]
+    other_path = "src/Other.php"
+    other_digest = "f" * 64
+    other_identity = {
+        "variant": "file",
+        "workspace_binding_id": binding_id,
+        "language": "php",
+        "kind": "file",
+        "path": other_path,
+    }
+    payload["nodes"].append({
+        "id": node_id(other_identity),
+        "identity": other_identity,
+        "kind": "file",
+        "language": "php",
+        "framework": None,
+        "name": "Other.php",
+        "qualified_name": other_path,
+        "namespace": None,
+        "uncertainty_id": None,
+        "location": None,
+        "properties": {
+            "file_sha256": other_digest,
+            "byte_size": 0,
+            "analysis_status": "analyzed",
+            "omission_reason": None,
+            "is_test": False,
+            "is_generated": False,
+        },
+        "evidence": {
+            "primary": {
+                "origin": "verified_from_code",
+                "extractor": "inventory.v2",
+                "source_locator": {"kind": "file", "path": other_path},
+                "source_fingerprint": file_source_fingerprint(other_digest, other_path),
+                "inference_rule": None,
+            },
+            "supporting": [],
+            "supporting_omitted_count": 0,
+        },
+    })
+    original = next(
+        node
+        for node in payload["nodes"]
+        if node["identity"]["variant"] == "file"
+        and node["identity"]["path"] != other_path
+    )
+    original["evidence"]["primary"]["source_locator"]["path"] = other_path
+    original["evidence"]["primary"]["source_fingerprint"] = file_source_fingerprint(
+        other_digest, other_path
+    )
+    payload["nodes"].sort(key=lambda record: record["id"])
+    artifact = model.artifact_from_payload(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_references(
+            artifact, validation.build_record_index(artifact)
+        )
+
+    assert exc_info.value.code == "file_evidence_record_mismatch"
+
+
+def test_incomplete_target_only_hint_respects_resolution_target_kind() -> None:
+    _, _, validation = _task3_api()
+    payload = _with_external_uncertainty()
+    uncertainty = payload["uncertainties"][0]
+    method_id = next(
+        node["id"] for node in payload["nodes"] if node["kind"] == "method"
+    )
+    uncertainty["candidate_set_knowledge"] = "incomplete"
+    uncertainty["candidate_target_node_ids"] = [method_id]
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "uncertainty_target_kind"
+
+
+def test_async_flow_cannot_be_orphaned_from_verified_parent_dispatch() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    parent = _step_by_relation(payload, "dispatches", flow_kind="request_lifecycle")
+    parent["async_child_flow_id"] = None
+    _flow_by_kind(payload, "request_lifecycle")["linked_async_flow_count"] = (
+        _exact_count(0)
+    )
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_async_orphan"
+
+
+def test_async_parent_link_matches_child_entrypoint_and_target() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    parent = _step_by_relation(payload, "dispatches", flow_kind="request_lifecycle")
+    parent["async_child_flow_id"] = _flow_by_kind(payload, "request_lifecycle")["id"]
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_async_parent_mismatch"
+
+
+def test_async_cycle_flag_requires_child_to_be_an_ancestor() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    parent = _step_by_relation(payload, "dispatches", flow_kind="request_lifecycle")
+    parent["async_cycle"] = True
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_async_cycle"
+
+
+def test_flow_min_depth_is_recomputed_from_root() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    step = _step_by_relation(payload, "routes_to")
+    step["min_depth"] = 999
+    step["order_key"] = _order_key(
+        step["stage_from"],
+        step["min_depth"],
+        next(
+            edge["source_id"]
+            for edge in payload["edges"]
+            if edge["id"] == step["edge_id"]
+        ),
+        next(
+            edge["target_id"]
+            for edge in payload["edges"]
+            if edge["id"] == step["edge_id"]
+        ),
+        step["edge_id"],
+    )
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_min_depth"
+
+
+def test_flow_order_key_is_canonical() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    _step_by_relation(payload, "routes_to")["order_key"] = "bogus"
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_order_key"
+
+
+def test_flow_stage_assignment_matches_relation_and_target() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    step = _step_by_relation(payload, "routes_to")
+    step["stage_to"] = "data"
+    step["id"] = flow_step_id(
+        step["flow_id"],
+        step["edge_id"],
+        step["stage_from"],
+        step["stage_to"],
+        step["async_context"],
+    )
+    _flow_by_kind(payload, "request_lifecycle")["stage_counts"]["data"] = _exact_count(
+        1
+    )
+    payload["flow_steps"].sort(key=lambda record: record["id"])
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_stage_mismatch"
+
+
+def test_flow_backbone_role_is_recomputed_from_topology() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    _step_by_relation(payload, "routes_to")["backbone_role"] = "branch"
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_backbone"
+
+
+def test_every_flow_step_is_reachable_from_its_flow_root() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    sync_flow = _flow_by_kind(payload, "request_lifecycle")
+    async_exit_step = _step_by_relation(payload, "exits_at", flow_kind="async_flow")
+    _append_flow_step(
+        payload,
+        public_flow_id=sync_flow["id"],
+        public_edge_id=async_exit_step["edge_id"],
+        stage_from="entry",
+        stage_to="response",
+        min_depth=0,
+        async_context="synchronous",
+    )
+    payload["flow_steps"].sort(key=lambda record: record["id"])
+    sync_flow["represented_step_count"] = 4
+    sync_flow["terminal_count"] = _exact_count(2)
+    sync_flow["stage_counts"]["entry"] = _exact_count(2)
+    sync_flow["stage_counts"]["response"] = _exact_count(2)
+    payload["graph_contract"]["coverage"]["records"]["flow_steps"] = 5
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_reachability"
+
+
+def test_entrypoint_handler_must_be_an_executable_handler_kind() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    file_id = next(node["id"] for node in payload["nodes"] if node["kind"] == "file")
+    payload["entrypoints"][0]["handler_node_id"] = file_id
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "entrypoint_handler_kind"
+
+
+def test_call_site_continuation_must_be_owned_executable_occurrence() -> None:
+    _, model, validation = _task3_api()
+    payload = _valid_semantic_artifact()
+    owner_id = _append_executable_node(
+        payload,
+        kind="method",
+        structural_path="declaration/method/owner",
+    )
+    file_id = next(node["id"] for node in payload["nodes"] if node["kind"] == "file")
+    identity = {
+        "kind": "call_site",
+        "owner_node_id": owner_id,
+        "structural_path": "body/call/0",
+        "ordinal": 0,
+        "subtype": "call",
+    }
+    payload["structures"] = [
+        {
+            "id": call_site_id(identity),
+            **identity,
+            "continuation_node_id": file_id,
+            "parent_structure_id": None,
+            "evidence": _producer_evidence(payload, "body/call/0"),
+        }
+    ]
+    artifact = model.artifact_from_payload(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_references(
+            artifact, validation.build_record_index(artifact)
+        )
+
+    assert exc_info.value.code == "structure_continuation_mismatch"
+
+
+def test_async_flow_root_must_be_a_compatible_async_target() -> None:
+    _, _, validation = _task3_api()
+    payload = _valid_flow_artifact()
+    child = _flow_by_kind(payload, "async_flow")
+    old_flow_id = child["id"]
+    child["root_node_id"] = next(
+        node["id"] for node in payload["nodes"] if node["kind"] == "file"
+    )
+    child["id"] = flow_id(child["entrypoint_id"], child["root_node_id"], child["kind"])
+    child["stage_counts"]["entry"] = _exact_count(2)
+    for step in payload["flow_steps"]:
+        if step["flow_id"] == old_flow_id:
+            step["flow_id"] = child["id"]
+            step["id"] = flow_step_id(
+                step["flow_id"],
+                step["edge_id"],
+                step["stage_from"],
+                step["stage_to"],
+                step["async_context"],
+            )
+        if step["async_child_flow_id"] == old_flow_id:
+            step["async_child_flow_id"] = child["id"]
+    payload["flows"].sort(key=lambda record: record["id"])
+    payload["flow_steps"].sort(key=lambda record: record["id"])
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "flow_root_kind"
+
+
+def test_capability_reason_count_matches_affected_records() -> None:
+    _, _, validation = _task3_api()
+    payload = _with_external_uncertainty()
+    global_reason = payload["graph_contract"]["completeness"]["capabilities"][
+        "data_access"
+    ]["reasons"][0]
+    language_reason = payload["graph_contract"]["completeness"]["languages"][0][
+        "capabilities"
+    ]["data_access"]["reasons"][0]
+    global_reason["count"] = 999
+    language_reason["count"] = 999
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "capability_reason_count_mismatch"
+
+
+def test_global_and_language_capability_reason_counts_reconcile() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_with_external_uncertainty()))
+    payload["graph_contract"]["completeness"]["capabilities"]["data_access"]["reasons"][
+        0
+    ]["count"] = 2
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "capability_reason_scope_mismatch"
