@@ -5,13 +5,18 @@ import copy
 import hashlib
 import hmac
 import json
-import unicodedata
 from pathlib import Path
 from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
+
+from hermes_cli.hades_graph_contract import (
+    canonical_json_bytes,
+    load_json_bytes,
+    normalize_source_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +31,6 @@ SCHEMAS = (
     "verification-result.schema.json",
     "graph-overlay.schema.json",
 )
-SAFE_INTEGER_MAX = 9_007_199_254_740_991
 FORMAT_CHECKER = FormatChecker()
 
 
@@ -48,7 +52,9 @@ def _contract_registry() -> Registry:
     registry = Registry()
     for name in SCHEMAS:
         document = _contract_document(name)
-        registry = registry.with_resource(document["$id"], Resource.from_contents(document))
+        registry = registry.with_resource(
+            document["$id"], Resource.from_contents(document)
+        )
     return registry
 
 
@@ -75,59 +81,7 @@ def validate_artifact_definition(name: str, instance: Any) -> None:
 
 
 def strict_load_contract_json(raw: bytes) -> Any:
-    def reject_float(_value: str) -> Any:
-        raise ValueError("float_not_allowed")
-
-    return json.loads(raw, parse_float=reject_float)
-
-
-def _canonical_fragment(value: Any) -> str:
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, int):
-        if not 0 <= value <= SAFE_INTEGER_MAX:
-            raise ValueError("integer outside the graph-v2 interoperable range")
-        return str(value)
-    if isinstance(value, float):
-        raise TypeError("graph-v2 canonical JSON rejects floats")
-    if isinstance(value, str):
-        normalized = unicodedata.normalize("NFC", value)
-        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(value, list):
-        return "[" + ",".join(_canonical_fragment(item) for item in value) + "]"
-    if isinstance(value, dict):
-        normalized: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("canonical JSON object keys must be strings")
-            nfc_key = unicodedata.normalize("NFC", key)
-            if nfc_key in normalized:
-                raise ValueError("NFC-normalized key collision")
-            normalized[nfc_key] = item
-        keys = sorted(normalized, key=lambda item: item.encode("utf-16-be"))
-        return "{" + ",".join(
-            f"{_canonical_fragment(key)}:{_canonical_fragment(normalized[key])}"
-            for key in keys
-        ) + "}"
-    raise TypeError(f"unsupported canonical JSON value: {type(value).__name__}")
-
-
-def canonical_json_bytes(value: Any) -> bytes:
-    return _canonical_fragment(value).encode("utf-8")
-
-
-def _normalize_source_path(value: str) -> str:
-    normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
-    parts = normalized.split("/")
-    if not normalized or normalized.startswith("/") or any(
-        part in {"", ".", ".."} for part in parts
-    ):
-        raise ValueError("unsafe source path")
-    return normalized
+    return load_json_bytes(raw)
 
 
 @pytest.fixture
@@ -314,9 +268,10 @@ def test_graph_v2_contract_inventory_is_closed_and_manifested():
         assert document["additionalProperties"] is False
         assert _all_object_schemas_are_closed(document)
         digest = hashlib.sha256((CONTRACT_ROOT / name).read_bytes()).hexdigest()
-        assert next(
-            row["sha256"] for row in manifest["files"] if row["path"] == name
-        ) == digest
+        assert (
+            next(row["sha256"] for row in manifest["files"] if row["path"] == name)
+            == digest
+        )
 
 
 @pytest.mark.parametrize(
@@ -338,9 +293,7 @@ def test_artifact_schema_rejects_non_v2_open_or_unsafe_payloads(
 
 def test_raw_wire_integral_float_is_rejected_before_schema_validation() -> None:
     golden = json.loads(
-        (CONTRACT_ROOT / "golden" / "canonicalization.json").read_text(
-            encoding="utf-8"
-        )
+        (CONTRACT_ROOT / "golden" / "canonicalization.json").read_text(encoding="utf-8")
     )
     assert golden["raw_wire_negative_vectors"] == [
         {
@@ -405,9 +358,7 @@ def test_identity_namespaces_are_limited_to_512_characters() -> None:
 def test_file_evidence_is_confined_to_file_nodes(
     valid_artifact: dict[str, Any],
 ) -> None:
-    examples = _contract_document("golden/canonicalization.json")[
-        "contract_examples"
-    ]
+    examples = _contract_document("golden/canonicalization.json")["contract_examples"]
     file_node = valid_artifact["nodes"][0]
     validate_artifact_definition("node", file_node)
 
@@ -455,9 +406,7 @@ def test_file_evidence_is_confined_to_file_nodes(
         examples["edges"][0],
     ]
     definition_names = ["node", "entrypoint", "structure", "edge"]
-    for definition_name, record in zip(
-        definition_names, producer_records, strict=True
-    ):
+    for definition_name, record in zip(definition_names, producer_records, strict=True):
         mutated = copy.deepcopy(record)
         mutated["evidence"]["primary"]["source_locator"] = {
             "kind": "file",
@@ -473,17 +422,15 @@ def test_structural_edges_reject_every_executable_field() -> None:
             "edges"
         ][0]
     )
-    edge.update(
-        {
-            "relation": "declares",
-            "flow": None,
-            "condition": None,
-            "branch_group_id": None,
-            "call_site_id": None,
-            "exception_scope_id": None,
-            "order": None,
-        }
-    )
+    edge.update({
+        "relation": "declares",
+        "flow": None,
+        "condition": None,
+        "branch_group_id": None,
+        "call_site_id": None,
+        "exception_scope_id": None,
+        "order": None,
+    })
     validate_artifact_definition("edge", edge)
 
     executable_values = {
@@ -533,12 +480,10 @@ def test_executable_edge_flow_condition_and_structure_matrix() -> None:
             validate_artifact_definition("edge", invalid)
 
     invocation = copy.deepcopy(edge)
-    invocation.update(
-        {
-            "relation": "invokes",
-            "call_site_id": "hades:call-site:v2:" + "3" * 64,
-        }
-    )
+    invocation.update({
+        "relation": "invokes",
+        "call_site_id": "hades:call-site:v2:" + "3" * 64,
+    })
     validate_artifact_definition("edge", invocation)
     invocation["call_site_id"] = None
     with pytest.raises(ValidationError):
@@ -555,7 +500,11 @@ def test_executable_edge_flow_condition_and_structure_matrix() -> None:
             validate_artifact_definition("edge", invalid)
 
     branch = copy.deepcopy(edge)
-    branch.update({"relation": "branches_to", "flow": "conditional", "condition": predicate})
+    branch.update({
+        "relation": "branches_to",
+        "flow": "conditional",
+        "condition": predicate,
+    })
     with pytest.raises(ValidationError):
         validate_artifact_definition("edge", branch)
 
@@ -575,23 +524,19 @@ def test_alternative_edges_require_branch_group_and_preserve_dynamic_dispatch() 
     }
 
     ordinary = copy.deepcopy(edge)
-    ordinary.update(
-        {
-            "flow": "alternative",
-            "condition": case_condition,
-            "branch_group_id": branch_group_id,
-        }
-    )
+    ordinary.update({
+        "flow": "alternative",
+        "condition": case_condition,
+        "branch_group_id": branch_group_id,
+    })
     validate_artifact_definition("edge", ordinary)
 
     dynamic_dispatch = copy.deepcopy(edge)
-    dynamic_dispatch.update(
-        {
-            "flow": "alternative",
-            "condition": None,
-            "branch_group_id": branch_group_id,
-        }
-    )
+    dynamic_dispatch.update({
+        "flow": "alternative",
+        "condition": None,
+        "branch_group_id": branch_group_id,
+    })
     validate_artifact_definition("edge", dynamic_dispatch)
 
     copied_outer_candidate = copy.deepcopy(dynamic_dispatch)
@@ -630,27 +575,23 @@ def test_structure_discriminator_closes_id_subtype_continuation_and_parent() -> 
         invalid_call_sites.append(mutated)
 
     branch = copy.deepcopy(call_site)
-    branch.update(
-        {
-            "id": "hades:branch:v2:" + "2" * 64,
-            "kind": "branch_group",
-            "subtype": "if",
-            "continuation_node_id": None,
-            "parent_structure_id": "hades:exception-scope:v2:" + "3" * 64,
-        }
-    )
+    branch.update({
+        "id": "hades:branch:v2:" + "2" * 64,
+        "kind": "branch_group",
+        "subtype": "if",
+        "continuation_node_id": None,
+        "parent_structure_id": "hades:exception-scope:v2:" + "3" * 64,
+    })
     validate_artifact_definition("structure", branch)
 
     exception_scope = copy.deepcopy(call_site)
-    exception_scope.update(
-        {
-            "id": "hades:exception-scope:v2:" + "3" * 64,
-            "kind": "exception_scope",
-            "subtype": "try_catch",
-            "continuation_node_id": None,
-            "parent_structure_id": "hades:branch:v2:" + "2" * 64,
-        }
-    )
+    exception_scope.update({
+        "id": "hades:exception-scope:v2:" + "3" * 64,
+        "kind": "exception_scope",
+        "subtype": "try_catch",
+        "continuation_node_id": None,
+        "parent_structure_id": "hades:branch:v2:" + "2" * 64,
+    })
     validate_artifact_definition("structure", exception_scope)
 
     invalid_structures = invalid_call_sites
@@ -675,7 +616,9 @@ def test_structure_discriminator_closes_id_subtype_continuation_and_parent() -> 
             validate_artifact_definition("structure", invalid)
 
 
-def test_candidate_set_knowledge_is_the_same_closed_union_in_artifact_and_work() -> None:
+def test_candidate_set_knowledge_is_the_same_closed_union_in_artifact_and_work() -> (
+    None
+):
     golden = _contract_document("golden/canonicalization.json")
     uncertainty = copy.deepcopy(golden["contract_examples"]["uncertainties"][0])
     work = copy.deepcopy(
@@ -786,9 +729,7 @@ def test_resolution_kind_binds_subject_and_complete_cardinality_in_both_roots() 
         validate_artifact_definition("uncertainty", valid_artifact)
         validate_contract("verification-work.schema.json", valid_work)
 
-        invalid_artifact, invalid_work = records_for(
-            resolution_kind, illegal_subject
-        )
+        invalid_artifact, invalid_work = records_for(resolution_kind, illegal_subject)
         with pytest.raises(ValidationError):
             validate_artifact_definition("uncertainty", invalid_artifact)
         with pytest.raises(ValidationError):
@@ -817,9 +758,7 @@ def test_resolution_kind_binds_subject_and_complete_cardinality_in_both_roots() 
             "external_target",
         ):
             subject = (
-                call_site_subject
-                if resolution_kind == "call_target"
-                else edge_subject
+                call_site_subject if resolution_kind == "call_target" else edge_subject
             )
             artifact, work = records_for(
                 resolution_kind, subject, "complete", candidate_count
@@ -828,7 +767,9 @@ def test_resolution_kind_binds_subject_and_complete_cardinality_in_both_roots() 
             validate_contract("verification-work.schema.json", work)
 
 
-def test_bundle_and_each_chunk_discriminator_validate(valid_artifact: dict[str, Any]) -> None:
+def test_bundle_and_each_chunk_discriminator_validate(
+    valid_artifact: dict[str, Any],
+) -> None:
     golden = json.loads(
         (CONTRACT_ROOT / "golden" / "canonicalization.json").read_text(encoding="utf-8")
     )
@@ -912,9 +853,10 @@ def test_verification_golden_payloads_validate() -> None:
         validate_contract("graph-overlay.schema.json", overlay)
         result = golden["results"][result_index]
         assert overlay["result_digest"] == golden["result_digests"][result_index]
-        assert overlay["evidence_digest"] == hashlib.sha256(
-            canonical_json_bytes(result["evidence"])
-        ).hexdigest()
+        assert (
+            overlay["evidence_digest"]
+            == hashlib.sha256(canonical_json_bytes(result["evidence"])).hexdigest()
+        )
 
     for item in golden["work_items"]:
         if item["domain"] == "graph":
@@ -941,9 +883,10 @@ def test_verification_golden_payloads_validate() -> None:
                 "source_tree_sha256": item["source_snapshot"]["tree_sha256"],
                 "attempt_generation": item["attempt_generation"],
             }
-        assert item["deduplication_key"] == hashlib.sha256(
-            canonical_json_bytes(preimage)
-        ).hexdigest()
+        assert (
+            item["deduplication_key"]
+            == hashlib.sha256(canonical_json_bytes(preimage)).hexdigest()
+        )
 
 
 def test_verification_goldens_are_closed_linked_scenarios() -> None:
@@ -997,9 +940,9 @@ def test_verification_goldens_are_closed_linked_scenarios() -> None:
             assert work["assertion"]["fingerprint"] == target["id"].removeprefix(
                 "hades:uncertainty:v2:"
             )
-            assert target["version"] == work["source_snapshot"][
-                "artifact_graph_version"
-            ]
+            assert (
+                target["version"] == work["source_snapshot"]["artifact_graph_version"]
+            )
             if result["verdict"] == "deferred":
                 assert result["graph"] is None
                 continue
@@ -1027,9 +970,10 @@ def test_verification_goldens_are_closed_linked_scenarios() -> None:
 
             for evidence in result["evidence"]:
                 if evidence["kind"] == "source_ref":
-                    assert evidence["source_tree_sha256"] == work["source_snapshot"][
-                        "tree_sha256"
-                    ]
+                    assert (
+                        evidence["source_tree_sha256"]
+                        == work["source_snapshot"]["tree_sha256"]
+                    )
         else:
             if result["verdict"] in {"verified", "contradicted"}:
                 assert work["source_snapshot"]["state"] == "available"
@@ -1166,14 +1110,14 @@ def test_canonicalization_vectors_have_exact_bytes_and_digests() -> None:
         }
         assert active_overlay["overlay"]
     for vector in vectors["path_vectors"]:
-        assert _normalize_source_path(vector["input"]) == vector["normalized"]
-        assert vector["normalized"].encode("utf-8").hex() == vector["normalized_utf8_hex"]
+        assert normalize_source_path(vector["input"]) == vector["normalized"]
+        assert (
+            vector["normalized"].encode("utf-8").hex() == vector["normalized_utf8_hex"]
+        )
     for vector in vectors["projection_versions"]:
         preimage = bytes.fromhex(vector["preimage_utf8_hex"])
         assert preimage == (
-            vector["artifact_graph_version"]
-            + ":"
-            + vector["verification_set_hash"]
+            vector["artifact_graph_version"] + ":" + vector["verification_set_hash"]
         ).encode("ascii")
         assert hashlib.sha256(preimage).hexdigest() == vector["projection_version"]
 

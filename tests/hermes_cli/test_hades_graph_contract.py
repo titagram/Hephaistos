@@ -1,1365 +1,411 @@
-from copy import deepcopy
+from __future__ import annotations
+
+import copy
+import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from hermes_cli.hades_graph_contract import finalize_graph_artifact
-from hermes_cli.hades_index.aggregate import merge_graph_artifacts
-from hermes_cli.hades_index.inventory import inventory_coverage
+import hermes_cli.hades_graph_contract as facade
+from hermes_cli.hades_graph_contract import (
+    GRAPH_CONTRACT_VERSION,
+    SCHEMA_NAMES,
+    GraphContractError,
+    GraphIdentityCollision,
+    artifact_digest,
+    artifact_graph_version,
+    ast_source_fingerprint,
+    branch_group_id,
+    call_site_id,
+    canonical_json_bytes,
+    canonicalize_records,
+    condition_hash,
+    config_source_fingerprint,
+    edge_id,
+    evidence_digest,
+    exception_scope_id,
+    file_source_fingerprint,
+    flow_id,
+    flow_step_id,
+    load_json_bytes,
+    node_id,
+    normalize_source_path,
+    projection_version,
+    result_digest,
+    sha256_jcs,
+    uncertainty_id,
+    validate_json_bytes,
+    validate_schema,
+    verification_deduplication_key,
+    verification_set_hash,
+)
 
 
-def test_finalize_graph_artifact_records_source_and_quality(tmp_path: Path):
-    graph = {
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": [{"id": "class:A", "name": "A", "kind": "class", "path": "a.php"}],
-        "edges": [
-            {"id": "calls:1", "kind": "calls", "source": "class:A", "target": "class:B"}
-        ],
-        "truncated": False,
+ROOT = Path(__file__).resolve().parents[2]
+CONTRACT_ROOT = ROOT / "contracts" / "hades" / "graph-v2"
+CANONICALIZATION_GOLDEN = CONTRACT_ROOT / "golden" / "canonicalization.json"
+CONTRACT_LOCK = CONTRACT_ROOT / "contract-lock.json"
+SCHEMA_SOURCE_COMMIT = "cbc07d447ad301a53468ad52093438cfe0160d1d"
+
+
+def _golden() -> dict[str, Any]:
+    return json.loads(CANONICALIZATION_GOLDEN.read_text(encoding="utf-8"))
+
+
+def _vector(kind: str) -> dict[str, Any]:
+    return next(item for item in _golden()["vectors"] if item["kind"] == kind)
+
+
+def test_facade_is_v2_only() -> None:
+    assert GRAPH_CONTRACT_VERSION == "hades.graph_artifact.v2"
+    assert not hasattr(facade, "finalize_graph_artifact")
+    assert not hasattr(facade, "DEFAULT_MAX_GRAPH_NODES")
+    assert not hasattr(facade, "_NODE_ID_PREFIX")
+
+
+def test_named_node_id_survives_unrelated_line_insertion() -> None:
+    named_node = {
+        "identity": _vector("node_id")["input"],
+        "location": {
+            "path": "src/Controller/WorkerController.php",
+            "start_line": 206,
+            "end_line": 240,
+        },
     }
-    result = finalize_graph_artifact(
-        graph,
-        payload={"head_commit": "abc123", "branch": "main"},
-        candidates=[tmp_path / "a.php"],
-        omitted=[],
-    )
-    assert result["graph_contract"] == {
-        "version": "hades.graph_artifact.v1",
-        "extractor": {
-            "name": "hades-native-php",
-            "version": "1",
-            "mode": "native",
-            "quality": "full",
-            "fallback_reason": None,
-        },
-        "coverage": {
-            "languages": ["php"],
-            "files_total": 1,
-            "files_analyzed": 1,
-            "files_failed": 0,
-            "files_budget_omitted": 0,
-            "routes_promoted": 0,
-            "routes_omitted": 0,
-            "tests_promoted": 0,
-            "tests_omitted": 0,
-            "nodes_capacity_omitted": 0,
-        },
-        "source": {"branch": "main", "head_commit": "abc123"},
-    }
-    assert result["canonicalization"]["nodes_synthesized"] == 1
-    assert result["head_commit"] == "abc123"
+    moved = copy.deepcopy(named_node)
+    moved["location"].update(start_line=900, end_line=905)
+
+    assert node_id(named_node["identity"]) == node_id(moved["identity"])
 
 
-def test_finalize_graph_artifact_exposes_inventory_fallback(tmp_path: Path):
-    result = finalize_graph_artifact(
-        {
-            "schema": "hades.code_graph.v1",
-            "language": "typescript",
-            "symbols": [],
-            "edges": [],
-            "truncated": True,
-        },
-        payload={"workspace_head_commit": "def456"},
-        candidates=[tmp_path / "app.ts"],
-        omitted=[{"path": "large.ts", "reason": "max_file_bytes"}],
-    )
-    assert result["graph_contract"]["extractor"]["quality"] == "inventory_only"
+def test_same_id_different_value_collision_is_fatal() -> None:
+    public_id = "hades:node:v2:" + "a" * 64
+    with pytest.raises(
+        GraphIdentityCollision,
+        match="same public ID has different canonical values",
+    ):
+        canonicalize_records([
+            {"id": public_id, "label": "A"},
+            {"id": public_id, "label": "B"},
+        ])
+
+
+def test_projection_version_hashes_exact_ascii_preimage() -> None:
     assert (
-        result["graph_contract"]["extractor"]["fallback_reason"]
-        == "bounded_or_omitted_input"
+        projection_version("a" * 64, "b" * 64)
+        == hashlib.sha256(("a" * 64 + ":" + "b" * 64).encode("ascii")).hexdigest()
     )
-    assert result["graph_contract"]["coverage"]["files_failed"] == 1
-    assert result["graph_contract"]["coverage"]["files_budget_omitted"] == 0
 
 
-def _finalize(
-    graph: dict,
-    *,
-    max_symbols: int = 5_000,
-    omitted: list[dict] | None = None,
-) -> dict:
-    return finalize_graph_artifact(
-        deepcopy(graph),
-        payload={
-            "head_commit": "abc123",
-            "branch": "main",
-            "max_graph_nodes": max_symbols,
-        },
-        candidates=[],
-        omitted=omitted or [],
+def test_canonical_json_is_rfc8785_safe_subset() -> None:
+    value = {
+        "\ue000": "BMP",
+        "\U0001f600": "astral",
+        "controls": '\x00\b\t\n\f\r"\\/\u2028',
+        "decomposed": "Cafe\u0301",
+        "flag": True,
+        "negative": -1,
+    }
+    assert (
+        canonical_json_bytes(value)
+        == (
+            '{"controls":"\\u0000\\b\\t\\n\\f\\r\\"\\\\/\u2028",'
+            '"decomposed":"Caf\u00e9","flag":true,"negative":-1,'
+            '"\U0001f600":"astral","\ue000":"BMP"}'
+        ).encode()
     )
 
 
 @pytest.mark.parametrize(
-    ("schema", "language"),
+    ("value", "code"),
     [
-        ("hades.php_graph.v1", "php"),
-        ("hades.code_graph.v1", "python"),
-        ("hades.code_graph.v1", "typescript"),
+        ({"value": 1.0}, "float_not_allowed"),
+        ({"value": 9_007_199_254_740_992}, "unsafe_integer"),
+        ({"value": -9_007_199_254_740_992}, "unsafe_integer"),
+        ({1: "not a string key"}, "non_string_object_key"),
+        ({"value": "\ud800"}, "isolated_surrogate"),
+        ({"Cafe\u0301": 1, "Caf\u00e9": 2}, "normalized_key_collision"),
+        (("not", "a", "JSON array"), "unsupported_json_type"),
     ],
 )
-def test_finalize_promotes_uniform_route_inventory_to_first_class_nodes(
-    schema: str,
-    language: str,
-):
-    result = _finalize(
-        {
-            "schema": schema,
-            "language": language,
-            "routes": [
-                {
-                    "framework": "fixture",
-                    "method": "GET",
-                    "uri": "/orders/{id}",
-                    "name": "orders.show",
-                    "handler": "OrderController@show",
-                    "path": "src/OrderController.php",
-                    "line": 12,
-                }
-            ],
-            "symbols": [
-                {"kind": "method", "name": "OrderController@show"}
-            ],
-            "edges": [
-                {
-                    "kind": "route_handler",
-                    "from": "route:orders.show",
-                    "to": "OrderController@show",
-                }
-            ],
-        },
-        max_symbols=20,
+def test_canonical_json_rejects_values_outside_safe_subset(
+    value: Any,
+    code: str,
+) -> None:
+    with pytest.raises(GraphContractError) as exc_info:
+        canonical_json_bytes(value)
+    assert exc_info.value.code == code
+
+
+def test_canonical_json_is_permutation_stable_and_boolean_is_not_integer() -> None:
+    first = {"z": [True, 1, None], "a": {"b": 2, "a": 1}}
+    second = {"a": {"a": 1, "b": 2}, "z": [True, 1, None]}
+    assert canonical_json_bytes(first) == canonical_json_bytes(second)
+    assert canonical_json_bytes({"value": True}) == b'{"value":true}'
+
+
+def test_path_normalization_is_nfc_posix_and_bounded() -> None:
+    path_vector = _golden()["path_vectors"][0]
+    assert normalize_source_path(path_vector["input"]) == path_vector["normalized"]
+    for invalid in (
+        "/absolute/private.php",
+        "C:/private.php",
+        "src/../private.php",
+        "src//private.php",
+        "src/\u202eprivate.php",
+    ):
+        with pytest.raises(GraphContractError) as exc_info:
+            normalize_source_path(invalid)
+        assert exc_info.value.code == "unsafe_source_path"
+
+
+def test_hashing_rejects_non_utc_timestamp_fields() -> None:
+    with pytest.raises(GraphContractError) as exc_info:
+        sha256_jcs({"generated_at": "2026-07-16T12:00:00+00:00"})
+    assert exc_info.value.code == "non_utc_timestamp"
+    assert sha256_jcs({"generated_at": "2026-07-16T12:00:00Z"})
+
+
+def test_raw_wire_integral_float_vector_is_rejected_before_schema() -> None:
+    vector = _golden()["raw_wire_negative_vectors"][0]
+    raw = bytes.fromhex(vector["raw_utf8_hex"])
+    assert json.loads(raw)["attempt_generation"] == 1.0
+
+    for operation in (
+        lambda: load_json_bytes(raw),
+        lambda: validate_json_bytes("verification-work.schema.json", raw),
+    ):
+        with pytest.raises(GraphContractError) as exc_info:
+            operation()
+        assert exc_info.value.code == vector["error_code"]
+
+
+def test_schema_facade_uses_complete_registry_and_format_checker() -> None:
+    assert SCHEMA_NAMES == frozenset({
+        "artifact.schema.json",
+        "bundle.schema.json",
+        "chunk.schema.json",
+        "dashboard-query.schema.json",
+        "dashboard-response.schema.json",
+        "verification-work.schema.json",
+        "verification-result.schema.json",
+        "graph-overlay.schema.json",
+    })
+    validate_schema(
+        "bundle.schema.json",
+        _golden()["contract_examples"]["bundle"],
     )
-
-    route = next(node for node in result["nodes"] if node.get("kind") == "route")
-    assert route["name"] == "orders.show"
-    assert route["uri"] == "/orders/{id}"
-    assert route["method"] == "GET"
-    assert route["handler"] == "OrderController@show"
-    assert result["canonicalization"]["route_inventory"] == {
-        "detected": 1,
-        "promoted": 1,
-        "merged": 0,
-    }
-    assert result["graph_contract"]["coverage"]["routes_promoted"] == 1
-    assert result["graph_contract"]["coverage"]["routes_omitted"] == 0
+    invalid = copy.deepcopy(_golden()["contract_examples"]["bundle"])
+    invalid["generated_at"] = "2026-02-31T12:00:00Z"
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("bundle.schema.json", invalid)
+    assert exc_info.value.code == "schema_validation_failed"
 
 
-def test_finalize_promotes_test_map_files_to_searchable_test_nodes():
-    result = _finalize(
-        {
-            "schema": "hades.php_graph.v1",
-            "language": "php",
-            "symbols": [],
-            "edges": [],
-            "tests": {
-                "schema": "hades.test_map.v1",
-                "files": [
-                    {
-                        "path": "tests/AdminControllerBulkDeleteBehaviorTest.php",
-                        "framework": "phpunit",
-                        "cases": ["testBulkDeleteSkipsForbiddenRows"],
-                        "target_candidates": [
-                            "AdminControllerBulkDeleteBehavior"
-                        ],
-                    }
-                ],
-            },
-        },
-        max_symbols=20,
+def test_contract_lock_pins_manifest_and_all_registered_schemas() -> None:
+    lock = json.loads(CONTRACT_LOCK.read_text(encoding="utf-8"))
+    manifest_path = CONTRACT_ROOT / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert lock["schema"] == "hades.graph_v2_contract_lock.v1"
+    assert lock["schema_source_commit"] == SCHEMA_SOURCE_COMMIT
+    assert (
+        lock["manifest_sha256"]
+        == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     )
-
-    test_node = next(node for node in result["nodes"] if node.get("kind") == "test")
-    assert test_node["name"] == "AdminControllerBulkDeleteBehaviorTest"
-    assert test_node["framework"] == "phpunit"
-    assert result["canonicalization"]["test_inventory"] == {
-        "detected": 1,
-        "promoted": 1,
-        "merged": 0,
+    assert lock["schema_digests"] == {
+        row["path"]: row["sha256"]
+        for row in manifest["files"]
+        if row["path"] in SCHEMA_NAMES
     }
-    assert result["graph_contract"]["coverage"]["tests_promoted"] == 1
-    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
+    assert set(lock["schema_digests"]) == SCHEMA_NAMES
 
 
-def test_finalize_distinguishes_same_test_names_by_path_and_unions_collections():
-    result = _finalize(
-        {
-            "schema": "hades.code_graph.v1",
-            "language": "python",
-            "symbols": [],
-            "edges": [],
-            "tests": {
-                "files": [
-                    {
-                        "path": "tests/unit/UserTest.py",
-                        "cases": ["test_beta", "test_alpha"],
-                        "target_candidates": ["User", "Account"],
-                    },
-                    {
-                        "path": "tests/integration/UserTest.py",
-                        "cases": ["test_integration"],
-                        "target_candidates": ["UserApi"],
-                    },
-                    {
-                        "path": "tests/unit/./UserTest.py",
-                        "cases": ["test_gamma", "test_alpha"],
-                        "target_candidates": ["Account", "Profile"],
-                    },
-                ]
-            },
-        },
-        max_symbols=20,
-    )
+def test_schema_facade_rejects_unknown_names_and_v1_with_typed_codes() -> None:
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("unknown.schema.json", {})
+    assert exc_info.value.code == "unknown_schema_name"
 
-    test_nodes = [node for node in result["nodes"] if node.get("kind") == "test"]
-    assert len(test_nodes) == 2
-    assert len({node["id"] for node in test_nodes}) == 2
-    unit = next(node for node in test_nodes if "test_gamma" in node.get("cases", []))
-    assert unit["cases"] == ["test_alpha", "test_beta", "test_gamma"]
-    assert unit["target_candidates"] == ["Account", "Profile", "User"]
-    assert result["canonicalization"]["test_inventory"] == {
-        "detected": 3,
-        "promoted": 2,
-        "merged": 1,
-    }
-    assert result["graph_contract"]["coverage"]["tests_promoted"] == 2
-    assert result["graph_contract"]["coverage"]["tests_omitted"] == 0
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("artifact.schema.json", {"schema": "hades.code_graph.v1"})
+    assert exc_info.value.code == "graph_v1_not_supported"
+
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("artifact-v1.schema.json", {})
+    assert exc_info.value.code == "graph_v1_not_supported"
 
 
-def test_polyglot_coverage_reports_unique_route_and_test_inventory_drops():
-    artifacts = []
-    for language, start in (("php", 0), ("python", 250)):
-        artifacts.append(
-            {
-                "language": language,
-                "framework": language,
-                "routes": [
-                    {
-                        "name": f"route.{index}",
-                        "method": "GET",
-                        "uri": f"/routes/{index}",
-                    }
-                    for index in range(start, start + 300)
-                ],
-                "symbols": [],
-                "edges": [],
-                "tests": {
-                    "files": [
-                        {"path": f"tests/{index}/BehaviorTest.py"}
-                        for index in range(start, start + 300)
-                    ]
-                },
-                "omitted": [],
-            }
+def test_schema_boundary_rejects_non_nfc_contract_strings() -> None:
+    bundle = copy.deepcopy(_golden()["contract_examples"]["bundle"])
+    bundle["source"]["branch"] = "Cafe\u0301"
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("bundle.schema.json", bundle)
+    assert exc_info.value.code == "non_nfc_string"
+
+
+def test_all_golden_identity_and_digest_helpers_match_exact_preimages() -> None:
+    node = _vector("node_id")
+    assert node_id(node["input"]) == "hades:node:v2:" + node["sha256"]
+
+    edge = _vector("edge_id")
+    assert edge_id(edge["input"]) == "hades:edge:v2:" + edge["sha256"]
+
+    condition = _vector("condition_hash")
+    assert condition_hash(condition["input"]["normalized_full"]) == condition["sha256"]
+
+    ast = _vector("ast_source_fingerprint")
+    assert (
+        ast_source_fingerprint(
+            ast["input"]["file_sha256"],
+            ast["input"]["path"],
+            ast["input"]["structural_path"],
         )
-
-    graph = merge_graph_artifacts(
-        artifacts,
-        root="workspace",
-        max_symbols=5_000,
-        max_edges=10_000,
-    )
-    result = finalize_graph_artifact(
-        graph,
-        payload={},
-        candidates=[],
-        omitted=[],
+        == ast["sha256"]
     )
 
-    coverage = result["graph_contract"]["coverage"]
-    assert len(result["routes"]) == 500
-    assert len(result["tests"]["files"]) == 500
-    assert coverage["routes_promoted"] == 500
-    assert coverage["routes_omitted"] == 50
-    assert coverage["tests_promoted"] == 500
-    assert coverage["tests_omitted"] == 50
-    assert not any(key.startswith("_") for key in result)
-
-
-def test_polyglot_coverage_unions_duplicate_private_child_identities():
-    shared_routes = [
-        {"name": "orders.index", "method": "GET", "uri": "/orders"},
-        {"name": "orders.show", "method": "GET", "uri": "/orders/{id}"},
-    ]
-    shared_tests = [
-        {"path": "tests/OrdersIndexTest.py"},
-        {"path": "tests/OrdersShowTest.py"},
-    ]
-    artifacts = []
-    for language in ("python", "typescript"):
-        artifacts.append(
-            {
-                "language": language,
-                "framework": language,
-                "routes": shared_routes[:1],
-                "symbols": [],
-                "edges": [],
-                "tests": {
-                    "files": shared_tests[:1],
-                    "_inventory_coverage": inventory_coverage(
-                        tests_detected=shared_tests,
-                        tests_retained=shared_tests[:1],
-                    ),
-                },
-                "omitted": [],
-                "_inventory_coverage": inventory_coverage(
-                    routes_detected=shared_routes,
-                    routes_retained=shared_routes[:1],
-                ),
-            }
+    config = _vector("config_source_fingerprint")
+    assert (
+        config_source_fingerprint(
+            config["input"]["file_sha256"],
+            config["input"]["path"],
+            config["input"]["structural_pointer"],
         )
-
-    result = finalize_graph_artifact(
-        merge_graph_artifacts(
-            artifacts,
-            root="workspace",
-            max_symbols=5_000,
-            max_edges=10_000,
-        ),
-        payload={},
-        candidates=[],
-        omitted=[],
+        == config["sha256"]
     )
 
-    coverage = result["graph_contract"]["coverage"]
-    assert coverage["routes_promoted"] == 1
-    assert coverage["routes_omitted"] == 1
-    assert coverage["tests_promoted"] == 1
-    assert coverage["tests_omitted"] == 1
-    assert not any(key.startswith("_") for key in result)
-    assert not any(key.startswith("_") for key in result["tests"])
-
-
-def test_inventory_promotion_merges_an_existing_route_node_idempotently():
-    result = _finalize(
-        {
-            "routes": [
-                {"method": "GET", "uri": "/orders", "name": "orders.index"}
-            ],
-            "symbols": [
-                {"kind": "route", "name": "orders.index", "method": "GET"}
-            ],
-            "edges": [],
-        },
-        max_symbols=20,
-    )
-
-    routes = [node for node in result["nodes"] if node.get("kind") == "route"]
-    assert len(routes) == 1
-    assert routes[0]["uri"] == "/orders"
-    assert result["canonicalization"]["route_inventory"] == {
-        "detected": 1,
-        "promoted": 0,
-        "merged": 1,
-    }
-
-
-def test_canonicalizes_php_like_nodes_and_closes_legacy_edges_without_paths_in_ids():
-    local_root = "/Users/alice/Dev/private-project"
-    graph = {
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": [
-            {
-                "kind": "class",
-                "name": "App\\Http\\Controllers\\OrderController",
-                "namespace": "App\\Http\\Controllers",
-                "path": f"{local_root}/app/Http/Controllers/OrderController.php",
-            },
-            {
-                "kind": "method",
-                "name": "OrderController@show",
-                "class": "App\\Http\\Controllers\\OrderController",
-                "method": "show",
-                "signature": "show(Order $order)",
-                "path": f"{local_root}/app/Http/Controllers/OrderController.php",
-            },
-            {
-                "kind": "route",
-                "name": "orders.show",
-                "signature": "GET /orders/{order}",
-                "path": "routes/web.php",
-            },
-            {"kind": "file", "path": "app/Http/Controllers/OrderController.php"},
-        ],
-        "edges": [
-            {
-                "kind": "declares",
-                "from": "App\\Http\\Controllers\\OrderController",
-                "to": "OrderController@show",
-            },
-            {
-                "kind": "route_handler",
-                "from": "route:orders.show",
-                "to": "OrderController@show",
-            },
-        ],
-        "truncated": False,
-    }
-
-    result = _finalize(graph)
-    node_ids = {node["id"] for node in result["nodes"]}
-
-    assert len(node_ids) == 4
-    assert all(node_id.startswith("hades:node:v1:") for node_id in node_ids)
-    assert all(local_root not in node_id for node_id in node_ids)
-    assert all(
-        edge["source_id"] in node_ids and edge["target_id"] in node_ids
-        for edge in result["relationships"]
-    )
-    assert all(
-        edge["id"].startswith("hades:edge:v1:") for edge in result["relationships"]
-    )
-    assert result["canonicalization"]["edges_omitted"] == 0
-
-
-def test_preserves_unique_explicit_node_identifiers_and_remaps_edge_aliases():
-    result = _finalize({
-        "schema": "hades.code_graph.v1",
-        "language": "typescript",
-        "symbols": [
-            {"id": "class:Order", "kind": "class", "name": "Order"},
-            {"symbol_id": "method:Order.save", "kind": "method", "name": "Order.save"},
-        ],
-        "edges": [{"kind": "calls", "source": "Order", "target": "Order.save"}],
-    })
-
-    assert [node["id"] for node in result["nodes"]] == [
-        "class:Order",
-        "method:Order.save",
-    ]
-    assert result["symbols"][1] == {
-        "symbol_id": "method:Order.save",
-        "kind": "method",
-        "name": "Order.save",
-    }
-    assert result["relationships"][0]["source_id"] == "class:Order"
-    assert result["relationships"][0]["target_id"] == "method:Order.save"
-    assert result["edges"] == [
-        {"kind": "calls", "source": "Order", "target": "Order.save"}
-    ]
-
-
-def test_preserves_same_explicit_id_repeated_on_one_node():
-    result = _finalize({
-        "schema": "hades.code_graph.v1",
-        "language": "typescript",
-        "symbols": [
-            {
-                "id": "symbol:Order",
-                "symbol_id": "symbol:Order",
-                "kind": "class",
-                "name": "Order",
-            }
-        ],
-        "edges": [],
-    })
-
-    assert result["nodes"][0]["id"] == "symbol:Order"
-
-
-def test_canonical_ids_and_capacity_selection_are_permutation_invariant():
-    nodes = [
-        {"kind": "class", "name": "A", "path": "src/A.php"},
-        {"kind": "class", "name": "B", "path": "src/B.php"},
-        {
-            "kind": "method",
-            "name": "B@run",
-            "class": "B",
-            "method": "run",
-            "path": "src/B.php",
-        },
-    ]
-    edges = [
-        {"kind": "uses", "from": "A", "to": "Vendor\\External"},
-        {"kind": "calls", "from": "A", "to": "B@run"},
-    ]
-    graph = {
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": nodes,
-        "edges": edges,
-    }
-    reversed_graph = {
-        **graph,
-        "symbols": list(reversed(nodes)),
-        "edges": list(reversed(edges)),
-    }
-
-    first = _finalize(graph, max_symbols=3)
-    second = _finalize(reversed_graph, max_symbols=3)
-
-    assert sorted(
-        (node["id"], node.get("name"), node.get("external", False))
-        for node in first["nodes"]
-    ) == sorted(
-        (node["id"], node.get("name"), node.get("external", False))
-        for node in second["nodes"]
-    )
-    assert sorted(
-        (edge["id"], edge["source_id"], edge["target_id"])
-        for edge in first["relationships"]
-    ) == sorted(
-        (edge["id"], edge["source_id"], edge["target_id"])
-        for edge in second["relationships"]
-    )
-
-
-def test_ambiguous_alias_is_not_resolved_by_input_order():
-    graph = {
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": [
-            {
-                "kind": "method",
-                "name": "Worker@run",
-                "class": "App\\A\\Worker",
-                "method": "run",
-                "path": "a.php",
-            },
-            {
-                "kind": "method",
-                "name": "Worker@run",
-                "class": "App\\B\\Worker",
-                "method": "run",
-                "path": "b.php",
-            },
-            {"kind": "class", "name": "Target", "path": "target.php"},
-        ],
-        "edges": [{"kind": "calls", "from": "Worker@run", "to": "Target"}],
-    }
-
-    result = _finalize(graph)
-    report = result["canonicalization"]
-
-    assert result["relationships"] == []
-    assert report["ambiguous_aliases"] >= 1
-    assert report["edges_omitted"] == 1
-    assert any(
-        issue["reason"] == "ambiguous_endpoint_alias" for issue in report["issues"]
-    )
-    assert result["graph_contract"]["extractor"]["quality"] == "inventory_only"
-
-
-def test_distinct_edge_occurrences_get_stable_distinct_ids():
-    graph = {
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": [
-            {"kind": "method", "name": "A@run", "path": "a.php"},
-            {"kind": "class", "name": "B", "path": "b.php"},
-        ],
-        "edges": [
-            {"kind": "calls", "from": "A@run", "to": "B", "path": "a.php", "line": 10},
-            {"kind": "calls", "from": "A@run", "to": "B", "path": "a.php", "line": 20},
-        ],
-    }
-
-    first = _finalize(graph)
-    second = _finalize({**graph, "edges": list(reversed(graph["edges"]))})
-
-    assert len(first["relationships"]) == 2
-    assert len({edge["id"] for edge in first["relationships"]}) == 2
-    assert sorted(edge["id"] for edge in first["relationships"]) == sorted(
-        edge["id"] for edge in second["relationships"]
-    )
-
-
-def test_synthesizes_external_endpoint_nodes_but_never_for_ambiguous_aliases():
-    result = _finalize({
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": [
-            {"kind": "class", "name": "App\\Service", "path": "app/Service.php"}
-        ],
-        "edges": [
-            {"kind": "extends", "from": "App\\Service", "to": "Vendor\\BaseService"},
-            {"kind": "query_table", "from": "App\\Service", "to": "table:orders"},
-        ],
-    })
-    external = [node for node in result["nodes"] if node.get("external")]
-    node_ids = {node["id"] for node in result["nodes"]}
-
-    assert {node["name"] for node in external} == {
-        "Vendor\\BaseService",
-        "table:orders",
-    }
-    assert all(
-        edge["source_id"] in node_ids and edge["target_id"] in node_ids
-        for edge in result["relationships"]
-    )
-    report = result["canonicalization"]
-    assert report["nodes_synthesized"] == 2
-    assert report["endpoint_aliases_missing_before_synthesis"] == 2
-    assert report["endpoint_aliases_synthesized"] == 2
-    assert report["endpoint_aliases_unresolved"] == 0
-
-
-def test_missing_node_identity_and_capacity_omissions_are_bounded_and_visible():
-    result = _finalize(
-        {
-            "schema": "hades.code_graph.v1",
-            "language": "python",
-            "symbols": [
-                {"kind": "unknown"},
-                {"kind": "class", "name": "A", "path": "a.py"},
-                {"kind": "class", "name": "Unused", "path": "unused.py"},
-            ],
-            "edges": [{"kind": "uses", "from": "A", "to": "Vendor\\External"}],
-        },
-        max_symbols=2,
-    )
-    report = result["canonicalization"]
-
-    assert len(result["nodes"]) == 2
-    assert report["nodes_input"] == 3
-    assert report["nodes_omitted"] == 2
-    assert report["nodes_synthesized"] == 1
-    assert report["issues_count"] >= 2
-    assert len(report["issues"]) <= 50
-    assert result["graph_contract"]["extractor"]["quality"] == "partial"
+    file_vector = _vector("file_source_fingerprint")
     assert (
-        result["graph_contract"]["extractor"]["fallback_reason"]
-        == "canonicalization_omissions"
-    )
-
-
-def test_canonicalization_stays_bounded_at_five_thousand_nodes_with_closed_edges():
-    nodes = [
-        {"kind": "class", "name": f"Class{index}", "path": f"src/Class{index}.php"}
-        for index in range(5_000)
-    ]
-    edges = [
-        {"kind": "uses", "from": f"Class{index}", "to": "Vendor\\Shared"}
-        for index in range(4_999)
-    ]
-
-    result = _finalize({
-        "schema": "hades.php_graph.v1",
-        "language": "php",
-        "symbols": nodes,
-        "edges": edges,
-        "truncated": True,
-    })
-    node_ids = {node["id"] for node in result["nodes"]}
-
-    assert len(result["nodes"]) == 5_000
-    assert len(result["relationships"]) == 4_999
-    assert all("src/Class" not in node["id"] for node in result["nodes"])
-    assert all(
-        edge["source_id"] in node_ids and edge["target_id"] in node_ids
-        for edge in result["relationships"]
-    )
-    report = result["canonicalization"]
-    assert report["nodes_input"] == 5_000
-    assert report["nodes_emitted"] == 5_000
-    assert report["nodes_synthesized"] == 1
-    assert report["nodes_omitted"] == 1
-    assert report["edges_input"] == 4_999
-    assert report["edges_emitted"] == 4_999
-    assert report["edges_omitted"] == 0
-
-
-def test_reserved_generated_edge_id_cannot_hijack_another_edge_in_any_order():
-    nodes = [
-        {"id": "class:A", "kind": "class", "name": "A"},
-        {"id": "class:B", "kind": "class", "name": "B"},
-        {"id": "class:C", "kind": "class", "name": "C"},
-    ]
-    genuine = {"kind": "calls", "source": "A", "target": "B"}
-    derived = _finalize({"symbols": nodes, "edges": [genuine]})["relationships"][0][
-        "id"
-    ]
-    malicious = {
-        "id": derived,
-        "kind": "calls",
-        "source": "A",
-        "target": "C",
-    }
-
-    for edges in ([genuine, malicious], [malicious, genuine]):
-        result = _finalize({"symbols": nodes, "edges": edges})
-        assert [edge["id"] for edge in result["relationships"]] == [derived]
-        report = result["canonicalization"]
-        assert report["edges_omitted"] == 1
-        assert report["issue_reasons"]["invalid_reserved_edge_id"] == 1
-
-
-def test_distinct_edges_with_same_explicit_id_omit_entire_collision_group():
-    nodes = [
-        {"id": "class:A", "kind": "class", "name": "A"},
-        {"id": "class:B", "kind": "class", "name": "B"},
-        {"id": "class:C", "kind": "class", "name": "C"},
-    ]
-    edges = [
-        {"id": "edge:shared", "kind": "calls", "source": "A", "target": "B"},
-        {"id": "edge:shared", "kind": "calls", "source": "A", "target": "C"},
-    ]
-
-    for ordered in (edges, list(reversed(edges))):
-        result = _finalize({"symbols": nodes, "edges": ordered})
-        assert result["relationships"] == []
-        report = result["canonicalization"]
-        assert report["edges_omitted"] == 2
-        assert report["edges_deduplicated"] == 0
-        assert report["issue_reasons"]["edge_id_collision"] == 2
-
-
-def test_exact_duplicates_are_reported_but_do_not_degrade_graph_quality():
-    node = {"id": "class:A", "kind": "class", "name": "A"}
-    edge = {"id": "edge:self", "kind": "calls", "source": "A", "target": "A"}
-    result = _finalize({
-        "symbols": [node, deepcopy(node)],
-        "edges": [edge, deepcopy(edge)],
-    })
-
-    report = result["canonicalization"]
-    assert len(result["nodes"]) == 1
-    assert len(result["relationships"]) == 1
-    assert report["nodes_deduplicated"] == 1
-    assert report["edges_deduplicated"] == 1
-    assert report["nodes_omitted"] == 0
-    assert report["edges_omitted"] == 0
-    assert result["graph_contract"]["extractor"] == {
-        "name": "hades-native-unknown",
-        "version": "1",
-        "mode": "native",
-        "quality": "full",
-        "fallback_reason": None,
-    }
-
-
-def test_edge_inputs_all_omitted_use_canonicalization_fallback_not_no_edges():
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [{"kind": "calls", "source": "A"}],
-    })
-
-    assert result["relationships"] == []
-    assert result["canonicalization"]["edges_input"] == 1
-    assert result["canonicalization"]["edges_omitted"] == 1
-    assert result["graph_contract"]["extractor"]["quality"] == "inventory_only"
-    assert (
-        result["graph_contract"]["extractor"]["fallback_reason"]
-        == "canonicalization_omissions"
-    )
-
-
-def test_rejects_path_like_control_and_oversize_explicit_node_and_edge_ids():
-    unsafe_ids = [
-        "",
-        " edge:spaced ",
-        "/etc/passwd",
-        "file:///home/alice/private.py",
-        r"C:\Users\alice\private.py",
-        r"\\server\share\secret.py",
-        "node:\x00hidden",
-        "x" * 513,
-    ]
-    for unsafe_id in unsafe_ids:
-        result = _finalize({
-            "symbols": [
-                {"id": unsafe_id, "kind": "class", "name": "A"},
-                {"id": "class:B", "kind": "class", "name": "B"},
-            ],
-            "edges": [
-                {
-                    "id": unsafe_id,
-                    "kind": "calls",
-                    "source": "B",
-                    "target": "B",
-                }
-            ],
-        })
-        report = result["canonicalization"]
-        assert all(node["id"] != unsafe_id for node in result["nodes"])
-        assert result["relationships"] == []
-        assert report["nodes_omitted"] == 1
-        assert report["edges_omitted"] == 1
-        assert report["issue_reasons"]["invalid_node_id"] == 1
-        assert report["issue_reasons"]["invalid_edge_id"] == 1
-
-
-def test_oversize_or_unrecognized_endpoint_is_omitted_without_raw_placeholder():
-    huge = "External" + "X" * 100_000
-    original_edges = [
-        {"kind": "calls", "source": "A", "target": huge},
-        {"kind": "calls", "source": "A", "target": "not a semantic locator"},
-    ]
-    graph = {
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": original_edges,
-    }
-    result = _finalize(graph)
-
-    assert result["edges"] == original_edges
-    assert result["relationships"] == []
-    assert not any(node.get("external") for node in result["nodes"])
-    report = result["canonicalization"]
-    assert report["edges_input"] == 2
-    assert report["edges_omitted"] == 2
-    assert report["issue_reasons"]["endpoint_locator_too_large"] == 1
-    assert report["issue_reasons"]["unrecognized_endpoint_locator"] == 1
-    assert huge not in json.dumps(report)
-    # The preserved legacy evidence contains the input once; canonicalization
-    # adds only bounded hashes/counters, never another raw 100 kB placeholder.
-    assert len(json.dumps(result)) < len(json.dumps(graph)) + 20_000
-
-
-def test_bounded_bare_identifier_is_a_safe_external_symbol_locator():
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [{"kind": "calls", "source": "A", "target": "ExternalService"}],
-    })
-
-    external = [node for node in result["nodes"] if node.get("external")]
-    assert len(external) == 1
-    assert external[0]["kind"] == "external_symbol"
-    assert external[0]["name"] == "ExternalService"
-    assert result["canonicalization"]["edges_omitted"] == 0
-    assert len(result["relationships"]) == 1
-
-
-def test_structured_route_and_table_locators_allow_only_bounded_semantic_grammar():
-    safe = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "routes", "source": "A", "target": "route:GET /orders/{id}"},
-            {"kind": "queries", "source": "A", "target": "table:shop.orders"},
-        ],
-    })
-    assert len(safe["relationships"]) == 2
-    assert {node["kind"] for node in safe["nodes"] if node.get("external")} == {
-        "route",
-        "table",
-    }
-
-    unsafe = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "routes", "source": "A", "target": "route:GET  /orders"},
-            {"kind": "routes", "source": "A", "target": "route:GET /orders;DROP"},
-            {"kind": "queries", "source": "A", "target": "table:{$prefix} orders"},
-        ],
-    })
-    assert unsafe["relationships"] == []
-    assert not any(node.get("external") for node in unsafe["nodes"])
-    assert unsafe["canonicalization"]["edges_omitted"] == 3
-    assert (
-        unsafe["canonicalization"]["issue_reasons"]["unrecognized_endpoint_locator"]
-        == 3
-    )
-
-
-def test_synthetic_path_placeholder_is_bounded_and_never_exposes_absolute_path():
-    for locator in ("src/domain/Order.py", "/home/alice/private/Order.py"):
-        result = _finalize({
-            "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-            "edges": [{"kind": "imports", "source": "A", "target": locator}],
-        })
-        external = [node for node in result["nodes"] if node.get("external")]
-        if locator.startswith("/"):
-            assert external == []
-            assert result["relationships"] == []
-            assert (
-                result["canonicalization"]["issue_reasons"]["unsafe_endpoint_locator"]
-                == 1
-            )
-        else:
-            assert len(external) == 1
-            assert external[0]["name"] == "Order.py"
-            assert external[0]["path"] == "Order.py"
-            assert len(json.dumps(external[0]).encode()) < 1_024
-
-
-def test_preserves_legacy_lists_exactly_including_invalid_shapes_and_counts_them():
-    symbols = [
-        {"id": "class:A", "kind": "class", "name": "A"},
-        "bad-node",
-        17,
-        None,
-    ]
-    edges = [
-        {"id": "edge:self", "kind": "calls", "source": "A", "target": "A"},
-        "bad-edge",
-        ["also", "bad"],
-    ]
-    graph = {"symbols": symbols, "edges": edges}
-    expected_json = json.dumps(graph, ensure_ascii=False, separators=(",", ":"))
-    result = _finalize(graph)
-
-    assert (
-        json.dumps(
-            {"symbols": result["symbols"], "edges": result["edges"]},
-            ensure_ascii=False,
-            separators=(",", ":"),
+        file_source_fingerprint(
+            file_vector["input"]["file_sha256"],
+            file_vector["input"]["path"],
         )
-        == expected_json
-    )
-    report = result["canonicalization"]
-    assert report["nodes_input"] == 4
-    assert report["edges_input"] == 3
-    assert report["nodes_omitted"] == 3
-    assert report["edges_omitted"] == 2
-    assert report["issue_reasons"]["invalid_node_shape"] == 3
-    assert report["issue_reasons"]["invalid_edge_shape"] == 2
-
-
-def test_more_than_five_thousand_inputs_are_bounded_without_dropping_legacy_evidence():
-    symbols = [
-        {"kind": "class", "name": f"Class{index}", "path": f"src/{index}.py"}
-        for index in range(5_250)
-    ]
-    result = _finalize({"symbols": symbols, "edges": []})
-
-    assert len(result["symbols"]) == 5_250
-    assert len(result["nodes"]) == 5_000
-    report = result["canonicalization"]
-    assert report["nodes_input"] == 5_250
-    assert report["nodes_emitted"] == 5_000
-    assert report["nodes_omitted"] == 250
-    assert report["issues_count"] == 250
-    assert len(report["issues"]) == 50
-    assert report["issues_truncated"] is True
-
-
-def test_explicit_ids_reject_every_path_form_but_allow_own_reserved_hash_replay():
-    unsafe_ids = [
-        "src/Order.py",
-        r"src\Order.py",
-        "file:/home/alice/Order.py",
-        "opaque:.",
-        "opaque:..",
-        "opaque:../secret",
-        "opaque:part/../secret",
-        "route:../../",
-    ]
-    for unsafe_id in unsafe_ids:
-        result = _finalize({
-            "symbols": [
-                {"id": unsafe_id, "kind": "class", "name": "Order"},
-                {"id": "class:Safe", "kind": "class", "name": "Safe"},
-            ],
-            "edges": [
-                {
-                    "id": unsafe_id,
-                    "kind": "calls",
-                    "source": "Safe",
-                    "target": "Safe",
-                }
-            ],
-        })
-        assert [node["id"] for node in result["nodes"]] == ["class:Safe"]
-        assert result["relationships"] == []
-        assert result["canonicalization"]["issue_reasons"] == {
-            "invalid_edge_id": 1,
-            "invalid_node_id": 1,
-        }
-        assert unsafe_id not in json.dumps(result["canonicalization"])
-
-    opaque = _finalize({
-        "symbols": [{"id": "opaque:domain:Order", "kind": "class", "name": "Order"}],
-        "edges": [],
-    })
-    assert [node["id"] for node in opaque["nodes"]] == ["opaque:domain:Order"]
-
-    source = {"kind": "class", "name": "Order", "path": "/srv/a/Order.php"}
-    derived = _finalize({"symbols": [source], "edges": []})["nodes"][0]["id"]
-    replay = _finalize({"symbols": [{**source, "id": derived}], "edges": []})
-    assert [node["id"] for node in replay["nodes"]] == [derived]
-    assert replay["canonicalization"]["nodes_omitted"] == 0
-
-
-def test_endpoint_locator_rejects_traversal_file_uri_and_malformed_routes():
-    unsafe_locators = [
-        "/etc/passwd",
-        "src/../../etc/passwd",
-        "file:/home/alice/private.php",
-        "route:../../",
-        "route:/api/../private",
-        "route:GET orders/{id}",
-        "route:GET /orders/{id",
-        "route:/orders/}id{",
-    ]
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "uses", "source": "A", "target": locator}
-            for locator in unsafe_locators
-        ],
-    })
-
-    assert result["relationships"] == []
-    assert not any(node.get("external") for node in result["nodes"])
-    assert result["canonicalization"]["edges_omitted"] == len(unsafe_locators)
-    serialized_report = json.dumps(result["canonicalization"])
-    assert not any(locator in serialized_report for locator in unsafe_locators)
-
-
-def test_route_names_and_absolute_route_paths_use_separate_safe_grammars():
-    locators = [
-        "route:orders.show",
-        "route:_bulk_delete",
-        "route_name:admin.orders.show",
-        "route:/api/orders/{order}",
-        "route:GET /orders/{order}",
-    ]
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "routes", "source": "A", "target": locator} for locator in locators
-        ],
-    })
-
-    assert len(result["relationships"]) == len(locators)
-    assert result["canonicalization"]["edges_omitted"] == 0
-    assert {node["name"] for node in result["nodes"] if node.get("external")} == set(
-        locators
+        == file_vector["sha256"]
     )
 
-
-def test_distinct_full_paths_have_distinct_private_identity_and_safe_display():
-    paths = [
-        "/Users/alice/secret-one/src/Order.php",
-        "/Users/alice/secret-two/src/Order.php",
-        r"\\server\share\Order.php",
-        "/server/share/Order.php",
-    ]
-    nodes = [{"kind": "class", "name": "Order", "path": path} for path in paths]
-
-    first = _finalize({"symbols": nodes, "edges": []})
-    second = _finalize({"symbols": list(reversed(nodes)), "edges": []})
-
-    assert len(first["nodes"]) == len(paths)
-    assert len({node["id"] for node in first["nodes"]}) == len(paths)
-    assert [node["id"] for node in first["nodes"]] == [
-        node["id"] for node in second["nodes"]
-    ]
-    assert {node["path"] for node in first["nodes"]} == {"Order.php"}
-    public = json.dumps({
-        "nodes": first["nodes"],
-        "canonicalization": first["canonicalization"],
-    })
-    assert all(path not in public for path in paths)
-
-
-def test_exact_same_full_path_deduplicates_and_oversize_paths_stay_bounded():
-    shared = {"kind": "class", "name": "Order", "path": "/srv/a/Order.php"}
-    duplicate = _finalize({"symbols": [shared, deepcopy(shared)], "edges": []})
-    assert len(duplicate["nodes"]) == 1
-    assert duplicate["canonicalization"]["nodes_deduplicated"] == 1
-
-    huge_paths = [
-        "/srv/" + character * 100_000 + "/Order.php" for character in ("a", "b")
-    ]
-    huge = _finalize({
-        "symbols": [
-            {"kind": "class", "name": "Order", "path": path} for path in huge_paths
-        ],
-        "edges": [],
-    })
-    assert len({node["id"] for node in huge["nodes"]}) == 2
-    assert {node["path"] for node in huge["nodes"]} == {"Order.php"}
-    canonical_output = json.dumps({
-        "nodes": huge["nodes"],
-        "canonicalization": huge["canonicalization"],
-    })
-    assert len(canonical_output) < 10_000
-    assert "a" * 1_000 not in canonical_output
-    assert "b" * 1_000 not in canonical_output
-
-    unsafe_label = _finalize({
-        "symbols": [
-            {
-                "kind": "class",
-                "name": "Order",
-                "path": "/srv/private/Order<script>.php",
-            }
-        ],
-        "edges": [],
-    })
-    assert unsafe_label["nodes"][0]["path"] == "Order_script_.php"
-
-
-def test_zero_relationship_fallback_reason_uses_truthful_loss_priority():
-    invalid_nodes = _finalize({"symbols": [{"kind": "unknown"}], "edges": []})
-    assert invalid_nodes["graph_contract"]["extractor"] == {
-        "name": "hades-native-unknown",
-        "version": "1",
-        "mode": "native",
-        "quality": "inventory_only",
-        "fallback_reason": "canonicalization_omissions",
-    }
-
-    truncated = _finalize({"symbols": [], "edges": [], "truncated": True})
+    flow = _vector("flow_id")
     assert (
-        truncated["graph_contract"]["extractor"]["fallback_reason"]
-        == "bounded_or_omitted_input"
-    )
-
-    files_failed = _finalize(
-        {"symbols": [], "edges": []},
-        omitted=[{"path": "private.php", "reason": "read_failed"}],
-    )
-    assert (
-        files_failed["graph_contract"]["extractor"]["fallback_reason"]
-        == "bounded_or_omitted_input"
-    )
-
-    genuinely_empty = _finalize({"symbols": [], "edges": []})
-    assert (
-        genuinely_empty["graph_contract"]["extractor"]["fallback_reason"]
-        == "no_relationships_extracted"
-    )
-
-
-def test_canonical_loss_precedes_bounded_loss_when_relationships_are_emitted():
-    result = _finalize({
-        "symbols": [
-            {"id": "class:A", "kind": "class", "name": "A"},
-            {"id": "class:B", "kind": "class", "name": "B"},
-            {"kind": "unknown"},
-        ],
-        "edges": [{"kind": "calls", "source": "A", "target": "B"}],
-        "truncated": True,
-    })
-
-    assert len(result["relationships"]) == 1
-    assert result["graph_contract"]["extractor"]["quality"] == "partial"
-    assert (
-        result["graph_contract"]["extractor"]["fallback_reason"]
-        == "canonicalization_omissions"
-    )
-
-
-def test_nodes_only_replay_preserves_private_path_identity_and_relationships():
-    graphs = [
-        {
-            "symbols": [
-                {"kind": "class", "name": "Absolute", "path": "/srv/a/Order.php"},
-                {"kind": "class", "name": "Relative", "path": "src/Order.php"},
-            ],
-            "edges": [],
-        },
-        {
-            "symbols": [{"kind": "class", "name": "Caller", "path": "src/Caller.php"}],
-            "edges": [
-                {
-                    "kind": "uses",
-                    "source": "Caller",
-                    "target": "src/domain/Order.php",
-                }
-            ],
-        },
-    ]
-
-    for graph in graphs:
-        first = _finalize(graph)
-        fingerprints = [
-            node.get("properties", {}).get("identity_fingerprint")
-            for node in first["nodes"]
-        ]
-        assert all(
-            isinstance(value, str) and value.startswith("sha256:") and len(value) == 71
-            for value in fingerprints
+        flow_id(
+            flow["input"]["entrypoint_id"],
+            flow["input"]["root_node_id"],
+            flow["input"]["kind"],
         )
-
-        replay_input = {
-            "nodes": list(reversed(deepcopy(first["nodes"]))),
-            "relationships": list(reversed(deepcopy(first["relationships"]))),
-        }
-        second = _finalize(replay_input)
-
-        assert second["nodes"] == first["nodes"]
-        assert second["relationships"] == first["relationships"]
-        assert second["canonicalization"]["nodes_omitted"] == 0
-        assert second["canonicalization"]["edges_omitted"] == 0
-
-
-def test_identity_fingerprint_is_strict_and_bound_to_reserved_id_and_public_identity():
-    original = _finalize({
-        "symbols": [
-            {"kind": "class", "name": "Order", "path": "/srv/private/Order.php"}
-        ],
-        "edges": [],
-    })["nodes"][0]
-
-    malformed_values = [
-        "",
-        "sha256:abc",
-        "sha256:" + "A" * 64,
-        "sha1:" + "0" * 64,
-        "sha256:" + "0" * 65,
-        123,
-    ]
-    for malformed in malformed_values:
-        node = deepcopy(original)
-        node["properties"]["identity_fingerprint"] = malformed
-        replay = _finalize({"nodes": [node], "relationships": []})
-        assert replay["nodes"] == []
-        assert replay["canonicalization"]["issue_reasons"] == {
-            "invalid_identity_fingerprint": 1
-        }
-
-    mismatched = deepcopy(original)
-    mismatched["properties"]["identity_fingerprint"] = "sha256:" + "0" * 64
-    mismatch_result = _finalize({"nodes": [mismatched], "relationships": []})
-    assert mismatch_result["nodes"] == []
-    assert mismatch_result["canonicalization"]["issue_reasons"] == {
-        "invalid_reserved_node_id": 1
-    }
-
-    renamed = deepcopy(original)
-    renamed["name"] = "Invoice"
-    renamed_result = _finalize({"nodes": [renamed], "relationships": []})
-    assert renamed_result["nodes"] == []
-    assert renamed_result["canonicalization"]["issue_reasons"] == {
-        "invalid_reserved_node_id": 1
-    }
-
-
-def test_path_uri_and_unicode_controls_are_rejected_without_harming_semantic_locators():
-    unsafe_locators = [
-        r"C:private\Order.php",
-        "C:Order.php",
-        "file:Order.php",
-        "FILE:///etc/passwd",
-        r"FiLe:C:\private\Order.php",
-        r"\Windows\private.php",
-        "foo:bar.php",
-        "table:ord\u0085ers",
-        "route:/api/ord\u202eers",
-    ]
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "uses", "source": "A", "target": locator}
-            for locator in unsafe_locators
-        ],
-    })
-
-    assert result["relationships"] == []
-    assert not any(node.get("external") for node in result["nodes"])
-    assert result["canonicalization"]["edges_omitted"] == len(unsafe_locators)
-    serialized = json.dumps(
-        {
-            "nodes": result["nodes"],
-            "relationships": result["relationships"],
-            "canonicalization": result["canonicalization"],
-        },
-        ensure_ascii=False,
+        == "hades:flow:v2:" + flow["sha256"]
     )
-    assert all(locator not in serialized for locator in unsafe_locators)
 
-    unsafe_ids = ["class:Bad\u0085Id", "class:Bad\u202eId"]
-    for unsafe_id in unsafe_ids:
-        rejected = _finalize({
-            "symbols": [{"id": unsafe_id, "kind": "class", "name": "Bad"}],
-            "edges": [],
-        })
-        assert rejected["nodes"] == []
-        assert rejected["canonicalization"]["issue_reasons"] == {"invalid_node_id": 1}
-
-    positives = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "uses", "source": "A", "target": r"\App\Service"},
-            {"kind": "routes", "source": "A", "target": "route:/api/orders"},
-            {
-                "kind": "routes",
-                "source": "A",
-                "target": "route:GET /orders/%7Border%7D",
-            },
-            {"kind": "reads", "source": "A", "target": "table:orders"},
-            {"kind": "uses", "source": "A", "target": "src/domain/Order.php"},
-            {
-                "kind": "tests",
-                "source": "A",
-                "target": "test:tests/Domain/OrderTest.php",
-            },
-        ],
-    })
-    assert len(positives["relationships"]) == 6
-    assert positives["canonicalization"]["edges_omitted"] == 0
-    file_node = next(
-        node for node in positives["nodes"] if node.get("name") == "Order.php"
+    step = _vector("flow_step_id")
+    assert (
+        flow_step_id(
+            step["input"]["flow_id"],
+            step["input"]["edge_id"],
+            step["input"]["stage_from"],
+            step["input"]["stage_to"],
+            step["input"]["async_context"],
+        )
+        == "hades:flow-step:v2:" + step["sha256"]
     )
-    assert file_node["name"] == "Order.php"
-    assert file_node["path"] == "Order.php"
-    assert "src/domain" not in json.dumps(file_node)
+
+    for kind, helper in (
+        ("call_site_id", call_site_id),
+        ("branch_group_id", branch_group_id),
+        ("exception_scope_id", exception_scope_id),
+    ):
+        vector = _vector(kind)
+        assert helper(vector["input"]) == vector["public_id"]
+
+    uncertainty = _vector("uncertainty_id")
+    assert uncertainty_id(uncertainty["input"]) == (
+        "hades:uncertainty:v2:" + uncertainty["sha256"]
+    )
+
+    evidence = _vector("evidence_digest")
+    assert evidence_digest(evidence["input"]) == evidence["sha256"]
+
+    empty_set = _vector("empty_verification_set_hash")
+    assert verification_set_hash(empty_set["input"]) == empty_set["sha256"]
+
+    verification_set = _vector("verification_set_hash")
+    assert (
+        verification_set_hash(verification_set["input"]) == verification_set["sha256"]
+    )
+
+    dedupe = _vector("verification_dedupe")
+    assert verification_deduplication_key(dedupe["input"]) == dedupe["sha256"]
+
+    result = _vector("result_digest")
+    assert result_digest(result["input"]) == result["sha256"]
+
+    artifact = _vector("artifact_digest")
+    assert artifact_digest(artifact["input"]) == artifact["sha256"]
 
 
-def test_route_percent_decoding_rejects_hidden_path_syntax_and_controls():
-    unsafe_routes = [
-        "route:/api/%2e%2e/private",
-        "route:/api/%2E/private",
-        "route:/api/orders%2Fprivate",
-        "route:/api/orders%5Cprivate",
-        "route:/api/orders%252Fprivate",
-        "route:/api/%252e%252e/private",
-        "route:/api/orders%00private",
-        "route:/api/orders%C2%85private",
-        "route:/api/orders%E2%80%AEprivate",
-        "route:/api/orders%ZZ",
-    ]
-    result = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {"kind": "routes", "source": "A", "target": route}
-            for route in unsafe_routes
-        ],
-    })
-
-    assert result["relationships"] == []
-    assert result["canonicalization"]["edges_omitted"] == len(unsafe_routes)
-
-    safe = _finalize({
-        "symbols": [{"id": "class:A", "kind": "class", "name": "A"}],
-        "edges": [
-            {
-                "kind": "routes",
-                "source": "A",
-                "target": "route:GET /orders/%7Border%7D/%20/%25",
-            }
-        ],
-    })
-    assert len(safe["relationships"]) == 1
-
-
-def test_unused_ambiguous_alias_is_warning_not_canonicalization_loss():
-    nodes = [
-        {
-            "kind": "method",
-            "name": "Worker@run",
-            "class": "App\\A\\Worker",
-            "method": "run",
+def test_artifact_graph_version_uses_only_exact_semantic_preimage() -> None:
+    vector = _vector("artifact_digest")
+    preimage = copy.deepcopy(vector["input"])
+    artifact = {
+        "schema": preimage["schema"],
+        "generated_at": "2026-07-16T12:00:00Z",
+        "project": preimage["project"],
+        "source": preimage["source"],
+        "graph_contract": {
+            "version": preimage["graph_contract_version"],
+            "artifact_graph_version": "0" * 64,
+            "projection_state": "queued",
+            "completeness": preimage["completeness"],
+            "coverage": preimage["coverage"],
         },
-        {
-            "kind": "method",
-            "name": "Worker@run",
-            "class": "App\\B\\Worker",
-            "method": "run",
-        },
-    ]
-    unused = _finalize({"symbols": nodes, "edges": []})
-    assert unused["canonicalization"]["ambiguous_aliases"] > 0
-    assert unused["canonicalization"]["issues_count"] > 0
-    assert unused["canonicalization"]["nodes_omitted"] == 0
-    assert unused["graph_contract"]["extractor"] == {
-        "name": "hades-native-unknown",
-        "version": "1",
-        "mode": "native",
-        "quality": "inventory_only",
-        "fallback_reason": "no_relationships_extracted",
+        "frameworks": preimage["frameworks"],
+        "languages": preimage["languages"],
+        "entrypoints": preimage["entrypoints"],
+        "nodes": preimage["nodes"],
+        "structures": preimage["structures"],
+        "edges": preimage["edges"],
+        "flows": preimage["flows"],
+        "flow_steps": preimage["flow_steps"],
+        "uncertainties": preimage["uncertainties"],
     }
+    assert artifact_graph_version(artifact) == vector["sha256"]
+    artifact["generated_at"] = "2026-07-16T12:00:01Z"
+    artifact["graph_contract"]["projection_state"] = "ready"
+    artifact["graph_contract"]["artifact_graph_version"] = "f" * 64
+    assert artifact_graph_version(artifact) == vector["sha256"]
 
-    used = _finalize({
-        "symbols": nodes,
-        "edges": [{"kind": "calls", "source": "Worker@run", "target": "Worker@run"}],
-    })
-    assert used["canonicalization"]["edges_omitted"] == 1
-    assert used["graph_contract"]["extractor"]["fallback_reason"] == (
-        "canonicalization_omissions"
-    )
+
+def test_canonicalize_records_sorts_and_deduplicates_identical_records() -> None:
+    a_id = "hades:node:v2:" + "a" * 64
+    b_id = "hades:node:v2:" + "b" * 64
+    records = [
+        {"id": b_id, "label": "Cafe\u0301"},
+        {"label": "Caf\u00e9", "id": b_id},
+        {"id": a_id, "label": "A"},
+    ]
+    expected = [
+        {"id": a_id, "label": "A"},
+        {"id": b_id, "label": "Caf\u00e9"},
+    ]
+    assert canonicalize_records(records) == expected
+    assert canonicalize_records(list(reversed(records))) == expected
+
+
+def test_verification_set_hash_is_permutation_stable() -> None:
+    first = copy.deepcopy(_vector("verification_set_hash")["input"][0])
+    second = copy.deepcopy(first)
+    second["assertion_fingerprint"] = "1" * 64
+    second["overlay"]["assertion_fingerprint"] = "1" * 64
+    second["overlay"]["uncertainty_id"] = "hades:uncertainty:v2:" + "1" * 64
+    assert verification_set_hash([first, second]) == verification_set_hash([
+        second,
+        first,
+    ])
+
+
+def test_projection_version_rejects_noncanonical_digests() -> None:
+    for artifact_version, overlay_hash in (
+        ("A" * 64, "b" * 64),
+        ("a" * 63, "b" * 64),
+        ("a" * 64, "b" * 65),
+    ):
+        with pytest.raises(GraphContractError) as exc_info:
+            projection_version(artifact_version, overlay_hash)
+        assert exc_info.value.code == "invalid_digest"

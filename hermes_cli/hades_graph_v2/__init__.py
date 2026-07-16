@@ -1,24 +1,19 @@
-"""Stable v2-only import facade for the Hades graph contract."""
+"""Public graph v2 contract package."""
 
-from hermes_cli.hades_graph_v2 import (
+from .canonicalize import (
+    canonicalize_records,
+    canonicalize_verification_evidence,
+    canonicalize_verification_set,
+)
+from .identity import (
     BRANCH_PREFIX,
-    BUNDLE_SCHEMA,
     CALL_SITE_PREFIX,
-    CHUNK_SCHEMA,
     EDGE_PREFIX,
     EXCEPTION_SCOPE_PREFIX,
     FLOW_PREFIX,
     FLOW_STEP_PREFIX,
-    GRAPH_CONTRACT_VERSION,
-    GRAPH_SCHEMA,
     NODE_PREFIX,
-    SAFE_INTEGER_MAX,
-    SCHEMA_NAMES,
     UNCERTAINTY_PREFIX,
-    GraphContractError,
-    GraphIdentityCollision,
-    JsonScalar,
-    JsonValue,
     artifact_digest,
     artifact_graph_version,
     artifact_semantic_preimage,
@@ -26,9 +21,6 @@ from hermes_cli.hades_graph_v2 import (
     branch_group_id,
     call_site_id,
     canonical_json_bytes,
-    canonicalize_records,
-    canonicalize_verification_evidence,
-    canonicalize_verification_set,
     condition_hash,
     config_source_fingerprint,
     edge_id,
@@ -37,7 +29,6 @@ from hermes_cli.hades_graph_v2 import (
     file_source_fingerprint,
     flow_id,
     flow_step_id,
-    load_json_bytes,
     node_id,
     normalize_contract_value,
     normalize_source_path,
@@ -49,10 +40,23 @@ from hermes_cli.hades_graph_v2 import (
     sha256_jcs,
     uncertainty_fingerprint,
     uncertainty_id,
-    validate_json_bytes,
-    validate_schema,
     verification_deduplication_key,
     verification_set_hash,
+)
+from .schema import (
+    BUNDLE_SCHEMA,
+    CHUNK_SCHEMA,
+    GRAPH_CONTRACT_VERSION,
+    GRAPH_SCHEMA,
+    SAFE_INTEGER_MAX,
+    SCHEMA_NAMES,
+    GraphContractError,
+    GraphIdentityCollision,
+    JsonScalar,
+    JsonValue,
+    load_json_bytes,
+    validate_json_bytes,
+    validate_schema,
 )
 
 
