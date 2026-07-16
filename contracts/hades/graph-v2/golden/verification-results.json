@@ -39,8 +39,8 @@
         "subject": {"edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
         "resolution_kind": "entrypoint_handler",
         "candidate_set_knowledge": "complete",
-        "candidate_target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "hades:node:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
-        "candidate_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+        "candidate_target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        "candidate_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
       },
       "source_snapshot": {"state": "available", "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
       "question": "Which handler owns this entrypoint in this source snapshot?",
@@ -137,7 +137,7 @@
       "target": {"type": "graph_assertion", "id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
       "reason": "The finite candidate universe contains one supported target.",
       "evidence": [{"kind": "graph_ref", "record_kind": "edge", "public_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "artifact_graph_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],
-      "graph": {"operation": "resolve_candidate_set", "uncertainty_id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "promoted_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"], "suppressed_edge_ids": ["hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"], "call_site_id": null, "subject_edge_id": null, "target_node_ids": []},
+      "graph": {"operation": "resolve_candidate_set", "uncertainty_id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "promoted_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"], "suppressed_edge_ids": [], "call_site_id": null, "subject_edge_id": null, "target_node_ids": []},
       "wiki": null,
       "deferred": null
     },
@@ -159,7 +159,7 @@
       "target": {"type": "graph_assertion", "id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
       "reason": "Neither immutable candidate is supported by the retained source snapshot.",
       "evidence": [{"kind": "source_ref", "path": "config/services.yaml", "line_start": 10, "line_end": 20, "file_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "source_tree_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],
-      "graph": {"operation": "resolve_candidate_set", "uncertainty_id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "promoted_edge_ids": [], "suppressed_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"], "call_site_id": null, "subject_edge_id": null, "target_node_ids": []},
+      "graph": {"operation": "resolve_candidate_set", "uncertainty_id": "hades:uncertainty:v2:3333333333333333333333333333333333333333333333333333333333333333", "promoted_edge_ids": [], "suppressed_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"], "call_site_id": null, "subject_edge_id": null, "target_node_ids": []},
       "wiki": null,
       "deferred": null
     },
@@ -221,9 +221,9 @@
   ],
   "result_digests": [
     "4d7900ffa2760c46afa00eac4c61180bc743ecf2e67895d66d8d1ec41f67e501",
-    "d4cbcbec7c38ca71ebc782510fefa116563bd8ff22cdf2c6b12ebdcd45761f08",
+    "473822e7dadf179d6202d9176650aa3bdcd9bbfe27b9fa49fc1bdf80708e2064",
     "5585ec9752dd17da641d80ab1e0c5bdccd91f031c4380a5a283b1af5fbfe7dfe",
-    "947b8ea8f1285e5c44a3915ca79abef1fce941a1207cbc39aa927ed10b8a999d",
+    "b37d6629ffb369a29c3ba63722e2b5f86aab35a0996d015703b7f296c0e5f161",
     "b0e13554423df3e553f43c55c950d494afd1bd50ac36990edeae8e786809b8c3",
     "965de5eff5a29fd09546bc9a301296b8f3462bd0843b4394f4c4c03f91c10551",
     "17e07af516c0720d71f462ffff2997ec658f31cdabc025b91b77d0973d404c47",
@@ -258,7 +258,7 @@
       "operation": "resolve_candidate_set",
       "subject_edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "promoted_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
-      "suppressed_edge_ids": ["hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+      "suppressed_edge_ids": [],
       "suppressed_node_ids": [],
       "suppressed_structure_ids": [],
       "target_node_ids": ["hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
@@ -266,7 +266,7 @@
       "effective_structure_ids": ["hades:branch:v2:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
       "effective_entrypoint_handler_node_id": "hades:node:v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "evidence_digest": "261d8b47761209bb85d7c42fb898d7450b46695d1674f747288aab3a7164abe5",
-      "result_digest": "d4cbcbec7c38ca71ebc782510fefa116563bd8ff22cdf2c6b12ebdcd45761f08"
+      "result_digest": "473822e7dadf179d6202d9176650aa3bdcd9bbfe27b9fa49fc1bdf80708e2064"
     },
     {
       "schema": "hades.graph_overlay.v1",
@@ -294,7 +294,7 @@
       "operation": "resolve_candidate_set",
       "subject_edge_id": "hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "promoted_edge_ids": [],
-      "suppressed_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "hades:edge:v2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+      "suppressed_edge_ids": ["hades:edge:v2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
       "suppressed_node_ids": [],
       "suppressed_structure_ids": ["hades:branch:v2:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
       "target_node_ids": [],
@@ -302,7 +302,7 @@
       "effective_structure_ids": [],
       "effective_entrypoint_handler_node_id": null,
       "evidence_digest": "6dd97c8a81548ab9137a76884f3904d4544800d16af50e732a8d141e309614c3",
-      "result_digest": "947b8ea8f1285e5c44a3915ca79abef1fce941a1207cbc39aa927ed10b8a999d"
+      "result_digest": "b37d6629ffb369a29c3ba63722e2b5f86aab35a0996d015703b7f296c0e5f161"
     },
     {
       "schema": "hades.graph_overlay.v1",

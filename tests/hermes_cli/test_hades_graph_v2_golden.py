@@ -560,6 +560,55 @@ def test_executable_edge_flow_condition_and_structure_matrix() -> None:
         validate_artifact_definition("edge", branch)
 
 
+def test_alternative_edges_require_branch_group_and_preserve_dynamic_dispatch() -> None:
+    edge = copy.deepcopy(
+        _contract_document("golden/canonicalization.json")["contract_examples"][
+            "edges"
+        ][0]
+    )
+    branch_group_id = "hades:branch:v2:" + "2" * 64
+    case_condition = {
+        "kind": "predicate",
+        "normalized": "case admin",
+        "hash": "3" * 64,
+        "polarity": "case",
+    }
+
+    ordinary = copy.deepcopy(edge)
+    ordinary.update(
+        {
+            "flow": "alternative",
+            "condition": case_condition,
+            "branch_group_id": branch_group_id,
+        }
+    )
+    validate_artifact_definition("edge", ordinary)
+
+    dynamic_dispatch = copy.deepcopy(edge)
+    dynamic_dispatch.update(
+        {
+            "flow": "alternative",
+            "condition": None,
+            "branch_group_id": branch_group_id,
+        }
+    )
+    validate_artifact_definition("edge", dynamic_dispatch)
+
+    copied_outer_candidate = copy.deepcopy(dynamic_dispatch)
+    copied_outer_candidate["condition"] = {
+        "kind": "predicate",
+        "normalized": "authorized",
+        "hash": "4" * 64,
+        "polarity": "true",
+    }
+    validate_artifact_definition("edge", copied_outer_candidate)
+
+    missing_group = copy.deepcopy(dynamic_dispatch)
+    missing_group["branch_group_id"] = None
+    with pytest.raises(ValidationError):
+        validate_artifact_definition("edge", missing_group)
+
+
 def test_structure_discriminator_closes_id_subtype_continuation_and_parent() -> None:
     call_site = copy.deepcopy(
         _contract_document("golden/canonicalization.json")["contract_examples"][
@@ -678,6 +727,105 @@ def test_candidate_set_knowledge_is_the_same_closed_union_in_artifact_and_work()
             validate_artifact_definition("uncertainty", artifact_case)
         with pytest.raises(ValidationError):
             validate_contract("verification-work.schema.json", work_case)
+
+
+def test_resolution_kind_binds_subject_and_complete_cardinality_in_both_roots() -> None:
+    artifact_template = copy.deepcopy(
+        _contract_document("golden/canonicalization.json")["contract_examples"][
+            "uncertainties"
+        ][0]
+    )
+    work_template = copy.deepcopy(
+        _contract_document("golden/verification-results.json")["work_items"][0]
+    )
+    call_site_subject = {
+        "call_site_id": "hades:call-site:v2:" + "1" * 64,
+    }
+    edge_subject = {"edge_id": "hades:edge:v2:" + "2" * 64}
+    resolution_kinds = (
+        "call_target",
+        "entrypoint_handler",
+        "async_target",
+        "exception_target",
+        "framework_target",
+        "external_target",
+    )
+
+    def records_for(
+        resolution_kind: str,
+        subject: dict[str, str],
+        knowledge: str = "not_applicable",
+        candidate_count: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        artifact = copy.deepcopy(artifact_template)
+        work = copy.deepcopy(work_template)
+        targets = [
+            f"hades:node:v2:{candidate_index:064x}"
+            for candidate_index in range(1, candidate_count + 1)
+        ]
+        edges = [
+            f"hades:edge:v2:{candidate_index:064x}"
+            for candidate_index in range(33, 33 + candidate_count)
+        ]
+        for record in (artifact, work["assertion"]):
+            record["resolution_kind"] = resolution_kind
+            record["subject"] = subject
+            record["candidate_set_knowledge"] = knowledge
+            record["candidate_target_node_ids"] = targets
+            record["candidate_edge_ids"] = edges
+        return artifact, work
+
+    for resolution_kind in resolution_kinds:
+        legal_subject = (
+            call_site_subject if resolution_kind == "call_target" else edge_subject
+        )
+        illegal_subject = (
+            edge_subject if resolution_kind == "call_target" else call_site_subject
+        )
+        valid_artifact, valid_work = records_for(resolution_kind, legal_subject)
+        validate_artifact_definition("uncertainty", valid_artifact)
+        validate_contract("verification-work.schema.json", valid_work)
+
+        invalid_artifact, invalid_work = records_for(
+            resolution_kind, illegal_subject
+        )
+        with pytest.raises(ValidationError):
+            validate_artifact_definition("uncertainty", invalid_artifact)
+        with pytest.raises(ValidationError):
+            validate_contract("verification-work.schema.json", invalid_work)
+
+    handler_artifact, handler_work = records_for(
+        "entrypoint_handler", edge_subject, "complete", 1
+    )
+    validate_artifact_definition("uncertainty", handler_artifact)
+    validate_contract("verification-work.schema.json", handler_work)
+
+    handler_artifact, handler_work = records_for(
+        "entrypoint_handler", edge_subject, "complete", 2
+    )
+    with pytest.raises(ValidationError):
+        validate_artifact_definition("uncertainty", handler_artifact)
+    with pytest.raises(ValidationError):
+        validate_contract("verification-work.schema.json", handler_work)
+
+    for candidate_count in (1, 20):
+        for resolution_kind in (
+            "call_target",
+            "async_target",
+            "exception_target",
+            "framework_target",
+            "external_target",
+        ):
+            subject = (
+                call_site_subject
+                if resolution_kind == "call_target"
+                else edge_subject
+            )
+            artifact, work = records_for(
+                resolution_kind, subject, "complete", candidate_count
+            )
+            validate_artifact_definition("uncertainty", artifact)
+            validate_contract("verification-work.schema.json", work)
 
 
 def test_bundle_and_each_chunk_discriminator_validate(valid_artifact: dict[str, Any]) -> None:
@@ -805,6 +953,20 @@ def test_verification_goldens_are_closed_linked_scenarios() -> None:
         key = (item["target"]["type"], item["target"]["id"], item["target"]["version"])
         assert key not in work_by_target
         work_by_target[key] = item
+        if item["domain"] != "graph":
+            continue
+        assertion = item["assertion"]
+        if assertion["resolution_kind"] == "call_target":
+            assert set(assertion["subject"]) == {"call_site_id"}
+        else:
+            assert set(assertion["subject"]) == {"edge_id"}
+        if assertion["candidate_set_knowledge"] == "complete":
+            candidate_count = len(assertion["candidate_target_node_ids"])
+            assert candidate_count == len(assertion["candidate_edge_ids"])
+            if assertion["resolution_kind"] == "entrypoint_handler":
+                assert candidate_count == 1
+            else:
+                assert 1 <= candidate_count <= 20
 
     assert {
         result["verdict"] for result in golden["results"] if result["domain"] == "graph"

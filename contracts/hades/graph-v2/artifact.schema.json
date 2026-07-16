@@ -1348,21 +1348,16 @@
               }
             },
             {
+              "$comment": "Every alternative edge requires a branch group. A null condition or a copied outer condition with any polarity is accepted here only as a dynamic-dispatch candidate because JSON Schema cannot inspect the referenced structure. Application validation MUST resolve branch_group_id to a structure with kind=branch_group and subtype=dynamic_dispatch for those exceptions; when condition is non-null it MUST equal the enclosing outer condition. Otherwise an ordinary alternative MUST use case|default polarity.",
               "properties": {
                 "flow": {"const": "alternative"},
+                "branch_group_id": {"$ref": "#/$defs/branchId"},
                 "condition": {
                   "oneOf": [
                     {"type": "null"},
-                    {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["case", "default"]}}}
+                    {"$ref": "#/$defs/condition"}
                   ]
                 }
-              }
-            },
-            {
-              "properties": {
-                "flow": {"const": "alternative"},
-                "condition": {"$ref": "#/$defs/condition", "properties": {"polarity": {"enum": ["true", "false", "loop_body", "loop_exit", "exception", "finally"]}}},
-                "branch_group_id": {"$ref": "#/$defs/branchId"}
               }
             },
             {
@@ -1546,6 +1541,39 @@
       }
     },
     "resolutionKind": {"enum": ["call_target", "entrypoint_handler", "async_target", "exception_target", "framework_target", "external_target"]},
+    "graphResolutionSemantics": {
+      "oneOf": [
+        {
+          "properties": {
+            "resolution_kind": {"const": "call_target"},
+            "subject": {"$ref": "#/$defs/callSiteSubject"}
+          }
+        },
+        {
+          "properties": {
+            "resolution_kind": {"const": "entrypoint_handler"},
+            "subject": {"$ref": "#/$defs/edgeSubject"}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"candidate_set_knowledge": {"const": "complete"}}},
+              "then": {
+                "properties": {
+                  "candidate_target_node_ids": {"minItems": 1, "maxItems": 1},
+                  "candidate_edge_ids": {"minItems": 1, "maxItems": 1}
+                }
+              }
+            }
+          ]
+        },
+        {
+          "properties": {
+            "resolution_kind": {"enum": ["async_target", "exception_target", "framework_target", "external_target"]},
+            "subject": {"$ref": "#/$defs/edgeSubject"}
+          }
+        }
+      ]
+    },
     "uncertainty": {
       "type": "object",
       "additionalProperties": false,
@@ -1587,26 +1615,31 @@
         "impact": {"$ref": "#/$defs/display1000"},
         "fingerprint": {"$ref": "#/$defs/digest"}
       },
-      "oneOf": [
+      "allOf": [
+        {"$ref": "#/$defs/graphResolutionSemantics"},
         {
-          "properties": {
-            "candidate_set_knowledge": {"const": "complete"},
-            "candidate_target_node_ids": {"minItems": 1},
-            "candidate_edge_ids": {"minItems": 1}
-          }
-        },
-        {
-          "properties": {
-            "candidate_set_knowledge": {"const": "incomplete"},
-            "candidate_target_node_ids": {"minItems": 1}
-          }
-        },
-        {
-          "properties": {
-            "candidate_set_knowledge": {"const": "not_applicable"},
-            "candidate_target_node_ids": {"maxItems": 0},
-            "candidate_edge_ids": {"maxItems": 0}
-          }
+          "oneOf": [
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "complete"},
+                "candidate_target_node_ids": {"minItems": 1},
+                "candidate_edge_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "incomplete"},
+                "candidate_target_node_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "not_applicable"},
+                "candidate_target_node_ids": {"maxItems": 0},
+                "candidate_edge_ids": {"maxItems": 0}
+              }
+            }
+          ]
         }
       ]
     }

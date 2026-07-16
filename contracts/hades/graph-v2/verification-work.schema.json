@@ -170,26 +170,31 @@
           "items": {"$ref": "artifact.schema.json#/$defs/edgeId"}
         }
       },
-      "oneOf": [
+      "allOf": [
+        {"$ref": "artifact.schema.json#/$defs/graphResolutionSemantics"},
         {
-          "properties": {
-            "candidate_set_knowledge": {"const": "complete"},
-            "candidate_target_node_ids": {"minItems": 1},
-            "candidate_edge_ids": {"minItems": 1}
-          }
-        },
-        {
-          "properties": {
-            "candidate_set_knowledge": {"const": "incomplete"},
-            "candidate_target_node_ids": {"minItems": 1}
-          }
-        },
-        {
-          "properties": {
-            "candidate_set_knowledge": {"const": "not_applicable"},
-            "candidate_target_node_ids": {"maxItems": 0},
-            "candidate_edge_ids": {"maxItems": 0}
-          }
+          "oneOf": [
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "complete"},
+                "candidate_target_node_ids": {"minItems": 1},
+                "candidate_edge_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "incomplete"},
+                "candidate_target_node_ids": {"minItems": 1}
+              }
+            },
+            {
+              "properties": {
+                "candidate_set_knowledge": {"const": "not_applicable"},
+                "candidate_target_node_ids": {"maxItems": 0},
+                "candidate_edge_ids": {"maxItems": 0}
+              }
+            }
+          ]
         }
       ]
     }
