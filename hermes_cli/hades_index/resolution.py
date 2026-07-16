@@ -6,7 +6,6 @@ import json
 import re
 import shutil
 import subprocess
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -99,7 +98,12 @@ def _edge_key(edge: dict[str, Any]) -> tuple[str, str, str, str, int]:
     )
 
 
-def _append_unique(edges: list[dict[str, Any]], edge: dict[str, Any], seen: set[tuple[str, str, str, str, int]], max_edges: int) -> bool:
+def _append_unique(
+    edges: list[dict[str, Any]],
+    edge: dict[str, Any],
+    seen: set[tuple[str, str, str, str, int]],
+    max_edges: int,
+) -> bool:
     key = _edge_key(edge)
     if key in seen:
         return True
@@ -110,7 +114,9 @@ def _append_unique(edges: list[dict[str, Any]], edge: dict[str, Any], seen: set[
     return True
 
 
-def merge_structural_facts(graph: dict[str, Any], parsed: ParsedFile, *, max_symbols: int, max_edges: int) -> bool:
+def merge_structural_facts(
+    graph: dict[str, Any], parsed: ParsedFile, *, max_symbols: int, max_edges: int
+) -> bool:
     """Merge one parsed file and release it before the next file is parsed."""
     symbols = graph.setdefault("symbols", [])
     edges = graph.setdefault("edges", [])
@@ -142,34 +148,40 @@ def merge_structural_facts(graph: dict[str, Any], parsed: ParsedFile, *, max_sym
         symbols.append(symbol)
         symbol_index[(parsed.path, item.name)] = symbol
     for item in parsed.imports:
-        truncated = not _append_unique(
-            edges,
-            {
-                "kind": "imports",
-                "from": parsed.path,
-                "to": item.target,
-                "path": parsed.path,
-                "line": item.line,
-                "parser": "tree_sitter",
-            },
-            seen_edges,
-            max_edges,
-        ) or truncated
+        truncated = (
+            not _append_unique(
+                edges,
+                {
+                    "kind": "imports",
+                    "from": parsed.path,
+                    "to": item.target,
+                    "path": parsed.path,
+                    "line": item.line,
+                    "parser": "tree_sitter",
+                },
+                seen_edges,
+                max_edges,
+            )
+            or truncated
+        )
     for item in parsed.calls:
-        truncated = not _append_unique(
-            edges,
-            {
-                "kind": "calls",
-                "from": item.caller,
-                "to": item.target,
-                "path": parsed.path,
-                "line": item.line,
-                "parser": "tree_sitter",
-                "confidence": 0.8,
-            },
-            seen_edges,
-            max_edges,
-        ) or truncated
+        truncated = (
+            not _append_unique(
+                edges,
+                {
+                    "kind": "calls",
+                    "from": item.caller,
+                    "to": item.target,
+                    "path": parsed.path,
+                    "line": item.line,
+                    "parser": "tree_sitter",
+                    "confidence": 0.8,
+                },
+                seen_edges,
+                max_edges,
+            )
+            or truncated
+        )
     return truncated
 
 
@@ -197,25 +209,28 @@ def sanitize_analyzer_edges(
         source_ref = _safe_ref(raw.get("from"))
         target_ref = _safe_ref(raw.get("to"))
         path = str(raw.get("path") or "").replace("\\", "/")
-        if kind not in {"calls", "calls_method"} or not source_ref or not target_ref or path not in allowed_paths:
+        if (
+            kind not in {"calls", "calls_method"}
+            or not source_ref
+            or not target_ref
+            or path not in allowed_paths
+        ):
             continue
         try:
             line = max(1, int(raw.get("line") or 1))
         except (TypeError, ValueError):
             continue
         analyzer = _safe_ref(raw.get("analyzer")) or "static_analyzer"
-        sanitized.append(
-            {
-                "kind": kind,
-                "from": source_ref,
-                "to": target_ref,
-                "path": path,
-                "line": line,
-                "analyzer": analyzer,
-                "confidence": 1.0,
-                "resolved": True,
-            }
-        )
+        sanitized.append({
+            "kind": kind,
+            "from": source_ref,
+            "to": target_ref,
+            "path": path,
+            "line": line,
+            "analyzer": analyzer,
+            "confidence": 1.0,
+            "resolved": True,
+        })
     return sanitized
 
 
@@ -245,7 +260,11 @@ def run_typescript_compiler(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> AnalyzerResult:
     """Run the local TypeScript compiler API without emitting source text."""
-    ts_files = [path for path in candidates if path.suffix.lower() in _TS_SUFFIXES and path.is_file()]
+    ts_files = [
+        path
+        for path in candidates
+        if path.suffix.lower() in _TS_SUFFIXES and path.is_file()
+    ]
     tsconfig = _find_tsconfig(workspace_root, ts_files)
     if not ts_files or tsconfig is None:
         return AnalyzerResult(status="skipped")
@@ -256,7 +275,11 @@ def run_typescript_compiler(
     root = workspace_root.resolve()
     request = {
         "root": str(root),
-        "files": [path.resolve().relative_to(root).as_posix() for path in ts_files if path.resolve().is_relative_to(root)],
+        "files": [
+            path.resolve().relative_to(root).as_posix()
+            for path in ts_files
+            if path.resolve().is_relative_to(root)
+        ],
         "tsconfig": str(tsconfig.resolve()),
         "maxEdges": max_edges,
     }
@@ -273,7 +296,9 @@ def run_typescript_compiler(
     except subprocess.TimeoutExpired:
         return AnalyzerResult(
             status="timeout",
-            omitted=({"analyzer": "typescript_compiler", "reason": "analyzer_timeout"},),
+            omitted=(
+                {"analyzer": "typescript_compiler", "reason": "analyzer_timeout"},
+            ),
         )
     except (OSError, ValueError):
         return AnalyzerResult(status="unavailable")
@@ -287,8 +312,12 @@ def run_typescript_compiler(
         return AnalyzerResult(status="error")
     status = str(response.get("status") or "error")
     if status != "ok":
-        return AnalyzerResult(status=status if status in {"unavailable", "skipped"} else "error")
-    edges = sanitize_analyzer_edges(root, ts_files, response.get("edges"), max_edges=max_edges)
+        return AnalyzerResult(
+            status=status if status in {"unavailable", "skipped"} else "error"
+        )
+    edges = sanitize_analyzer_edges(
+        root, ts_files, response.get("edges"), max_edges=max_edges
+    )
     return AnalyzerResult(status="ok", edges=tuple(edges))
 
 
@@ -299,37 +328,52 @@ def _route_ref(route: dict[str, Any]) -> str:
     return f"route:{route_id}" if route_id else ""
 
 
-def resolve_call_graph(graph: dict[str, Any], *, max_edges: int, max_depth: int = 8) -> bool:
-    """Derive table access and bounded route reachability from existing edges."""
+def resolve_call_graph(graph: dict[str, Any], *, max_edges: int) -> bool:
+    """Derive local structural facts without claiming lifecycle reachability.
+
+    The former depth-eight BFS and ``route_reaches_table`` summary have been
+    removed.  A route-to-table relationship is a query-time summary over real
+    v2 edges, not a producer-side lifecycle assertion.
+    """
     edges = graph.setdefault("edges", [])
     seen = {_edge_key(edge) for edge in edges}
     truncated = False
 
-    known_handlers = {str(symbol.get("name") or "") for symbol in graph.get("symbols") or []}
+    known_handlers = {
+        str(symbol.get("name") or "") for symbol in graph.get("symbols") or []
+    }
     for route in graph.get("routes") or []:
         handler = str(route.get("handler") or "")
         route_ref = _route_ref(route)
-        if not route_ref or not handler or (known_handlers and handler not in known_handlers):
+        if (
+            not route_ref
+            or not handler
+            or (known_handlers and handler not in known_handlers)
+        ):
             continue
-        truncated = not _append_unique(
-            edges,
-            {
-                "kind": "route_handler",
-                "from": route_ref,
-                "to": handler,
-                "framework": route.get("framework"),
-                "path": route.get("path") or route.get("source_path"),
-                "line": route.get("line"),
-                "resolver": "hades_static",
-            },
-            seen,
-            max_edges,
-        ) or truncated
+        truncated = (
+            not _append_unique(
+                edges,
+                {
+                    "kind": "route_handler",
+                    "from": route_ref,
+                    "to": handler,
+                    "framework": route.get("framework"),
+                    "path": route.get("path") or route.get("source_path"),
+                    "line": route.get("line"),
+                    "resolver": "hades_static",
+                },
+                seen,
+                max_edges,
+            )
+            or truncated
+        )
 
     model_tables = {
         str(edge.get("from") or ""): str(edge.get("to") or "")
         for edge in edges
-        if edge.get("kind") == "model_table" and str(edge.get("to") or "").startswith("table:")
+        if edge.get("kind") == "model_table"
+        and str(edge.get("to") or "").startswith("table:")
     }
     for edge in list(edges):
         source_ref = str(edge.get("from") or "")
@@ -343,68 +387,31 @@ def resolve_call_graph(graph: dict[str, Any], *, max_edges: int, max_depth: int 
             table_ref = model_tables.get(model_ref, "")
         if not table_ref and edge.get("table"):
             table_name = str(edge.get("table") or "")
-            table_ref = table_name if table_name.startswith("table:") else f"table:{table_name}"
+            table_ref = (
+                table_name if table_name.startswith("table:") else f"table:{table_name}"
+            )
         if not source_ref or not table_ref:
             continue
-        truncated = not _append_unique(
-            edges,
-            {
-                "kind": "accesses_table",
-                "from": source_ref,
-                "to": table_ref,
-                "model": model_ref,
-                "via_kind": edge.get("kind"),
-                "path": edge.get("path"),
-                "line": edge.get("line"),
-                "resolver": "hades_static",
-                "confidence": 0.9,
-            },
-            seen,
-            max_edges,
-        ) or truncated
+        truncated = (
+            not _append_unique(
+                edges,
+                {
+                    "kind": "accesses_table",
+                    "from": source_ref,
+                    "to": table_ref,
+                    "model": model_ref,
+                    "via_kind": edge.get("kind"),
+                    "path": edge.get("path"),
+                    "line": edge.get("line"),
+                    "resolver": "hades_static",
+                    "confidence": 0.9,
+                },
+                seen,
+                max_edges,
+            )
+            or truncated
+        )
 
-    traversable = {"route_handler", "calls", "calls_method", "accesses_table"}
-    adjacency: dict[str, list[str]] = {}
-    route_metadata: dict[str, dict[str, Any]] = {}
-    for edge in edges:
-        if edge.get("kind") not in traversable:
-            continue
-        source_ref = str(edge.get("from") or "")
-        target_ref = str(edge.get("to") or "")
-        if not source_ref or not target_ref:
-            continue
-        adjacency.setdefault(source_ref, []).append(target_ref)
-        if source_ref.startswith("route:"):
-            route_metadata.setdefault(source_ref, edge)
-
-    for route_ref in sorted(route_metadata):
-        queue: deque[tuple[str, tuple[str, ...]]] = deque((target, (target,)) for target in adjacency.get(route_ref, []))
-        visited = {route_ref}
-        while queue:
-            current, path = queue.popleft()
-            if current in visited or len(path) > max_depth:
-                continue
-            visited.add(current)
-            if current.startswith("table:"):
-                metadata = route_metadata[route_ref]
-                truncated = not _append_unique(
-                    edges,
-                    {
-                        "kind": "route_reaches_table",
-                        "from": route_ref,
-                        "to": current,
-                        "via": list(path[:-1]),
-                        "path": metadata.get("path"),
-                        "line": metadata.get("line"),
-                        "resolver": "hades_static",
-                        "confidence": 0.9,
-                    },
-                    seen,
-                    max_edges,
-                ) or truncated
-                continue
-            for target in adjacency.get(current, []):
-                queue.append((target, (*path, target)))
     return truncated
 
 
@@ -432,7 +439,17 @@ def enrich_graph_for_workspace(
         parser_status: dict[str, str] = {}
         for path in candidates:
             suffix = path.suffix.lower()
-            language = "typescript" if suffix in {".ts", ".tsx"} else "javascript" if suffix in {".js", ".jsx"} else "php" if suffix == ".php" else ""
+            language = (
+                "typescript"
+                if suffix in {".ts", ".tsx"}
+                else "javascript"
+                if suffix in {".js", ".jsx"}
+                else "python"
+                if suffix == ".py"
+                else "php"
+                if suffix == ".php"
+                else ""
+            )
             if not language:
                 continue
             if language in parser_status and parser_status[language] == "unavailable":
@@ -441,14 +458,26 @@ def enrich_graph_for_workspace(
                 parser_status[language] = "unavailable"
                 continue
             rel = path.relative_to(workspace_root).as_posix()
-            parsed = adapter.parse_file(path, relative_path=rel, language=language, max_bytes=max_file_bytes)
-            if parsed is None:
+            parse_result = adapter.parse_file(
+                path, relative_path=rel, language=language, max_bytes=max_file_bytes
+            )
+            if parse_result.status == "failed" or parse_result.syntax is None:
                 parser_status.setdefault(language, "degraded")
+                if parse_result.coverage_event is not None:
+                    graph.setdefault("coverage_events", []).append({
+                        "language": parse_result.coverage_event.language,
+                        "capability": parse_result.coverage_event.capability.value,
+                        "outcome": parse_result.coverage_event.outcome.value,
+                        "reason_code": parse_result.coverage_event.reason_code,
+                        "path": parse_result.coverage_event.path,
+                        "represented_count": parse_result.coverage_event.represented_count,
+                        "omitted_count": parse_result.coverage_event.omitted_count,
+                    })
                 continue
             parser_status[language] = "ok"
             graph["truncated"] = merge_structural_facts(
                 graph,
-                parsed,
+                parse_result.syntax.parsed_file,
                 max_symbols=max_symbols,
                 max_edges=max_edges,
             ) or bool(graph.get("truncated"))
@@ -464,7 +493,10 @@ def enrich_graph_for_workspace(
             timeout_seconds=timeout,
             max_edges=max(0, max_edges - len(graph.get("edges") or [])),
         )
-        analysis["typescript_compiler"] = {"status": analyzer.status, "edge_count": len(analyzer.edges)}
+        analysis["typescript_compiler"] = {
+            "status": analyzer.status,
+            "edge_count": len(analyzer.edges),
+        }
         edges = graph.setdefault("edges", [])
         seen = {_edge_key(edge) for edge in edges}
         for edge in analyzer.edges:
@@ -474,6 +506,8 @@ def enrich_graph_for_workspace(
         if analyzer.omitted:
             graph.setdefault("omitted", []).extend(analyzer.omitted)
             graph["truncated"] = True
-        graph["truncated"] = resolve_call_graph(graph, max_edges=max_edges) or bool(graph.get("truncated"))
+        graph["truncated"] = resolve_call_graph(graph, max_edges=max_edges) or bool(
+            graph.get("truncated")
+        )
     else:
         analysis["typescript_compiler"] = {"status": "disabled", "edge_count": 0}

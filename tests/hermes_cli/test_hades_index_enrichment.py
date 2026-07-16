@@ -44,7 +44,9 @@ def test_tree_sitter_adapter_extracts_bounded_metadata_only():
     source = b"function checkout() { charge(); }"
     function_name = _Node("identifier", 9, 17)
     target = _Node("identifier", 22, 28)
-    call = _Node("call_expression", 22, 30, start_point=(0, 22), fields={"function": target})
+    call = _Node(
+        "call_expression", 22, 30, start_point=(0, 22), fields={"function": target}
+    )
     function = _Node(
         "function_declaration",
         0,
@@ -59,10 +61,11 @@ def test_tree_sitter_adapter_extracts_bounded_metadata_only():
 
     parsed = adapter.parse_bytes(source, path="src/checkout.ts", language="typescript")
 
-    assert parsed is not None
-    assert parsed.symbols[0].name == "checkout"
-    assert parsed.calls[0].caller == "checkout"
-    assert parsed.calls[0].target == "charge"
+    assert parsed.status == "parsed"
+    assert parsed.syntax is not None
+    assert parsed.syntax.symbols[0].name == "checkout"
+    assert parsed.syntax.calls[0].caller == "checkout"
+    assert parsed.syntax.calls[0].target == "charge"
     assert "function checkout" not in repr(parsed)
     assert not hasattr(parsed, "source")
 
@@ -75,10 +78,14 @@ def test_tree_sitter_adapter_fails_closed_when_optional_parser_is_missing():
 
     adapter = TreeSitterAdapter(parser_loader=unavailable)
 
-    assert adapter.parse_bytes(b"export function ok() {}", path="src/a.ts", language="typescript") is None
+    parsed = adapter.parse_bytes(
+        b"export function ok() {}", path="src/a.ts", language="typescript"
+    )
+    assert parsed.status == "failed"
+    assert parsed.failure is not None and parsed.failure.code == "parser_unavailable"
 
 
-def test_call_graph_resolution_is_monotonic_and_derives_route_table_path():
+def test_call_graph_resolution_is_monotonic_without_a_route_table_lifecycle_shortcut():
     from hermes_cli.hades_index.resolution import resolve_call_graph
 
     legacy_edge = {
@@ -90,8 +97,18 @@ def test_call_graph_resolution_is_monotonic_and_derives_route_table_path():
     }
     graph = {
         "symbols": [
-            {"kind": "method", "name": "OrderController@store", "path": "app/Http/Controllers/OrderController.php", "line": 13},
-            {"kind": "method", "name": "OrderService@create", "path": "app/Services/OrderService.php", "line": 10},
+            {
+                "kind": "method",
+                "name": "OrderController@store",
+                "path": "app/Http/Controllers/OrderController.php",
+                "line": 13,
+            },
+            {
+                "kind": "method",
+                "name": "OrderService@create",
+                "path": "app/Services/OrderService.php",
+                "line": 10,
+            },
         ],
         "edges": [
             legacy_edge,
@@ -122,10 +139,7 @@ def test_call_graph_resolution_is_monotonic_and_derives_route_table_path():
         and edge.get("to") == "table:orders"
         for edge in graph["edges"]
     )
-    route_edge = next(edge for edge in graph["edges"] if edge.get("kind") == "route_reaches_table")
-    assert route_edge["from"] == "route:orders.store"
-    assert route_edge["to"] == "table:orders"
-    assert route_edge["via"] == ["OrderController@store", "OrderService@create"]
+    assert not any(edge.get("kind") == "route_reaches_table" for edge in graph["edges"])
 
 
 def test_analyzer_output_is_allowlisted_and_workspace_scoped(tmp_path: Path):
@@ -146,7 +160,13 @@ def test_analyzer_output_is_allowlisted_and_workspace_scoped(tmp_path: Path):
             "diagnostic": "do-not-leak",
             "analyzer": "typescript_compiler",
         },
-        {"kind": "calls", "from": "escape", "to": "outside", "path": "../outside.ts", "line": 1},
+        {
+            "kind": "calls",
+            "from": "escape",
+            "to": "outside",
+            "path": "../outside.ts",
+            "line": 1,
+        },
     ]
 
     edges = sanitize_analyzer_edges(tmp_path, [candidate], payload, max_edges=10)
@@ -186,4 +206,6 @@ def test_typescript_analyzer_timeout_is_non_fatal(tmp_path: Path):
 
     assert result.edges == ()
     assert result.status == "timeout"
-    assert result.omitted == ({"analyzer": "typescript_compiler", "reason": "analyzer_timeout"},)
+    assert result.omitted == (
+        {"analyzer": "typescript_compiler", "reason": "analyzer_timeout"},
+    )

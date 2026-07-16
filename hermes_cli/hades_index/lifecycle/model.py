@@ -2309,7 +2309,7 @@ class AdapterResult:
                 call_site_structure_key = call_site_structure_by_site[
                     site.local_key
                 ].local_key
-                subject_invocations = [
+                all_invocations = [
                     edge
                     for edge in self.edge_facts
                     if edge_matches_resolution(
@@ -2319,6 +2319,16 @@ class AdapterResult:
                     )
                 ]
                 if fact.candidate_set_knowledge is not CandidateSetKnowledge.COMPLETE:
+                    # Incomplete inferred hints (including optional Graphify
+                    # hints) share the call-site structure but cannot replace
+                    # the one native unresolved assertion.  The assertion is
+                    # the sole non-inferred invocation; inferred candidates
+                    # are validated below through candidate_edge_local_keys.
+                    subject_invocations = [
+                        edge
+                        for edge in all_invocations
+                        if edge.evidence.origin is not EvidenceOrigin.INFERRED
+                    ]
                     if len(subject_invocations) != 1:
                         _fail(
                             "invalid_unresolved_subject",

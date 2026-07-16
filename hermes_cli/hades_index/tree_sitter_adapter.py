@@ -10,7 +10,13 @@ import importlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal, TypeAlias
+
+from hermes_cli.hades_index.lifecycle.model import (
+    CoverageCapability,
+    CoverageEvent,
+    CoverageOutcome,
+)
 
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_.$\\][A-Za-z0-9_.$\\/:@>~\-]*$")
@@ -23,6 +29,11 @@ _SYMBOL_TYPES = {
         "type_alias_declaration": "type",
         "enum_declaration": "enum",
         "method_definition": "method",
+    },
+    "python": {
+        "function_definition": "function",
+        "async_function_definition": "function",
+        "class_definition": "class",
     },
     "javascript": {
         "function_declaration": "function",
@@ -45,11 +56,31 @@ _CALL_TYPES = {
     "member_call_expression",
     "nullsafe_member_call_expression",
     "scoped_call_expression",
+    "call",
 }
 _IMPORT_TYPES = {
     "import_statement",
     "namespace_use_declaration",
 }
+
+SyntaxControlKind: TypeAlias = Literal[
+    "branch",
+    "merge",
+    "loop",
+    "return",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "async_dispatch",
+    "call",
+]
+ParseFailureCode: TypeAlias = Literal[
+    "parser_unavailable",
+    "parser_failed",
+    "file_too_large",
+    "file_read_failed",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +114,103 @@ class ParsedFile:
     calls: tuple[StructuralCall, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SyntaxControl:
+    """A source-free, finite control fact retained from one parsed syntax tree."""
+
+    kind: SyntaxControlKind
+    structural_path: str
+    line: int
+    end_line: int
+
+    def __post_init__(self) -> None:
+        if not self.structural_path or self.structural_path.startswith("/"):
+            raise ValueError("syntax control must use a relative structural path")
+        if self.line < 1 or self.end_line < self.line:
+            raise ValueError("syntax control must have positive ordered lines")
+
+
+@dataclass(frozen=True, slots=True)
+class SyntaxIR:
+    """Closed parse output: metadata plus language-neutral control facts.
+
+    It intentionally has no source bytes, native tree, exception object, or
+    open metadata payload.  A later language adapter translates these facts
+    into frozen lifecycle IR records.
+    """
+
+    parsed_file: ParsedFile
+    controls: tuple[SyntaxControl, ...]
+
+    @property
+    def path(self) -> str:
+        return self.parsed_file.path
+
+    @property
+    def language(self) -> str:
+        return self.parsed_file.language
+
+    @property
+    def symbols(self) -> tuple[StructuralSymbol, ...]:
+        return self.parsed_file.symbols
+
+    @property
+    def imports(self) -> tuple[StructuralImport, ...]:
+        return self.parsed_file.imports
+
+    @property
+    def calls(self) -> tuple[StructuralCall, ...]:
+        return self.parsed_file.calls
+
+
+@dataclass(frozen=True, slots=True)
+class ParseFailure:
+    """Privacy-safe parse failure; raw exceptions and source never leave parsing."""
+
+    code: ParseFailureCode
+    path: str
+    language: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParseResult:
+    """A parser outcome is never represented by a successful ``None`` value."""
+
+    status: Literal["parsed", "failed"]
+    syntax: SyntaxIR | None
+    failure: ParseFailure | None
+    coverage_event: CoverageEvent | None
+
+    def __post_init__(self) -> None:
+        parsed = self.status == "parsed"
+        if parsed != (self.syntax is not None) or parsed == (self.failure is not None):
+            raise ValueError("parse result must contain exactly syntax or failure")
+        if parsed != (self.coverage_event is None):
+            raise ValueError("only failed parsing may carry a coverage event")
+
+    @classmethod
+    def parsed(cls, syntax: SyntaxIR) -> "ParseResult":
+        return cls("parsed", syntax, None, None)
+
+    @classmethod
+    def failed(cls, code: ParseFailureCode, path: str, language: str) -> "ParseResult":
+        failure = ParseFailure(code, path, language)
+        return cls(
+            "failed",
+            None,
+            failure,
+            CoverageEvent(
+                language=language,
+                capability=CoverageCapability.CONTROL_FLOW,
+                outcome=CoverageOutcome.PARTIAL,
+                reason_code=code,
+                path=path,
+                represented_count=0,
+                omitted_count=1,
+            ),
+        )
+
+
 ParserLoader = Callable[[str], Any | None]
 
 
@@ -100,7 +228,12 @@ def _bounded_node_text(source: bytes, node: Any | None, *, limit: int = 512) -> 
     if end <= start:
         return ""
     value = source[start:end].decode("utf-8", errors="replace").strip().strip("'\"")
-    if not value or "\n" in value or "\r" in value or not _SAFE_NAME_RE.fullmatch(value):
+    if (
+        not value
+        or "\n" in value
+        or "\r" in value
+        or not _SAFE_NAME_RE.fullmatch(value)
+    ):
         return ""
     return value
 
@@ -129,6 +262,7 @@ def _load_parser(language: str) -> Any | None:
         "typescript": ("tree_sitter_typescript", "language_typescript"),
         "javascript": ("tree_sitter_javascript", "language"),
         "php": ("tree_sitter_php", "language_php"),
+        "python": ("tree_sitter_python", "language_python"),
     }
     module_spec = grammar_modules.get(language)
     if module_spec is None:
@@ -136,7 +270,9 @@ def _load_parser(language: str) -> Any | None:
     try:
         tree_sitter = importlib.import_module("tree_sitter")
         grammar = importlib.import_module(module_spec[0])
-        language_factory = getattr(grammar, module_spec[1], None) or getattr(grammar, "language")
+        language_factory = getattr(grammar, module_spec[1], None) or getattr(
+            grammar, "language"
+        )
         language_object = language_factory()
         try:
             language_object = tree_sitter.Language(language_object)
@@ -170,32 +306,59 @@ class TreeSitterAdapter:
     def is_available(self, language: str) -> bool:
         return self._parser(language) is not None
 
-    def parse_file(self, path: Path, *, relative_path: str, language: str, max_bytes: int) -> ParsedFile | None:
+    def parse_file(
+        self,
+        path: Path,
+        *,
+        relative_path: str,
+        language: str,
+        max_bytes: int,
+    ) -> ParseResult:
         try:
             if path.stat().st_size > max_bytes:
-                return None
+                return ParseResult.failed("file_too_large", relative_path, language)
             with path.open("rb") as handle:
                 source = handle.read(max_bytes + 1)
             if len(source) > max_bytes:
-                return None
+                return ParseResult.failed("file_too_large", relative_path, language)
             return self.parse_bytes(source, path=relative_path, language=language)
         except OSError:
-            return None
+            return ParseResult.failed("file_read_failed", relative_path, language)
 
-    def parse_bytes(self, source: bytes, *, path: str, language: str) -> ParsedFile | None:
+    def parse_bytes(self, source: bytes, *, path: str, language: str) -> ParseResult:
         parser = self._parser(language)
         if parser is None:
-            return None
+            return ParseResult.failed("parser_unavailable", path, language)
         tree = None
         try:
             tree = parser.parse(source)
             root = tree.root_node
+            if bool(getattr(root, "has_error", False)):
+                return ParseResult.failed("parser_failed", path, language)
             symbols: list[StructuralSymbol] = []
             imports: list[StructuralImport] = []
             calls: list[StructuralCall] = []
+            controls: list[SyntaxControl] = []
             symbol_types = _SYMBOL_TYPES.get(language, {})
 
-            def visit(node: Any, context: str = "", container: str = "") -> None:
+            def add_control(
+                kind: SyntaxControlKind, structural_path: str, node: Any
+            ) -> None:
+                controls.append(
+                    SyntaxControl(
+                        kind=kind,
+                        structural_path=structural_path,
+                        line=_point_row(node.start_point) + 1,
+                        end_line=_point_row(node.end_point) + 1,
+                    )
+                )
+
+            def visit(
+                node: Any,
+                context: str = "",
+                container: str = "",
+                structural_path: str = "root",
+            ) -> None:
                 node_type = str(getattr(node, "type", ""))
                 next_context = context
                 next_container = container
@@ -203,7 +366,11 @@ class TreeSitterAdapter:
                 if symbol_kind:
                     name = _bounded_node_text(source, _field(node, "name"))
                     if name:
-                        qualified = f"{container}.{name}" if symbol_kind == "method" and container else name
+                        qualified = (
+                            f"{container}.{name}"
+                            if symbol_kind == "method" and container
+                            else name
+                        )
                         symbols.append(
                             StructuralSymbol(
                                 name=qualified,
@@ -219,24 +386,89 @@ class TreeSitterAdapter:
                 if node_type in _IMPORT_TYPES:
                     target = _bounded_node_text(source, _field(node, "source", "name"))
                     if target:
-                        imports.append(StructuralImport(target=target, line=_point_row(node.start_point) + 1))
+                        imports.append(
+                            StructuralImport(
+                                target=target, line=_point_row(node.start_point) + 1
+                            )
+                        )
                 if node_type in _CALL_TYPES and context:
-                    target = _bounded_node_text(source, _field(node, "function", "name", "member"))
+                    target = _bounded_node_text(
+                        source, _field(node, "function", "name", "member")
+                    )
                     if target:
-                        calls.append(StructuralCall(caller=context, target=target, line=_point_row(node.start_point) + 1))
+                        calls.append(
+                            StructuralCall(
+                                caller=context,
+                                target=target,
+                                line=_point_row(node.start_point) + 1,
+                            )
+                        )
+                control_kind = _control_kind(node_type)
+                if control_kind is not None:
+                    add_control(control_kind, structural_path, node)
+                    if control_kind in {"branch", "loop", "try"}:
+                        # This is a structural convergence marker, not an
+                        # inferred runtime path.  CFG construction later owns
+                        # the concrete continuation block.
+                        add_control("merge", f"{structural_path}/merge", node)
+                if node_type in _CALL_TYPES:
+                    add_control("call", structural_path, node)
+                child_type_counts: dict[str, int] = {}
                 for child in getattr(node, "children", ()):
-                    visit(child, next_context, next_container)
+                    child_type = str(getattr(child, "type", "node"))
+                    child_ordinal = child_type_counts.get(child_type, 0)
+                    child_type_counts[child_type] = child_ordinal + 1
+                    visit(
+                        child,
+                        next_context,
+                        next_container,
+                        f"{structural_path}/{child_type}/{child_ordinal}",
+                    )
 
             visit(root)
-            return ParsedFile(
+            parsed = ParsedFile(
                 path=path,
                 language=language,
                 symbols=tuple(symbols),
                 imports=tuple(imports),
                 calls=tuple(calls),
             )
+            return ParseResult.parsed(SyntaxIR(parsed, tuple(controls)))
         except Exception:
-            return None
+            return ParseResult.failed("parser_failed", path, language)
         finally:
             # Keep neither the source buffer nor native tree alive across files.
             del tree
+
+
+def _control_kind(node_type: str) -> SyntaxControlKind | None:
+    """Map grammar node spellings to the finite language-neutral syntax set."""
+
+    if node_type in {
+        "if_statement",
+        "switch_statement",
+        "match_statement",
+        "conditional_expression",
+        "ternary_expression",
+    }:
+        return "branch"
+    if node_type in {
+        "for_statement",
+        "while_statement",
+        "foreach_statement",
+        "do_statement",
+    }:
+        return "loop"
+    if node_type in {"return_statement", "return"}:
+        return "return"
+    if node_type in {"throw_statement", "raise_statement"}:
+        return "throw"
+    if node_type in {"try_statement", "try"}:
+        return "try"
+    if node_type in {"catch_clause", "except_clause"}:
+        return "catch"
+    if node_type in {"finally_clause", "finally"}:
+        return "finally"
+    if node_type in {"await_expression", "await"}:
+        return "async_dispatch"
+    return None
