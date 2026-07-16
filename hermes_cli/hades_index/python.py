@@ -6,7 +6,7 @@ import ast
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from hermes_cli import hades_backend_jobs as _hades_backend_jobs
 from hermes_cli.hades_backend_client import redact_secret
@@ -20,6 +20,13 @@ from hermes_cli.hades_backend_jobs import (
     MAX_LOG_EVENTS,
 )
 from hermes_cli.hades_index.inventory import inventory_coverage
+from hermes_cli.hades_index.lifecycle.entrypoints import (
+    EntrypointExtraction,
+    extract_language_entrypoints,
+)
+from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
+from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
 PY_HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "api_route", "route"}
@@ -27,6 +34,22 @@ PY_DJANGO_ROUTE_FUNCS = {"path", "re_path"}
 PY_DJANGO_RELATION_FIELDS = {"ForeignKey", "OneToOneField", "ManyToManyField"}
 PY_SQLALCHEMY_COLUMN_CALLS = {"Column", "mapped_column"}
 PY_LOG_LEVELS = {"debug", "info", "warning", "warn", "error", "exception", "critical"}
+
+
+def extract_lifecycle_entrypoints(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    *,
+    registry: FrameworkAdapterRegistry | None = None,
+) -> EntrypointExtraction:
+    """Emit Python syntax roots and registered framework facts, never v1 graph data."""
+
+    return extract_language_entrypoints(
+        context,
+        syntax,
+        language="python",
+        registry=registry,
+    )
 
 
 def _py_graph_summary(
@@ -780,4 +803,3 @@ def build_graph(
         logs=logs,
     )
     return graph
-

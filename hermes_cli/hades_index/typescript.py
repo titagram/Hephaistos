@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from hermes_cli import hades_backend_jobs as _hades_backend_jobs
 from hermes_cli.hades_backend_client import redact_secret
@@ -24,12 +24,35 @@ from hermes_cli.hades_backend_jobs import (
     MAX_LOG_EVENTS,
 )
 from hermes_cli.hades_index.inventory import inventory_coverage
+from hermes_cli.hades_index.lifecycle.entrypoints import (
+    EntrypointExtraction,
+    extract_languages_entrypoints,
+)
+from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
+from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
 TS_EXPORT_DECL_RE = re.compile(
     r"\bexport\s+(?:default\s+)?(?:(?:async\s+)?function|class|const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)",
     re.MULTILINE,
 )
+
+
+def extract_lifecycle_entrypoints(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    *,
+    registry: FrameworkAdapterRegistry | None = None,
+) -> EntrypointExtraction:
+    """Emit JavaScript/TypeScript syntax roots and registered framework facts."""
+
+    return extract_languages_entrypoints(
+        context,
+        syntax,
+        languages=frozenset({"javascript", "typescript"}),
+        registry=registry,
+    )
 TS_FUNCTION_RE = re.compile(r"\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(", re.MULTILINE)
 TS_ARROW_COMPONENT_RE = re.compile(
     r"\b(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Z][A-Za-z0-9_$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>",
@@ -654,4 +677,3 @@ def build_graph(
         logs=logs,
     )
     return graph
-

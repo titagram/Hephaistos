@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 from hermes_cli.hades_backend_client import redact_secret
@@ -28,9 +28,32 @@ from hermes_cli.hades_backend_jobs import (
     PHP_USE_RE,
     MAX_LOG_EVENTS,
 )
+from hermes_cli.hades_index.lifecycle.entrypoints import (
+    EntrypointExtraction,
+    extract_language_entrypoints,
+)
+from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
+from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
 PHP_LOG_LEVEL_PATTERN = r"debug|info|notice|warn|warning|error|critical|alert|emergency"
+
+
+def extract_lifecycle_entrypoints(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    *,
+    registry: FrameworkAdapterRegistry | None = None,
+) -> EntrypointExtraction:
+    """Delegate PHP lifecycle semantics without growing this legacy god-file."""
+
+    return extract_language_entrypoints(
+        context,
+        syntax,
+        language="php",
+        registry=registry,
+    )
 PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
 PHP_CLASS_RE = re.compile(
     r"\b(?P<kind>class|interface|trait|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"

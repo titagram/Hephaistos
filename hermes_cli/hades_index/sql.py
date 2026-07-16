@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from hermes_cli import hades_backend_jobs as _hades_backend_jobs
 from hermes_cli.hades_backend_jobs import (
@@ -13,12 +13,33 @@ from hermes_cli.hades_backend_jobs import (
     _line_number,
     _ts_graph_summary,
 )
+from hermes_cli.hades_index.lifecycle.entrypoints import (
+    EntrypointExtraction,
+    sql_entrypoint_extraction,
+)
+from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
+from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
 SQL_CREATE_TABLE_RE = re.compile(
     r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<table>[`\"A-Za-z0-9_.]+)\s*\((?P<body>.*?)\)\s*;",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def extract_lifecycle_entrypoints(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    *,
+    registry: FrameworkAdapterRegistry | None = None,
+) -> EntrypointExtraction:
+    """Emit SQL's explicit not-applicable executable capability records only."""
+
+    if registry is not None:
+        raise ValueError("SQL does not accept framework lifecycle adapters")
+    del context
+    return sql_entrypoint_extraction(syntax)
 SQL_INLINE_REFERENCE_RE = re.compile(
     r"\bREFERENCES\s+(?P<table>[`\"A-Za-z0-9_.]+)\s*\(\s*(?P<column>[`\"A-Za-z0-9_]+)\s*\)",
     re.IGNORECASE,
@@ -233,5 +254,4 @@ def build_graph(
     }
     graph["summary"] = _ts_graph_summary([], symbols, edges, framework="sql", database=graph_database)
     return graph
-
 
