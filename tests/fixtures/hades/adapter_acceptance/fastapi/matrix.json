@@ -60,6 +60,7 @@
         }
       ],
       "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child",
         "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_repeated_router_inclusion_has_distinct_registry_safe_pipeline_identity"
       ]
     },
@@ -156,6 +157,7 @@
         }
       ],
       "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child",
         "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_add_api_route_merges_registration_and_endpoint_dependencies"
       ]
     },
@@ -277,7 +279,9 @@
         }
       ],
       "test_nodes": [
-        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_literal_none_lifespan_preserves_routes_and_legacy_events"
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_literal_none_lifespan_preserves_routes_and_legacy_events",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_lifespan_target_uses_constructor_occurrence_binding",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child"
       ]
     },
     {
