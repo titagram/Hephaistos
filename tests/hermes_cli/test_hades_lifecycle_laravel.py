@@ -230,12 +230,58 @@ def test_resource_paths_use_laravel_static_singular_parameters(tmp_path: Path) -
     assert paths["categories.destroy"] == "/categories/{category}"
 
 
+def test_resource_buses_uses_a_proven_static_parameter(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::resource('buses', BusController::class);",
+    )
+
+    routes = LaravelLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/BusController.php",
+                "BusController.index",
+                "BusController.create",
+                "BusController.store",
+                "BusController.show",
+                "BusController.edit",
+                "BusController.update",
+                "BusController.destroy",
+            ),
+        ),
+    )
+    paths = {route.public_name: route.public_path for route in routes}
+
+    assert paths["buses.show"] == "/buses/{bus}"
+    assert paths["buses.edit"] == "/buses/{bus}/edit"
+
+
 def test_resource_with_unproven_parameter_inflection_is_partial(tmp_path: Path) -> None:
     _prepare_project(tmp_path)
     _write(
         tmp_path,
         "routes/web.php",
         "<?php Route::resource('status', StatusController::class);",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    assert "resource_parameter_unresolved" in {
+        event.reason_code for event in adapter.coverage_events(context)
+    }
+
+
+def test_resource_with_unsupported_es_inflection_is_partial(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::resource('quizzes', QuizController::class);",
     )
     adapter = LaravelLifecycleAdapter()
     context = _context(tmp_path)
@@ -323,7 +369,9 @@ class Kernel {
     assert "authorization" in roles
     assert "validation" in roles
     assert "handler" in roles
-    assert roles[-1] == "response"
+    assert "response" in roles
+    assert "response_outcome" in roles
+    assert roles.index("response") < roles.index("response_outcome")
     # Two global entries plus the expanded group/aliases remain visible; the
     # duplicate ``auth`` registration is collapsed after alias expansion.
     assert len([role for role in roles if role == "middleware"]) == 5
@@ -428,6 +476,11 @@ Route::get('/throws', [OutcomeController::class, 'throws']);
         ),
     )
 
+    expected_outcome_roles = {
+        "/response": "response_outcome",
+        "/redirect": "redirect_outcome",
+        "/abort": "abort_outcome",
+    }
     for route in routes:
         pipeline = adapter.pipeline(_context(tmp_path), route)
         by_role = {segment.framework_role: segment for segment in pipeline}
@@ -440,6 +493,15 @@ Route::get('/throws', [OutcomeController::class, 'throws']);
         )
         assert isinstance(response.success_successor, AlwaysSuccessor)
         assert response.success_successor.target_block_key == terminating.local_key
+        if route.public_path in expected_outcome_roles:
+            outcome = by_role[expected_outcome_roles[route.public_path]]
+            assert isinstance(outcome.success_successor, AlwaysSuccessor)
+            assert outcome.success_successor.target_block_key == response.local_key
+            assert any(
+                isinstance(successor, AlwaysSuccessor)
+                and successor.target_block_key == outcome.local_key
+                for successor in handler.short_circuit_successors
+            )
         if "exception_renderer" in by_role:
             renderer = by_role["exception_renderer"]
             assert isinstance(renderer.success_successor, AlwaysSuccessor)
@@ -448,6 +510,52 @@ Route::get('/throws', [OutcomeController::class, 'throws']);
                 isinstance(successor, ExceptionSuccessor)
                 for successor in handler.short_circuit_successors
             )
+
+
+def test_throw_without_renderer_is_an_explicit_partial_exception_boundary(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/throws', [ThrowingController::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/ThrowingController.php",
+        "<?php class ThrowingController { public function show() { throw new RuntimeException(); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/ThrowingController.php",
+                "ThrowingController.show",
+            ),
+        ),
+    )[0]
+    by_role = {
+        segment.framework_role: segment for segment in adapter.pipeline(context, route)
+    }
+    handler = by_role["handler"]
+    unresolved = by_role["unresolved_exception"]
+
+    assert "exception_renderer" not in by_role
+    assert any(
+        isinstance(successor, ExceptionSuccessor)
+        and successor.target_block_key == unresolved.local_key
+        for successor in handler.short_circuit_successors
+    )
+    assert isinstance(unresolved.success_successor, ReturnSuccessor)
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        and event.reason_code == "exception_renderer_unresolved"
+        for event in adapter.coverage_events(context)
+    )
 
 
 def test_linked_async_job_and_event_never_become_inline_handler_continuations(

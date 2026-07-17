@@ -106,7 +106,9 @@ _QUEUE_DISPATCH_RE = re.compile(
     r"\bQueue\s*::\s*(?:push|later)\s*\(\s*(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*class"
 )
 
-_RESOURCE_IRREGULAR_SINGULARS = {
+_RESOURCE_STATIC_SINGULARS = {
+    "buses": "bus",
+    "categories": "category",
     "children": "child",
     "feet": "foot",
     "geese": "goose",
@@ -114,6 +116,7 @@ _RESOURCE_IRREGULAR_SINGULARS = {
     "mice": "mouse",
     "people": "person",
     "teeth": "tooth",
+    "users": "user",
     "women": "woman",
 }
 
@@ -511,21 +514,15 @@ def _route_middleware(chain: str) -> tuple[tuple[str, ...], bool]:
 
 
 def _resource_parameter_name(resource: str) -> str | None:
-    """Return the closed English resource-name subset Laravel can prove here."""
+    """Return only an explicitly proven Laravel resource parameter spelling.
 
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", resource):
-        return None
-    folded = resource.casefold()
-    irregular = _RESOURCE_IRREGULAR_SINGULARS.get(folded)
-    if irregular is not None:
-        return irregular if resource.islower() else irregular.capitalize()
-    if resource.endswith("ies") and len(resource) > 3:
-        return resource[:-3] + "y"
-    if resource.endswith(("ches", "shes", "sses", "xes", "zes")):
-        return resource[:-2]
-    if resource.endswith("s") and not resource.endswith(("ss", "us", "is")):
-        return resource[:-1]
-    return None
+    Laravel delegates singularization to its inflector.  A catch-all suffix
+    rule would therefore create public endpoint identities that this static
+    extractor cannot prove.  Keep the supported vocabulary closed and report
+    every other resource declaration as partial instead of guessing.
+    """
+
+    return _RESOURCE_STATIC_SINGULARS.get(resource)
 
 
 def _resource_specs(
@@ -1614,6 +1611,10 @@ class LaravelLifecycleAdapter:
         outcomes: dict[str, _HandlerOutcome] = {}
         async_targets = _async_target_keys(syntax)
         event_listeners = _event_listener_map(context, diagnostics)
+        renderer = any(
+            _text(context, path) is not None
+            for path in ("app/Exceptions/Handler.php", "bootstrap/app.php")
+        )
         for candidate, spec in zip(candidates, specs, strict=True):
             if candidate.handler_local_key is not None:
                 outcome = _handler_outcome(context, spec.controller)
@@ -1640,6 +1641,12 @@ class LaravelLifecycleAdapter:
                         spec.source_path,
                         CoverageCapability.FRAMEWORK_LIFECYCLE,
                         "gate_unresolved",
+                    )
+                if outcome.throws and not renderer:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "exception_renderer_unresolved",
                     )
                 base_effective = (
                     _expand_middleware(
@@ -1682,10 +1689,6 @@ class LaravelLifecycleAdapter:
                             "async_target_unresolved",
                         )
         console = _console_entries(context, syntax, diagnostics)
-        renderer = any(
-            _text(context, path) is not None
-            for path in ("app/Exceptions/Handler.php", "bootstrap/app.php")
-        )
         snapshot = _Snapshot(
             middleware,
             MappingProxyType({
@@ -1808,9 +1811,26 @@ class LaravelLifecycleAdapter:
         for middleware in effective or ():
             if _is_terminable_middleware(context, middleware):
                 roles.append(("terminating_middleware", middleware, False))
-        if outcome.throws and snapshot.exception_renderer:
-            # This is an error arm, not the normal successor of ``response``.
-            roles.append(("exception_renderer", None, False))
+        if outcome.throws:
+            # This error arm is reached only by an ExceptionSuccessor from the
+            # handler.  A proven renderer rejoins the response tail; without
+            # that evidence the arm stays a typed partial boundary.
+            roles.append((
+                "exception_renderer"
+                if snapshot.exception_renderer
+                else "unresolved_exception",
+                None,
+                False,
+            ))
+        for observed, role in (
+            (outcome.response, "response_outcome"),
+            (outcome.redirects, "redirect_outcome"),
+            (outcome.aborts, "abort_outcome"),
+        ):
+            if observed:
+                # These arm nodes preserve a detected outcome without making
+                # it a premature HTTP terminal.  Each rejoins ``response``.
+                roles.append((role, None, False))
         keys = [
             _pipeline_key(candidate, role, ordinal)
             for ordinal, (role, _name, _term) in enumerate(roles)
@@ -1841,19 +1861,36 @@ class LaravelLifecycleAdapter:
                     ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0)
                 )
             if role == "handler":
-                if outcome.throws:
-                    renderer_index = next(
+                for outcome_role in (
+                    "response_outcome",
+                    "redirect_outcome",
+                    "abort_outcome",
+                ):
+                    outcome_index = next(
                         (
                             index
                             for index, item in enumerate(roles)
-                            if item[0] == "exception_renderer"
+                            if item[0] == outcome_role
                         ),
                         None,
                     )
-                    if renderer_index is not None:
+                    if outcome_index is not None:
+                        shortcuts.append(
+                            AlwaysSuccessor(keys[outcome_index], len(shortcuts))
+                        )
+                if outcome.throws:
+                    exception_index = next(
+                        (
+                            index
+                            for index, item in enumerate(roles)
+                            if item[0] in {"exception_renderer", "unresolved_exception"}
+                        ),
+                        None,
+                    )
+                    if exception_index is not None:
                         shortcuts.append(
                             ExceptionSuccessor(
-                                keys[renderer_index],
+                                keys[exception_index],
                                 _exception_scope_key(candidate),
                                 None,
                                 len(shortcuts),
@@ -1884,6 +1921,15 @@ class LaravelLifecycleAdapter:
                     index for index, item in enumerate(roles) if item[0] == "response"
                 )
                 success = AlwaysSuccessor(keys[response_index], ordinal)
+            elif role in {"response_outcome", "redirect_outcome", "abort_outcome"}:
+                response_index = next(
+                    index for index, item in enumerate(roles) if item[0] == "response"
+                )
+                success = AlwaysSuccessor(keys[response_index], ordinal)
+            elif role == "unresolved_exception":
+                success = ReturnSuccessor(
+                    _terminal_key(candidate, "exception", ordinal), ordinal
+                )
             elif role == "response" and any(
                 item[0] == "terminating_middleware" for item in roles[ordinal + 1 :]
             ):
@@ -1905,23 +1951,13 @@ class LaravelLifecycleAdapter:
                     _terminal_key(candidate, "response", ordinal), ordinal
                 )
             else:
-                # Error segments are intentionally not connected by the normal
-                # backbone.  They are reached only by the handler exception arm.
                 next_index = ordinal + 1
-                if (
-                    next_index < len(roles)
-                    and roles[next_index][0] == "exception_renderer"
-                ):
-                    success = ReturnSuccessor(
-                        _terminal_key(candidate, "response", ordinal), ordinal
-                    )
-                else:
-                    next_key = (
-                        keys[next_index]
-                        if next_index < len(keys)
-                        else _terminal_key(candidate, "response", ordinal)
-                    )
-                    success = AlwaysSuccessor(next_key, ordinal)
+                next_key = (
+                    keys[next_index]
+                    if next_index < len(keys)
+                    else _terminal_key(candidate, "response", ordinal)
+                )
+                success = AlwaysSuccessor(next_key, ordinal)
             segments.append(
                 FrameworkPipelineSegment(
                     keys[ordinal],
