@@ -1,0 +1,7 @@
+{
+  "schema": "hades.adapter_acceptance_freeze.v1",
+  "bundle_sha256": "d1d9c8799e59bdd57855d89bce09b5900ff52f307ba2ae29cb064d98a64f8505",
+  "frozen_at_utc": "2026-07-17T23:19:17Z",
+  "frozen_at_epoch": 1784330357,
+  "head": "4f55c00b6674ce7c3de8c8153db91da77db43230"
+}

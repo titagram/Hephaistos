@@ -662,6 +662,12 @@ git add hermes_cli/hades_index/lifecycle/frameworks/fastapi.py tests/hermes_cli/
 git commit -m "feat(hades): extract FastAPI request lifecycles"
 ```
 
+### Finite Adapter Acceptance Gate
+
+See the approved [finite adapter acceptance gates design](../specs/2026-07-17-finite-adapter-acceptance-gates-design.md).
+
+Every remaining framework adapter must have a validated corpus.json, matrix.json, and lock.json before production implementation. The task brief records the lock digest. One complete independent review, one repair, and one scoped re-review are permitted. Correctly declared out-of-matrix partial/unresolved behavior is backlog, not a blocker.
+
 ### Task 12: Implement the Express Lifecycle Adapter
 
 **Files:**
