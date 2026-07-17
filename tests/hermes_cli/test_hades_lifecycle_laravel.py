@@ -18,12 +18,16 @@ from hermes_cli.hades_graph_v2.model import (
     MethodSemantics,
     SourceIdentity,
 )
+from hermes_cli.hades_index.lifecycle.entrypoints import normalized_entrypoint_identity
 from hermes_cli.hades_index.lifecycle.frameworks.laravel import LaravelLifecycleAdapter
 from hermes_cli.hades_index.lifecycle.model import (
+    AlwaysSuccessor,
     AsyncSuccessor,
     ConfigLocatorIR,
     CoverageOutcome,
+    ExceptionSuccessor,
     ExtractionContext,
+    ReturnSuccessor,
     SourceLocationIR,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import (
@@ -194,6 +198,54 @@ def test_resource_routes_expand_to_explicit_methods_in_declaration_order(
     ]
 
 
+def test_resource_paths_use_laravel_static_singular_parameters(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::resource('categories', CategoryController::class);",
+    )
+
+    routes = LaravelLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/CategoryController.php",
+                "CategoryController.index",
+                "CategoryController.create",
+                "CategoryController.store",
+                "CategoryController.show",
+                "CategoryController.edit",
+                "CategoryController.update",
+                "CategoryController.destroy",
+            ),
+        ),
+    )
+    paths = {route.public_name: route.public_path for route in routes}
+
+    assert paths["categories.show"] == "/categories/{category}"
+    assert paths["categories.edit"] == "/categories/{category}/edit"
+    assert paths["categories.update"] == "/categories/{category}"
+    assert paths["categories.destroy"] == "/categories/{category}"
+
+
+def test_resource_with_unproven_parameter_inflection_is_partial(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::resource('status', StatusController::class);",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    assert "resource_parameter_unresolved" in {
+        event.reason_code for event in adapter.coverage_events(context)
+    }
+
+
 def test_route_service_provider_context_is_applied_without_a_default_fallback(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +372,82 @@ def test_binding_validation_policy_redirect_abort_and_exception_are_explicit_arm
     assert by_role["authorization"].short_circuit_successors
     assert by_role["handler"].short_circuit_successors
     assert "exception_renderer" in by_role
+
+
+def test_handler_outcomes_join_response_and_terminating_middleware(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "app/Http/Kernel.php",
+        "<?php class Kernel { protected $middleware = [Terminable::class]; }",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Middleware/Terminable.php",
+        "<?php class Terminable { public function terminate($request, $response) {} }",
+    )
+    _write(
+        tmp_path,
+        "routes/web.php",
+        """<?php
+Route::get('/response', [OutcomeController::class, 'response']);
+Route::get('/redirect', [OutcomeController::class, 'redirect']);
+Route::get('/abort', [OutcomeController::class, 'abort']);
+Route::get('/throws', [OutcomeController::class, 'throws']);
+""",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OutcomeController.php",
+        """<?php class OutcomeController {
+ public function response() { return response()->noContent(); }
+ public function redirect() { return redirect('/next'); }
+ public function abort() { abort(403); }
+ public function throws() { throw new RuntimeException(); }
+}""",
+    )
+    _write(
+        tmp_path,
+        "app/Exceptions/Handler.php",
+        "<?php class Handler { public function render($request, Throwable $exception) {} }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OutcomeController.php",
+                "OutcomeController.response",
+                "OutcomeController.redirect",
+                "OutcomeController.abort",
+                "OutcomeController.throws",
+            ),
+        ),
+    )
+
+    for route in routes:
+        pipeline = adapter.pipeline(_context(tmp_path), route)
+        by_role = {segment.framework_role: segment for segment in pipeline}
+        handler = by_role["handler"]
+        response = by_role["response"]
+        terminating = by_role["terminating_middleware"]
+        assert not any(
+            isinstance(successor, ReturnSuccessor)
+            for successor in handler.short_circuit_successors
+        )
+        assert isinstance(response.success_successor, AlwaysSuccessor)
+        assert response.success_successor.target_block_key == terminating.local_key
+        if "exception_renderer" in by_role:
+            renderer = by_role["exception_renderer"]
+            assert isinstance(renderer.success_successor, AlwaysSuccessor)
+            assert renderer.success_successor.target_block_key == response.local_key
+            assert any(
+                isinstance(successor, ExceptionSuccessor)
+                for successor in handler.short_circuit_successors
+            )
 
 
 def test_linked_async_job_and_event_never_become_inline_handler_continuations(
@@ -472,6 +600,70 @@ def test_handler_facts_do_not_leak_from_an_unrelated_method(tmp_path: Path) -> N
     assert "validation" not in roles
     assert "job_dispatch" not in roles
     assert "exception_renderer" not in roles
+
+
+def test_unproven_fqcn_route_handler_remains_unresolved(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/x', [Admin\\C::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/C.php",
+        "<?php class C { public function show() { Ship::dispatch(); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/C.php",
+                "C.show",
+            ),
+        ),
+    )[0]
+
+    assert route.handler_local_key is None
+    assert route.unresolved_fact_local_key is not None
+    assert "job_dispatch" not in [
+        segment.framework_role
+        for segment in adapter.pipeline(_context(tmp_path), route)
+    ]
+
+
+def test_fqcn_route_handler_requires_matching_laravel_psr4_source(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/x', [App\\Http\\Controllers\\Admin\\C::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/Admin/C.php",
+        """<?php
+namespace App\\Http\\Controllers\\Admin;
+class C { public function show() { Ship::dispatch(); } }
+""",
+    )
+    route = LaravelLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/Admin/C.php",
+                "C.show",
+            ),
+        ),
+    )[0]
+
+    assert route.handler_local_key is not None
+    assert route.unresolved_fact_local_key is None
 
 
 def test_event_without_static_listener_mapping_remains_a_boundary_not_async_child(
@@ -914,8 +1106,43 @@ def test_closed_gate_allows_and_denies_have_distinct_security_arms(
 
     assert "gate_allow" in by_role
     assert "gate_deny" in by_role
-    assert by_role["gate_allow"].short_circuit_successors
-    assert by_role["gate_deny"].short_circuit_successors
+    assert not by_role["gate_allow"].short_circuit_successors
+    assert not by_role["gate_deny"].short_circuit_successors
+    assert "authorization" not in by_role
+
+
+def test_authorize_and_auth_middleware_keep_distinct_denial_boundaries(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/orders', [OrderController::class, 'show'])->middleware('auth');",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OrderController.php",
+        "<?php class OrderController { public function show() { Gate::authorize('view', $order); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OrderController.php",
+                "OrderController.show",
+            ),
+        ),
+    )[0]
+    by_role = {
+        segment.framework_role: segment
+        for segment in adapter.pipeline(_context(tmp_path), route)
+    }
+
+    assert by_role["authentication"].short_circuit_successors
+    assert by_role["authorization"].short_circuit_successors
 
 
 def test_dynamic_gate_is_an_explicit_security_boundary(tmp_path: Path) -> None:
@@ -981,3 +1208,6 @@ Artisan::command('reports:daily', ReportCommand::class);
     assert entries[0].registration_locator.structural_pointer.endswith(
         "/schedule/daily"
     )
+    identity = normalized_entrypoint_identity(_context(tmp_path), entries[0])
+    assert identity.entrypoint_identity.public_name == "ReportCommand"
+    assert identity.entrypoint_identity.trigger.value == "daily"

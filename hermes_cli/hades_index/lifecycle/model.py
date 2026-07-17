@@ -1221,6 +1221,7 @@ class EntrypointCandidate:
     public_path: str | None
     public_name: str | None
     trigger: TriggerKind
+    trigger_value: str
     match_constraints: MatchConstraints
     registration_locator: OccurrenceLocatorIR
     handler_local_key: str | None
@@ -1261,6 +1262,7 @@ class EntrypointCandidate:
             if value is not None:
                 _nfc(value, field_name=field_name, limit=1024)
         _require_enum(self.trigger, TriggerKind, field_name="entrypoint.trigger")
+        _nfc(self.trigger_value, field_name="entrypoint.trigger_value", limit=4096)
         if type(self.match_constraints) is not MatchConstraints:
             _fail(
                 "invalid_record",
@@ -1794,6 +1796,7 @@ class AdapterResult:
                 item.framework or "",
                 item.public_path or "",
                 item.public_name or "",
+                item.trigger_value,
                 *_locator_key(item.registration_locator),
             ),
         )

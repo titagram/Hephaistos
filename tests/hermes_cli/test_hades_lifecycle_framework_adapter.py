@@ -110,6 +110,7 @@ def _candidate(
         public_path=generic.public_path,
         public_name=public_name,
         trigger=generic.trigger,
+        trigger_value=generic.trigger_value,
         match_constraints=generic.match_constraints,
         registration_locator=generic.registration_locator,
         handler_local_key=generic.handler_local_key,
@@ -338,6 +339,7 @@ def test_generic_and_framework_entrypoints_share_handler_independent_identity(
         public_path=framework.public_path,
         public_name=framework.public_name,
         trigger=framework.trigger,
+        trigger_value=framework.trigger_value,
         match_constraints=framework.match_constraints,
         registration_locator=framework.registration_locator,
         handler_local_key=local_record_key(

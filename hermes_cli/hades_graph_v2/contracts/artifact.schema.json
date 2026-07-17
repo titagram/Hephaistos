@@ -679,7 +679,7 @@
             "methods": {"maxItems": 0},
             "public_path": {"type": "null"},
             "public_name": {"type": "string"},
-            "trigger": {"properties": {"kind": {"const": "schedule"}}},
+            "trigger": {"properties": {"kind": {"const": "schedule"}, "value": {"type": "string", "minLength": 1}}},
             "match_constraints": {"properties": {"host": {"type": "null"}, "schemes": {"maxItems": 0}, "condition_hash": {"type": "null"}}}
           }
         },

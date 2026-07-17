@@ -1905,6 +1905,7 @@ def _candidate_from_spec(
         public_path=spec.path,
         public_name=spec.name,
         trigger=TriggerKind.HTTP,
+        trigger_value=f"{'|'.join(methods) if methods else 'ALL'} {spec.path}",
         match_constraints=MatchConstraints(
             spec.host,
             (),

@@ -71,6 +71,7 @@ def _candidate_key(candidate: EntrypointCandidate) -> tuple[object, ...]:
         candidate.framework or "",
         candidate.public_path or "",
         candidate.public_name or "",
+        candidate.trigger_value,
         locator.source_location.path,
         structural,
         locator.ordinal,
@@ -202,6 +203,7 @@ def _generic_candidate(
         public_path=None,
         public_name=symbol.name,
         trigger=_trigger_for(kind),
+        trigger_value=symbol.name,
         match_constraints=MatchConstraints(None, (), None),
         registration_locator=locator,
         handler_local_key=handler_key,
@@ -483,10 +485,7 @@ def normalized_entrypoint_identity(
             methods=candidate.methods,
             public_path=candidate.public_path,
             public_name=candidate.public_name,
-            trigger=Trigger(
-                candidate.trigger,
-                candidate.public_path or candidate.public_name,
-            ),
+            trigger=Trigger(candidate.trigger, candidate.trigger_value),
             match_constraints=GraphMatchConstraints(
                 candidate.match_constraints.host,
                 candidate.match_constraints.schemes,

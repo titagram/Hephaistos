@@ -2666,6 +2666,34 @@ def test_http_entrypoint_label_is_derived_from_methods_and_public_path() -> None
     assert exc_info.value.code == "entrypoint_http_label_mismatch"
 
 
+def test_scheduled_entrypoint_requires_a_normalized_trigger_expression() -> None:
+    payload = _valid_flow_artifact()
+    entrypoint = payload["entrypoints"][0]
+    entrypoint_node = next(
+        node for node in payload["nodes"] if node["kind"] == "entrypoint"
+    )
+    scheduled = {
+        "entrypoint_kind": "scheduled_job",
+        "method_semantics": "not_applicable",
+        "methods": [],
+        "public_path": None,
+        "public_name": "ReportCommand",
+        "trigger": {"kind": "schedule", "value": None},
+        "match_constraints": {
+            "host": None,
+            "schemes": [],
+            "condition_hash": None,
+        },
+    }
+    entrypoint.update(scheduled)
+    entrypoint_node["identity"]["entrypoint_identity"].update(scheduled)
+
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("artifact.schema.json", payload)
+
+    assert exc_info.value.code == "schema_validation_failed"
+
+
 def test_unrestricted_http_entrypoint_uses_all_label_and_trigger() -> None:
     _, model, validation = _task3_api()
     payload = _valid_flow_artifact()

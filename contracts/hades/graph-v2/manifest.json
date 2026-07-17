@@ -3,7 +3,7 @@
   "files": [
     {
       "path": "artifact.schema.json",
-      "sha256": "03c06b780598e14f323ab4c6c2ba790c4d878c6a4c995ff8665c31c817cf64aa"
+      "sha256": "7d46579aa6a4a17da23d75364bcc8f505c75411e209efcd376894216d269a7c9"
     },
     {
       "path": "bundle.schema.json",

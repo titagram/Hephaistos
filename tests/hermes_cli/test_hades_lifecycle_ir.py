@@ -338,6 +338,7 @@ def _records() -> dict[str, object]:
         public_path="/health",
         public_name=None,
         trigger=TriggerKind.HTTP,
+        trigger_value="GET /health",
         match_constraints=MatchConstraints(
             host=None, schemes=("https",), condition_hash=None
         ),

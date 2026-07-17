@@ -69,6 +69,10 @@ _ROUTE_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 _ROUTE_ANY_RE = re.compile(r"\bRoute\s*::", re.IGNORECASE)
+_NAMESPACE_RE = re.compile(
+    r"\bnamespace\s+(?P<name>[A-Za-z_][A-Za-z0-9_\\]*)\s*;",
+    re.MULTILINE,
+)
 _GROUP_RE = re.compile(
     r"->\s*group\s*\(\s*function\s*\([^)]*\)\s*(?::[^\{]+)?\{", re.DOTALL
 )
@@ -101,6 +105,17 @@ _EVENT_DISPATCH_RE = re.compile(
 _QUEUE_DISPATCH_RE = re.compile(
     r"\bQueue\s*::\s*(?:push|later)\s*\(\s*(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*class"
 )
+
+_RESOURCE_IRREGULAR_SINGULARS = {
+    "children": "child",
+    "feet": "foot",
+    "geese": "goose",
+    "men": "man",
+    "mice": "mouse",
+    "people": "person",
+    "teeth": "tooth",
+    "women": "woman",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +510,24 @@ def _route_middleware(chain: str) -> tuple[tuple[str, ...], bool]:
     return _chain_values(chain, _MIDDLEWARE_CALL_RE)
 
 
+def _resource_parameter_name(resource: str) -> str | None:
+    """Return the closed English resource-name subset Laravel can prove here."""
+
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", resource):
+        return None
+    folded = resource.casefold()
+    irregular = _RESOURCE_IRREGULAR_SINGULARS.get(folded)
+    if irregular is not None:
+        return irregular if resource.islower() else irregular.capitalize()
+    if resource.endswith("ies") and len(resource) > 3:
+        return resource[:-3] + "y"
+    if resource.endswith(("ches", "shes", "sses", "xes", "zes")):
+        return resource[:-2]
+    if resource.endswith("s") and not resource.endswith(("ss", "us", "is")):
+        return resource[:-1]
+    return None
+
+
 def _resource_specs(
     context: _RouteContext,
     path: str,
@@ -506,21 +539,22 @@ def _resource_specs(
     order: int,
     *,
     api_resource: bool,
-) -> tuple[_RouteSpec, ...]:
+) -> tuple[_RouteSpec, ...] | None:
     resource = path.strip("/")
+    parameter = _resource_parameter_name(resource)
+    if parameter is None:
+        return None
     base = _join(context.prefix, resource)
     rows = [
         ("index", ("GET",), base),
         ("store", ("POST",), base),
-        ("show", ("GET",), _join(base, "{" + resource.rstrip("s") + "}")),
-        ("update", ("PATCH", "PUT"), _join(base, "{" + resource.rstrip("s") + "}")),
-        ("destroy", ("DELETE",), _join(base, "{" + resource.rstrip("s") + "}")),
+        ("show", ("GET",), _join(base, "{" + parameter + "}")),
+        ("update", ("PATCH", "PUT"), _join(base, "{" + parameter + "}")),
+        ("destroy", ("DELETE",), _join(base, "{" + parameter + "}")),
     ]
     if not api_resource:
         rows.insert(1, ("create", ("GET",), _join(base, "create")))
-        rows.insert(
-            4, ("edit", ("GET",), _join(base, "{" + resource.rstrip("s") + "}/edit"))
-        )
+        rows.insert(4, ("edit", ("GET",), _join(base, "{" + parameter + "}/edit")))
     return tuple(
         _RouteSpec(
             route_path,
@@ -582,7 +616,7 @@ def _route_from_statement(
         if resource is None or controller is None:
             diagnostics.mark(source_path)
             return ()
-        return _resource_specs(
+        rows = _resource_specs(
             effective_context,
             resource,
             controller,
@@ -593,6 +627,14 @@ def _route_from_statement(
             order,
             api_resource=verb.lower() == "apiresource",
         )
+        if rows is None:
+            diagnostics.mark(
+                source_path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "resource_parameter_unresolved",
+            )
+            return ()
+        return rows
     if len(arguments) < 2:
         diagnostics.mark(source_path)
         return ()
@@ -886,13 +928,47 @@ def _provider_route_contexts(
     })
 
 
-def _handler_key(syntax: Sequence[SyntaxIR], handler: str | None) -> str | None:
+def _source_declares_class(content: str, class_name: str) -> bool:
+    """Require a unique class declaration and, for FQCNs, its namespace."""
+
+    normalized = class_name.lstrip("\\")
+    namespace, separator, short_class = normalized.rpartition("\\")
+    class_matches = list(
+        re.finditer(rf"\bclass\s+{re.escape(short_class or normalized)}\b", content)
+    )
+    if len(class_matches) != 1:
+        return False
+    if not separator:
+        return True
+    namespace_match = _NAMESPACE_RE.search(content)
+    return namespace_match is not None and namespace_match.group("name") == namespace
+
+
+def _fqcn_controller_path(class_name: str) -> str | None:
+    normalized = class_name.lstrip("\\")
+    if not normalized.startswith("App\\"):
+        return None
+    return "app/" + normalized[len("App\\") :].replace("\\", "/") + ".php"
+
+
+def _handler_key(
+    context: ExtractionContext, syntax: Sequence[SyntaxIR], handler: str | None
+) -> str | None:
     if handler is None or "::" not in handler:
         return None
     class_name, method = handler.rsplit("::", 1)
     short_class = class_name.rsplit("\\", 1)[-1]
+    expected_path = _fqcn_controller_path(class_name) if "\\" in class_name else None
+    if "\\" in class_name and expected_path is None:
+        return None
     exact: list[str] = []
     for item in syntax:
+        if expected_path is not None:
+            if item.parsed_file.path != expected_path:
+                continue
+            content = _text(context, item.parsed_file.path)
+            if content is None or not _source_declares_class(content, class_name):
+                continue
         for ordinal, symbol in enumerate(item.parsed_file.symbols):
             name = symbol.name
             short = name.replace("::", ".").split(".")
@@ -938,6 +1014,14 @@ def _handler_source(context: ExtractionContext, handler: str | None) -> str | No
         return None
     class_name, _method = handler.rsplit("::", 1)
     short = class_name.rsplit("\\", 1)[-1]
+    fqcn_path = _fqcn_controller_path(class_name) if "\\" in class_name else None
+    if "\\" in class_name:
+        content = _text(context, fqcn_path) if fqcn_path is not None else None
+        return (
+            content
+            if content is not None and _source_declares_class(content, class_name)
+            else None
+        )
     candidates = (
         f"app/Http/Controllers/{short}.php",
         f"app/Jobs/{short}.php",
@@ -946,7 +1030,7 @@ def _handler_source(context: ExtractionContext, handler: str | None) -> str | No
     )
     for path in candidates:
         content = _text(context, path)
-        if content is not None:
+        if content is not None and _source_declares_class(content, short):
             return content
     return None
 
@@ -971,6 +1055,8 @@ def _method_source(content: str, handler: str | None) -> str | None:
         return None
     class_name, method = handler.rsplit("::", 1)
     short_class = class_name.rsplit("\\", 1)[-1]
+    if not _source_declares_class(content, class_name):
+        return None
     class_matches = list(re.finditer(rf"\bclass\s+{re.escape(short_class)}\b", content))
     if len(class_matches) != 1:
         return None
@@ -1268,7 +1354,9 @@ def _candidate(
     locator = _locator(
         spec.source_path, content, spec.source_line - 1, spec.pointer, spec.source_order
     )
-    handler = None if spec.unresolved else _handler_key(syntax, spec.controller)
+    handler = (
+        None if spec.unresolved else _handler_key(context, syntax, spec.controller)
+    )
     unresolved = None
     if handler is None:
         unresolved = local_record_key(
@@ -1293,6 +1381,7 @@ def _candidate(
         spec.path,
         spec.name,
         TriggerKind.HTTP,
+        f"{'|'.join(spec.methods) if spec.methods else 'ALL'} {spec.path}",
         MatchConstraints(spec.domain, (), None),
         locator,
         handler,
@@ -1359,12 +1448,9 @@ def _console_entries(
         ):
             handler_class = _class_literal(handler_expression)
             handler = f"{handler_class}::handle" if handler_class else None
-            handler_key = _handler_key(syntax, handler)
+            handler_key = _handler_key(context, syntax, handler)
             pointer = f"laravel/console/{ordinal}"
             if frequency is not None:
-                # The frozen EntrypointCandidate contract has no separate
-                # schedule-expression field.  Keep the normalized expression
-                # as registration semantics, never in executable public_name.
                 pointer += f"/schedule/{frequency}"
             locator = _locator(path, content, offset, pointer, ordinal)
             unresolved = (
@@ -1396,6 +1482,7 @@ def _console_entries(
                     None,
                     public_name,
                     trigger,
+                    frequency or public_name,
                     MatchConstraints(None, (), None),
                     locator,
                     handler_key,
@@ -1701,14 +1788,9 @@ class LaravelLifecycleAdapter:
             item.endswith("Authenticate") or item == "auth" for item in effective or ()
         ):
             roles.append(("authentication", None, False))
-        if (
-            outcome.authorization
-            or outcome.gate_decisions
-            or not outcome.gate_complete
-            or any(
-                item.endswith("Authorize") or item.startswith("can:")
-                for item in (effective or ())
-            )
+        if outcome.authorization or any(
+            item.endswith("Authorize") or item.startswith("can:")
+            for item in (effective or ())
         ):
             roles.append(("authorization", None, False))
         for decision in outcome.gate_decisions:
@@ -1754,39 +1836,11 @@ class LaravelLifecycleAdapter:
                 "authentication",
                 "authorization",
                 "validation",
-                "gate_allow",
-                "gate_deny",
             }:
                 shortcuts.append(
                     ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0)
                 )
-            if role == "gate_allow":
-                shortcuts.append(
-                    ReturnSuccessor(_terminal_key(candidate, "gate_denied", ordinal), 1)
-                )
-            if role == "gate_deny":
-                shortcuts.append(
-                    ReturnSuccessor(
-                        _terminal_key(candidate, "gate_allowed", ordinal), 1
-                    )
-                )
             if role == "handler":
-                if outcome.aborts:
-                    shortcuts.append(
-                        ReturnSuccessor(_terminal_key(candidate, "abort", ordinal), 0)
-                    )
-                if outcome.redirects:
-                    shortcuts.append(
-                        ReturnSuccessor(
-                            _terminal_key(candidate, "redirect", ordinal), 1
-                        )
-                    )
-                if outcome.response:
-                    shortcuts.append(
-                        ReturnSuccessor(
-                            _terminal_key(candidate, "response", ordinal), 2
-                        )
-                    )
                 if outcome.throws:
                     renderer_index = next(
                         (
@@ -1796,19 +1850,13 @@ class LaravelLifecycleAdapter:
                         ),
                         None,
                     )
-                    if renderer_index is None:
-                        shortcuts.append(
-                            ReturnSuccessor(
-                                _terminal_key(candidate, "exception", ordinal), 3
-                            )
-                        )
-                    else:
+                    if renderer_index is not None:
                         shortcuts.append(
                             ExceptionSuccessor(
                                 keys[renderer_index],
                                 _exception_scope_key(candidate),
                                 None,
-                                3,
+                                len(shortcuts),
                             )
                         )
             if role.endswith("_dispatch") and name:
@@ -1832,14 +1880,10 @@ class LaravelLifecycleAdapter:
                             AsyncSuccessor(async_handler, kind, len(shortcuts) + 1)
                         )
             if role == "exception_renderer":
-                success: Successor = ReturnSuccessor(
-                    _terminal_key(
-                        candidate,
-                        "exception" if role == "exception_renderer" else "response",
-                        ordinal,
-                    ),
-                    ordinal,
+                response_index = next(
+                    index for index, item in enumerate(roles) if item[0] == "response"
                 )
+                success = AlwaysSuccessor(keys[response_index], ordinal)
             elif role == "response" and any(
                 item[0] == "terminating_middleware" for item in roles[ordinal + 1 :]
             ):
