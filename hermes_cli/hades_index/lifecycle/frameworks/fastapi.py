@@ -948,6 +948,22 @@ def _dependency_bindings(
                 effects.append((value.target.id, result))
                 evaluated[id(value)] = result
                 return result
+            if isinstance(value, ast.Lambda):
+                for default in (
+                    *value.args.defaults,
+                    *(item for item in value.args.kw_defaults if item is not None),
+                ):
+                    evaluate_named_expression_rhs(
+                        default,
+                        module,
+                        path,
+                        occurrence,
+                        overrides,
+                        effects,
+                        evaluated,
+                    )
+                evaluated[id(value)] = ()
+                return ()
             if isinstance(value, (ast.List, ast.Tuple)):
                 for item in value.elts:
                     evaluate_named_expression_rhs(
@@ -1075,6 +1091,12 @@ def _dependency_bindings(
                 remember(module, name, _line_order(path, binding), None)
 
         for path, (_source, tree, module) in parsed.items():
+            postponed_annotations = any(
+                isinstance(statement, ast.ImportFrom)
+                and statement.module == "__future__"
+                and any(alias.name == "annotations" for alias in statement.names)
+                for statement in tree.body
+            )
             for node in tree.body:
                 order = _line_order(path, node)
                 if isinstance(node, ast.ImportFrom):
@@ -1203,10 +1225,44 @@ def _dependency_bindings(
                         *node.args.defaults,
                         *(item for item in node.args.kw_defaults if item is not None),
                     )
+                    arguments = (
+                        *node.args.posonlyargs,
+                        *node.args.args,
+                    )
+                    annotations = (
+                        ()
+                        if postponed_annotations
+                        else (
+                            *(
+                                argument.annotation
+                                for argument in arguments
+                                if argument.annotation is not None
+                            ),
+                            *(
+                                argument.annotation
+                                for argument in (node.args.vararg,)
+                                if argument is not None
+                                and argument.annotation is not None
+                            ),
+                            *(
+                                argument.annotation
+                                for argument in node.args.kwonlyargs
+                                if argument.annotation is not None
+                            ),
+                            *(
+                                argument.annotation
+                                for argument in (node.args.kwarg,)
+                                if argument is not None
+                                and argument.annotation is not None
+                            ),
+                            *((node.returns,) if node.returns is not None else ()),
+                        )
+                    )
+                    eager_header = (*node.decorator_list, *defaults, *annotations)
                     if any(
                         isinstance(item, ast.NamedExpr)
-                        for default in defaults
-                        for item in ast.walk(default)
+                        for expression in eager_header
+                        for item in ast.walk(expression)
                     ):
                         overrides: dict[
                             str,
@@ -1214,7 +1270,7 @@ def _dependency_bindings(
                         ] = {}
                         effects: list[tuple[str, tuple[_Dependency, ...] | None]] = []
                         evaluate_named_expression_rhs(
-                            ast.Tuple(elts=list(defaults), ctx=ast.Load()),
+                            ast.Tuple(elts=list(eager_header), ctx=ast.Load()),
                             module,
                             path,
                             order,
@@ -2250,7 +2306,7 @@ def _middleware_may_short_circuit(
         for name, binding in visitor.records:
             remember_helper_alias(name, binding, None)
 
-    called_helpers: list[tuple[ast.AST, ast.Call]] = []
+    called_helpers: list[tuple[ast.AST, ast.Call, _HelperRelation | bool]] = []
 
     def helper_root_name(value: ast.AST) -> str | None:
         while isinstance(value, ast.Subscript):
@@ -2258,37 +2314,64 @@ def _middleware_may_short_circuit(
         return value.id if isinstance(value, ast.Name) else None
 
     class _HelperCallVisitor(ast.NodeVisitor):
-        def __init__(self, occurrence: ast.Call | None = None) -> None:
+        def __init__(
+            self,
+            occurrence: ast.Call | None = None,
+            *,
+            snapshot: bool = False,
+        ) -> None:
             self.occurrence = occurrence
+            self.snapshot = snapshot
+
+        def visit_defaults(self, arguments: ast.arguments) -> None:
+            for default in (
+                *arguments.defaults,
+                *(item for item in arguments.kw_defaults if item is not None),
+            ):
+                self.visit(default)
 
         def visit_Call(self, node: ast.Call) -> None:
             root_name = helper_root_name(node.func)
             if root_name is not None and root_name in helper_aliases:
                 runtime_occurrence = self.occurrence or node
-                called_helpers.append((node.func, runtime_occurrence))
+                called_helpers.append((
+                    node.func,
+                    runtime_occurrence,
+                    helper_value(node.func, runtime_occurrence)
+                    if self.snapshot
+                    else False,
+                ))
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            return None
+            self.visit_defaults(node.args)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            return None
+            self.visit_defaults(node.args)
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             return None
 
         def visit_Lambda(self, node: ast.Lambda) -> None:
-            return None
+            self.visit_defaults(node.args)
 
     helper_call_visitor = _HelperCallVisitor()
     for statement in function.body:
-        if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            helper_call_visitor.visit(statement)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for default in (
+                *statement.args.defaults,
+                *(item for item in statement.args.kw_defaults if item is not None),
+            ):
+                helper_call_visitor.visit(default)
+            continue
+        helper_call_visitor.visit(statement)
     processed_helpers: set[tuple[int, tuple[int, int]]] = set()
     pending_helpers = list(called_helpers)
     while pending_helpers:
-        helper_expression, call = pending_helpers.pop(0)
-        helper = helper_value(helper_expression, call)
+        helper_expression, call, snapshot = pending_helpers.pop(0)
+        helper = (
+            helper_value(helper_expression, call) if snapshot is False else snapshot
+        )
         if not isinstance(helper, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         identity = (id(helper), position(call))
@@ -2303,10 +2386,18 @@ def _middleware_may_short_circuit(
             force_uncertain=True,
             mutated_names=frozenset(helper_bindings.nonlocal_names),
         )
-        for statement in helper.body:
-            helper_mutations.visit(statement)
         nonlocal_names = frozenset(helper_bindings.nonlocal_names)
+        nested_pending: list[tuple[ast.AST, ast.Call, _HelperRelation | bool]] = []
         for statement in helper.body:
+            before = len(called_helpers)
+            nested_calls = _HelperCallVisitor(call, snapshot=True)
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                if statement.value is not None:
+                    nested_calls.visit(statement.value)
+            else:
+                nested_calls.visit(statement)
+            nested_pending.extend(called_helpers[before:])
+            helper_mutations.visit(statement)
             if isinstance(statement, ast.Assign):
                 runtime_bindings = tuple(
                     binding
@@ -2332,11 +2423,9 @@ def _middleware_may_short_circuit(
             for name, runtime_identity in runtime_bindings:
                 if name in nonlocal_names:
                     remember_helper_alias(name, call, runtime_identity)
-        before = len(called_helpers)
-        nested_calls = _HelperCallVisitor(call)
-        for statement in helper.body:
-            nested_calls.visit(statement)
-        pending_helpers.extend(called_helpers[before:])
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                break
+        pending_helpers[0:0] = nested_pending
 
     uncertain_call = False
 
@@ -2851,6 +2940,7 @@ def _wildcard_exports(
         tuple[object | tuple[str, ...] | None, set[str], tuple[str | None, ...], bool],
     ] = {}
     all_aliases: set[str] = set()
+    all_alias_paths: dict[str, set[tuple[object, ...]]] = {}
 
     def literal_all(value: ast.AST | None) -> tuple[str, ...] | None:
         if not isinstance(value, (ast.List, ast.Tuple)):
@@ -2864,10 +2954,53 @@ def _wildcard_exports(
             return None
         return tuple(dict.fromkeys(names))
 
+    def literal_subscript_key(node: ast.Subscript) -> object:
+        try:
+            key = ast.literal_eval(node.slice)
+            hash(key)
+        except (TypeError, ValueError):
+            return absent
+        return key
+
+    def alias_paths(value: ast.AST) -> frozenset[tuple[object, ...]]:
+        if isinstance(value, ast.Name):
+            paths = set(all_alias_paths.get(value.id, set()))
+            if value.id in all_aliases:
+                paths.add(())
+            return frozenset(paths)
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return frozenset(
+                (index, *path)
+                for index, item in enumerate(value.elts)
+                for path in alias_paths(item)
+            )
+        if isinstance(value, ast.Subscript):
+            key = literal_subscript_key(value)
+            if key is absent:
+                return frozenset()
+            return frozenset(
+                path[1:] for path in alias_paths(value.value) if path and path[0] == key
+            )
+        return frozenset()
+
     def all_receiver(node: ast.AST) -> bool:
-        while isinstance(node, (ast.Attribute, ast.Subscript)):
-            node = node.value
-        return isinstance(node, ast.Name) and node.id in all_aliases
+        return () in alias_paths(node)
+
+    def discard_all_aliases(names: Sequence[str] | set[str]) -> None:
+        all_aliases.difference_update(names)
+        for name in names:
+            all_alias_paths.pop(name, None)
+
+    def set_all_alias(
+        name: str,
+        paths: frozenset[tuple[object, ...]],
+    ) -> None:
+        discard_all_aliases((name,))
+        if () in paths:
+            all_aliases.add(name)
+        nested_paths = {path for path in paths if path}
+        if nested_paths:
+            all_alias_paths[name] = nested_paths
 
     def finite_namedexpr_rebindings(
         node: ast.AST,
@@ -2889,6 +3022,10 @@ def _wildcard_exports(
                 for key, value in zip(node.keys, node.values, strict=True)
                 for item in ((key, value) if key is not None else (value,))
             )
+        elif isinstance(node, ast.Subscript):
+            values = (node.value, node.slice)
+        elif isinstance(node, ast.Attribute):
+            values = (node.value,)
         elif not any(isinstance(item, ast.NamedExpr) for item in ast.walk(node)):
             return ()
         else:
@@ -2904,14 +3041,9 @@ def _wildcard_exports(
     def destructured_all_aliases(
         target: ast.AST,
         value: ast.AST,
-    ) -> tuple[tuple[str, bool], ...] | None:
+    ) -> tuple[tuple[str, frozenset[tuple[object, ...]]], ...] | None:
         if isinstance(target, ast.Name):
-            return (
-                (
-                    target.id,
-                    isinstance(value, ast.Name) and value.id in all_aliases,
-                ),
-            )
+            return ((target.id, alias_paths(value)),)
         if not isinstance(target, (ast.List, ast.Tuple)) or not isinstance(
             value,
             (ast.List, ast.Tuple),
@@ -2953,7 +3085,7 @@ def _wildcard_exports(
         else:
             starred = None
             items = tuple(zip(target.elts, value.elts, strict=True))
-        bindings: list[tuple[str, bool]] = []
+        bindings: list[tuple[str, frozenset[tuple[object, ...]]]] = []
         for nested_target, nested_value in items:
             nested = destructured_all_aliases(nested_target, nested_value)
             if nested is None:
@@ -2961,7 +3093,14 @@ def _wildcard_exports(
             bindings.extend(nested)
         if starred is not None:
             assert isinstance(starred.value, ast.Name)
-            bindings.append((starred.value.id, False))
+            star_index = star_positions[0]
+            suffix_count = len(target.elts) - star_index - 1
+            captured_end = len(value.elts) - suffix_count
+            captured = ast.List(
+                elts=value.elts[star_index:captured_end],
+                ctx=ast.Load(),
+            )
+            bindings.append((starred.value.id, alias_paths(captured)))
         return tuple(bindings)
 
     def finite_all_method(
@@ -3003,41 +3142,124 @@ def _wildcard_exports(
     class _UnprovenAllMutation(ast.NodeVisitor):
         def __init__(self) -> None:
             self.found = False
+            self.aliases = set(all_aliases)
+            self.alias_paths = {
+                name: set(paths) for name, paths in all_alias_paths.items()
+            }
+
+        def relation(self, value: ast.AST) -> frozenset[tuple[object, ...]]:
+            if isinstance(value, ast.NamedExpr):
+                return self.relation(value.value)
+            if isinstance(value, ast.Name):
+                paths = set(self.alias_paths.get(value.id, set()))
+                if value.id in self.aliases:
+                    paths.add(())
+                return frozenset(paths)
+            if isinstance(value, (ast.List, ast.Tuple)):
+                return frozenset(
+                    (index, *path)
+                    for index, item in enumerate(value.elts)
+                    for path in self.relation(item)
+                )
+            if isinstance(value, ast.Subscript):
+                key = literal_subscript_key(value)
+                if key is absent:
+                    return frozenset()
+                return frozenset(
+                    path[1:]
+                    for path in self.relation(value.value)
+                    if path and path[0] == key
+                )
+            return frozenset()
+
+        def set_alias(
+            self,
+            name: str,
+            paths: frozenset[tuple[object, ...]],
+        ) -> None:
+            self.aliases.discard(name)
+            self.alias_paths.pop(name, None)
+            if () in paths:
+                self.aliases.add(name)
+            nested_paths = {path for path in paths if path}
+            if nested_paths:
+                self.alias_paths[name] = nested_paths
+
+        def receiver(self, node: ast.AST) -> bool:
+            return () in self.relation(node)
+
+        def scan_alias_load(self, node: ast.AST) -> bool:
+            return any(
+                isinstance(nested, ast.Name)
+                and isinstance(nested.ctx, ast.Load)
+                and (nested.id in self.aliases or nested.id in self.alias_paths)
+                for nested in ast.walk(node)
+            )
+
+        def expression_contains_alias(self, node: ast.AST) -> bool:
+            if isinstance(node, ast.NamedExpr):
+                contains_alias = self.expression_contains_alias(node.value)
+                relation = self.relation(node.value)
+                self.set_alias(node.target.id, relation)
+                return contains_alias
+            if isinstance(node, ast.Name):
+                return isinstance(node.ctx, ast.Load) and bool(self.relation(node))
+            if isinstance(node, ast.Subscript):
+                self.expression_contains_alias(node.value)
+                self.expression_contains_alias(node.slice)
+                return bool(self.relation(node))
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute) and self.receiver(
+                    node.func.value
+                ):
+                    self.found = True
+                if self.expression_contains_alias(node.func):
+                    self.found = True
+                for value in (*node.args, *(item.value for item in node.keywords)):
+                    if self.expression_contains_alias(value):
+                        self.found = True
+                return False
+            if isinstance(node, (ast.BoolOp, ast.IfExp, ast.Lambda)) or isinstance(
+                node,
+                (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
+            ):
+                return self.scan_alias_load(node)
+            if isinstance(node, ast.Dict):
+                values = tuple(
+                    item
+                    for key, value in zip(node.keys, node.values, strict=True)
+                    for item in ((key, value) if key is not None else (value,))
+                )
+            else:
+                values = tuple(ast.iter_child_nodes(node))
+            contains_alias = False
+            for value in values:
+                if self.expression_contains_alias(value):
+                    contains_alias = True
+            return contains_alias
 
         def visit_Assign(self, node: ast.Assign) -> None:
-            if any(all_receiver(target) for target in node.targets):
+            if any(self.receiver(target) for target in node.targets):
                 self.found = True
             self.visit(node.value)
 
         def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-            if all_receiver(node.target):
+            if self.receiver(node.target):
                 self.found = True
             if node.value is not None:
                 self.visit(node.value)
 
         def visit_AugAssign(self, node: ast.AugAssign) -> None:
-            if all_receiver(node.target):
+            if self.receiver(node.target):
                 self.found = True
             self.visit(node.value)
 
         def visit_Delete(self, node: ast.Delete) -> None:
-            if any(all_receiver(target) for target in node.targets):
+            if any(self.receiver(target) for target in node.targets):
                 self.found = True
 
         def visit_Call(self, node: ast.Call) -> None:
-            if isinstance(node.func, ast.Attribute) and all_receiver(node.func.value):
-                self.found = True
-            if any(
-                any(
-                    isinstance(nested, ast.Name)
-                    and isinstance(nested.ctx, ast.Load)
-                    and nested.id in all_aliases
-                    for nested in ast.walk(value)
-                )
-                for value in (*node.args, *(item.value for item in node.keywords))
-            ):
-                self.found = True
-            self.generic_visit(node)
+            self.expression_contains_alias(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             return None
@@ -3054,6 +3276,7 @@ def _wildcard_exports(
     for path, (_source, tree, module) in parsed.items():
         explicit_all: object | tuple[str, ...] | None = absent
         all_aliases = set()
+        all_alias_paths = {}
         all_is_list: bool | None = None
         public: set[str] = set()
         wildcard_bases: list[str | None] = []
@@ -3064,7 +3287,7 @@ def _wildcard_exports(
                     alias.asname or alias.name.split(".", 1)[0] for alias in node.names
                 }
                 public.update(names)
-                all_aliases.difference_update(names)
+                discard_all_aliases(names)
                 continue
             if isinstance(node, ast.ImportFrom):
                 base = _import_from_base(path, module, node)
@@ -3074,11 +3297,11 @@ def _wildcard_exports(
                     else:
                         name = alias.asname or alias.name
                         public.add(name)
-                        all_aliases.discard(name)
+                        discard_all_aliases((name,))
                 continue
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 public.add(node.name)
-                all_aliases.discard(node.name)
+                discard_all_aliases((node.name,))
                 continue
             if isinstance(node, ast.Assign):
                 direct_names = tuple(
@@ -3097,31 +3320,30 @@ def _wildcard_exports(
                         destructured_all_aliases(target, node.value)
                         for target in node.targets
                     )
+                    value_uses_all_alias = any(
+                        isinstance(value, ast.Name)
+                        and isinstance(value.ctx, ast.Load)
+                        and (value.id in all_aliases or value.id in all_alias_paths)
+                        for value in ast.walk(node.value)
+                    )
                     if not all(item is not None for item in paired):
                         uncertain_public = True
-                    all_aliases.difference_update(target_names)
+                    discard_all_aliases(target_names)
                     if all(item is not None for item in paired):
-                        all_aliases.update(
-                            name
-                            for item in paired
-                            if item is not None
-                            for name, aliases_all in item
-                            if aliases_all
-                        )
-                    elif any(
-                        isinstance(value, ast.Name) and value.id in all_aliases
-                        for value in ast.walk(node.value)
-                    ):
+                        for item in paired:
+                            assert item is not None
+                            for name, paths in item:
+                                set_all_alias(name, paths)
+                    elif value_uses_all_alias:
                         explicit_all = None
                     if "__all__" in target_names:
                         explicit_all = None
                         all_is_list = None
-                        all_aliases.add("__all__")
+                        set_all_alias("__all__", frozenset({()}))
                     continue
                 public.update(direct_names)
-                aliases_all = (
-                    isinstance(node.value, ast.Name) and node.value.id in all_aliases
-                )
+                relation = alias_paths(node.value)
+                aliases_all = () in relation
                 if "__all__" in direct_names:
                     if not aliases_all:
                         explicit_all = literal_all(node.value)
@@ -3133,17 +3355,19 @@ def _wildcard_exports(
                             else None
                         )
                         all_aliases.clear()
-                    all_aliases.update(direct_names)
+                        all_alias_paths.clear()
+                    for name in direct_names:
+                        set_all_alias(name, frozenset({()}))
                 else:
-                    all_aliases.difference_update(direct_names)
-                    if aliases_all:
-                        all_aliases.update(direct_names)
+                    for name in direct_names:
+                        set_all_alias(name, relation)
                 continue
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 public.add(node.target.id)
-                aliases_all = (
-                    isinstance(node.value, ast.Name) and node.value.id in all_aliases
+                relation = (
+                    alias_paths(node.value) if node.value is not None else frozenset()
                 )
+                aliases_all = () in relation
                 if node.target.id == "__all__":
                     if not aliases_all:
                         explicit_all = literal_all(node.value)
@@ -3155,11 +3379,10 @@ def _wildcard_exports(
                             else None
                         )
                         all_aliases.clear()
-                    all_aliases.add("__all__")
+                        all_alias_paths.clear()
+                    set_all_alias("__all__", frozenset({()}))
                 else:
-                    all_aliases.discard(node.target.id)
-                    if aliases_all:
-                        all_aliases.add(node.target.id)
+                    set_all_alias(node.target.id, relation)
                 continue
             handled_all_method, mutated_all = finite_all_method(
                 node,
@@ -3192,8 +3415,9 @@ def _wildcard_exports(
                             else None
                         )
                         all_aliases = {"__all__"}
+                        all_alias_paths.clear()
                     else:
-                        all_aliases.discard(node.target.id)
+                        discard_all_aliases((node.target.id,))
                 else:
                     explicit_all = None
                 continue
@@ -3213,19 +3437,15 @@ def _wildcard_exports(
                 for name, value in rebindings:
                     if name == "__all__":
                         continue
-                    aliases_all = (
-                        isinstance(value, ast.Name) and value.id in all_aliases
-                    )
-                    all_aliases.discard(name)
-                    if aliases_all:
-                        all_aliases.add(name)
+                    relation = alias_paths(value)
+                    set_all_alias(name, relation)
                 names.difference_update(proven_names)
             if names:
                 public.update(names)
                 uncertain_public = True
                 if names & all_aliases:
                     explicit_all = None
-                    all_aliases.difference_update(names)
+                discard_all_aliases(names)
                 if "__all__" in names:
                     explicit_all = None
         descriptions[module] = (
