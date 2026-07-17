@@ -921,8 +921,6 @@ def _dependency_bindings(
             target: ast.AST,
             value: ast.AST,
         ) -> tuple[tuple[ast.Name, ast.AST], ...] | None:
-            if sum(isinstance(item, ast.Starred) for item in ast.walk(target)) > 1:
-                return None
             if any(isinstance(item, ast.Starred) for item in ast.walk(value)):
                 return None
             if isinstance(target, ast.Name):
@@ -937,6 +935,8 @@ def _dependency_bindings(
                 for index, item in enumerate(target.elts)
                 if isinstance(item, ast.Starred)
             )
+            if len(star_positions) > 1:
+                return None
             if not star_positions and len(target.elts) != len(value.elts):
                 return None
             if star_positions and len(value.elts) < len(target.elts) - 1:
@@ -1343,7 +1343,9 @@ def _middleware_may_short_circuit(
         visible = next(
             (
                 value
-                for order, value in reversed(alias_bindings.get(name, ()))
+                for order, value in reversed(
+                    sorted(alias_bindings.get(name, ()), key=lambda item: item[0])
+                )
                 if order <= occurrence
             ),
             False,
@@ -1433,7 +1435,6 @@ def _middleware_may_short_circuit(
         value: ast.AST | None,
         statement: ast.AST,
     ) -> None:
-        nonlocal continuation_escaped
         if isinstance(target, ast.Name):
             remember_alias(target.id, statement, alias_value(value, statement))
             return
@@ -1452,12 +1453,7 @@ def _middleware_may_short_circuit(
                 remember_target(nested_target, None, statement)
             return
         if isinstance(target, (ast.Attribute, ast.Subscript)):
-            stored = contains_continuation(alias_value(value, statement))
-            container = contains_continuation(alias_value(target.value, statement))
-            continuation_escaped |= stored in {True, None} or container in {
-                True,
-                None,
-            }
+            return
 
     for statement in function.body:
         if isinstance(statement, ast.Assign):
@@ -1485,43 +1481,259 @@ def _middleware_may_short_circuit(
         for name, binding in visitor.records:
             remember_alias(name, binding, None)
 
+    top_level_statements = {id(statement) for statement in function.body}
+
+    def merge_relations(
+        left: _ContinuationRelation,
+        right: _ContinuationRelation,
+    ) -> _ContinuationRelation:
+        if left == right:
+            return left
+        if not isinstance(left, _ContinuationContainer) or not isinstance(
+            right,
+            _ContinuationContainer,
+        ):
+            return None
+        merged: list[tuple[object, _ContinuationRelation]] = []
+        matched: set[int] = set()
+        for left_key, left_value in left.values:
+            right_item = next(
+                (
+                    (index, right_value)
+                    for index, (right_key, right_value) in enumerate(right.values)
+                    if right_key == left_key
+                ),
+                None,
+            )
+            if right_item is None:
+                merged.append((left_key, None))
+                continue
+            index, right_value = right_item
+            matched.add(index)
+            merged.append((left_key, merge_relations(left_value, right_value)))
+        merged.extend(
+            (right_key, None)
+            for index, (right_key, _right_value) in enumerate(right.values)
+            if index not in matched
+        )
+        return _ContinuationContainer(tuple(merged))
+
+    def subscript_target(
+        target: ast.Subscript,
+    ) -> tuple[str, tuple[object, ...]] | None:
+        keys: list[object] = []
+        current: ast.AST = target
+        while isinstance(current, ast.Subscript):
+            key = literal_key(current.slice)
+            if key is _INVALID_STATIC_KEY:
+                return None
+            keys.append(key)
+            current = current.value
+        if not isinstance(current, ast.Name):
+            return None
+        return (current.id, tuple(reversed(keys)))
+
+    def update_relation(
+        relation: _ContinuationRelation,
+        keys: tuple[object, ...],
+        value: _ContinuationRelation,
+        *,
+        delete: bool,
+    ) -> tuple[bool, _ContinuationRelation]:
+        if not keys or not isinstance(relation, _ContinuationContainer):
+            return (False, relation)
+        key = keys[0]
+        values = list(relation.values)
+        index = next(
+            (
+                candidate
+                for candidate, (item_key, _item_value) in enumerate(values)
+                if item_key == key
+            ),
+            None,
+        )
+        if len(keys) == 1:
+            if delete:
+                if index is None:
+                    return (False, relation)
+                del values[index]
+            elif index is None:
+                values.append((key, value))
+            else:
+                values[index] = (values[index][0], value)
+            return (True, _ContinuationContainer(tuple(values)))
+        if index is None:
+            return (False, relation)
+        updated, nested = update_relation(
+            values[index][1],
+            keys[1:],
+            value,
+            delete=delete,
+        )
+        if not updated:
+            return (False, relation)
+        values[index] = (values[index][0], nested)
+        return (True, _ContinuationContainer(tuple(values)))
+
     def mutation_target(
         target: ast.AST,
         value: ast.AST | None,
         statement: ast.AST,
+        *,
+        uncertain: bool,
+        delete: bool = False,
     ) -> None:
         nonlocal continuation_escaped
         if isinstance(target, (ast.List, ast.Tuple)):
             for nested in target.elts:
-                mutation_target(nested, value, statement)
+                mutation_target(
+                    nested,
+                    value,
+                    statement,
+                    uncertain=uncertain,
+                    delete=delete,
+                )
             return
         if isinstance(target, ast.Starred):
-            mutation_target(target.value, value, statement)
+            mutation_target(
+                target.value,
+                value,
+                statement,
+                uncertain=uncertain,
+                delete=delete,
+            )
             return
-        if not isinstance(target, (ast.Attribute, ast.Subscript)):
+        if isinstance(target, ast.Attribute):
+            stored = contains_continuation(alias_value(value, statement))
+            container = contains_continuation(alias_value(target.value, statement))
+            continuation_escaped |= stored in {True, None} or container in {True, None}
             return
-        stored = contains_continuation(alias_value(value, statement))
-        container = contains_continuation(alias_value(target.value, statement))
-        continuation_escaped |= stored in {True, None} or container in {True, None}
+        if not isinstance(target, ast.Subscript):
+            return
+        stored_relation = alias_value(value, statement)
+        target_path = subscript_target(target)
+        if target_path is None:
+            stored = contains_continuation(stored_relation)
+            container = contains_continuation(alias_value(target.value, statement))
+            continuation_escaped |= stored in {True, None} or container in {True, None}
+            return
+        name, keys = target_path
+        original = alias_at(name, statement)
+        updated, relation = update_relation(
+            original,
+            keys,
+            stored_relation,
+            delete=delete,
+        )
+        if not updated:
+            stored = contains_continuation(stored_relation)
+            container = contains_continuation(original)
+            continuation_escaped |= stored in {True, None} or container in {True, None}
+            return
+        remember_alias(
+            name,
+            statement,
+            merge_relations(original, relation) if uncertain else relation,
+        )
 
     class _MutationVisitor(ast.NodeVisitor):
+        def __init__(
+            self,
+            *,
+            occurrence: ast.AST | None = None,
+            force_uncertain: bool = False,
+            mutated_names: frozenset[str] = frozenset(),
+        ) -> None:
+            self.occurrence = occurrence
+            self.force_uncertain = force_uncertain
+            self.mutated_names = mutated_names
+
+        def mutate_names(
+            self,
+            target: ast.AST,
+            value: ast.AST | None,
+            occurrence: ast.AST,
+        ) -> None:
+            if isinstance(target, ast.Name):
+                if target.id not in self.mutated_names:
+                    return
+                original = alias_at(target.id, occurrence)
+                replacement = alias_value(value, occurrence)
+                remember_alias(
+                    target.id,
+                    occurrence,
+                    merge_relations(original, replacement),
+                )
+                return
+            if isinstance(target, (ast.List, ast.Tuple)):
+                for nested in target.elts:
+                    self.mutate_names(nested, None, occurrence)
+                return
+            if isinstance(target, ast.Starred):
+                self.mutate_names(target.value, None, occurrence)
+
+        def apply(
+            self,
+            target: ast.AST,
+            value: ast.AST | None,
+            node: ast.AST,
+            *,
+            delete: bool = False,
+            force_uncertain: bool = False,
+        ) -> None:
+            occurrence = self.occurrence or node
+            self.mutate_names(target, value, occurrence)
+            mutation_target(
+                target,
+                value,
+                occurrence,
+                uncertain=(
+                    self.force_uncertain
+                    or force_uncertain
+                    or id(node) not in top_level_statements
+                ),
+                delete=delete,
+            )
+
         def visit_Assign(self, node: ast.Assign) -> None:
             for target in node.targets:
-                mutation_target(target, node.value, node)
+                self.apply(target, node.value, node)
             self.visit(node.value)
 
         def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-            mutation_target(node.target, node.value, node)
+            self.apply(node.target, node.value, node)
             if node.value is not None:
                 self.visit(node.value)
 
         def visit_AugAssign(self, node: ast.AugAssign) -> None:
-            mutation_target(node.target, node.value, node)
+            self.apply(node.target, None, node, force_uncertain=True)
             self.visit(node.value)
 
         def visit_Delete(self, node: ast.Delete) -> None:
             for target in node.targets:
-                mutation_target(target, ast.Constant(value=None), node)
+                self.apply(
+                    target,
+                    ast.Constant(value=None),
+                    node,
+                    delete=True,
+                )
+
+        def visit_Call(self, node: ast.Call) -> None:
+            nonlocal continuation_escaped
+            occurrence = self.occurrence or node
+            receiver = (
+                contains_continuation(alias_value(node.func.value, occurrence))
+                if self.force_uncertain and isinstance(node.func, ast.Attribute)
+                else False
+            )
+            arguments = tuple(
+                contains_continuation(alias_value(value, occurrence))
+                for value in (*node.args, *(item.value for item in node.keywords))
+            )
+            continuation_escaped |= receiver in {True, None} or any(
+                value in {True, None} for value in arguments
+            )
+            self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             return None
@@ -1538,6 +1750,63 @@ def _middleware_may_short_circuit(
     mutation_visitor = _MutationVisitor()
     for statement in function.body:
         mutation_visitor.visit(statement)
+
+    local_helpers = {
+        statement.name: statement
+        for statement in function.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not statement.decorator_list
+    }
+    called_helpers: list[tuple[str, ast.Call]] = []
+
+    class _HelperCallVisitor(ast.NodeVisitor):
+        def __init__(self, occurrence: ast.Call | None = None) -> None:
+            self.occurrence = occurrence
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Name) and node.func.id in local_helpers:
+                called_helpers.append((node.func.id, self.occurrence or node))
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    helper_call_visitor = _HelperCallVisitor()
+    for statement in function.body:
+        if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            helper_call_visitor.visit(statement)
+    processed_helpers: set[tuple[str, tuple[int, int]]] = set()
+    pending_helpers = list(called_helpers)
+    while pending_helpers:
+        name, call = pending_helpers.pop(0)
+        identity = (name, position(call))
+        if identity in processed_helpers:
+            continue
+        processed_helpers.add(identity)
+        helper_bindings = _ScopeBindingVisitor()
+        for statement in local_helpers[name].body:
+            helper_bindings.visit(statement)
+        helper_mutations = _MutationVisitor(
+            occurrence=call,
+            force_uncertain=True,
+            mutated_names=frozenset(helper_bindings.nonlocal_names),
+        )
+        for statement in local_helpers[name].body:
+            helper_mutations.visit(statement)
+        before = len(called_helpers)
+        nested_calls = _HelperCallVisitor(call)
+        for statement in local_helpers[name].body:
+            nested_calls.visit(statement)
+        pending_helpers.extend(called_helpers[before:])
 
     uncertain_call = False
 
@@ -2064,6 +2333,81 @@ def _wildcard_exports(
             return None
         return tuple(dict.fromkeys(names))
 
+    def all_receiver(node: ast.AST) -> bool:
+        while isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        return isinstance(node, ast.Name) and node.id == "__all__"
+
+    def finite_all_method(
+        node: ast.AST,
+        current: object | tuple[str, ...] | None,
+    ) -> tuple[bool, tuple[str, ...] | None]:
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+            return (False, None)
+        call = node.value
+        if not isinstance(call.func, ast.Attribute) or not all_receiver(
+            call.func.value
+        ):
+            return (False, None)
+        if not isinstance(current, tuple) or call.keywords or len(call.args) != 1:
+            return (True, None)
+        if call.func.attr == "append":
+            value = call.args[0]
+            names = (
+                (value.value,)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                else None
+            )
+        elif call.func.attr == "extend":
+            names = literal_all(call.args[0])
+        else:
+            names = None
+        return (
+            True,
+            tuple(dict.fromkeys((*current, *names))) if names is not None else None,
+        )
+
+    class _UnprovenAllMutation(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.found = False
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if any(all_receiver(target) for target in node.targets):
+                self.found = True
+            self.visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if all_receiver(node.target):
+                self.found = True
+            if node.value is not None:
+                self.visit(node.value)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            if all_receiver(node.target):
+                self.found = True
+            self.visit(node.value)
+
+        def visit_Delete(self, node: ast.Delete) -> None:
+            if any(all_receiver(target) for target in node.targets):
+                self.found = True
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Attribute) and all_receiver(node.func.value):
+                self.found = True
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
     for path, (_source, tree, module) in parsed.items():
         explicit_all: object | tuple[str, ...] | None = absent
         public: set[str] = set()
@@ -2105,6 +2449,29 @@ def _wildcard_exports(
                 if node.target.id == "__all__":
                     explicit_all = literal_all(node.value)
                 continue
+            handled_all_method, mutated_all = finite_all_method(node, explicit_all)
+            if handled_all_method:
+                explicit_all = mutated_all
+                continue
+            if (
+                isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "__all__"
+            ):
+                public.add("__all__")
+                names = (
+                    literal_all(node.value) if isinstance(node.op, ast.Add) else None
+                )
+                explicit_all = (
+                    tuple(dict.fromkeys((*explicit_all, *names)))
+                    if isinstance(explicit_all, tuple) and names is not None
+                    else None
+                )
+                continue
+            all_mutation = _UnprovenAllMutation()
+            all_mutation.visit(node)
+            if all_mutation.found:
+                explicit_all = None
             visitor = _ScopeBindingVisitor()
             visitor.visit(node)
             names = {name for name, _binding in visitor.records}
@@ -2329,6 +2696,13 @@ def _module_import_reachability(
                 base = _import_from_base(path, module, node)
                 if base in known_modules:
                     graph[module].add(base)
+                if base is not None:
+                    graph[module].update(
+                        candidate
+                        for alias in node.names
+                        if alias.name != "*"
+                        and (candidate := f"{base}.{alias.name}") in known_modules
+                    )
 
     reachable: set[tuple[str, str]] = set()
     for source in known_modules:
