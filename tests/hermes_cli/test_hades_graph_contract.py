@@ -51,7 +51,7 @@ PACKAGED_CONTRACT_ROOT = ROOT / "hermes_cli" / "hades_graph_v2" / "contracts"
 CANONICALIZATION_GOLDEN = CONTRACT_ROOT / "golden" / "canonicalization.json"
 VERIFICATION_GOLDEN = CONTRACT_ROOT / "golden" / "verification-results.json"
 CONTRACT_LOCK = CONTRACT_ROOT / "contract-lock.json"
-SCHEMA_SOURCE_COMMIT = "cbc07d447ad301a53468ad52093438cfe0160d1d"
+SCHEMA_SOURCE_COMMIT = "3f8498e0f9a6902e1b68ed45495a2d89993a7a9e"
 
 
 def _golden() -> dict[str, Any]:

@@ -1,6 +1,6 @@
 {
   "schema": "hades.graph_v2_contract_lock.v1",
-  "schema_source_commit": "cbc07d447ad301a53468ad52093438cfe0160d1d",
+  "schema_source_commit": "3f8498e0f9a6902e1b68ed45495a2d89993a7a9e",
   "manifest_sha256": "1e529df75c66a5fe3682d3e98257445221fa20e1f17d2baebb4a0c9a979cefa2",
   "schema_digests": {
     "artifact.schema.json": "7d46579aa6a4a17da23d75364bcc8f505c75411e209efcd376894216d269a7c9",
