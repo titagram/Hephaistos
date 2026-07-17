@@ -5504,3 +5504,440 @@ async def old_route(value=old_marker): return None
         event.path == "app.py" and event.reason_code == "framework_config_unresolved"
         for event in adapter.coverage_events(context)
     )
+
+
+def test_middleware_destructured_helper_alias_calls_are_occurrence_bounded(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "dormant.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def dormant_alias(request, proceed):
+    callbacks = [proceed]
+    def overwrite():
+        callbacks[0] = replacement
+    (helper,) = (overwrite,)
+    return await callbacks[0](request)
+
+@app.get("/dormant")
+async def dormant_endpoint(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "invoked.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def invoked_alias(request, proceed):
+    callbacks = [proceed]
+    def overwrite():
+        callbacks[0] = replacement
+    (helper,) = (overwrite,)
+    helper()
+    return await callbacks[0](request)
+
+@app.get("/invoked")
+async def invoked_endpoint(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def dynamic_alias(request, proceed):
+    callbacks = [proceed]
+    def overwrite():
+        callbacks[0] = replacement
+    (helper,) = choose_helpers(overwrite)
+    helper()
+    return await callbacks[0](request)
+
+@app.get("/dynamic")
+async def dynamic_endpoint(): return None
+""",
+    )
+    paths = ("dormant.py", "dynamic.py", "invoked.py")
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(_syntax(tmp_path, path) for path in paths),
+    )
+
+    def middleware(route_name: str, path: str, middleware_name: str):
+        route = next(item for item in entrypoints if item.public_name == route_name)
+        local_key = _function_key_at(tmp_path, path, middleware_name)
+        return next(
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "middleware_request"
+            and isinstance(item.target, FrameworkLocalTarget)
+            and item.target.local_key == local_key
+        )
+
+    assert not middleware(
+        "dormant_endpoint",
+        "dormant.py",
+        "dormant_alias",
+    ).short_circuit_successors
+    for route_name, path, name in (
+        ("invoked_endpoint", "invoked.py", "invoked_alias"),
+        ("dynamic_endpoint", "dynamic.py", "dynamic_alias"),
+    ):
+        assert middleware(route_name, path, name).short_circuit_successors
+
+    coverage = adapter.coverage_events(context)
+    assert not any(
+        event.path == "dormant.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        for event in coverage
+    )
+    for path in ("dynamic.py", "invoked.py"):
+        assert any(
+            event.path == path
+            and event.reason_code == "middleware_behavior_unresolved"
+            and event.outcome is CoverageOutcome.PARTIAL
+            for event in coverage
+        )
+
+
+def test_middleware_same_name_helpers_resolve_the_body_at_each_call(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "first_effect.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def first_effect(request, proceed):
+    callbacks = [proceed]
+    def mutate():
+        callbacks[0] = replacement
+    mutate()
+    def mutate():
+        return None
+    return await callbacks[0](request)
+
+@app.get("/first")
+async def first_endpoint(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "late_effect.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def late_effect(request, proceed):
+    callbacks = [proceed]
+    def mutate():
+        return None
+    mutate()
+    def mutate():
+        callbacks[0] = replacement
+    return await callbacks[0](request)
+
+@app.get("/late")
+async def late_endpoint(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "first_effect.py"),
+            _syntax(tmp_path, "late_effect.py"),
+        ),
+    )
+
+    def middleware(route_name: str, path: str, middleware_name: str):
+        route = next(item for item in entrypoints if item.public_name == route_name)
+        local_key = _function_key_at(tmp_path, path, middleware_name)
+        return next(
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "middleware_request"
+            and isinstance(item.target, FrameworkLocalTarget)
+            and item.target.local_key == local_key
+        )
+
+    assert middleware(
+        "first_endpoint",
+        "first_effect.py",
+        "first_effect",
+    ).short_circuit_successors
+    assert not middleware(
+        "late_endpoint",
+        "late_effect.py",
+        "late_effect",
+    ).short_circuit_successors
+
+    coverage = adapter.coverage_events(context)
+    assert any(
+        event.path == "first_effect.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in coverage
+    )
+    assert not any(
+        event.path == "late_effect.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        for event in coverage
+    )
+
+
+def test_middleware_chained_assignment_shares_one_container_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def chained_mutation(request, proceed):
+    alias = callbacks = {"next": proceed}
+    alias["next"] = replacement
+    return await callbacks["next"](request)
+
+@app.middleware("http")
+async def chained_read_only(request, proceed):
+    alias = callbacks = {"next": proceed}
+    return await alias["next"](request)
+
+@app.middleware("http")
+async def independent_storage(request, proceed):
+    callbacks = {"next": proceed}
+    alias = {"next": replacement}
+    alias["next"] = another
+    return await callbacks["next"](request)
+
+@app.get("/route")
+async def endpoint(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+    route = next(item for item in entrypoints if item.public_name == "endpoint")
+
+    def middleware(name: str):
+        local_key = _function_key(tmp_path, name)
+        return next(
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "middleware_request"
+            and isinstance(item.target, FrameworkLocalTarget)
+            and item.target.local_key == local_key
+        )
+
+    assert middleware("chained_mutation").short_circuit_successors
+    for name in ("chained_read_only", "independent_storage"):
+        assert not middleware(name).short_circuit_successors
+    assert not any(
+        event.path == "app.py" and event.reason_code == "middleware_behavior_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_wildcard_exports_track_destructured_all_alias_mutations(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "finite.py",
+        """from fastapi import Depends
+
+__all__ = ["marker"]
+(exports,) = (__all__,)
+exports.append("alias_marker")
+
+def shared(): return None
+marker = Depends(shared)
+alias_marker = Depends(shared)
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic.py",
+        """from fastapi import Depends
+
+__all__ = ["dynamic_marker"]
+(exports,) = (__all__,)
+exports.append(build_export())
+
+def shared(): return None
+dynamic_marker = Depends(shared)
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+from finite import *
+
+app = FastAPI()
+
+@app.get("/marker")
+async def marker_route(value=marker): return None
+
+@app.get("/alias")
+async def alias_route(value=alias_marker): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic_app.py",
+        """from dynamic import *
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/dynamic")
+async def dynamic_route(value=dynamic_marker): return None
+""",
+    )
+    paths = ("app.py", "dynamic.py", "dynamic_app.py", "finite.py")
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(_syntax(tmp_path, path) for path in paths),
+    )
+
+    by_name = {item.public_name: item for item in entrypoints}
+    assert set(by_name) == {"marker_route", "alias_route"}
+    for route in by_name.values():
+        dependencies = [
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "decorator_dependency"
+        ]
+        assert len(dependencies) == 1
+        assert isinstance(dependencies[0].target, FrameworkLocalTarget)
+        assert dependencies[0].target.local_key == _function_key_at(
+            tmp_path,
+            "finite.py",
+            "shared",
+        )
+
+    coverage = adapter.coverage_events(context)
+    assert not any(
+        event.path == "app.py" and event.reason_code == "framework_config_unresolved"
+        for event in coverage
+    )
+    assert any(
+        event.path == "dynamic_app.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in coverage
+    )
+
+
+def test_dependency_destructuring_applies_namedexpr_effects_left_to_right(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "exact.py",
+        """from fastapi import Depends, FastAPI
+
+def old_dependency(): return None
+def new_dependency(): return None
+
+marker = Depends(old_dependency)
+assigned, later = ((marker := Depends(new_dependency)), marker)
+
+app = FastAPI()
+
+@app.get("/assigned")
+async def assigned_route(value=assigned): return None
+
+@app.get("/later")
+async def later_route(value=later): return None
+
+@app.get("/marker")
+async def marker_route(value=marker): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic.py",
+        """from fastapi import Depends, FastAPI
+
+def old_dependency(): return None
+
+marker = Depends(old_dependency)
+assigned, later = ((marker := build_marker()), marker)
+
+app = FastAPI()
+
+@app.get("/assigned")
+async def dynamic_assigned_route(value=assigned): return None
+
+@app.get("/later")
+async def dynamic_later_route(value=later): return None
+
+@app.get("/marker")
+async def dynamic_marker_route(value=marker): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "dynamic.py"), _syntax(tmp_path, "exact.py")),
+    )
+
+    by_name = {item.public_name: item for item in entrypoints}
+    assert set(by_name) == {"assigned_route", "later_route", "marker_route"}
+    for route in by_name.values():
+        dependencies = [
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "decorator_dependency"
+        ]
+        assert len(dependencies) == 1
+        assert isinstance(dependencies[0].target, FrameworkLocalTarget)
+        assert dependencies[0].target.local_key == _function_key_at(
+            tmp_path,
+            "exact.py",
+            "new_dependency",
+        )
+
+    coverage = adapter.coverage_events(context)
+    assert not any(
+        event.path == "exact.py" and event.reason_code == "framework_config_unresolved"
+        for event in coverage
+    )
+    assert any(
+        event.path == "dynamic.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in coverage
+    )

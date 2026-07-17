@@ -917,6 +917,63 @@ def _dependency_bindings(
                 return ()
             return None
 
+        def evaluate_named_expression_rhs(
+            value: ast.AST,
+            module: str,
+            path: str,
+            occurrence: _Order,
+            overrides: dict[str, tuple[_Dependency, ...] | None],
+            effects: list[tuple[str, tuple[_Dependency, ...] | None]],
+            evaluated: dict[int, tuple[_Dependency, ...] | None],
+        ) -> tuple[_Dependency, ...] | None:
+            if isinstance(value, ast.NamedExpr):
+                result = evaluate_named_expression_rhs(
+                    value.value,
+                    module,
+                    path,
+                    occurrence,
+                    overrides,
+                    effects,
+                    evaluated,
+                )
+                overrides[value.target.id] = result
+                effects.append((value.target.id, result))
+                evaluated[id(value)] = result
+                return result
+            if isinstance(value, (ast.List, ast.Tuple)):
+                for item in value.elts:
+                    evaluate_named_expression_rhs(
+                        item,
+                        module,
+                        path,
+                        occurrence,
+                        overrides,
+                        effects,
+                        evaluated,
+                    )
+                evaluated[id(value)] = ()
+                return ()
+            if isinstance(value, ast.Name):
+                result = (
+                    overrides[value.id]
+                    if value.id in overrides
+                    else visible(module, value.id, occurrence)
+                )
+                evaluated[id(value)] = result
+                return result
+            nested_named = tuple(
+                item for item in ast.walk(value) if isinstance(item, ast.NamedExpr)
+            )
+            if nested_named:
+                for item in nested_named:
+                    overrides[item.target.id] = None
+                    effects.append((item.target.id, None))
+                evaluated[id(value)] = None
+                return None
+            result = classify(value, module, path, occurrence)
+            evaluated[id(value)] = result
+            return result
+
         def paired_destructuring(
             target: ast.AST,
             value: ast.AST,
@@ -987,15 +1044,21 @@ def _dependency_bindings(
             target: ast.AST,
             value: ast.AST,
             order: _Order,
+            evaluated: Mapping[int, tuple[_Dependency, ...] | None] | None = None,
         ) -> None:
             pairs = paired_destructuring(target, value)
             if pairs is not None:
                 for name, paired_value in pairs:
+                    classified = (
+                        evaluated[id(paired_value)]
+                        if evaluated is not None and id(paired_value) in evaluated
+                        else classify(paired_value, module, path, order)
+                    )
                     remember(
                         module,
                         name.id,
                         order,
-                        classify(paired_value, module, path, order),
+                        classified,
                     )
                 return
             visitor = _ScopeBindingVisitor()
@@ -1056,6 +1119,27 @@ def _dependency_bindings(
                         )
                     continue
                 if isinstance(node, ast.Assign):
+                    evaluated: dict[int, tuple[_Dependency, ...] | None] | None = None
+                    if any(
+                        isinstance(item, ast.NamedExpr) for item in ast.walk(node.value)
+                    ):
+                        overrides: dict[
+                            str,
+                            tuple[_Dependency, ...] | None,
+                        ] = {}
+                        effects: list[tuple[str, tuple[_Dependency, ...] | None]] = []
+                        evaluated = {}
+                        evaluate_named_expression_rhs(
+                            node.value,
+                            module,
+                            path,
+                            order,
+                            overrides,
+                            effects,
+                            evaluated,
+                        )
+                        for name, effect in effects:
+                            remember(module, name, order, effect)
                     for target in node.targets:
                         remember_assignment(
                             module,
@@ -1063,6 +1147,7 @@ def _dependency_bindings(
                             target,
                             node.value,
                             order,
+                            evaluated,
                         )
                     continue
                 if isinstance(node, ast.AnnAssign) and isinstance(
@@ -1367,6 +1452,11 @@ def _middleware_may_short_circuit(
             return _INVALID_STATIC_KEY
         return key
 
+    literal_containers: dict[
+        tuple[int, tuple[int, int]],
+        _ContinuationRelation,
+    ] = {}
+
     def alias_value(
         value: ast.AST | None,
         occurrence: ast.AST,
@@ -1376,22 +1466,34 @@ def _middleware_may_short_circuit(
         if isinstance(value, ast.Constant):
             return False
         if isinstance(value, (ast.List, ast.Tuple)):
-            return _ContinuationContainer(
+            identity = (id(value), position(occurrence))
+            if identity in literal_containers:
+                return literal_containers[identity]
+            relation = _ContinuationContainer(
                 tuple(
                     (index, alias_value(item, occurrence))
                     for index, item in enumerate(value.elts)
                 )
             )
+            literal_containers[identity] = relation
+            return relation
         if isinstance(value, ast.Dict):
+            identity = (id(value), position(occurrence))
+            if identity in literal_containers:
+                return literal_containers[identity]
             items: dict[object, _ContinuationRelation] = {}
             for key_node, item in zip(value.keys, value.values, strict=True):
                 if key_node is None:
+                    literal_containers[identity] = None
                     return None
                 key = literal_key(key_node)
                 if key is _INVALID_STATIC_KEY:
+                    literal_containers[identity] = None
                     return None
                 items[key] = alias_value(item, occurrence)
-            return _ContinuationContainer(tuple(items.items()))
+            relation = _ContinuationContainer(tuple(items.items()))
+            literal_containers[identity] = relation
+            return relation
         if isinstance(value, ast.Attribute):
             relation = contains_continuation(alias_value(value.value, occurrence))
             return None if relation in {True, None} else False
@@ -1795,15 +1897,26 @@ def _middleware_may_short_circuit(
     for statement in function.body:
         mutation_visitor.visit(statement)
 
-    local_helpers = {
-        statement.name: statement
+    local_helpers = tuple(
+        statement
         for statement in function.body
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
         and not statement.decorator_list
-    }
-    helper_aliases: dict[str, list[tuple[tuple[int, int], str | None]]] = {}
+    )
+    helper_aliases: dict[
+        str,
+        list[
+            tuple[
+                tuple[int, int],
+                ast.FunctionDef | ast.AsyncFunctionDef | None,
+            ]
+        ],
+    ] = {}
 
-    def helper_at(name: str, node: ast.AST) -> str | None:
+    def helper_at(
+        name: str,
+        node: ast.AST,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         occurrence = position(node)
         return next(
             (
@@ -1819,27 +1932,72 @@ def _middleware_may_short_circuit(
     def remember_helper_alias(
         name: str,
         node: ast.AST,
-        identity: str | None,
+        identity: ast.FunctionDef | ast.AsyncFunctionDef | None,
     ) -> None:
         helper_aliases.setdefault(name, []).append((position(node), identity))
+
+    def helper_target_bindings(
+        target: ast.AST,
+        value: ast.AST,
+        statement: ast.AST,
+    ) -> tuple[
+        tuple[str, ast.FunctionDef | ast.AsyncFunctionDef | None],
+        ...,
+    ]:
+        if isinstance(target, ast.Name):
+            return (
+                (
+                    target.id,
+                    helper_at(value.id, statement)
+                    if isinstance(value, ast.Name)
+                    else None,
+                ),
+            )
+        if (
+            isinstance(target, (ast.List, ast.Tuple))
+            and isinstance(value, (ast.List, ast.Tuple))
+            and len(target.elts) == len(value.elts)
+            and not any(
+                isinstance(item, ast.Starred) for item in (*target.elts, *value.elts)
+            )
+        ):
+            return tuple(
+                binding
+                for nested_target, nested_value in zip(
+                    target.elts,
+                    value.elts,
+                    strict=True,
+                )
+                for binding in helper_target_bindings(
+                    nested_target,
+                    nested_value,
+                    statement,
+                )
+            )
+        visitor = _ScopeBindingVisitor()
+        visitor.visit(target)
+        return tuple((name, None) for name, _binding in visitor.records)
 
     for statement in function.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             remember_helper_alias(
                 statement.name,
                 statement,
-                statement.name if statement.name in local_helpers else None,
+                statement if statement in local_helpers else None,
             )
             continue
         if isinstance(statement, ast.Assign):
-            identity = (
-                helper_at(statement.value.id, statement)
-                if isinstance(statement.value, ast.Name)
-                else None
+            pending = tuple(
+                binding
+                for target in statement.targets
+                for binding in helper_target_bindings(
+                    target,
+                    statement.value,
+                    statement,
+                )
             )
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    remember_helper_alias(target.id, statement, identity)
+            for name, identity in pending:
+                remember_helper_alias(name, statement, identity)
             continue
         if isinstance(statement, ast.AnnAssign) and isinstance(
             statement.target,
@@ -1857,7 +2015,7 @@ def _middleware_may_short_circuit(
         for name, binding in visitor.records:
             remember_helper_alias(name, binding, None)
 
-    called_helpers: list[tuple[str, ast.Call]] = []
+    called_helpers: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.Call]] = []
 
     class _HelperCallVisitor(ast.NodeVisitor):
         def __init__(self, occurrence: ast.Call | None = None) -> None:
@@ -1886,27 +2044,27 @@ def _middleware_may_short_circuit(
     for statement in function.body:
         if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             helper_call_visitor.visit(statement)
-    processed_helpers: set[tuple[str, tuple[int, int]]] = set()
+    processed_helpers: set[tuple[int, tuple[int, int]]] = set()
     pending_helpers = list(called_helpers)
     while pending_helpers:
-        name, call = pending_helpers.pop(0)
-        identity = (name, position(call))
+        helper, call = pending_helpers.pop(0)
+        identity = (id(helper), position(call))
         if identity in processed_helpers:
             continue
         processed_helpers.add(identity)
         helper_bindings = _ScopeBindingVisitor()
-        for statement in local_helpers[name].body:
+        for statement in helper.body:
             helper_bindings.visit(statement)
         helper_mutations = _MutationVisitor(
             occurrence=call,
             force_uncertain=True,
             mutated_names=frozenset(helper_bindings.nonlocal_names),
         )
-        for statement in local_helpers[name].body:
+        for statement in helper.body:
             helper_mutations.visit(statement)
         before = len(called_helpers)
         nested_calls = _HelperCallVisitor(call)
-        for statement in local_helpers[name].body:
+        for statement in helper.body:
             nested_calls.visit(statement)
         pending_helpers.extend(called_helpers[before:])
 
@@ -2441,6 +2599,38 @@ def _wildcard_exports(
             node = node.value
         return isinstance(node, ast.Name) and node.id in all_aliases
 
+    def destructured_all_aliases(
+        target: ast.AST,
+        value: ast.AST,
+    ) -> tuple[tuple[str, bool], ...] | None:
+        if isinstance(target, ast.Name):
+            return (
+                (
+                    target.id,
+                    isinstance(value, ast.Name) and value.id in all_aliases,
+                ),
+            )
+        if (
+            not isinstance(target, (ast.List, ast.Tuple))
+            or not isinstance(value, (ast.List, ast.Tuple))
+            or len(target.elts) != len(value.elts)
+            or any(
+                isinstance(item, ast.Starred) for item in (*target.elts, *value.elts)
+            )
+        ):
+            return None
+        bindings: list[tuple[str, bool]] = []
+        for nested_target, nested_value in zip(
+            target.elts,
+            value.elts,
+            strict=True,
+        ):
+            nested = destructured_all_aliases(nested_target, nested_value)
+            if nested is None:
+                return None
+            bindings.extend(nested)
+        return tuple(bindings)
+
     def finite_all_method(
         node: ast.AST,
         current: object | tuple[str, ...] | None,
@@ -2556,6 +2746,39 @@ def _wildcard_exports(
                 direct_names = tuple(
                     target.id for target in node.targets if isinstance(target, ast.Name)
                 )
+                if len(direct_names) != len(node.targets):
+                    visitor = _ScopeBindingVisitor()
+                    for target in node.targets:
+                        visitor.visit(target)
+                    target_names = {
+                        *direct_names,
+                        *(name for name, _binding in visitor.records),
+                    }
+                    public.update(target_names)
+                    uncertain_public = True
+                    paired = tuple(
+                        destructured_all_aliases(target, node.value)
+                        for target in node.targets
+                    )
+                    all_aliases.difference_update(target_names)
+                    if all(item is not None for item in paired):
+                        all_aliases.update(
+                            name
+                            for item in paired
+                            if item is not None
+                            for name, aliases_all in item
+                            if aliases_all
+                        )
+                    elif any(
+                        isinstance(value, ast.Name) and value.id in all_aliases
+                        for value in ast.walk(node.value)
+                    ):
+                        explicit_all = None
+                    if "__all__" in target_names:
+                        explicit_all = None
+                        all_is_list = None
+                        all_aliases.add("__all__")
+                    continue
                 public.update(direct_names)
                 aliases_all = (
                     isinstance(node.value, ast.Name) and node.value.id in all_aliases
@@ -2576,14 +2799,6 @@ def _wildcard_exports(
                     all_aliases.difference_update(direct_names)
                     if aliases_all:
                         all_aliases.update(direct_names)
-                if len(direct_names) != len(node.targets):
-                    visitor = _ScopeBindingVisitor()
-                    for target in node.targets:
-                        visitor.visit(target)
-                    public.update(name for name, _binding in visitor.records)
-                    uncertain_public = True
-                    if aliases_all:
-                        explicit_all = None
                 continue
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 public.add(node.target.id)
