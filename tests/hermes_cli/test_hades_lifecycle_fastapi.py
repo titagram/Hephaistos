@@ -1330,3 +1330,246 @@ async def after_rebind(): return None
         and event.outcome is CoverageOutcome.PARTIAL
         for event in adapter.coverage_events(context)
     )
+
+
+def test_runtime_exception_alias_lookup_distinguishes_global_and_local_state(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class A(Exception): pass
+class B(Exception): pass
+
+Alias = A
+app = FastAPI()
+
+@app.exception_handler(A)
+async def a_handler(request, exc): return None
+
+@app.exception_handler(B)
+async def b_handler(request, exc): return None
+
+@app.get("/global-final")
+async def global_final(): raise Alias()
+
+@app.get("/local-exact")
+async def local_exact():
+    Alias = A
+    raise Alias()
+
+@app.get("/local-dynamic")
+async def local_dynamic():
+    if enabled:
+        Alias = A
+    raise Alias()
+
+Alias = B
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    global_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "global_final")
+    )
+    local_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "local_exact")
+    )
+    dynamic_roles = {
+        item.framework_role
+        for item in adapter.pipeline(
+            context, _candidate(adapter, context, "local_dynamic")
+        )
+    }
+
+    global_handler = next(
+        item for item in global_pipeline if item.framework_role == "exception_handler"
+    )
+    local_handler = next(
+        item for item in local_pipeline if item.framework_role == "exception_handler"
+    )
+    assert isinstance(global_handler.target, FrameworkLocalTarget)
+    assert global_handler.target.local_key == _function_key(tmp_path, "b_handler")
+    assert isinstance(local_handler.target, FrameworkLocalTarget)
+    assert local_handler.target.local_key == _function_key(tmp_path, "a_handler")
+    assert "exception_handler" not in dynamic_roles
+    assert "exception_handler_resolution_boundary" in dynamic_roles
+
+
+def test_redeclared_exception_classes_have_distinct_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class Problem(Exception): pass
+OldProblem = Problem
+
+app = FastAPI()
+
+@app.exception_handler(OldProblem)
+async def old_handler(request, exc): return None
+
+class Problem(Exception): pass
+
+@app.get("/old-problem")
+async def old_problem(): raise OldProblem()
+
+@app.get("/new-problem")
+async def new_problem(): raise Problem()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    old_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "old_problem")
+    )
+    new_roles = {
+        item.framework_role
+        for item in adapter.pipeline(
+            context, _candidate(adapter, context, "new_problem")
+        )
+    }
+
+    old_handler = next(
+        item for item in old_pipeline if item.framework_role == "exception_handler"
+    )
+    assert isinstance(old_handler.target, FrameworkLocalTarget)
+    assert old_handler.target.local_key == _function_key(tmp_path, "old_handler")
+    assert "exception_handler" not in new_roles
+    assert "unhandled_exception" in new_roles
+
+
+def test_framework_import_references_resolve_at_each_occurrence(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "first.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.get("/first")
+async def first(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "second.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.get("/second")
+async def second(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from first import app as selected_app, router as selected_router
+
+selected_app.include_router(selected_router, prefix="/one")
+
+from second import app as selected_app, router as selected_router
+
+selected_app.include_router(selected_router, prefix="/two")
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "app.py"),
+            _syntax(tmp_path, "first.py"),
+            _syntax(tmp_path, "second.py"),
+        ),
+    )
+
+    assert {
+        (item.public_name, item.public_path)
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {("first", "/one/first"), ("second", "/two/second")}
+    assert not any(
+        event.source_path == "app.py"
+        and event.reason_code
+        in {"framework_config_unresolved", "framework_object_rebound"}
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_module_header_expressions_rebind_framework_objects_but_bodies_do_not(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+decorator_app = FastAPI()
+@decorator_app.get("/decorator-stale")
+async def decorator_stale(): return None
+@configure(decorator_app := build_app())
+def decorated(): pass
+
+default_app = FastAPI()
+@default_app.get("/default-stale")
+async def default_stale(): return None
+def defaulted(value=(default_app := build_app())): pass
+
+annotation_app = FastAPI()
+@annotation_app.get("/annotation-stale")
+async def annotation_stale(): return None
+def annotated(value: marker(annotation_app := build_app())): pass
+
+base_app = FastAPI()
+@base_app.get("/base-stale")
+async def base_stale(): return None
+class HeaderBase((base_app := make_base())): pass
+
+keyword_app = FastAPI()
+@keyword_app.get("/keyword-stale")
+async def keyword_stale(): return None
+class HeaderKeyword(object, metaclass=select_meta(keyword_app := build_app())): pass
+
+body_app = FastAPI()
+@body_app.get("/body-stable")
+async def body_stable(): return None
+def body_scope():
+    body_app = build_app()
+
+class_app = FastAPI()
+@class_app.get("/class-stable")
+async def class_stable(): return None
+class ClassScope:
+    class_app = build_app()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {"body_stable", "class_stable"}
+    assert any(
+        event.reason_code == "framework_object_rebound"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
