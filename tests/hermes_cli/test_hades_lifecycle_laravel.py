@@ -405,7 +405,7 @@ Schedule::command(ReportCommand::class)->daily();
 
     assert [(entry.kind, entry.public_name) for entry in entries] == [
         (EntrypointKind.CLI_COMMAND, "reports:daily"),
-        (EntrypointKind.SCHEDULED_JOB, "daily"),
+        (EntrypointKind.SCHEDULED_JOB, "ReportCommand"),
     ]
     assert all(
         entry.method_semantics is MethodSemantics.NOT_APPLICABLE for entry in entries
@@ -434,7 +434,7 @@ def test_legacy_console_kernel_scheduler_is_a_distinct_non_http_entrypoint(
     )
 
     assert [(entry.kind, entry.public_name) for entry in entries] == [
-        (EntrypointKind.SCHEDULED_JOB, "daily"),
+        (EntrypointKind.SCHEDULED_JOB, "ReportCommand"),
     ]
 
 
@@ -587,3 +587,397 @@ def test_adapter_never_passes_absolute_or_traversal_paths_to_workspace_accessor(
     )
     assert observed
     assert all(not path.is_absolute() and ".." not in path.parts for path in observed)
+
+
+def test_direct_preverb_route_chain_is_expanded_without_losing_static_context(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "app/Http/Controllers/UserController.php",
+        "<?php class UserController { public function index() {} }",
+    )
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::prefix('v1')->name('v1.')->domain('api.test')->middleware('auth')->get('/users', [UserController::class, 'index'])->name('users');",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/UserController.php",
+                "UserController.index",
+            ),
+        ),
+    )[0]
+
+    assert (route.public_path, route.public_name, route.methods) == (
+        "/v1/users",
+        "v1.users",
+        ("GET",),
+    )
+    assert route.match_constraints.host == "api.test"
+    assert "authentication" in [
+        segment.framework_role
+        for segment in adapter.pipeline(_context(tmp_path), route)
+    ]
+
+
+def test_missing_controller_source_is_partial_without_erasing_route_middleware(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/private', [PrivateController::class, 'show'])->middleware('auth');",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/PrivateController.php",
+                "PrivateController.show",
+            ),
+        ),
+    )[0]
+    roles = [segment.framework_role for segment in adapter.pipeline(context, route)]
+
+    assert "authentication" in roles
+    assert "controller_middleware_unresolved_boundary" in roles
+    assert {event.reason_code for event in adapter.coverage_events(context)} >= {
+        "controller_middleware_unresolved",
+        "handler_outcome_unresolved",
+    }
+
+
+def test_api_resource_omits_create_and_edit_actions(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/api.php",
+        "<?php Route::apiResource('users', UserController::class);",
+    )
+    routes = LaravelLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/UserController.php",
+                "UserController.index",
+                "UserController.store",
+                "UserController.show",
+                "UserController.update",
+                "UserController.destroy",
+            ),
+        ),
+    )
+
+    assert [route.public_name for route in routes] == [
+        "users.index",
+        "users.store",
+        "users.show",
+        "users.update",
+        "users.destroy",
+    ]
+    assert all("create" not in (route.public_name or "") for route in routes)
+    assert all("edit" not in (route.public_name or "") for route in routes)
+
+
+def test_terminable_middleware_is_resolved_in_its_own_class_after_response(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "app/Http/Kernel.php",
+        "<?php class Kernel { protected $middleware = [Terminable::class]; }",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Middleware/Terminable.php",
+        "<?php class Terminable { public function terminate($request, $response) {} }",
+    )
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/status', [StatusController::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/StatusController.php",
+        "<?php class StatusController { public function show() {} }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/StatusController.php",
+                "StatusController.show",
+            ),
+        ),
+    )[0]
+    pipeline = adapter.pipeline(_context(tmp_path), route)
+    roles = [segment.framework_role for segment in pipeline]
+
+    assert "terminating_middleware" in roles
+    assert roles.index("response") < roles.index("terminating_middleware")
+    response = pipeline[roles.index("response")]
+    terminating = pipeline[roles.index("terminating_middleware")]
+    assert response.success_successor.kind == "always"
+    assert terminating.success_successor.kind == "return"
+
+
+def test_controller_middleware_only_and_except_apply_to_selected_handler_only(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/show', [C::class, 'show']); Route::get('/edit', [C::class, 'edit']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/C.php",
+        "<?php class C { public function __construct() { $this->middleware('auth')->only('edit'); $this->middleware('throttle:api')->except(['edit']); } public function show() {} public function edit() {} }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (_syntax(tmp_path, "app/Http/Controllers/C.php", "C.show", "C.edit"),),
+    )
+    by_path = {route.public_path: route for route in routes}
+    show_roles = [
+        segment.framework_role
+        for segment in adapter.pipeline(_context(tmp_path), by_path["/show"])
+    ]
+    edit_roles = [
+        segment.framework_role
+        for segment in adapter.pipeline(_context(tmp_path), by_path["/edit"])
+    ]
+
+    assert "authentication" not in show_roles
+    assert "authentication" in edit_roles
+    assert len([role for role in show_roles if role == "middleware"]) == 1
+    assert len([role for role in edit_roles if role == "middleware"]) == 1
+
+
+def test_same_named_method_in_another_class_never_leaks_handler_outcomes(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/safe', [C::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/C.php",
+        """<?php
+class Other { public function show(StoreRequest $request) { abort(403); Ship::dispatch(); } }
+class C { public function show() { return response()->noContent(); } }
+""",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (_syntax(tmp_path, "app/Http/Controllers/C.php", "C.show"),),
+    )[0]
+    roles = [
+        segment.framework_role
+        for segment in adapter.pipeline(_context(tmp_path), route)
+    ]
+
+    assert "validation" not in roles
+    assert "job_dispatch" not in roles
+
+
+def test_dispatch_sync_does_not_create_linked_async_child_flow(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::post('/orders', [OrderController::class, 'store']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OrderController.php",
+        "<?php class OrderController { public function store() { ShipJob::dispatchSync(); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OrderController.php",
+                "OrderController.store",
+            ),
+            _syntax(tmp_path, "app/Jobs/ShipJob.php", "ShipJob.handle"),
+        ),
+    )[0]
+    pipeline = adapter.pipeline(_context(tmp_path), route)
+
+    assert "job_dispatch" not in [segment.framework_role for segment in pipeline]
+    assert not any(
+        isinstance(successor, AsyncSuccessor)
+        for segment in pipeline
+        for successor in segment.short_circuit_successors
+    )
+
+
+def test_unresolved_event_and_cyclic_middleware_are_partial_without_pipeline_mutation(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "app/Http/Kernel.php",
+        "<?php class Kernel { protected $middlewareGroups = ['a' => ['b'], 'b' => ['a']]; }",
+    )
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::post('/orders', [OrderController::class, 'store'])->middleware('a');",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OrderController.php",
+        "<?php class OrderController { public function store() { event(new OrderPlaced()); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OrderController.php",
+                "OrderController.store",
+            ),
+        ),
+    )[0]
+    first = adapter.pipeline(context, route)
+    second = adapter.pipeline(context, route)
+    events = adapter.coverage_events(context)
+
+    assert [segment.framework_role for segment in first] == [
+        segment.framework_role for segment in second
+    ]
+    assert "middleware_unresolved_boundary" in [
+        segment.framework_role for segment in first
+    ]
+    assert {event.reason_code for event in events} >= {
+        "async_target_unresolved",
+        "middleware_cycle",
+    }
+
+
+def test_closed_gate_allows_and_denies_have_distinct_security_arms(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/orders', [OrderController::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OrderController.php",
+        "<?php class OrderController { public function show() { if (Gate::allows('view', $order)) {} if (Gate::denies('delete', $order)) {} } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    route = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OrderController.php",
+                "OrderController.show",
+            ),
+        ),
+    )[0]
+    pipeline = adapter.pipeline(_context(tmp_path), route)
+    by_role = {segment.framework_role: segment for segment in pipeline}
+
+    assert "gate_allow" in by_role
+    assert "gate_deny" in by_role
+    assert by_role["gate_allow"].short_circuit_successors
+    assert by_role["gate_deny"].short_circuit_successors
+
+
+def test_dynamic_gate_is_an_explicit_security_boundary(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/orders', [OrderController::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/OrderController.php",
+        "<?php class OrderController { public function show() { Gate::allows($ability, $order); } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/OrderController.php",
+                "OrderController.show",
+            ),
+        ),
+    )[0]
+
+    assert "gate_unresolved_boundary" in [
+        segment.framework_role for segment in adapter.pipeline(context, route)
+    ]
+    assert "gate_unresolved" in {
+        event.reason_code for event in adapter.coverage_events(context)
+    }
+
+
+def test_console_and_scheduler_keep_source_order_and_executable_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/console.php",
+        """<?php
+Schedule::command(ReportCommand::class)->daily();
+Artisan::command('reports:daily', ReportCommand::class);
+""",
+    )
+    entries = LaravelLifecycleAdapter().entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "app/Console/Commands/ReportCommand.php",
+                "ReportCommand.handle",
+            ),
+        ),
+    )
+
+    assert [(entry.kind, entry.public_name) for entry in entries] == [
+        (EntrypointKind.SCHEDULED_JOB, "ReportCommand"),
+        (EntrypointKind.CLI_COMMAND, "reports:daily"),
+    ]
+    assert entries[0].registration_locator.structural_pointer.endswith(
+        "/schedule/daily"
+    )

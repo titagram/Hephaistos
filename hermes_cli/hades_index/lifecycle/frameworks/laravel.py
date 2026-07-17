@@ -64,8 +64,8 @@ _PROVIDER_FILES = (
     "app/Providers/AppServiceProvider.php",
 )
 _COMPUTED_RE = re.compile(r"(?:\$|\b(?:env|config|app|resolve)\s*\(|\?\?|\{\{)")
-_ROUTE_START_RE = re.compile(
-    r"\bRoute\s*::\s*(?P<verb>get|post|put|patch|delete|options|any|match|resource|apiResource)\s*\(",
+_ROUTE_VERB_RE = re.compile(
+    r"(?:\bRoute\s*::|->)\s*(?P<verb>get|post|put|patch|delete|options|any|match|resource|apiResource)\s*\(",
     re.IGNORECASE,
 )
 _ROUTE_ANY_RE = re.compile(r"\bRoute\s*::", re.IGNORECASE)
@@ -77,7 +77,6 @@ _MIDDLEWARE_CALL_RE = re.compile(_CHAIN_START + r"middleware\s*\(", re.DOTALL)
 _PREFIX_CALL_RE = re.compile(_CHAIN_START + r"prefix\s*\(", re.DOTALL)
 _NAME_CALL_RE = re.compile(_CHAIN_START + r"name\s*\(", re.DOTALL)
 _DOMAIN_CALL_RE = re.compile(_CHAIN_START + r"domain\s*\(", re.DOTALL)
-_CLASS_RE = re.compile(r"\bclass\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
 _CONTROLLER_MIDDLEWARE_RE = re.compile(r"\$this\s*->\s*middleware\s*\(", re.DOTALL)
 _FORM_REQUEST_RE = re.compile(
     r"\b(?P<name>[A-Za-z_][A-Za-z0-9_\\]*Request)\s+\$[A-Za-z_][A-Za-z0-9_]*"
@@ -88,12 +87,13 @@ _MODEL_PARAMETER_RE = re.compile(
 _AUTHORIZE_RE = re.compile(
     r"(?:\$this\s*->\s*authorize|Gate\s*::\s*authorize|->\s*can)\s*\("
 )
+_GATE_DECISION_RE = re.compile(r"\bGate\s*::\s*(?P<decision>allows|denies)\s*\(")
 _ABORT_RE = re.compile(r"\babort(?:_if|_unless)?\s*\(")
 _REDIRECT_RE = re.compile(r"\b(?:redirect|to_route|back)\s*\(")
 _THROW_RE = re.compile(r"\bthrow\s+(?:new\s+)?[A-Za-z_\\][A-Za-z0-9_\\]*")
 _RESPONSE_RE = re.compile(r"\breturn\s+(?:response\s*\(|new\s+[A-Za-z_\\]*Response\b)")
 _JOB_DISPATCH_RE = re.compile(
-    r"\b(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*(?:dispatch|dispatchSync|dispatchAfterResponse)\s*\("
+    r"\b(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*(?:dispatch|dispatchAfterResponse)\s*\("
 )
 _EVENT_DISPATCH_RE = re.compile(
     r"\b(?:event|dispatch)\s*\(\s*new\s+(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*\("
@@ -101,7 +101,6 @@ _EVENT_DISPATCH_RE = re.compile(
 _QUEUE_DISPATCH_RE = re.compile(
     r"\bQueue\s*::\s*(?:push|later)\s*\(\s*(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*class"
 )
-_TERMINATE_RE = re.compile(r"\bfunction\s+terminate\s*\(")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +132,6 @@ class _MiddlewareFacts:
     groups: Mapping[str, tuple[str, ...]]
     aliases: Mapping[str, str]
     priority: tuple[str, ...]
-    terminating: frozenset[str]
     complete: bool
 
 
@@ -148,6 +146,10 @@ class _HandlerOutcome:
     throws: bool
     response: bool
     async_dispatches: tuple[tuple[AsyncDispatchKind, str], ...]
+    controller_middleware_complete: bool = True
+    handler_complete: bool = True
+    gate_decisions: tuple[str, ...] = ()
+    gate_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,16 +165,17 @@ class _Snapshot:
 
 @dataclass(slots=True)
 class _Diagnostics:
-    paths: dict[str, set[CoverageCapability]]
+    records: set[tuple[str, CoverageCapability, str]]
 
     def mark(
         self,
         path: str,
         capability: CoverageCapability = CoverageCapability.ENTRYPOINT_DISCOVERY,
+        reason_code: str = "framework_config_unresolved",
     ) -> None:
         safe = _workspace_path(path)
         if safe is not None:
-            self.paths.setdefault(safe, set()).add(capability)
+            self.records.add((safe, capability, reason_code))
 
     def events(self) -> tuple[CoverageEvent, ...]:
         return tuple(
@@ -180,13 +183,14 @@ class _Diagnostics:
                 "php",
                 capability,
                 CoverageOutcome.PARTIAL,
-                "framework_config_unresolved",
+                reason_code,
                 path,
                 0,
                 1,
             )
-            for path, capabilities in sorted(self.paths.items())
-            for capability in sorted(capabilities, key=lambda item: item.value)
+            for path, capability, reason_code in sorted(
+                self.records, key=lambda item: (item[0], item[1].value, item[2])
+            )
         )
 
 
@@ -500,18 +504,23 @@ def _resource_specs(
     source_line: int,
     pointer: str,
     order: int,
+    *,
+    api_resource: bool,
 ) -> tuple[_RouteSpec, ...]:
     resource = path.strip("/")
     base = _join(context.prefix, resource)
-    rows = (
+    rows = [
         ("index", ("GET",), base),
-        ("create", ("GET",), _join(base, "create")),
         ("store", ("POST",), base),
         ("show", ("GET",), _join(base, "{" + resource.rstrip("s") + "}")),
-        ("edit", ("GET",), _join(base, "{" + resource.rstrip("s") + "}/edit")),
         ("update", ("PATCH", "PUT"), _join(base, "{" + resource.rstrip("s") + "}")),
         ("destroy", ("DELETE",), _join(base, "{" + resource.rstrip("s") + "}")),
-    )
+    ]
+    if not api_resource:
+        rows.insert(1, ("create", ("GET",), _join(base, "create")))
+        rows.insert(
+            4, ("edit", ("GET",), _join(base, "{" + resource.rstrip("s") + "}/edit"))
+        )
     return tuple(
         _RouteSpec(
             route_path,
@@ -540,8 +549,13 @@ def _route_from_statement(
     order: int,
     diagnostics: _Diagnostics,
 ) -> tuple[_RouteSpec, ...]:
-    match = _ROUTE_START_RE.search(statement)
+    match = _ROUTE_VERB_RE.search(statement)
     if match is None:
+        diagnostics.mark(source_path)
+        return ()
+    effective_context = _apply_group(context, statement[: match.start()])
+    if effective_context is None:
+        diagnostics.mark(source_path, CoverageCapability.FRAMEWORK_LIFECYCLE)
         return ()
     parsed = _call_arguments(statement, match)
     if parsed is None:
@@ -569,7 +583,7 @@ def _route_from_statement(
             diagnostics.mark(source_path)
             return ()
         return _resource_specs(
-            context,
+            effective_context,
             resource,
             controller,
             middleware,
@@ -577,6 +591,7 @@ def _route_from_statement(
             _line(content, offset),
             pointer,
             order,
+            api_resource=verb.lower() == "apiresource",
         )
     if len(arguments) < 2:
         diagnostics.mark(source_path)
@@ -591,14 +606,14 @@ def _route_from_statement(
     # verbs; the IR expresses it as unrestricted methods.
     return (
         _RouteSpec(
-            _join(context.prefix, path),
-            context.name_prefix + name
+            _join(effective_context.prefix, path),
+            effective_context.name_prefix + name
             if name is not None
-            else context.name_prefix or None,
+            else effective_context.name_prefix or None,
             methods,
             handler,
-            context.middleware + middleware,
-            context.domain,
+            effective_context.middleware + middleware,
+            effective_context.domain,
             source_path,
             _line(content, offset),
             pointer,
@@ -697,7 +712,6 @@ def _config_middleware(
     groups: dict[str, tuple[str, ...]] = {}
     aliases: dict[str, str] = {}
     priority: tuple[str, ...] = ()
-    terminating: set[str] = set()
     for path in _KERNEL_FILES:
         content = _text(context, path)
         if content is None:
@@ -765,16 +779,6 @@ def _config_middleware(
                 diagnostics.mark(path, CoverageCapability.FRAMEWORK_LIFECYCLE)
             else:
                 priority = values
-        for class_match in _CLASS_RE.finditer(content):
-            class_name = class_match.group("name")
-            block_open = content.find("{", class_match.end())
-            block_close = (
-                _matching(content, block_open, "{", "}") if block_open >= 0 else None
-            )
-            if block_close is not None and _TERMINATE_RE.search(
-                content[block_open:block_close]
-            ):
-                terminating.add(class_name)
     # Laravel 11 bootstrap configuration uses methods rather than properties.
     bootstrap = _text(context, "bootstrap/app.php")
     if bootstrap is not None:
@@ -841,8 +845,7 @@ def _config_middleware(
         MappingProxyType(dict(groups)),
         MappingProxyType(dict(aliases)),
         priority,
-        frozenset(terminating),
-        not diagnostics.paths,
+        not diagnostics.records,
     )
 
 
@@ -948,35 +951,110 @@ def _handler_source(context: ExtractionContext, handler: str | None) -> str | No
     return None
 
 
+def _is_terminable_middleware(context: ExtractionContext, middleware: str) -> bool:
+    """Prove ``terminate`` on the configured middleware class itself."""
+
+    class_name = middleware.rsplit("\\", 1)[-1]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", class_name):
+        return False
+    content = _text(context, f"app/Http/Middleware/{class_name}.php")
+    return (
+        content is not None
+        and _method_source(content, f"{class_name}::terminate") is not None
+    )
+
+
 def _method_source(content: str, handler: str | None) -> str | None:
     """Return one statically identified handler declaration, never a class-wide guess."""
 
     if handler is None or "::" not in handler:
         return None
-    _class_name, method = handler.rsplit("::", 1)
+    class_name, method = handler.rsplit("::", 1)
+    short_class = class_name.rsplit("\\", 1)[-1]
+    class_matches = list(re.finditer(rf"\bclass\s+{re.escape(short_class)}\b", content))
+    if len(class_matches) != 1:
+        return None
+    class_opening = content.find("{", class_matches[0].end())
+    class_closing = (
+        _matching(content, class_opening, "{", "}") if class_opening >= 0 else None
+    )
+    if class_closing is None:
+        return None
+    class_body = content[class_opening + 1 : class_closing]
     match = re.search(
         rf"\bfunction\s+{re.escape(method)}\s*\([^)]*\)\s*(?::[^{{]+)?\{{",
-        content,
+        class_body,
         re.DOTALL,
     )
     if match is None:
         return None
     opening = match.end() - 1
-    closing = _matching(content, opening, "{", "}")
-    return content[match.start() : closing + 1] if closing is not None else None
+    closing = _matching(class_body, opening, "{", "}")
+    return class_body[match.start() : closing + 1] if closing is not None else None
 
 
-def _controller_middleware(content: str | None) -> tuple[str, ...]:
-    if content is None:
-        return ()
+def _controller_middleware(
+    content: str | None, handler: str | None
+) -> tuple[tuple[str, ...], bool]:
+    """Select only literal controller middleware applicable to one action."""
+
+    if content is None or handler is None or "::" not in handler:
+        return (), False
+    class_name, selected_method = handler.rsplit("::", 1)
+    short_class = class_name.rsplit("\\", 1)[-1]
+    class_matches = list(re.finditer(rf"\bclass\s+{re.escape(short_class)}\b", content))
+    if len(class_matches) != 1:
+        return (), False
+    class_opening = content.find("{", class_matches[0].end())
+    class_closing = (
+        _matching(content, class_opening, "{", "}") if class_opening >= 0 else None
+    )
+    if class_closing is None:
+        return (), False
+    class_body = content[class_opening + 1 : class_closing]
+    if re.search(r"\bfunction\s+__construct\b", class_body) is None:
+        return (), True
+    constructor = _method_source(content, f"{class_name}::__construct")
+    if constructor is None:
+        return (), False
     output: list[str] = []
-    for match in _CONTROLLER_MIDDLEWARE_RE.finditer(content):
-        parsed = _call_arguments(content, match)
+    for match in _CONTROLLER_MIDDLEWARE_RE.finditer(constructor):
+        parsed = _call_arguments(constructor, match)
         parts = _argument_parts(parsed[0]) if parsed else None
-        values = _literal_list(parts[0]) if parts else None
-        if values is not None:
-            output.extend(values)
-    return tuple(output)
+        values = _literal_list(parts[0]) if parts and len(parts) >= 1 else None
+        if values is None or parsed is None:
+            return (), False
+        statement_end = _find_statement_end(constructor, parsed[1], len(constructor))
+        if statement_end is None:
+            return (), False
+        tail = constructor[parsed[1] : statement_end]
+        selectors: list[tuple[str, tuple[str, ...]]] = []
+        for selector_name in ("only", "except"):
+            selector_match = re.search(rf"->\s*{selector_name}\s*\(", tail)
+            if selector_match is None:
+                continue
+            selector_call = _call_arguments(tail, selector_match)
+            selector_parts = (
+                _argument_parts(selector_call[0]) if selector_call else None
+            )
+            selector_values = (
+                _literal_list(selector_parts[0])
+                if selector_parts and len(selector_parts) == 1
+                else None
+            )
+            if selector_values is None:
+                return (), False
+            selectors.append((selector_name, selector_values))
+        if len(selectors) > 1:
+            return (), False
+        if selectors:
+            selector_name, selector_values = selectors[0]
+            if selector_name == "only" and selected_method not in selector_values:
+                continue
+            if selector_name == "except" and selected_method in selector_values:
+                continue
+        output.extend(values)
+    return tuple(output), True
 
 
 def _handler_outcome(
@@ -984,11 +1062,16 @@ def _handler_outcome(
 ) -> _HandlerOutcome:
     content = _handler_source(context, handler)
     if content is None:
-        return _HandlerOutcome((), False, False, False, False, False, False, False, ())
+        return _HandlerOutcome(
+            (), False, False, False, False, False, False, False, (), False, False
+        )
+    controller_middleware, controller_complete = _controller_middleware(
+        content, handler
+    )
     method_source = _method_source(content, handler)
     if method_source is None:
         return _HandlerOutcome(
-            _controller_middleware(content),
+            controller_middleware,
             False,
             False,
             False,
@@ -997,6 +1080,8 @@ def _handler_outcome(
             False,
             False,
             (),
+            controller_complete,
+            False,
         )
     opening = method_source.find("{")
     body = method_source[opening + 1 : -1] if opening >= 0 else method_source
@@ -1019,8 +1104,9 @@ def _handler_outcome(
     for item in dispatches:
         if item not in unique:
             unique.append(item)
+    gate_decisions, gate_complete = _gate_decisions(body)
     return _HandlerOutcome(
-        _controller_middleware(content),
+        controller_middleware,
         model_parameter,
         form_request,
         bool(_AUTHORIZE_RE.search(body)),
@@ -1029,7 +1115,31 @@ def _handler_outcome(
         bool(_THROW_RE.search(body)),
         bool(_RESPONSE_RE.search(body)),
         tuple(unique),
+        controller_complete,
+        True,
+        gate_decisions,
+        gate_complete,
     )
+
+
+def _gate_decisions(body: str) -> tuple[tuple[str, ...], bool]:
+    """Accept only literal ability plus simple subject-variable Gate decisions."""
+
+    decisions: list[str] = []
+    for match in _GATE_DECISION_RE.finditer(body):
+        parsed = _call_arguments(body, match)
+        parts = _argument_parts(parsed[0]) if parsed else None
+        ability = _literal(parts[0]) if parts and len(parts) == 2 else None
+        subject = parts[1].strip() if parts and len(parts) == 2 else ""
+        if (
+            ability is None
+            or re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", subject) is None
+        ):
+            return (), False
+        decision = "allow" if match.group("decision") == "allows" else "deny"
+        if decision not in decisions:
+            decisions.append(decision)
+    return tuple(decisions), True
 
 
 def _expand_middleware(
@@ -1197,72 +1307,104 @@ def _console_entries(
 ) -> tuple[EntrypointCandidate, ...]:
     rows: list[EntrypointCandidate] = []
     ordinal = 0
+    artisan_pattern = re.compile(
+        r"\bArtisan\s*::\s*command\s*\(\s*(['\"])(?P<name>[^'\"]+)\1\s*,\s*(?P<handler>[^)]+)\)"
+    )
+    schedule_pattern = re.compile(
+        r"(?:\bSchedule\s*::|\$schedule\s*->)\s*command\s*\(\s*(?P<handler>[^)]+)\)\s*->\s*(?P<frequency>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+    )
     for path in ("routes/console.php", "app/Console/Kernel.php"):
         content = _text(context, path)
         if content is None:
             continue
-        patterns = (
+        registrations: list[
+            tuple[int, EntrypointKind, TriggerKind, str, str, str | None]
+        ] = []
+        registrations.extend(
             (
-                re.compile(
-                    r"\bArtisan\s*::\s*command\s*\(\s*(['\"])(?P<name>[^'\"]+)\1\s*,\s*(?P<handler>[^)]+)\)"
-                ),
+                match.start(),
                 EntrypointKind.CLI_COMMAND,
                 TriggerKind.CLI,
-            ),
-            (
-                re.compile(
-                    r"(?:\bSchedule\s*::|\$schedule\s*->)\s*command\s*\(\s*(?P<handler>[^)]+)\)\s*->\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("
-                ),
+                match.group("name"),
+                match.group("handler"),
+                None,
+            )
+            for match in artisan_pattern.finditer(content)
+        )
+        for match in schedule_pattern.finditer(content):
+            handler_expression = match.group("handler")
+            handler_class = _class_literal(handler_expression)
+            executable_name = (
+                handler_class.rsplit("\\", 1)[-1]
+                if handler_class is not None
+                else _literal(handler_expression)
+            )
+            if executable_name is None:
+                diagnostics.mark(
+                    path,
+                    CoverageCapability.ENTRYPOINT_DISCOVERY,
+                    "framework_config_unresolved",
+                )
+                continue
+            registrations.append((
+                match.start(),
                 EntrypointKind.SCHEDULED_JOB,
                 TriggerKind.SCHEDULE,
-            ),
-        )
-        for pattern, kind, trigger in patterns:
-            for match in pattern.finditer(content):
-                handler_class = _class_literal(match.group("handler"))
-                handler = f"{handler_class}::handle" if handler_class else None
-                handler_key = _handler_key(syntax, handler)
-                locator = _locator(
-                    path, content, match.start(), f"laravel/console/{ordinal}", ordinal
+                executable_name,
+                handler_expression,
+                match.group("frequency"),
+            ))
+        for offset, kind, trigger, public_name, handler_expression, frequency in sorted(
+            registrations, key=lambda item: item[0]
+        ):
+            handler_class = _class_literal(handler_expression)
+            handler = f"{handler_class}::handle" if handler_class else None
+            handler_key = _handler_key(syntax, handler)
+            pointer = f"laravel/console/{ordinal}"
+            if frequency is not None:
+                # The frozen EntrypointCandidate contract has no separate
+                # schedule-expression field.  Keep the normalized expression
+                # as registration semantics, never in executable public_name.
+                pointer += f"/schedule/{frequency}"
+            locator = _locator(path, content, offset, pointer, ordinal)
+            unresolved = (
+                None
+                if handler_key is not None
+                else local_record_key(
+                    "php",
+                    path,
+                    "unresolved_fact",
+                    "config",
+                    f"{pointer}/handler",
+                    ordinal,
                 )
-                unresolved = (
-                    None
-                    if handler_key is not None
-                    else local_record_key(
-                        "php",
-                        path,
-                        "unresolved_fact",
-                        "config",
-                        f"laravel/console/{ordinal}/handler",
-                        ordinal,
-                    )
-                )
-                evidence = IREvidence(
-                    EvidenceOrigin.VERIFIED_FROM_CODE
-                    if handler_key
-                    else EvidenceOrigin.UNRESOLVED,
-                    "laravel.console",
-                    locator,
+            )
+            evidence = IREvidence(
+                EvidenceOrigin.VERIFIED_FROM_CODE
+                if handler_key
+                else EvidenceOrigin.UNRESOLVED,
+                "laravel.console",
+                locator,
+                None,
+            )
+            rows.append(
+                EntrypointCandidate(
+                    kind,
+                    "laravel",
+                    MethodSemantics.NOT_APPLICABLE,
+                    (),
                     None,
+                    public_name,
+                    trigger,
+                    MatchConstraints(None, (), None),
+                    locator,
+                    handler_key,
+                    unresolved,
+                    (),
+                    evidence,
                 )
-                rows.append(
-                    EntrypointCandidate(
-                        kind,
-                        "laravel",
-                        MethodSemantics.NOT_APPLICABLE,
-                        (),
-                        None,
-                        match.group("name"),
-                        trigger,
-                        MatchConstraints(None, (), None),
-                        locator,
-                        handler_key,
-                        unresolved,
-                        (),
-                        evidence,
-                    )
-                )
-                ordinal += 1
+            )
+            ordinal += 1
     return tuple(rows)
 
 
@@ -1295,7 +1437,6 @@ class LaravelLifecycleAdapter:
                     MappingProxyType({}),
                     MappingProxyType({}),
                     (),
-                    frozenset(),
                     True,
                 ),
                 MappingProxyType({}),
@@ -1359,7 +1500,7 @@ class LaravelLifecycleAdapter:
     def entrypoints(
         self, context: ExtractionContext, syntax: Sequence[SyntaxIR]
     ) -> tuple[EntrypointCandidate, ...]:
-        diagnostics = _Diagnostics({})
+        diagnostics = _Diagnostics(set())
         middleware = _config_middleware(context, diagnostics)
         provider_contexts = _provider_route_contexts(context, diagnostics)
         order = [0]
@@ -1384,6 +1525,8 @@ class LaravelLifecycleAdapter:
                     )
         candidates = [_candidate(context, spec, syntax) for spec in specs]
         outcomes: dict[str, _HandlerOutcome] = {}
+        async_targets = _async_target_keys(syntax)
+        event_listeners = _event_listener_map(context, diagnostics)
         for candidate, spec in zip(candidates, specs, strict=True):
             if candidate.handler_local_key is not None:
                 outcome = _handler_outcome(context, spec.controller)
@@ -1393,6 +1536,64 @@ class LaravelLifecycleAdapter:
                 if "{" in spec.path:
                     outcome = replace(outcome, binding=True)
                 outcomes[candidate.handler_local_key] = outcome
+                if not outcome.controller_middleware_complete:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "controller_middleware_unresolved",
+                    )
+                if not outcome.handler_complete:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "handler_outcome_unresolved",
+                    )
+                if not outcome.gate_complete:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "gate_unresolved",
+                    )
+                base_effective = (
+                    _expand_middleware(
+                        middleware.global_middleware + spec.middleware,
+                        middleware,
+                    )
+                    if middleware.complete
+                    else None
+                )
+                effective = (
+                    _expand_middleware(
+                        middleware.global_middleware
+                        + spec.middleware
+                        + outcome.controller_middleware,
+                        middleware,
+                    )
+                    if base_effective is not None
+                    and outcome.controller_middleware_complete
+                    else base_effective
+                )
+                if middleware.complete and effective is None:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "middleware_cycle",
+                    )
+                for dispatch_kind, target_name in outcome.async_dispatches:
+                    target_names = (
+                        event_listeners.get(target_name.rsplit("\\", 1)[-1], ())
+                        if dispatch_kind is AsyncDispatchKind.EVENT
+                        else (target_name,)
+                    )
+                    if not target_names or not any(
+                        async_targets.get(name.rsplit("\\", 1)[-1])
+                        for name in target_names
+                    ):
+                        diagnostics.mark(
+                            spec.source_path,
+                            CoverageCapability.ASYNC,
+                            "async_target_unresolved",
+                        )
         console = _console_entries(context, syntax, diagnostics)
         renderer = any(
             _text(context, path) is not None
@@ -1405,8 +1606,8 @@ class LaravelLifecycleAdapter:
                 for candidate, spec in zip(candidates, specs, strict=True)
             }),
             MappingProxyType(outcomes),
-            _async_target_keys(syntax),
-            _event_listener_map(context, diagnostics),
+            async_targets,
+            event_listeners,
             renderer,
             diagnostics.events(),
         )
@@ -1463,7 +1664,18 @@ class LaravelLifecycleAdapter:
         spec = snapshot.routes.get(_candidate_key(candidate))
         outcome = snapshot.outcomes.get(
             candidate.handler_local_key or "",
-            _HandlerOutcome((), False, False, False, False, False, False, False, ()),
+            _HandlerOutcome(
+                (), False, False, False, False, False, False, False, (), False, False
+            ),
+        )
+        base_effective = (
+            _expand_middleware(
+                snapshot.middleware.global_middleware
+                + (spec.middleware if spec else ()),
+                snapshot.middleware,
+            )
+            if snapshot.middleware.complete
+            else None
         )
         effective = (
             _expand_middleware(
@@ -1472,46 +1684,48 @@ class LaravelLifecycleAdapter:
                 + outcome.controller_middleware,
                 snapshot.middleware,
             )
-            if snapshot.middleware.complete
-            else None
+            if base_effective is not None and outcome.controller_middleware_complete
+            else base_effective
         )
         roles: list[tuple[str, str | None, bool]] = [("router", None, False)]
         if effective is None:
             roles.append(("middleware_unresolved_boundary", None, False))
         else:
             for middleware in effective:
-                roles.append((
-                    "middleware",
-                    middleware,
-                    middleware in snapshot.middleware.terminating
-                    or middleware.rsplit("\\", 1)[-1]
-                    in snapshot.middleware.terminating,
-                ))
+                roles.append(("middleware", middleware, False))
+            if not outcome.controller_middleware_complete:
+                roles.append(("controller_middleware_unresolved_boundary", None, False))
         if outcome.binding:
             roles.append(("route_binding", None, False))
         if any(
             item.endswith("Authenticate") or item == "auth" for item in effective or ()
         ):
             roles.append(("authentication", None, False))
-        if outcome.authorization or any(
-            item.endswith("Authorize") or item.startswith("can:")
-            for item in (effective or ())
+        if (
+            outcome.authorization
+            or outcome.gate_decisions
+            or not outcome.gate_complete
+            or any(
+                item.endswith("Authorize") or item.startswith("can:")
+                for item in (effective or ())
+            )
         ):
             roles.append(("authorization", None, False))
+        for decision in outcome.gate_decisions:
+            roles.append((f"gate_{decision}", None, False))
+        if not outcome.gate_complete:
+            roles.append(("gate_unresolved_boundary", None, False))
         if outcome.validation:
             roles.append(("validation", None, False))
         roles.append(("handler", None, False))
-        for middleware in effective or ():
-            if (
-                middleware in snapshot.middleware.terminating
-                or middleware.rsplit("\\", 1)[-1] in snapshot.middleware.terminating
-            ):
-                roles.append(("terminating_middleware", middleware, False))
         for kind, target in outcome.async_dispatches:
             roles.append((f"{kind.value}_dispatch", target, False))
         if candidate.unresolved_fact_local_key is not None:
             roles.append(("unresolved_boundary", None, False))
         roles.append(("response", None, False))
+        for middleware in effective or ():
+            if _is_terminable_middleware(context, middleware):
+                roles.append(("terminating_middleware", middleware, False))
         if outcome.throws and snapshot.exception_renderer:
             # This is an error arm, not the normal successor of ``response``.
             roles.append(("exception_renderer", None, False))
@@ -1540,9 +1754,21 @@ class LaravelLifecycleAdapter:
                 "authentication",
                 "authorization",
                 "validation",
+                "gate_allow",
+                "gate_deny",
             }:
                 shortcuts.append(
                     ReturnSuccessor(_terminal_key(candidate, role, ordinal), 0)
+                )
+            if role == "gate_allow":
+                shortcuts.append(
+                    ReturnSuccessor(_terminal_key(candidate, "gate_denied", ordinal), 1)
+                )
+            if role == "gate_deny":
+                shortcuts.append(
+                    ReturnSuccessor(
+                        _terminal_key(candidate, "gate_allowed", ordinal), 1
+                    )
                 )
             if role == "handler":
                 if outcome.aborts:
@@ -1605,7 +1831,7 @@ class LaravelLifecycleAdapter:
                         shortcuts.append(
                             AsyncSuccessor(async_handler, kind, len(shortcuts) + 1)
                         )
-            if role in {"response", "exception_renderer"}:
+            if role == "exception_renderer":
                 success: Successor = ReturnSuccessor(
                     _terminal_key(
                         candidate,
@@ -1613,6 +1839,26 @@ class LaravelLifecycleAdapter:
                         ordinal,
                     ),
                     ordinal,
+                )
+            elif role == "response" and any(
+                item[0] == "terminating_middleware" for item in roles[ordinal + 1 :]
+            ):
+                next_key = keys[ordinal + 1]
+                success = AlwaysSuccessor(next_key, ordinal)
+            elif role == "terminating_middleware":
+                next_index = ordinal + 1
+                if (
+                    next_index < len(roles)
+                    and roles[next_index][0] == "terminating_middleware"
+                ):
+                    success = AlwaysSuccessor(keys[next_index], ordinal)
+                else:
+                    success = ReturnSuccessor(
+                        _terminal_key(candidate, "response", ordinal), ordinal
+                    )
+            elif role == "response":
+                success = ReturnSuccessor(
+                    _terminal_key(candidate, "response", ordinal), ordinal
                 )
             else:
                 # Error segments are intentionally not connected by the normal
