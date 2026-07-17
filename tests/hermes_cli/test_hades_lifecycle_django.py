@@ -1107,3 +1107,64 @@ urlpatterns = [path("stale/", views.stale, name="stale")]
             (event.reason_code, event.outcome)
             for event in adapter.coverage_events(_context(root))
         }, name
+
+
+def test_urlpatterns_import_rebindings_do_not_retain_static_routes(
+    tmp_path: Path,
+) -> None:
+    imports = (
+        ("aliased", "import replacement as urlpatterns"),
+        ("from_import", "from replacement import urlpatterns"),
+        (
+            "conditional",
+            "if runtime_flag:\n    import replacement as urlpatterns",
+        ),
+    )
+    for name, import_statement in imports:
+        root = tmp_path / name
+        _prepare_project(root)
+        _write(
+            root,
+            "project/urls.py",
+            f"""from . import views
+urlpatterns = [path("stale/", views.stale, name="stale")]
+{import_statement}
+""",
+        )
+        _write(root, "project/views.py", "def stale(request): return HttpResponse()\n")
+        context = _context(root)
+        adapter = DjangoLifecycleAdapter()
+        routes = adapter.entrypoints(
+            context,
+            (_syntax(root, "project/views.py", _function("stale", 1)),),
+        )
+
+        assert routes == (), name
+        assert ("urlpatterns_unresolved", CoverageOutcome.PARTIAL) in {
+            (event.reason_code, event.outcome)
+            for event in adapter.coverage_events(context)
+        }, name
+
+
+def test_unrelated_import_does_not_invalidate_static_urlpatterns(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+import replacement
+urlpatterns = [path("live/", views.live, name="live")]
+""",
+    )
+    _write(tmp_path, "project/views.py", "def live(request): return HttpResponse()\n")
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (_syntax(tmp_path, "project/views.py", _function("live", 1)),),
+    )
+
+    assert [(route.public_path, route.public_name) for route in routes] == [
+        ("/live/", "live")
+    ]

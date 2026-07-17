@@ -337,6 +337,18 @@ def _direct_rebound_names(statement: ast.stmt) -> frozenset[str]:
     """Collect names rebound by one statement without entering child bodies."""
 
     targets: tuple[ast.AST, ...] = ()
+    if isinstance(statement, ast.Import):
+        return frozenset(
+            alias.asname or alias.name.split(".", 1)[0]
+            for alias in statement.names
+            if _DOTTED_RE.fullmatch(alias.name)
+        )
+    if isinstance(statement, ast.ImportFrom):
+        return frozenset(
+            alias.asname or alias.name
+            for alias in statement.names
+            if alias.name != "*" and _DOTTED_RE.fullmatch(alias.name)
+        )
     if isinstance(statement, ast.Assign):
         targets = tuple(statement.targets)
     elif isinstance(statement, ast.AnnAssign):
