@@ -891,3 +891,219 @@ def after(request): return HttpResponse()
     assert ("route_target_unresolved", CoverageOutcome.PARTIAL) in {
         (event.reason_code, event.outcome) for event in adapter.coverage_events(context)
     }
+
+
+def test_control_flow_rebindings_invalidate_later_decorator_and_url_uses(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        (
+            "conditional_assignment",
+            "if runtime_flag:\n    login_required = lambda function: function",
+            "if runtime_flag:\n    views = replacement",
+        ),
+        (
+            "try_function",
+            "try:\n    def login_required(function):\n        return function\nexcept Exception:\n    pass",
+            "try:\n    def views():\n        pass\nexcept Exception:\n    pass",
+        ),
+        (
+            "loop_class",
+            "for candidate in candidates:\n    class login_required:\n        pass",
+            "for candidate in candidates:\n    class views:\n        pass",
+        ),
+        (
+            "match_assignment",
+            "match selector:\n    case _:\n        login_required = lambda function: function",
+            "match selector:\n    case _:\n        views = replacement",
+        ),
+    )
+    for name, decorator_rebind, url_rebind in cases:
+        decorator_root = tmp_path / name / "decorator"
+        _prepare_project(decorator_root)
+        _write(
+            decorator_root,
+            "project/urls.py",
+            """from . import views
+urlpatterns = [
+    path("before/", views.before, name="before"),
+    path("after/", views.after, name="after"),
+]
+""",
+        )
+        _write(
+            decorator_root,
+            "project/views.py",
+            f"""from django.contrib.auth.decorators import login_required
+@login_required
+def before(request): return HttpResponse()
+{decorator_rebind}
+@login_required
+def after(request): return HttpResponse()
+""",
+        )
+        context = _context(decorator_root)
+        adapter = DjangoLifecycleAdapter()
+        routes = adapter.entrypoints(
+            context,
+            (
+                _syntax(
+                    decorator_root,
+                    "project/views.py",
+                    _function("before", 3),
+                    _function("after", 9),
+                ),
+            ),
+        )
+        pipelines = {
+            route.public_name: {
+                segment.framework_role for segment in adapter.pipeline(context, route)
+            }
+            for route in routes
+        }
+
+        assert "decorator_access_control" in pipelines["before"], name
+        assert "decorator_access_control" not in pipelines["after"], name
+        url_root = tmp_path / name / "url"
+        _prepare_project(url_root)
+        _write(
+            url_root,
+            "project/urls.py",
+            f"""from . import views
+urlpatterns = [path("before/", views.before, name="before")]
+{url_rebind}
+urlpatterns += [path("after/", views.after, name="after")]
+""",
+        )
+        _write(
+            url_root,
+            "project/views.py",
+            """def before(request): return HttpResponse()
+def after(request): return HttpResponse()
+""",
+        )
+        url_context = _context(url_root)
+        url_adapter = DjangoLifecycleAdapter()
+        url_routes = url_adapter.entrypoints(
+            url_context,
+            (
+                _syntax(
+                    url_root,
+                    "project/views.py",
+                    _function("before", 1),
+                    _function("after", 2),
+                ),
+            ),
+        )
+
+        assert [route.public_name for route in url_routes] == ["before"], name
+        assert ("route_target_unresolved", CoverageOutcome.PARTIAL) in {
+            (event.reason_code, event.outcome)
+            for event in url_adapter.coverage_events(url_context)
+        }, name
+
+
+def test_urlpatterns_assignment_replaces_previous_static_routes(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("obsolete/", views.obsolete, name="obsolete")]
+urlpatterns = [path("live/", views.live, name="live")]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """def obsolete(request): return HttpResponse()
+def live(request): return HttpResponse()
+""",
+    )
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("obsolete", 1),
+                _function("live", 2),
+            ),
+        ),
+    )
+
+    assert [(route.public_path, route.public_name) for route in routes] == [
+        ("/live/", "live")
+    ]
+
+
+def test_urlpatterns_augmented_assignment_extends_static_routes(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("first/", views.first, name="first")]
+urlpatterns += [path("second/", views.second, name="second")]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """def first(request): return HttpResponse()
+def second(request): return HttpResponse()
+""",
+    )
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("first", 1),
+                _function("second", 2),
+            ),
+        ),
+    )
+
+    assert [(route.public_path, route.public_name) for route in routes] == [
+        ("/first/", "first"),
+        ("/second/", "second"),
+    ]
+
+
+def test_uncertain_urlpatterns_assignments_do_not_retain_static_routes(
+    tmp_path: Path,
+) -> None:
+    assignments = (
+        (
+            "conditional",
+            'if runtime_flag:\n    urlpatterns = [path("conditional/", views.conditional, name="conditional")]',
+        ),
+        ("computed", "urlpatterns = build_routes()"),
+    )
+    for name, assignment in assignments:
+        root = tmp_path / name
+        _prepare_project(root)
+        _write(
+            root,
+            "project/urls.py",
+            f"""from . import views
+urlpatterns = [path("stale/", views.stale, name="stale")]
+{assignment}
+""",
+        )
+        _write(root, "project/views.py", "def stale(request): return HttpResponse()\n")
+        adapter = DjangoLifecycleAdapter()
+        routes = adapter.entrypoints(
+            _context(root),
+            (_syntax(root, "project/views.py", _function("stale", 1)),),
+        )
+
+        assert routes == (), name
+        assert ("urlpatterns_unresolved", CoverageOutcome.PARTIAL) in {
+            (event.reason_code, event.outcome)
+            for event in adapter.coverage_events(_context(root))
+        }, name

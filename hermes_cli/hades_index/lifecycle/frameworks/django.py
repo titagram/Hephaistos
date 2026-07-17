@@ -319,18 +319,22 @@ def _source_end(node: ast.AST) -> tuple[int, int]:
     )
 
 
-def _assignment_root(target: ast.AST) -> str | None:
-    """Return the import alias affected by a direct or attribute mutation."""
+def _assignment_roots(target: ast.AST) -> frozenset[str]:
+    """Return aliases affected by direct, destructuring, or attribute mutation."""
 
     if isinstance(target, ast.Name):
-        return target.id
+        return frozenset({target.id})
+    if isinstance(target, ast.Starred):
+        return _assignment_roots(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return frozenset().union(*(_assignment_roots(item) for item in target.elts))
     if isinstance(target, (ast.Attribute, ast.Subscript)):
-        return _assignment_root(target.value)
-    return None
+        return _assignment_roots(target.value)
+    return frozenset()
 
 
-def _rebound_names(statement: ast.stmt) -> frozenset[str]:
-    """Collect top-level names that can invalidate an earlier import binding."""
+def _direct_rebound_names(statement: ast.stmt) -> frozenset[str]:
+    """Collect names rebound by one statement without entering child bodies."""
 
     targets: tuple[ast.AST, ...] = ()
     if isinstance(statement, ast.Assign):
@@ -358,9 +362,38 @@ def _rebound_names(statement: ast.stmt) -> frozenset[str]:
         and statement.value.args
     ):
         targets = (statement.value.args[0],)
-    return frozenset(
-        root for target in targets if (root := _assignment_root(target)) is not None
-    )
+    return frozenset().union(*(_assignment_roots(target) for target in targets))
+
+
+def _rebound_names(statement: ast.stmt) -> frozenset[str]:
+    """Collect names possibly rebound by a visible executable statement."""
+
+    names = set(_direct_rebound_names(statement))
+
+    def visit(statements: Sequence[ast.stmt]) -> None:
+        for child in statements:
+            names.update(_rebound_names(child))
+
+    if isinstance(statement, ast.If):
+        visit(statement.body)
+        visit(statement.orelse)
+    elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+        visit(statement.body)
+        visit(statement.orelse)
+    elif isinstance(statement, (ast.With, ast.AsyncWith)):
+        visit(statement.body)
+    elif isinstance(statement, ast.Try):
+        visit(statement.body)
+        visit(statement.orelse)
+        visit(statement.finalbody)
+        for handler in statement.handlers:
+            if handler.name is not None:
+                names.add(handler.name)
+            visit(handler.body)
+    elif isinstance(statement, ast.Match):
+        for case in statement.cases:
+            visit(case.body)
+    return frozenset(names)
 
 
 def _import_bindings(
@@ -587,28 +620,72 @@ def _middleware(
     return tuple(facts)
 
 
+def _literal_urlpatterns(value: ast.AST | None) -> tuple[ast.AST, ...] | None:
+    """Accept a sequence only when its membership is statically visible."""
+
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return None
+    if any(isinstance(item, ast.Starred) for item in value.elts):
+        return None
+    return tuple(value.elts)
+
+
+def _targets_urlpatterns(targets: Sequence[ast.AST]) -> bool:
+    return any("urlpatterns" in _assignment_roots(target) for target in targets)
+
+
 def _urlpatterns(tree: ast.Module) -> tuple[ast.AST, ...] | None:
-    values: list[ast.AST] = []
+    """Evaluate a bounded, source-ordered subset of Python assignment semantics."""
+
+    values: tuple[ast.AST, ...] = ()
     found = False
     for statement in tree.body:
-        if isinstance(statement, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "urlpatterns"
-            for target in statement.targets
-        ):
-            if not isinstance(statement.value, (ast.List, ast.Tuple)):
+        if isinstance(statement, ast.Assign):
+            if not _targets_urlpatterns(statement.targets):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "urlpatterns"
+                for target in statement.targets
+            ):
                 return None
-            values.extend(statement.value.elts)
-            found = True
-        elif (
-            isinstance(statement, ast.AugAssign)
-            and isinstance(statement.target, ast.Name)
-            and statement.target.id == "urlpatterns"
-        ):
-            if not isinstance(statement.value, (ast.List, ast.Tuple)):
+            replacement = _literal_urlpatterns(statement.value)
+            if replacement is None:
                 return None
-            values.extend(statement.value.elts)
+            values = replacement
             found = True
-    return tuple(values) if found else ()
+            continue
+        if isinstance(statement, ast.AnnAssign):
+            if "urlpatterns" not in _assignment_roots(statement.target):
+                continue
+            if not (
+                isinstance(statement.target, ast.Name)
+                and statement.target.id == "urlpatterns"
+            ):
+                return None
+            replacement = _literal_urlpatterns(statement.value)
+            if replacement is None:
+                return None
+            values = replacement
+            found = True
+            continue
+        if isinstance(statement, ast.AugAssign):
+            if "urlpatterns" not in _assignment_roots(statement.target):
+                continue
+            if not (
+                isinstance(statement.target, ast.Name)
+                and statement.target.id == "urlpatterns"
+                and isinstance(statement.op, ast.Add)
+                and found
+            ):
+                return None
+            extension = _literal_urlpatterns(statement.value)
+            if extension is None:
+                return None
+            values += extension
+            continue
+        if "urlpatterns" in _rebound_names(statement):
+            return None
+    return values if found else ()
 
 
 def _include_target(call: ast.Call) -> tuple[str, str | None] | None:
