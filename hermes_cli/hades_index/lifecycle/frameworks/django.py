@@ -54,6 +54,42 @@ _PYPROJECT_FILES = ("pyproject.toml", "requirements.txt", "requirements/base.txt
 _URL_CALLS = frozenset({"path", "re_path"})
 _DYNAMIC_REASON = "framework_config_unresolved"
 _DOTTED_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_DJANGO_ACCESS_DECORATORS = frozenset({
+    "django.contrib.auth.decorators.login_required",
+    "django.contrib.auth.decorators.permission_required",
+    "django.contrib.auth.decorators.user_passes_test",
+})
+_BUILTIN_EXCEPTION_BASES: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "builtins.BaseException": (),
+    "builtins.BaseExceptionGroup": ("builtins.BaseException",),
+    "builtins.Exception": ("builtins.BaseException",),
+    "builtins.ExceptionGroup": (
+        "builtins.BaseExceptionGroup",
+        "builtins.Exception",
+    ),
+    "builtins.ArithmeticError": ("builtins.Exception",),
+    "builtins.AssertionError": ("builtins.Exception",),
+    "builtins.AttributeError": ("builtins.Exception",),
+    "builtins.BufferError": ("builtins.Exception",),
+    "builtins.EOFError": ("builtins.Exception",),
+    "builtins.ImportError": ("builtins.Exception",),
+    "builtins.LookupError": ("builtins.Exception",),
+    "builtins.MemoryError": ("builtins.Exception",),
+    "builtins.NameError": ("builtins.Exception",),
+    "builtins.OSError": ("builtins.Exception",),
+    "builtins.ReferenceError": ("builtins.Exception",),
+    "builtins.RuntimeError": ("builtins.Exception",),
+    "builtins.StopAsyncIteration": ("builtins.Exception",),
+    "builtins.StopIteration": ("builtins.Exception",),
+    "builtins.SyntaxError": ("builtins.Exception",),
+    "builtins.SystemError": ("builtins.Exception",),
+    "builtins.TypeError": ("builtins.Exception",),
+    "builtins.ValueError": ("builtins.Exception",),
+    "builtins.Warning": ("builtins.Exception",),
+    "builtins.UnicodeError": ("builtins.ValueError",),
+    "builtins.UnboundLocalError": ("builtins.NameError",),
+})
+_MAX_INHERITANCE_DEPTH = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +147,12 @@ class _SyntaxIndex:
     functions: Mapping[tuple[str, str], str]
     classes: Mapping[tuple[str, str], str]
     methods: Mapping[tuple[str, str, str], str]
+
+
+@dataclass(frozen=True, slots=True)
+class _InheritanceIndex:
+    bases: Mapping[str, tuple[str, ...]]
+    incomplete: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +423,25 @@ def _root_urlconf(
     return module_path
 
 
+def _has_direct_non_none_return(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Find returns in this callable's lexical body, never a nested callable."""
+
+    def visit(node: ast.AST) -> bool:
+        if isinstance(node, ast.Return):
+            return not (
+                isinstance(node.value, ast.Constant) and node.value.value is None
+            )
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+        ):
+            return False
+        return any(visit(child) for child in ast.iter_child_nodes(node))
+
+    return any(visit(statement) for statement in function.body)
+
+
 def _middleware(
     context: ExtractionContext,
     syntax: Sequence[SyntaxIR],
@@ -432,13 +493,9 @@ def _middleware(
                     ),
                     None,
                 )
-                may_short_circuit = request_method is not None and any(
-                    isinstance(node, ast.Return)
-                    and not (
-                        isinstance(node.value, ast.Constant)
-                        and node.value.value is None
-                    )
-                    for node in ast.walk(request_method)
+                may_short_circuit = (
+                    request_method is not None
+                    and _has_direct_non_none_return(request_method)
                 )
             else:
                 diagnostics.mark(
@@ -654,30 +711,135 @@ def _syntax_index(syntax: Sequence[SyntaxIR]) -> _SyntaxIndex:
     )
 
 
-def _raised_type(node: ast.Raise) -> str | None:
-    value = node.exc
-    if isinstance(value, ast.Call):
-        name = (_dotted(value.func) or "").rsplit(".", 1)[-1]
-    else:
-        name = (_dotted(value) or "").rsplit(".", 1)[-1]
-    # A lower-case name is a runtime exception value, not an evaluable class.
-    return name if name and name[0].isupper() else None
+def _exception_reference(
+    node: ast.AST | None,
+    path: str,
+    bindings: Mapping[str, _ImportBinding],
+    index: _SyntaxIndex,
+) -> str | None:
+    """Resolve an exception class only through visible declarations/imports."""
+
+    target = node.func if isinstance(node, ast.Call) else node
+    raw = _dotted(target)
+    if raw is None:
+        return None
+    name = raw.rsplit(".", 1)[-1]
+    # A lower-case identifier is a runtime exception value, not a static class.
+    if not name or not name[0].isupper():
+        return None
+    head, *tail = raw.split(".")
+    binding = bindings.get(head)
+    if binding is not None:
+        return ".".join((binding.target, *tail))
+    if tail:
+        return None
+    module = _module_name(path)
+    if module is not None and (module, raw) in index.classes:
+        return f"{module}.{raw}"
+    built_in = f"builtins.{raw}"
+    return built_in if built_in in _BUILTIN_EXCEPTION_BASES else None
 
 
-def _handler_catches(handler: ast.ExceptHandler, raised_type: str) -> bool | None:
+def _inheritance_index(
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    index: _SyntaxIndex,
+) -> _InheritanceIndex:
+    """Index only class ancestry exposed by the current bounded source set."""
+
+    bases: dict[str, tuple[str, ...]] = {}
+    incomplete: set[str] = set()
+    for item in syntax:
+        if item.language != "python":
+            continue
+        module = _module_name(item.path)
+        parsed = _tree(context, item.path)
+        if module is None or parsed is None:
+            continue
+        _content, tree = parsed
+        bindings = _import_bindings(item.path, tree)
+        for node in tree.body:
+            if (
+                not isinstance(node, ast.ClassDef)
+                or (module, node.name) not in index.classes
+            ):
+                continue
+            name = f"{module}.{node.name}"
+            visible_bases = tuple(
+                value
+                for base in node.bases
+                if (value := _exception_reference(base, item.path, bindings, index))
+                is not None
+            )
+            if len(visible_bases) != len(node.bases):
+                incomplete.add(name)
+            bases[name] = visible_bases
+    return _InheritanceIndex(MappingProxyType(bases), frozenset(incomplete))
+
+
+def _is_subclass(
+    child: str,
+    parent: str,
+    inheritance: _InheritanceIndex,
+    seen: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> bool | None:
+    """Return true/false only for bounded ancestry; unknown paths remain unknown."""
+
+    if child == parent:
+        return True
+    if child in seen or depth >= _MAX_INHERITANCE_DEPTH:
+        return None
+    bases = _BUILTIN_EXCEPTION_BASES.get(child)
+    incomplete = False
+    if bases is None:
+        bases = inheritance.bases.get(child)
+        if bases is None:
+            return None
+        incomplete = child in inheritance.incomplete
+    outcomes = tuple(
+        _is_subclass(base, parent, inheritance, seen | {child}, depth + 1)
+        for base in bases
+    )
+    if any(outcome is True for outcome in outcomes):
+        return True
+    if incomplete or any(outcome is None for outcome in outcomes):
+        return None
+    return False
+
+
+def _handler_catches(
+    handler: ast.ExceptHandler,
+    raised_type: str,
+    path: str,
+    bindings: Mapping[str, _ImportBinding],
+    index: _SyntaxIndex,
+    inheritance: _InheritanceIndex,
+) -> bool | None:
     if handler.type is None:
         return True
     types = (
         handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
     )
-    names = [(_dotted(item) or "").rsplit(".", 1)[-1] for item in types]
-    if raised_type in names or bool({"Exception", "BaseException"} & set(names)):
-        return True
-    return None if any(not name or not name[0].isupper() for name in names) else False
+    unresolved = False
+    for caught in types:
+        caught_type = _exception_reference(caught, path, bindings, index)
+        if caught_type is None:
+            unresolved = True
+            continue
+        outcome = _is_subclass(raised_type, caught_type, inheritance)
+        if outcome is True:
+            return True
+        unresolved = unresolved or outcome is None
+    return None if unresolved else False
 
 
 def _exception_arms(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: str,
+    bindings: Mapping[str, _ImportBinding],
+    index: _SyntaxIndex,
+    inheritance: _InheritanceIndex,
 ) -> tuple[str, ...]:
     """Classify each raise by the handlers that lexically enclose it."""
 
@@ -685,16 +847,19 @@ def _exception_arms(
 
     def visit(node: ast.AST, handlers: tuple[ast.ExceptHandler, ...]) -> None:
         if isinstance(node, ast.Raise):
-            raised_type = _raised_type(node)
+            raised_type = _exception_reference(node.exc, path, bindings, index)
             if raised_type is None:
                 found.add("unresolved_exception_boundary")
-            elif any(
-                _handler_catches(handler, raised_type) is True for handler in handlers
-            ):
+                return
+            outcomes = tuple(
+                _handler_catches(
+                    handler, raised_type, path, bindings, index, inheritance
+                )
+                for handler in handlers
+            )
+            if any(outcome is True for outcome in outcomes):
                 found.add("handled_exception")
-            elif any(
-                _handler_catches(handler, raised_type) is None for handler in handlers
-            ):
+            elif any(outcome is None for outcome in outcomes):
                 found.add("unresolved_exception_boundary")
             else:
                 found.add("unhandled_exception")
@@ -731,20 +896,39 @@ def _exception_arms(
     )
 
 
-def _view_outcome(function: ast.FunctionDef | ast.AsyncFunctionDef) -> _ViewOutcome:
+def _is_django_access_decorator(
+    decorator: ast.AST,
+    path: str,
+    bindings: Mapping[str, _ImportBinding],
+) -> bool:
+    """Recognize only an explicitly imported Django auth decorator."""
+
+    raw = _decorator_name(decorator)
+    if raw is None or not _DOTTED_RE.fullmatch(raw):
+        return False
+    # Do not use _resolve_reference's local fallback: access control is a
+    # framework fact only when an import binding proves its Django origin.
+    if raw.split(".", 1)[0] not in bindings:
+        return False
+    resolved = _resolve_reference(raw, path, bindings)
+    return resolved in _DJANGO_ACCESS_DECORATORS
+
+
+def _view_outcome(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: str,
+    bindings: Mapping[str, _ImportBinding],
+    index: _SyntaxIndex,
+    inheritance: _InheritanceIndex,
+) -> _ViewOutcome:
     decorator_denial = any(
-        decorator_name.endswith((
-            "login_required",
-            "permission_required",
-            "user_passes_test",
-        ))
+        _is_django_access_decorator(decorator, path, bindings)
         for decorator in function.decorator_list
-        if (decorator_name := _decorator_name(decorator)) is not None
     )
     return _ViewOutcome(
         isinstance(function, ast.AsyncFunctionDef),
         decorator_denial,
-        _exception_arms(function),
+        _exception_arms(function, path, bindings, index, inheritance),
     )
 
 
@@ -756,6 +940,7 @@ def _function_outcomes(
     """Map parsed function bodies only to their exact module/container symbol."""
 
     values: dict[str, _ViewOutcome] = {}
+    inheritance = _inheritance_index(context, syntax, index)
     for item in syntax:
         if item.language != "python":
             continue
@@ -764,11 +949,14 @@ def _function_outcomes(
         if module is None or parsed is None:
             continue
         _content, tree = parsed
+        bindings = _import_bindings(item.path, tree)
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 key = index.functions.get((module, node.name))
                 if key is not None:
-                    values[key] = _view_outcome(node)
+                    values[key] = _view_outcome(
+                        node, item.path, bindings, index, inheritance
+                    )
             elif isinstance(node, ast.ClassDef):
                 if (module, node.name) not in index.classes:
                     continue
@@ -777,7 +965,9 @@ def _function_outcomes(
                         continue
                     key = index.methods.get((module, node.name, method.name))
                     if key is not None:
-                        values[key] = _view_outcome(method)
+                        values[key] = _view_outcome(
+                            method, item.path, bindings, index, inheritance
+                        )
     return MappingProxyType(values)
 
 

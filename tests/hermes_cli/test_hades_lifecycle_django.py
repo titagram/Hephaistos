@@ -181,7 +181,8 @@ def test_pipeline_models_decorator_denial_middleware_order_and_entered_unwind(
     _write(
         tmp_path,
         "project/views.py",
-        """@login_required
+        """from django.contrib.auth.decorators import login_required
+@login_required
 def secure(request):
     return HttpResponse("ok")
 """,
@@ -660,3 +661,144 @@ def test_dynamic_raised_value_uses_an_explicit_uncertainty_boundary(
     assert ("exception_resolution_unresolved", CoverageOutcome.PARTIAL) in {
         (event.reason_code, event.outcome) for event in adapter.coverage_events(context)
     }
+
+
+def test_nested_helper_return_does_not_create_middleware_short_circuit(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path, middleware='["project.middleware.First"]')
+    _write(
+        tmp_path,
+        "project/urls.py",
+        'from . import views\nurlpatterns = [path("safe/", views.safe, name="safe")]\n',
+    )
+    _write(tmp_path, "project/views.py", "def safe(request): return HttpResponse()\n")
+    _write(
+        tmp_path,
+        "project/middleware.py",
+        """class First:
+    def process_request(self, request):
+        def helper():
+            return HttpResponse()
+        return None
+""",
+    )
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    route = adapter.entrypoints(
+        context, (_syntax(tmp_path, "project/views.py", _function("safe", 1)),)
+    )[0]
+    request_stage = next(
+        segment
+        for segment in adapter.pipeline(context, route)
+        if segment.framework_role == "middleware_request"
+    )
+
+    assert request_stage.short_circuit_successors == ()
+
+
+def test_non_django_access_decorators_never_create_denial_arm(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [
+    path("local/", views.local, name="local"),
+    path("custom/", views.custom, name="custom"),
+    path("external/", views.external, name="external"),
+]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """def login_required(function): return function
+from .decorators import login_required as custom_login_required
+from third_party.decorators import login_required as external_login_required
+@login_required
+def local(request): return HttpResponse()
+@custom_login_required
+def custom(request): return HttpResponse()
+@external_login_required
+def external(request): return HttpResponse()
+""",
+    )
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("login_required", 1),
+                _function("local", 5),
+                _function("custom", 7),
+                _function("external", 9),
+            ),
+        ),
+    )
+
+    for route in routes:
+        assert "decorator_access_control" not in {
+            segment.framework_role for segment in adapter.pipeline(context, route)
+        }
+
+
+def test_visible_and_external_subclass_exception_arms_are_not_confused(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [
+    path("local/", views.local_error, name="local"),
+    path("external/", views.external_error, name="external"),
+]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """class CustomError(ValueError): pass
+from remote.errors import ExternalError
+def local_error(request):
+    try:
+        raise CustomError()
+    except ValueError:
+        return HttpResponse()
+def external_error(request):
+    try:
+        raise ExternalError()
+    except ValueError:
+        return HttpResponse()
+""",
+    )
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _class("CustomError", 1),
+                _function("local_error", 3),
+                _function("external_error", 8),
+            ),
+        ),
+    )
+    pipelines = {
+        route.public_name: {
+            segment.framework_role for segment in adapter.pipeline(context, route)
+        }
+        for route in routes
+    }
+
+    assert "handled_exception" in pipelines["local"]
+    assert "unhandled_exception" not in pipelines["local"]
+    assert "unresolved_exception_boundary" in pipelines["external"]
+    assert "unhandled_exception" not in pipelines["external"]
