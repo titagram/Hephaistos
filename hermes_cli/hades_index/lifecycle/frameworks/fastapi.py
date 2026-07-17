@@ -121,8 +121,10 @@ _DependencyBindingTimeline = Mapping[
     tuple[str, str],
     tuple[tuple[_Order, tuple["_Dependency", ...] | None], ...],
 ]
+_WildcardExports = Mapping[str, tuple[str, ...] | None]
 _NON_FRAMEWORK_BINDING = "<hades-non-framework>"
 _BACKGROUND_TASKS_BINDING = "<hades-background-tasks>"
+_WILDCARD_BINDING = "<hades-wildcard>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -833,9 +835,10 @@ def _dependency_bindings(
     parsed: Mapping[str, tuple[str, ast.Module, str]],
     imports: Mapping[str, Mapping[str, str]],
     import_bindings: _BindingTimeline,
+    wildcard_exports: _WildcardExports,
+    reachability: frozenset[tuple[str, str]],
 ) -> _DependencyBindingTimeline:
     known_modules = {module for _source, _tree, module in parsed.values()}
-    reachability = _module_import_reachability(parsed)
     previous_finals: dict[tuple[str, str], tuple[_Dependency, ...] | None] = {}
     final_bindings: dict[
         tuple[str, str],
@@ -918,6 +921,10 @@ def _dependency_bindings(
             target: ast.AST,
             value: ast.AST,
         ) -> tuple[tuple[ast.Name, ast.AST], ...] | None:
+            if sum(isinstance(item, ast.Starred) for item in ast.walk(target)) > 1:
+                return None
+            if any(isinstance(item, ast.Starred) for item in ast.walk(value)):
+                return None
             if isinstance(target, ast.Name):
                 return ((target, value),)
             if not isinstance(target, (ast.List, ast.Tuple)) or not isinstance(
@@ -925,16 +932,49 @@ def _dependency_bindings(
                 (ast.List, ast.Tuple),
             ):
                 return None
-            if len(target.elts) != len(value.elts) or any(
-                isinstance(item, ast.Starred) for item in target.elts
-            ):
+            star_positions = tuple(
+                index
+                for index, item in enumerate(target.elts)
+                if isinstance(item, ast.Starred)
+            )
+            if not star_positions and len(target.elts) != len(value.elts):
+                return None
+            if star_positions and len(value.elts) < len(target.elts) - 1:
                 return None
             pairs: list[tuple[ast.Name, ast.AST]] = []
-            for nested_target, nested_value in zip(
-                target.elts,
-                value.elts,
-                strict=True,
-            ):
+            if star_positions:
+                star_index = star_positions[0]
+                suffix_count = len(target.elts) - star_index - 1
+                captured_end = len(value.elts) - suffix_count
+                starred = target.elts[star_index]
+                assert isinstance(starred, ast.Starred)
+                if not isinstance(starred.value, ast.Name):
+                    return None
+                items = (
+                    *zip(
+                        target.elts[:star_index],
+                        value.elts[:star_index],
+                        strict=True,
+                    ),
+                    (
+                        starred.value,
+                        ast.copy_location(
+                            ast.List(
+                                elts=value.elts[star_index:captured_end],
+                                ctx=ast.Load(),
+                            ),
+                            value,
+                        ),
+                    ),
+                    *zip(
+                        target.elts[star_index + 1 :],
+                        value.elts[captured_end:],
+                        strict=True,
+                    ),
+                )
+            else:
+                items = tuple(zip(target.elts, value.elts, strict=True))
+            for nested_target, nested_value in items:
                 nested = paired_destructuring(nested_target, nested_value)
                 if nested is None:
                     return None
@@ -975,6 +1015,26 @@ def _dependency_bindings(
                     )
                     for alias in node.names:
                         if alias.name == "*":
+                            names = (
+                                wildcard_exports.get(base)
+                                if base is not None and not cyclic
+                                else None
+                            )
+                            if names is None:
+                                remember(
+                                    module,
+                                    _WILDCARD_BINDING,
+                                    order,
+                                    None,
+                                )
+                                continue
+                            for name in names:
+                                remember(
+                                    module,
+                                    name,
+                                    order,
+                                    previous_finals.get((base, name)),
+                                )
                             continue
                         name = alias.asname or alias.name
                         value = (
@@ -1047,6 +1107,7 @@ def _parameter_dependencies(
     imports: Mapping[str, Mapping[str, str]],
     import_bindings: _BindingTimeline,
     dependency_bindings: _DependencyBindingTimeline,
+    import_reachability: frozenset[tuple[str, str]],
 ) -> tuple[_Dependency, ...] | None:
     found: list[_Dependency] = []
 
@@ -1057,13 +1118,28 @@ def _parameter_dependencies(
         occurrence = _line_order(path, occurrence_node)
         if isinstance(value, ast.Name):
             timeline = dependency_bindings.get((module, value.id))
-            if not timeline:
-                return (False, ())
-            binding = next(
-                (item for order, item in reversed(timeline) if order <= occurrence),
+            named = next(
+                (item for item in reversed(timeline or ()) if item[0] <= occurrence),
                 None,
             )
-            return (True, binding)
+            wildcard = next(
+                (
+                    item
+                    for item in reversed(
+                        dependency_bindings.get(
+                            (module, _WILDCARD_BINDING),
+                            (),
+                        )
+                    )
+                    if item[0] <= occurrence
+                ),
+                None,
+            )
+            if wildcard is not None and (named is None or wildcard[0] > named[0]):
+                return (True, None)
+            if named is None:
+                return (True, None) if timeline is not None else (False, ())
+            return (True, named[1])
         if not isinstance(value, ast.Attribute):
             return (False, ())
         raw = _dotted(value)
@@ -1079,9 +1155,13 @@ def _parameter_dependencies(
         )
         if reference is None:
             return ((module, head) in import_bindings, None)
+        if reference[0] not in imports or (
+            reference[0] != module and (reference[0], module) in import_reachability
+        ):
+            return (True, None)
         timeline = dependency_bindings.get(reference)
         if not timeline:
-            return (False, ())
+            return (True, None)
         binding = (
             next(
                 (item for order, item in reversed(timeline) if order <= occurrence),
@@ -1404,6 +1484,60 @@ def _middleware_may_short_circuit(
         visitor.visit(statement)
         for name, binding in visitor.records:
             remember_alias(name, binding, None)
+
+    def mutation_target(
+        target: ast.AST,
+        value: ast.AST | None,
+        statement: ast.AST,
+    ) -> None:
+        nonlocal continuation_escaped
+        if isinstance(target, (ast.List, ast.Tuple)):
+            for nested in target.elts:
+                mutation_target(nested, value, statement)
+            return
+        if isinstance(target, ast.Starred):
+            mutation_target(target.value, value, statement)
+            return
+        if not isinstance(target, (ast.Attribute, ast.Subscript)):
+            return
+        stored = contains_continuation(alias_value(value, statement))
+        container = contains_continuation(alias_value(target.value, statement))
+        continuation_escaped |= stored in {True, None} or container in {True, None}
+
+    class _MutationVisitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for target in node.targets:
+                mutation_target(target, node.value, node)
+            self.visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            mutation_target(node.target, node.value, node)
+            if node.value is not None:
+                self.visit(node.value)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            mutation_target(node.target, node.value, node)
+            self.visit(node.value)
+
+        def visit_Delete(self, node: ast.Delete) -> None:
+            for target in node.targets:
+                mutation_target(target, ast.Constant(value=None), node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    mutation_visitor = _MutationVisitor()
+    for statement in function.body:
+        mutation_visitor.visit(statement)
 
     uncertain_call = False
 
@@ -1908,7 +2042,135 @@ def _import_from_base(
     return base if base and _DOTTED_RE.fullmatch(base) else None
 
 
-def _imports_for(path: str, module: str, tree: ast.Module) -> Mapping[str, str]:
+def _wildcard_exports(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+    reachability: frozenset[tuple[str, str]],
+) -> _WildcardExports:
+    absent = object()
+    descriptions: dict[
+        str,
+        tuple[object | tuple[str, ...] | None, set[str], tuple[str | None, ...], bool],
+    ] = {}
+
+    def literal_all(value: ast.AST | None) -> tuple[str, ...] | None:
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            return None
+        names = tuple(
+            item.value
+            for item in value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        )
+        if len(names) != len(value.elts):
+            return None
+        return tuple(dict.fromkeys(names))
+
+    for path, (_source, tree, module) in parsed.items():
+        explicit_all: object | tuple[str, ...] | None = absent
+        public: set[str] = set()
+        wildcard_bases: list[str | None] = []
+        uncertain_public = False
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                public.update(
+                    alias.asname or alias.name.split(".", 1)[0] for alias in node.names
+                )
+                continue
+            if isinstance(node, ast.ImportFrom):
+                base = _import_from_base(path, module, node)
+                for alias in node.names:
+                    if alias.name == "*":
+                        wildcard_bases.append(base)
+                    else:
+                        public.add(alias.asname or alias.name)
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                public.add(node.name)
+                continue
+            if isinstance(node, ast.Assign):
+                direct_names = tuple(
+                    target.id for target in node.targets if isinstance(target, ast.Name)
+                )
+                public.update(direct_names)
+                if "__all__" in direct_names:
+                    explicit_all = literal_all(node.value)
+                if len(direct_names) != len(node.targets):
+                    visitor = _ScopeBindingVisitor()
+                    for target in node.targets:
+                        visitor.visit(target)
+                    public.update(name for name, _binding in visitor.records)
+                    uncertain_public = True
+                continue
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                public.add(node.target.id)
+                if node.target.id == "__all__":
+                    explicit_all = literal_all(node.value)
+                continue
+            visitor = _ScopeBindingVisitor()
+            visitor.visit(node)
+            names = {name for name, _binding in visitor.records}
+            if names:
+                public.update(names)
+                uncertain_public = True
+                if "__all__" in names:
+                    explicit_all = None
+        descriptions[module] = (
+            explicit_all,
+            {name for name in public if not name.startswith("_")},
+            tuple(wildcard_bases),
+            uncertain_public,
+        )
+
+    previous: dict[str, tuple[str, ...] | None] = {}
+    for module, (
+        explicit_all,
+        public,
+        wildcard_bases,
+        uncertain,
+    ) in descriptions.items():
+        if explicit_all is not absent:
+            previous[module] = explicit_all  # type: ignore[assignment]
+        elif uncertain or wildcard_bases:
+            previous[module] = None
+        else:
+            previous[module] = tuple(sorted(public))
+
+    for _iteration in range(len(descriptions) + 1):
+        current: dict[str, tuple[str, ...] | None] = {}
+        for module, (
+            explicit_all,
+            public,
+            wildcard_bases,
+            uncertain,
+        ) in descriptions.items():
+            if explicit_all is not absent:
+                current[module] = explicit_all  # type: ignore[assignment]
+                continue
+            names = set(public)
+            unresolved = uncertain
+            for base in wildcard_bases:
+                if (
+                    base not in descriptions
+                    or base is None
+                    or (base != module and (base, module) in reachability)
+                    or previous.get(base) is None
+                ):
+                    unresolved = True
+                    continue
+                names.update(previous[base] or ())
+            current[module] = None if unresolved else tuple(sorted(names))
+        if current == previous:
+            break
+        previous = current
+    return MappingProxyType(previous)
+
+
+def _imports_for(
+    path: str,
+    module: str,
+    tree: ast.Module,
+    wildcard_exports: _WildcardExports,
+    reachability: frozenset[tuple[str, str]],
+) -> Mapping[str, str]:
     bindings: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -1921,6 +2183,10 @@ def _imports_for(path: str, module: str, tree: ast.Module) -> Mapping[str, str]:
                 continue
             for alias in node.names:
                 if alias.name == "*":
+                    if base != module and (base, module) in reachability:
+                        continue
+                    for name in wildcard_exports.get(base) or ():
+                        bindings[name] = f"{base}.{name}"
                     continue
                 bindings[alias.asname or alias.name] = f"{base}.{alias.name}"
     return MappingProxyType(bindings)
@@ -1928,6 +2194,8 @@ def _imports_for(path: str, module: str, tree: ast.Module) -> Mapping[str, str]:
 
 def _import_bindings(
     parsed: Mapping[str, tuple[str, ast.Module, str]],
+    wildcard_exports: _WildcardExports,
+    reachability: frozenset[tuple[str, str]],
 ) -> _BindingTimeline:
     bindings: dict[tuple[str, str], list[tuple[_Order, str | None]]] = {}
 
@@ -1969,6 +2237,27 @@ def _import_bindings(
                 base = _import_from_base(path, module, node)
                 for alias in node.names:
                     if alias.name == "*":
+                        names = (
+                            wildcard_exports.get(base)
+                            if base is not None
+                            and not (base != module and (base, module) in reachability)
+                            else None
+                        )
+                        if names is None:
+                            remember(
+                                module,
+                                _WILDCARD_BINDING,
+                                order,
+                                None,
+                            )
+                            continue
+                        for name in names:
+                            remember(
+                                module,
+                                name,
+                                order,
+                                f"{base}.{name}",
+                            )
                         continue
                     name = alias.asname or alias.name
                     identity = f"{base}.{alias.name}" if base is not None else None
@@ -2288,6 +2577,14 @@ def _resolved_reference_at(
         return None
     head, separator, tail = raw.partition(".")
     binding = _visible_binding(import_bindings, module, head, occurrence)
+    wildcard = _visible_binding(
+        import_bindings,
+        module,
+        _WILDCARD_BINDING,
+        occurrence,
+    )
+    if wildcard is not None and (binding is None or wildcard[0] > binding[0]):
+        return None
     if binding is not None:
         if binding[1] is None:
             return None
@@ -2356,6 +2653,14 @@ def _exception_identity(
         if occurrence is None
         else tuple(item for item in bindings if item[0] <= occurrence)
     )
+    wildcard_bindings = aliases.get((module, _WILDCARD_BINDING), ())
+    visible_wildcards = (
+        wildcard_bindings
+        if occurrence is None
+        else tuple(item for item in wildcard_bindings if item[0] <= occurrence)
+    )
+    if visible_wildcards and (not visible or visible_wildcards[-1][0] > visible[-1][0]):
+        return None
     if visible:
         identity = visible[-1][1]
         if identity is None:
@@ -2383,6 +2688,8 @@ def _class_identity_preserved(node: ast.ClassDef) -> bool:
 def _exception_aliases(
     parsed: Mapping[str, tuple[str, ast.Module, str]],
     class_identities: Mapping[int, str],
+    wildcard_exports: _WildcardExports,
+    reachability: frozenset[tuple[str, str]],
     proven_mros: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> _BindingTimeline:
     """Resolve source-visible exception bindings at each use occurrence."""
@@ -2403,6 +2710,13 @@ def _exception_aliases(
         visible = tuple(
             item for item in aliases.get((module, head), ()) if item[0] <= occurrence
         )
+        wildcard = tuple(
+            item
+            for item in aliases.get((module, _WILDCARD_BINDING), ())
+            if item[0] <= occurrence
+        )
+        if wildcard and (not visible or wildcard[-1][0] > visible[-1][0]):
+            return None
         if visible:
             identity = visible[-1][1]
             if identity is None:
@@ -2572,6 +2886,29 @@ def _exception_aliases(
                 base = _import_from_base(path, module, node)
                 for alias in node.names:
                     if alias.name == "*":
+                        names = (
+                            wildcard_exports.get(base)
+                            if base is not None
+                            and not (base != module and (base, module) in reachability)
+                            else None
+                        )
+                        if names is None:
+                            remember(
+                                module,
+                                _WILDCARD_BINDING,
+                                order,
+                                None,
+                            )
+                            continue
+                        for name in names:
+                            identity = f"{base}.{name}"
+                            if (
+                                proven_mros is not None
+                                and identity in proven_mros
+                                and proven_mros[identity] is None
+                            ):
+                                identity = None
+                            remember(module, name, order, identity)
                         continue
                     name = alias.asname or alias.name
                     identity = f"{base}.{alias.name}" if base is not None else None
@@ -3747,13 +4084,11 @@ def _expand_events(
         )
         return False
 
-    def walk(
+    def emit_copied_handlers(
         object_key: str,
         cutoff: _Order | None,
         app_key: str,
         ancestry: frozenset[str],
-        *,
-        emit_current_events: bool,
     ) -> None:
         current = objects.get(object_key)
         if current is None or current.unresolved:
@@ -3770,22 +4105,21 @@ def _expand_events(
                 "router_cycle_unresolved",
             )
             return
-        if emit_current_events:
-            for uncertainty in uncertainties_by_owner.get(object_key, ()):
-                if visible(
+        for uncertainty in uncertainties_by_owner.get(object_key, ()):
+            if visible(
+                uncertainty.source_path,
+                uncertainty.order,
+                current,
+                cutoff,
+            ):
+                diagnostics.mark(
                     uncertainty.source_path,
-                    uncertainty.order,
-                    current,
-                    cutoff,
-                ):
-                    diagnostics.mark(
-                        uncertainty.source_path,
-                        CoverageCapability.FRAMEWORK_LIFECYCLE,
-                        "framework_config_unresolved",
-                    )
-            for event in events_by_owner.get(object_key, ()):
-                if visible(event.source_path, event.order, current, cutoff):
-                    resolved.append((app_key, event))
+                    CoverageCapability.FRAMEWORK_LIFECYCLE,
+                    "framework_config_unresolved",
+                )
+        for event in events_by_owner.get(object_key, ()):
+            if visible(event.source_path, event.order, current, cutoff):
+                resolved.append((app_key, event))
         for include in includes_by_parent.get(object_key, ()):
             if not visible(include.source_path, include.order, current, cutoff):
                 continue
@@ -3797,12 +4131,60 @@ def _expand_events(
                     "framework_config_unresolved",
                 )
                 continue
-            walk(
+            emit_copied_handlers(
                 child.key,
                 include.order,
                 app_key,
                 ancestry | {object_key},
-                emit_current_events=True,
+            )
+
+    def walk_lifespan_context(
+        object_key: str,
+        cutoff: _Order | None,
+        app_key: str,
+        ancestry: frozenset[str],
+    ) -> None:
+        current = objects.get(object_key)
+        if current is None or current.unresolved:
+            diagnostics.mark(
+                current.source_path if current else None,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "framework_config_unresolved",
+            )
+            return
+        if object_key in ancestry:
+            diagnostics.mark(
+                current.source_path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "router_cycle_unresolved",
+            )
+            return
+
+        # FastAPI composes two independent mechanisms when a router is
+        # included.  Its event handlers are copied into the parent's lists at
+        # registration time, while its lifespan context is merged separately.
+        # A default lifespan reads the router's mutable, final handler lists;
+        # a custom lifespan suppresses those lists without suppressing nested
+        # router contexts already merged into it.
+        if not current.lifespan_declared:
+            emit_copied_handlers(object_key, None, app_key, frozenset())
+
+        for include in includes_by_parent.get(object_key, ()):
+            if not visible(include.source_path, include.order, current, cutoff):
+                continue
+            child = objects.get(include.child or "")
+            if include.unresolved or child is None or child.kind != "router":
+                diagnostics.mark(
+                    include.source_path,
+                    CoverageCapability.ENTRYPOINT_DISCOVERY,
+                    "framework_config_unresolved",
+                )
+                continue
+            walk_lifespan_context(
+                child.key,
+                include.order,
+                app_key,
+                ancestry | {object_key},
             )
 
     for app in sorted(
@@ -3813,12 +4195,11 @@ def _expand_events(
         ),
         key=lambda item: item.order,
     ):
-        walk(
+        walk_lifespan_context(
             app.key,
             None,
             app.key,
             frozenset(),
-            emit_current_events=not app.lifespan_declared,
         )
 
     ordered = sorted(
@@ -4002,7 +4383,6 @@ class FastAPILifecycleAdapter:
         syntax = tuple(item for item in syntax if item.language == "python")
         function_keys = _function_key_index(syntax)
         parsed: dict[str, tuple[str, ast.Module, str]] = {}
-        imports: dict[str, Mapping[str, str]] = {}
         for item in sorted(syntax, key=lambda value: value.path):
             module = _module_name(item.path)
             tree = _tree(context, item.path)
@@ -4015,15 +4395,33 @@ class FastAPILifecycleAdapter:
                 continue
             source, parsed_tree = tree
             parsed[item.path] = (source, parsed_tree, module)
-            imports[module] = _imports_for(item.path, module, parsed_tree)
+
+        import_reachability = _module_import_reachability(parsed)
+        wildcard_exports = _wildcard_exports(parsed, import_reachability)
+        imports = {
+            module: _imports_for(
+                path,
+                module,
+                tree,
+                wildcard_exports,
+                import_reachability,
+            )
+            for path, (_source, tree, module) in parsed.items()
+        }
 
         fastapi_version = self.detected_version(context)
         starlette_version = self.detected_starlette_version(context)
-        import_binding_view = _import_bindings(parsed)
+        import_binding_view = _import_bindings(
+            parsed,
+            wildcard_exports,
+            import_reachability,
+        )
         dependency_binding_view = _dependency_bindings(
             parsed,
             imports,
             import_binding_view,
+            wildcard_exports,
+            import_reachability,
         )
         response_class_view = _response_class_bindings(
             parsed,
@@ -4033,7 +4431,6 @@ class FastAPILifecycleAdapter:
         modules_by_path = MappingProxyType({
             path: module for path, (_source, _tree, module) in parsed.items()
         })
-        import_reachability = _module_import_reachability(parsed)
         module_binding_view = _module_binding_orders(parsed)
         fastapi_route_contract_proven = (
             fastapi_version in _FASTAPI_ROUTE_SIGNATURE_VERSIONS
@@ -4042,7 +4439,12 @@ class FastAPILifecycleAdapter:
             starlette_version in _STARLETTE_ROUTE_SIGNATURE_VERSIONS
         )
         exception_classes = _exception_class_identities(parsed)
-        exception_declarations = _exception_aliases(parsed, exception_classes)
+        exception_declarations = _exception_aliases(
+            parsed,
+            exception_classes,
+            wildcard_exports,
+            import_reachability,
+        )
         exception_mros = _exception_mros(
             parsed,
             imports,
@@ -4052,6 +4454,8 @@ class FastAPILifecycleAdapter:
         exception_aliases = _exception_aliases(
             parsed,
             exception_classes,
+            wildcard_exports,
+            import_reachability,
             exception_mros,
         )
 
@@ -4336,6 +4740,7 @@ class FastAPILifecycleAdapter:
                             imports,
                             import_binding_view,
                             dependency_binding_view,
+                            import_reachability,
                         )
                     )
                     function_nodes.append((path, source, module, node))
