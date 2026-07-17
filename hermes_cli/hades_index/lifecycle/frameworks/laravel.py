@@ -95,6 +95,7 @@ _GATE_DECISION_RE = re.compile(r"\bGate\s*::\s*(?P<decision>allows|denies)\s*\("
 _ABORT_RE = re.compile(r"\babort(?:_if|_unless)?\s*\(")
 _REDIRECT_RE = re.compile(r"\b(?:redirect|to_route|back)\s*\(")
 _THROW_RE = re.compile(r"\bthrow\s+(?:new\s+)?[A-Za-z_\\][A-Za-z0-9_\\]*")
+_DIRECT_THROW_RE = re.compile(r"\s*throw\b[^;]*;\s*", re.DOTALL)
 _RESPONSE_RE = re.compile(r"\breturn\s+(?:response\s*\(|new\s+[A-Za-z_\\]*Response\b)")
 _JOB_DISPATCH_RE = re.compile(
     r"\b(?P<class>[A-Za-z_][A-Za-z0-9_\\]*)\s*::\s*(?:dispatch|dispatchAfterResponse)\s*\("
@@ -168,6 +169,7 @@ class _HandlerOutcome:
     handler_complete: bool = True
     gate_decisions: tuple[str, ...] = ()
     gate_complete: bool = True
+    direct_non_returning_throw: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1202,6 +1204,7 @@ def _handler_outcome(
         True,
         gate_decisions,
         gate_complete,
+        _DIRECT_THROW_RE.fullmatch(body) is not None,
     )
 
 
@@ -1648,6 +1651,12 @@ class LaravelLifecycleAdapter:
                         CoverageCapability.FRAMEWORK_LIFECYCLE,
                         "exception_renderer_unresolved",
                     )
+                if outcome.throws and not outcome.direct_non_returning_throw:
+                    diagnostics.mark(
+                        spec.source_path,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        "normal_completion_unresolved",
+                    )
                 base_effective = (
                     _expand_middleware(
                         middleware.global_middleware + spec.middleware,
@@ -1803,6 +1812,11 @@ class LaravelLifecycleAdapter:
         if outcome.validation:
             roles.append(("validation", None, False))
         roles.append(("handler", None, False))
+        if outcome.throws and not outcome.direct_non_returning_throw:
+            # A non-direct throw has an observed error path, but this bounded
+            # extractor cannot prove that normal completion is exact. Preserve
+            # the possible normal path behind an explicit partial boundary.
+            roles.append(("normal_completion_unresolved_boundary", None, False))
         for kind, target in outcome.async_dispatches:
             roles.append((f"{kind.value}_dispatch", target, False))
         if candidate.unresolved_fact_local_key is not None:
@@ -1887,7 +1901,10 @@ class LaravelLifecycleAdapter:
                         ),
                         None,
                     )
-                    if exception_index is not None:
+                    if (
+                        exception_index is not None
+                        and not outcome.direct_non_returning_throw
+                    ):
                         shortcuts.append(
                             ExceptionSuccessor(
                                 keys[exception_index],
@@ -1916,7 +1933,26 @@ class LaravelLifecycleAdapter:
                         shortcuts.append(
                             AsyncSuccessor(async_handler, kind, len(shortcuts) + 1)
                         )
-            if role == "exception_renderer":
+            if role == "handler" and outcome.direct_non_returning_throw:
+                exception_index = next(
+                    (
+                        index
+                        for index, item in enumerate(roles)
+                        if item[0] in {"exception_renderer", "unresolved_exception"}
+                    ),
+                    None,
+                )
+                if exception_index is None:
+                    raise AssertionError(
+                        "direct Laravel throw requires an exception arm"
+                    )
+                success = ExceptionSuccessor(
+                    keys[exception_index],
+                    _exception_scope_key(candidate),
+                    None,
+                    ordinal,
+                )
+            elif role == "exception_renderer":
                 response_index = next(
                     index for index, item in enumerate(roles) if item[0] == "response"
                 )

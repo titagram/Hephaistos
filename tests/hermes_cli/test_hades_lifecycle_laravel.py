@@ -508,7 +508,8 @@ Route::get('/throws', [OutcomeController::class, 'throws']);
             assert renderer.success_successor.target_block_key == response.local_key
             assert any(
                 isinstance(successor, ExceptionSuccessor)
-                for successor in handler.short_circuit_successors
+                for successor in (handler.success_successor,)
+                + handler.short_circuit_successors
             )
 
 
@@ -545,15 +546,64 @@ def test_throw_without_renderer_is_an_explicit_partial_exception_boundary(
     unresolved = by_role["unresolved_exception"]
 
     assert "exception_renderer" not in by_role
-    assert any(
-        isinstance(successor, ExceptionSuccessor)
-        and successor.target_block_key == unresolved.local_key
-        for successor in handler.short_circuit_successors
+    assert isinstance(handler.success_successor, ExceptionSuccessor)
+    assert handler.success_successor.target_block_key == unresolved.local_key
+    assert not any(
+        isinstance(successor, AlwaysSuccessor)
+        and successor.target_block_key == by_role["response"].local_key
+        for successor in (handler.success_successor,) + handler.short_circuit_successors
     )
     assert isinstance(unresolved.success_successor, ReturnSuccessor)
     assert any(
         event.outcome is CoverageOutcome.PARTIAL
         and event.reason_code == "exception_renderer_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_conditional_throw_routes_normal_completion_through_partial_boundary(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "routes/web.php",
+        "<?php Route::get('/maybe', [MaybeController::class, 'show']);",
+    )
+    _write(
+        tmp_path,
+        "app/Http/Controllers/MaybeController.php",
+        "<?php class MaybeController { public function show() { if ($bad) { throw new RuntimeException(); } } }",
+    )
+    adapter = LaravelLifecycleAdapter()
+    context = _context(tmp_path)
+    route = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "app/Http/Controllers/MaybeController.php",
+                "MaybeController.show",
+            ),
+        ),
+    )[0]
+    by_role = {
+        segment.framework_role: segment for segment in adapter.pipeline(context, route)
+    }
+    handler = by_role["handler"]
+    normal = by_role["normal_completion_unresolved_boundary"]
+
+    assert isinstance(handler.success_successor, AlwaysSuccessor)
+    assert handler.success_successor.target_block_key == normal.local_key
+    assert isinstance(normal.success_successor, AlwaysSuccessor)
+    assert normal.success_successor.target_block_key == by_role["response"].local_key
+    assert any(
+        isinstance(successor, ExceptionSuccessor)
+        for successor in handler.short_circuit_successors
+    )
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        and event.reason_code == "normal_completion_unresolved"
         for event in adapter.coverage_events(context)
     )
 
