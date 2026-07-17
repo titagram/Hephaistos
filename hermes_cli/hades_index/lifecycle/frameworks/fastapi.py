@@ -72,6 +72,7 @@ _HTTP_DECORATORS = frozenset({
 _ROUTE_DECORATORS = _HTTP_DECORATORS | {"api_route", "route"}
 _FRAMEWORK_REGISTRATION_METHODS = frozenset({
     "add_api_route",
+    "add_event_handler",
     "add_exception_handler",
     "add_middleware",
     "add_route",
@@ -112,7 +113,12 @@ _ObjectBindingTimeline = Mapping[
     tuple[str, str],
     tuple[tuple[_Order, str | None], ...],
 ]
+_ResponseClassTimeline = Mapping[
+    tuple[str, str],
+    tuple[tuple[_Order, bool | None], ...],
+]
 _NON_FRAMEWORK_BINDING = "<hades-non-framework>"
+_BACKGROUND_TASKS_BINDING = "<hades-background-tasks>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +133,7 @@ class _Dependency:
     module: str
     target: tuple[str, str] | None
     cache: bool
+    scopes: tuple[str, ...]
     source_path: str
     line: int
 
@@ -596,7 +603,15 @@ def _static_type_annotation(
     return None
 
 
-def _response_model(call: ast.Call, return_annotation: ast.AST | None) -> bool | None:
+def _response_model(
+    call: ast.Call,
+    return_annotation: ast.AST | None,
+    module: str,
+    path: str,
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+    response_classes: _ResponseClassTimeline,
+) -> bool | None:
     """Return whether a declared response model is statically meaningful.
 
     An explicit ``response_model=None`` opts out even when the endpoint has a
@@ -606,6 +621,21 @@ def _response_model(call: ast.Call, return_annotation: ast.AST | None) -> bool |
 
     value = _keyword(call, "response_model")
     if value is None:
+        relation = _response_annotation_relation(
+            return_annotation,
+            module,
+            path,
+            imports,
+            import_bindings,
+            response_classes,
+        )
+        if relation is True:
+            return False
+        if relation is None and isinstance(
+            return_annotation,
+            (ast.Name, ast.Attribute, ast.Constant),
+        ):
+            return None
         return _static_type_annotation(return_annotation)
     if isinstance(value, ast.Constant):
         return False if value.value is None else _static_type_annotation(value)
@@ -652,6 +682,26 @@ def _dependency_from(
         cache = use_cache.value
     else:
         return None
+    scopes_node = _keyword(node, "scopes")
+    if constructor in {
+        ("fastapi", "Security"),
+        ("fastapi.params", "Security"),
+    }:
+        if scopes_node is None or (
+            isinstance(scopes_node, ast.Constant) and scopes_node.value is None
+        ):
+            scopes: tuple[str, ...] = ()
+        elif isinstance(scopes_node, (ast.List, ast.Tuple)) and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            for item in scopes_node.elts
+        ):
+            scopes = tuple(sorted({item.value for item in scopes_node.elts}))
+        else:
+            return None
+    elif scopes_node is not None:
+        return None
+    else:
+        scopes = ()
     return _Dependency(
         target,
         module,
@@ -663,6 +713,7 @@ def _dependency_from(
             _line_order(path, node.args[0]),
         ),
         cache,
+        scopes,
         path,
         int(getattr(node, "lineno", 1)),
     )
@@ -750,6 +801,14 @@ def _parameter_dependencies(
         return True
 
     def append_annotation(annotation: ast.AST | None) -> bool:
+        quoted = False
+        occurrence_node = annotation
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return True
+            quoted = True
         if not isinstance(annotation, ast.Subscript):
             return True
         raw_wrapper = _dotted(annotation.value)
@@ -760,7 +819,7 @@ def _parameter_dependencies(
             module,
             imports,
             import_bindings,
-            _line_order(path, annotation.value),
+            _line_order(path, occurrence_node or annotation.value),
         )
         if wrapper not in {
             ("typing", "Annotated"),
@@ -772,11 +831,37 @@ def _parameter_dependencies(
             if isinstance(annotation.slice, ast.Tuple)
             else (annotation.slice,)
         )
-        return all(
-            append_call(metadata)
-            for metadata in elements[1:]
-            if isinstance(metadata, ast.Call)
-        )
+
+        def proven_nondependency(metadata: ast.AST) -> bool:
+            if isinstance(metadata, ast.Constant):
+                return True
+            if isinstance(metadata, (ast.List, ast.Set, ast.Tuple)):
+                return all(proven_nondependency(item) for item in metadata.elts)
+            if isinstance(metadata, ast.Dict):
+                return all(
+                    key is not None
+                    and proven_nondependency(key)
+                    and proven_nondependency(value)
+                    for key, value in zip(metadata.keys, metadata.values, strict=True)
+                )
+            return False
+
+        for metadata in elements[1:]:
+            if proven_nondependency(metadata):
+                continue
+            if quoted or not isinstance(metadata, ast.Call):
+                return False
+            dependency = _dependency_from(
+                metadata,
+                module,
+                path,
+                imports,
+                import_bindings,
+            )
+            if dependency is None:
+                return False
+            found.append(dependency)
+        return True
 
     for argument in (*positional, *function.args.kwonlyargs):
         if not append_annotation(argument.annotation):
@@ -822,36 +907,221 @@ def _has_yield(node: ast.AST) -> bool:
     return found
 
 
-def _calls_name_in_body(
+def _middleware_may_short_circuit(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
-    name: str,
-) -> bool:
-    found = False
+) -> bool | None:
+    """Prove whether every normal middleware path invokes its continuation."""
 
-    class _Visitor(ast.NodeVisitor):
-        def visit_Call(self, node: ast.Call) -> None:
-            nonlocal found
-            target = _dotted(node.func)
-            if target is not None and target.rsplit(".", 1)[-1] == name:
-                found = True
-            self.generic_visit(node)
+    positional = (*function.args.posonlyargs, *function.args.args)
+    if len(positional) < 2:
+        return None
+    continuation = positional[1].arg
 
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            return None
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            return None
-
-        def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            return None
-
-        def visit_Lambda(self, node: ast.Lambda) -> None:
-            return None
-
-    visitor = _Visitor()
+    bindings = _ScopeBindingVisitor()
     for statement in function.body:
+        bindings.visit(statement)
+    if any(name == continuation for name, _binding in bindings.records):
+        return None
+
+    def position(node: ast.AST) -> tuple[int, int]:
+        return (
+            int(getattr(node, "lineno", function.lineno)),
+            int(getattr(node, "col_offset", 0)),
+        )
+
+    alias_bindings: dict[str, list[tuple[tuple[int, int], bool | None]]] = {
+        continuation: [(position(function), True)]
+    }
+
+    def alias_at(name: str, node: ast.AST) -> bool | None:
+        occurrence = position(node)
+        visible = next(
+            (
+                value
+                for order, value in reversed(alias_bindings.get(name, ()))
+                if order <= occurrence
+            ),
+            False,
+        )
+        return visible
+
+    def remember_alias(name: str, node: ast.AST, value: bool | None) -> None:
+        alias_bindings.setdefault(name, []).append((position(node), value))
+
+    for statement in function.body:
+        if isinstance(statement, ast.Assign):
+            value = (
+                alias_at(statement.value.id, statement)
+                if isinstance(statement.value, ast.Name)
+                else False
+                if isinstance(
+                    statement.value,
+                    (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
+                )
+                else None
+            )
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    remember_alias(target.id, statement, value)
+            continue
+        if isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            value = (
+                alias_at(statement.value.id, statement)
+                if isinstance(statement.value, ast.Name)
+                else None
+            )
+            remember_alias(statement.target.id, statement, value)
+            continue
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            remember_alias(
+                statement.name,
+                statement,
+                False if not statement.decorator_list else None,
+            )
+            continue
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            visitor = _ScopeBindingVisitor()
+            visitor.visit(statement)
+            for name, binding in visitor.records:
+                remember_alias(name, binding, False)
+            continue
+        visitor = _ScopeBindingVisitor()
         visitor.visit(statement)
-    return found
+        for name, binding in visitor.records:
+            remember_alias(name, binding, None)
+
+    uncertain_call = False
+
+    def call_presence(node: ast.AST | None) -> tuple[bool, bool]:
+        """Return (must call, may call) under Python expression evaluation."""
+
+        if node is None or isinstance(node, (ast.Constant, ast.Name)):
+            return (False, False)
+        if isinstance(node, ast.Call):
+            nonlocal uncertain_call
+            if isinstance(node.func, ast.Name):
+                relation = alias_at(node.func.id, node.func)
+                if relation is True:
+                    return (True, True)
+                if relation is None:
+                    uncertain_call = True
+            elif any(
+                isinstance(child, ast.Name)
+                and alias_at(child.id, child) in {True, None}
+                for child in ast.walk(node.func)
+            ):
+                uncertain_call = True
+            if any(
+                isinstance(child, ast.Name)
+                and alias_at(child.id, child) in {True, None}
+                for value in (*node.args, *(item.value for item in node.keywords))
+                for child in ast.walk(value)
+            ):
+                uncertain_call = True
+            values = (node.func, *node.args, *(item.value for item in node.keywords))
+            results = tuple(call_presence(item) for item in values)
+            return (any(item[0] for item in results), any(item[1] for item in results))
+        if isinstance(node, ast.BoolOp):
+            results = tuple(call_presence(item) for item in node.values)
+            must = bool(results) and results[0][0]
+            may = any(item[1] for item in results)
+            return (must, may)
+        if isinstance(node, ast.Compare):
+            guaranteed = (node.left, *node.comparators[:1])
+            all_values = (node.left, *node.comparators)
+            return (
+                any(call_presence(item)[0] for item in guaranteed),
+                any(call_presence(item)[1] for item in all_values),
+            )
+        if isinstance(node, ast.IfExp):
+            test = call_presence(node.test)
+            body = call_presence(node.body)
+            otherwise = call_presence(node.orelse)
+            return (
+                test[0] or (body[0] and otherwise[0]),
+                test[1] or body[1] or otherwise[1],
+            )
+        if isinstance(
+            node,
+            (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Lambda),
+        ):
+            return (False, False)
+        results = tuple(call_presence(child) for child in ast.iter_child_nodes(node))
+        return (any(item[0] for item in results), any(item[1] for item in results))
+
+    def apply_expression(states: set[bool], node: ast.AST | None) -> set[bool]:
+        must_call, may_call = call_presence(node)
+        if must_call:
+            return {True} if states else set()
+        if may_call and False in states:
+            return states | {True}
+        return set(states)
+
+    def walk_block(
+        statements: Sequence[ast.stmt],
+        incoming: set[bool],
+    ) -> tuple[set[bool], list[bool], bool]:
+        active = set(incoming)
+        returned: list[bool] = []
+        for statement in statements:
+            if not active:
+                break
+            if isinstance(statement, ast.Return):
+                returned.extend(apply_expression(active, statement.value))
+                active.clear()
+                continue
+            if isinstance(statement, ast.Raise):
+                returned.extend(apply_expression(active, statement.exc))
+                active.clear()
+                continue
+            if isinstance(statement, ast.If):
+                branch_input = apply_expression(active, statement.test)
+                body_active, body_returned, body_unknown = walk_block(
+                    statement.body,
+                    branch_input,
+                )
+                else_active, else_returned, else_unknown = (
+                    walk_block(statement.orelse, branch_input)
+                    if statement.orelse
+                    else (set(branch_input), [], False)
+                )
+                active = body_active | else_active
+                returned.extend((*body_returned, *else_returned))
+                if body_unknown or else_unknown:
+                    return (active, returned, True)
+                continue
+            if isinstance(statement, ast.Expr):
+                active = apply_expression(active, statement.value)
+                continue
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                active = apply_expression(active, statement.value)
+                continue
+            if isinstance(
+                statement,
+                (
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.Global,
+                    ast.Import,
+                    ast.ImportFrom,
+                    ast.Nonlocal,
+                    ast.Pass,
+                ),
+            ):
+                continue
+            return (active, returned, True)
+        return (active, returned, False)
+
+    active, returned, unknown = walk_block(function.body, {False})
+    if unknown or uncertain_call:
+        return None
+    terminal_states = (*returned, *active)
+    if not terminal_states:
+        return None
+    return any(not called for called in terminal_states)
 
 
 def _raised_types(
@@ -950,93 +1220,6 @@ def _background_targets(
         for argument in (node.args.vararg, node.args.kwarg)
         if argument is not None
     })
-    bound_names = set(arguments) | {name for name, _binding in collector.records}
-    local_names = bound_names - collector.global_names - collector.nonlocal_names
-    runtime_global_writes = bound_names & collector.global_names
-    local_aliases: dict[str, list[tuple[_Order, str | None]]] = {}
-
-    def remember(name: str, binding: ast.AST, identity: str | None) -> None:
-        if name in local_names:
-            local_aliases.setdefault(name, []).append((
-                _line_order(path, binding),
-                identity,
-            ))
-
-    for name in arguments:
-        remember(name, node, None)
-
-    def final_global_identity(raw: str) -> str | None:
-        head, separator, tail = raw.partition(".")
-        if head in runtime_global_writes or head in collector.nonlocal_names:
-            return None
-        binding = _visible_binding(
-            import_bindings,
-            module,
-            head,
-            (path, 10**9, 10**9),
-        )
-        if binding is not None:
-            if binding[1] is None:
-                return None
-            return f"{binding[1]}.{tail}" if separator else binding[1]
-        resolved = _resolved_reference(raw, module, imports)
-        return ".".join(resolved) if resolved is not None else None
-
-    def identity_at(raw: str, occurrence: _Order) -> str | None:
-        head, separator, tail = raw.partition(".")
-        if head not in local_names:
-            return final_global_identity(raw)
-        visible = next(
-            (
-                item
-                for item in reversed(local_aliases.get(head, ()))
-                if item[0] <= occurrence
-            ),
-            None,
-        )
-        if visible is None or visible[1] is None:
-            return None
-        return f"{visible[1]}.{tail}" if separator else visible[1]
-
-    for statement in node.body:
-        order = _line_order(path, statement)
-        if isinstance(statement, ast.Assign):
-            identity = identity_at(_dotted(statement.value) or "", order)
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    remember(target.id, statement, identity)
-            continue
-        if isinstance(statement, ast.AnnAssign) and isinstance(
-            statement.target, ast.Name
-        ):
-            remember(
-                statement.target.id,
-                statement,
-                identity_at(_dotted(statement.value) or "", order),
-            )
-            continue
-        if isinstance(statement, ast.Import):
-            for alias in statement.names:
-                remember(
-                    alias.asname or alias.name.split(".", 1)[0],
-                    statement,
-                    alias.name if alias.asname else alias.name.split(".", 1)[0],
-                )
-            continue
-        if isinstance(statement, ast.ImportFrom):
-            base = _import_from_base(module, statement)
-            for alias in statement.names:
-                if alias.name != "*":
-                    remember(
-                        alias.asname or alias.name,
-                        statement,
-                        f"{base}.{alias.name}" if base is not None else None,
-                    )
-            continue
-        visitor = _ScopeBindingVisitor()
-        visitor.visit(statement)
-        for name, binding in visitor.records:
-            remember(name, binding, None)
 
     def typed_background_receiver(raw: str) -> bool:
         argument = arguments.get(raw)
@@ -1078,12 +1261,127 @@ def _background_targets(
             ("starlette.background", "BackgroundTasks"),
         }
 
+    bound_names = set(arguments) | {name for name, _binding in collector.records}
+    local_names = bound_names - collector.global_names - collector.nonlocal_names
+    runtime_global_writes = bound_names & collector.global_names
+    local_aliases: dict[str, list[tuple[_Order, str | None]]] = {}
+
+    def remember(name: str, binding: ast.AST, identity: str | None) -> None:
+        if name in local_names:
+            local_aliases.setdefault(name, []).append((
+                _line_order(path, binding),
+                identity,
+            ))
+
+    for name in arguments:
+        remember(
+            name,
+            node,
+            _BACKGROUND_TASKS_BINDING if typed_background_receiver(name) else None,
+        )
+
+    def final_global_identity(raw: str) -> str | None:
+        head, separator, tail = raw.partition(".")
+        if head in runtime_global_writes or head in collector.nonlocal_names:
+            return None
+        binding = _visible_binding(
+            import_bindings,
+            module,
+            head,
+            (path, 10**9, 10**9),
+        )
+        if binding is not None:
+            if binding[1] is None:
+                return None
+            return f"{binding[1]}.{tail}" if separator else binding[1]
+        resolved = _resolved_reference(raw, module, imports)
+        return ".".join(resolved) if resolved is not None else None
+
+    def identity_at(raw: str, occurrence: _Order) -> str | None:
+        head, separator, tail = raw.partition(".")
+        if head not in local_names:
+            return final_global_identity(raw)
+        visible = next(
+            (
+                item
+                for item in reversed(local_aliases.get(head, ()))
+                if item[0] <= occurrence
+            ),
+            None,
+        )
+        if visible is None or visible[1] is None:
+            return None
+        return f"{visible[1]}.{tail}" if separator else visible[1]
+
+    for statement in node.body:
+        order = _line_order(path, statement)
+        if isinstance(statement, ast.Assign):
+            identity = identity_at(_dotted(statement.value) or "", order)
+            if identity is None and isinstance(
+                statement.value,
+                (
+                    ast.Constant,
+                    ast.Dict,
+                    ast.DictComp,
+                    ast.GeneratorExp,
+                    ast.Lambda,
+                    ast.List,
+                    ast.ListComp,
+                    ast.Set,
+                    ast.SetComp,
+                    ast.Tuple,
+                ),
+            ):
+                identity = _NON_FRAMEWORK_BINDING
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    remember(target.id, statement, identity)
+            continue
+        if isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            remember(
+                statement.target.id,
+                statement,
+                identity_at(_dotted(statement.value) or "", order),
+            )
+            continue
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                remember(
+                    alias.asname or alias.name.split(".", 1)[0],
+                    statement,
+                    alias.name if alias.asname else alias.name.split(".", 1)[0],
+                )
+            continue
+        if isinstance(statement, ast.ImportFrom):
+            base = _import_from_base(module, statement)
+            for alias in statement.names:
+                if alias.name != "*":
+                    remember(
+                        alias.asname or alias.name,
+                        statement,
+                        f"{base}.{alias.name}" if base is not None else None,
+                    )
+            continue
+        visitor = _ScopeBindingVisitor()
+        visitor.visit(statement)
+        for name, binding in visitor.records:
+            remember(name, binding, None)
+
     class _Visitor(ast.NodeVisitor):
         def visit_Call(self, node: ast.Call) -> None:
             nonlocal unresolved
             if isinstance(node.func, ast.Attribute) and node.func.attr == "add_task":
                 receiver = _dotted(node.func.value)
-                if receiver is None or not typed_background_receiver(receiver):
+                receiver_binding = (
+                    identity_at(receiver, _line_order(path, node.func.value))
+                    if receiver is not None
+                    else None
+                )
+                if receiver_binding == _NON_FRAMEWORK_BINDING:
+                    return
+                if receiver_binding != _BACKGROUND_TASKS_BINDING:
                     unresolved = True
                     return
                 if not node.args:
@@ -1313,6 +1611,212 @@ def _module_import_reachability(
     return frozenset(reachable)
 
 
+_RESPONSE_TARGETS = frozenset(
+    (module, name)
+    for module in ("fastapi", "fastapi.responses", "starlette.responses")
+    for name in (
+        "FileResponse",
+        "HTMLResponse",
+        "JSONResponse",
+        "PlainTextResponse",
+        "RedirectResponse",
+        "Response",
+        "StreamingResponse",
+    )
+) | frozenset({
+    ("fastapi.responses", "ORJSONResponse"),
+    ("fastapi.responses", "UJSONResponse"),
+})
+_KNOWN_NON_RESPONSE_NAMES = frozenset({
+    "Any",
+    "None",
+    "bool",
+    "bytes",
+    "complex",
+    "dict",
+    "float",
+    "frozenset",
+    "int",
+    "list",
+    "object",
+    "set",
+    "str",
+    "tuple",
+    "type",
+})
+
+
+def _response_class_bindings(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+) -> _ResponseClassTimeline:
+    declarations: dict[tuple[str, str, _Order], ast.ClassDef] = {}
+    paths: dict[int, str] = {}
+    modules: dict[int, str] = {}
+    for path, (_source, tree, module) in parsed.items():
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                declarations[(module, node.name, _line_order(path, node))] = node
+                paths[id(node)] = path
+                modules[id(node)] = module
+
+    known: dict[int, bool | None] = {}
+    active: set[int] = set()
+
+    def target_status(
+        raw: str | None,
+        module: str,
+        path: str,
+        occurrence: _Order,
+    ) -> bool | None:
+        if raw is None:
+            return None
+        if raw in _KNOWN_NON_RESPONSE_NAMES:
+            return False
+        target = _resolved_reference_at(
+            raw,
+            module,
+            imports,
+            import_bindings,
+            occurrence,
+        )
+        if target in _RESPONSE_TARGETS:
+            return True
+        if target is not None and target[0] in {
+            "builtins",
+            "collections.abc",
+            "typing",
+            "typing_extensions",
+        }:
+            return False
+        head, separator, _tail = raw.partition(".")
+        if separator:
+            return None
+        visible = _visible_binding(import_bindings, module, head, occurrence)
+        if visible is None:
+            return None
+        declaration = declarations.get((module, head, visible[0]))
+        return status(declaration) if declaration is not None else None
+
+    def status(node: ast.ClassDef) -> bool | None:
+        if id(node) in known:
+            return known[id(node)]
+        if id(node) in active:
+            return None
+        if node.decorator_list or any(
+            keyword.arg == "metaclass" for keyword in node.keywords
+        ):
+            known[id(node)] = None
+            return None
+        if not node.bases:
+            known[id(node)] = False
+            return False
+        active.add(id(node))
+        path = paths[id(node)]
+        module = modules[id(node)]
+        bases = tuple(
+            target_status(
+                _dotted(base),
+                module,
+                path,
+                _line_order(path, base),
+            )
+            for base in node.bases
+        )
+        active.remove(id(node))
+        result = (
+            True
+            if True in bases
+            else False
+            if all(item is False for item in bases)
+            else None
+        )
+        known[id(node)] = result
+        return result
+
+    values: dict[tuple[str, str], list[tuple[_Order, bool | None]]] = {}
+    for (module, name, order), declaration in declarations.items():
+        values.setdefault((module, name), []).append((order, status(declaration)))
+    return MappingProxyType({
+        key: tuple(sorted(items, key=lambda item: item[0]))
+        for key, items in values.items()
+    })
+
+
+def _response_annotation_relation(
+    annotation: ast.AST | None,
+    module: str,
+    path: str,
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+    response_classes: _ResponseClassTimeline,
+    *,
+    occurrence: _Order | None = None,
+) -> bool | None:
+    """Return whether a return annotation is exactly a Response subclass."""
+
+    if annotation is None:
+        return False
+    occurrence = occurrence or _line_order(path, annotation)
+    if isinstance(annotation, ast.Constant):
+        if annotation.value is None:
+            return False
+        if not isinstance(annotation.value, str) or not annotation.value.strip():
+            return False
+        try:
+            parsed = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return None
+        return _response_annotation_relation(
+            parsed,
+            module,
+            path,
+            imports,
+            import_bindings,
+            response_classes,
+            occurrence=occurrence,
+        )
+    if not isinstance(annotation, (ast.Name, ast.Attribute)):
+        return False
+    raw = _dotted(annotation)
+    if raw is None:
+        return None
+    if raw in _KNOWN_NON_RESPONSE_NAMES:
+        return False
+    target = _resolved_reference_at(
+        raw,
+        module,
+        imports,
+        import_bindings,
+        occurrence,
+    )
+    if target in _RESPONSE_TARGETS:
+        return True
+    if target is not None and target[0] in {
+        "builtins",
+        "collections.abc",
+        "typing",
+        "typing_extensions",
+    }:
+        return False
+    head, separator, _tail = raw.partition(".")
+    if separator:
+        return None
+    visible = _visible_binding(import_bindings, module, head, occurrence)
+    if visible is None:
+        return None
+    status = next(
+        (
+            value
+            for order, value in reversed(response_classes.get((module, head), ()))
+            if order == visible[0]
+        ),
+        None,
+    )
+    return status
+
+
 def _visible_binding(
     bindings: _BindingTimeline,
     module: str,
@@ -1404,6 +1908,12 @@ def _exception_identity(
         return f"builtins.{raw}"
     resolved = _resolved_reference(raw, module, imports)
     return ".".join(resolved) if resolved is not None else None
+
+
+def _class_identity_preserved(node: ast.ClassDef) -> bool:
+    return not node.decorator_list and not any(
+        keyword.arg == "metaclass" for keyword in node.keywords
+    )
 
 
 def _exception_aliases(
@@ -1578,7 +2088,9 @@ def _exception_aliases(
                     module,
                     node.name,
                     binding_order,
-                    class_identities[id(node)] if not node.decorator_list else None,
+                    class_identities[id(node)]
+                    if _class_identity_preserved(node)
+                    else None,
                 )
                 continue
             if isinstance(node, ast.Import):
@@ -1772,6 +2284,9 @@ def _exception_mros(
             if not isinstance(node, ast.ClassDef):
                 continue
             identity = class_identities[id(node)]
+            if not _class_identity_preserved(node):
+                bases_by_class[identity] = None
+                continue
             if not node.bases:
                 bases_by_class[identity] = ("builtins.object",)
                 continue
@@ -2899,6 +3414,11 @@ class FastAPILifecycleAdapter:
         fastapi_version = self.detected_version(context)
         starlette_version = self.detected_starlette_version(context)
         import_binding_view = _import_bindings(parsed)
+        response_class_view = _response_class_bindings(
+            parsed,
+            imports,
+            import_binding_view,
+        )
         modules_by_path = MappingProxyType({
             path: module for path, (_source, _tree, module) in parsed.items()
         })
@@ -2923,12 +3443,15 @@ class FastAPILifecycleAdapter:
         duplicate_objects: set[str] = set()
         outcomes: dict[tuple[str, str], _FunctionOutcome] = {}
         function_returns: dict[tuple[str, str], ast.AST | None] = {}
+        function_return_paths: dict[tuple[str, str], str] = {}
         function_dependencies: dict[
             tuple[str, str], tuple[_Dependency, ...] | None
         ] = {}
         function_nodes: list[
             tuple[str, str, str, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
+        events: list[_Event] = []
+        event_ordinal = 0
         for path, (source, tree, module) in parsed.items():
             for node in tree.body:
                 constructor_call: ast.Call | None = None
@@ -3102,6 +3625,57 @@ class FastAPILifecycleAdapter:
                         _line_order(path, node),
                         unresolved,
                     )
+                    if kind == "app":
+                        for event_name, keyword_name in (
+                            ("startup", "on_startup"),
+                            ("shutdown", "on_shutdown"),
+                        ):
+                            handlers_node = _keyword(constructor_call, keyword_name)
+                            if handlers_node is None:
+                                continue
+                            if (
+                                isinstance(handlers_node, ast.Constant)
+                                and handlers_node.value is None
+                            ):
+                                continue
+                            if not isinstance(handlers_node, (ast.List, ast.Tuple)):
+                                diagnostics.mark(
+                                    path,
+                                    CoverageCapability.FRAMEWORK_LIFECYCLE,
+                                    "framework_config_unresolved",
+                                )
+                                continue
+                            for handler_node in handlers_node.elts:
+                                handler_raw = _dotted(handler_node)
+                                target = _resolved_reference_at(
+                                    handler_raw or "",
+                                    module,
+                                    imports,
+                                    import_binding_view,
+                                    _line_order(path, handler_node),
+                                )
+                                if handler_raw is None or target is None:
+                                    diagnostics.mark(
+                                        path,
+                                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                                        "framework_config_unresolved",
+                                    )
+                                    continue
+                                events.append(
+                                    _Event(
+                                        key,
+                                        event_name,
+                                        target[0],
+                                        target[1],
+                                        path,
+                                        int(
+                                            getattr(handler_node, "lineno", node.lineno)
+                                        ),
+                                        _line_order(path, node),
+                                        event_ordinal,
+                                    )
+                                )
+                                event_ordinal += 1
                     continue
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     background_targets = _background_targets(
@@ -3132,6 +3706,7 @@ class FastAPILifecycleAdapter:
                     )
                     outcomes[(module, node.name)] = outcome
                     function_returns[(module, node.name)] = node.returns
+                    function_return_paths[(module, node.name)] = path
                     function_dependencies[(module, node.name)] = (
                         _parameter_dependencies(
                             node,
@@ -3200,9 +3775,7 @@ class FastAPILifecycleAdapter:
         routes: list[_Route] = []
         middleware: dict[str, list[_Middleware]] = {}
         exception_handlers: dict[str, list[_ExceptionHandler]] = {}
-        events: list[_Event] = []
         route_ordinal = 0
-        event_ordinal = 0
 
         for path, source, module, function in function_nodes:
             for decorator in function.decorator_list:
@@ -3254,7 +3827,15 @@ class FastAPILifecycleAdapter:
                         else ()
                     )
                     response_model = (
-                        _response_model(decorator, function.returns)
+                        _response_model(
+                            decorator,
+                            function.returns,
+                            module,
+                            path,
+                            imports,
+                            import_binding_view,
+                            response_class_view,
+                        )
                         if flavor == "fastapi"
                         else False
                     )
@@ -3307,13 +3888,19 @@ class FastAPILifecycleAdapter:
                         )
                         continue
                     local = function_keys.get((module, function.name))
-                    calls_next = _calls_name_in_body(function, "call_next")
+                    may_short_circuit = _middleware_may_short_circuit(function)
+                    if may_short_circuit is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.FRAMEWORK_LIFECYCLE,
+                            "middleware_behavior_unresolved",
+                        )
                     middleware.setdefault(owner, []).append(
                         _Middleware(
                             owner,
                             function.name,
                             local,
-                            not calls_next,
+                            True if may_short_circuit is None else may_short_circuit,
                             path,
                             decorator.lineno,
                             _line_order(path, decorator),
@@ -3417,6 +4004,44 @@ class FastAPILifecycleAdapter:
                             child is None or prefix is None or dependencies is None,
                         )
                     )
+                elif method == "add_event_handler":
+                    event_node = (
+                        call.args[0] if call.args else _keyword(call, "event_type")
+                    )
+                    event = _literal_string(event_node)
+                    handler_node = (
+                        call.args[1]
+                        if len(call.args) > 1
+                        else _keyword(call, "func") or _keyword(call, "handler")
+                    )
+                    handler_raw = _dotted(handler_node)
+                    target = _resolved_reference_at(
+                        handler_raw or "",
+                        module,
+                        imports,
+                        import_binding_view,
+                        _line_order(path, handler_node or node),
+                    )
+                    if event not in {"startup", "shutdown"} or target is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.FRAMEWORK_LIFECYCLE,
+                            "framework_config_unresolved",
+                        )
+                        continue
+                    events.append(
+                        _Event(
+                            owner,
+                            event,
+                            target[0],
+                            target[1],
+                            path,
+                            node.lineno,
+                            _line_order(path, node),
+                            event_ordinal,
+                        )
+                    )
+                    event_ordinal += 1
                 elif method in {"add_api_route", "add_route"}:
                     flavor = "fastapi" if method == "add_api_route" else "starlette"
                     path_node = call.args[0] if call.args else _keyword(call, "path")
@@ -3469,6 +4094,13 @@ class FastAPILifecycleAdapter:
                             function_returns.get(target)
                             if target is not None
                             else None,
+                            target[0] if target is not None else module,
+                            function_return_paths.get(target, path)
+                            if target is not None
+                            else path,
+                            imports,
+                            import_binding_view,
+                            response_class_view,
                         )
                         if flavor == "fastapi"
                         else False
@@ -3787,12 +4419,13 @@ class FastAPILifecycleAdapter:
         if resolved.route.flavor == "fastapi" and outcome.has_request_validation:
             roles.append(("request_validation", None, None, True, False))
 
-        seen_cached: set[tuple[str, str]] = set()
+        seen_cached: set[tuple[tuple[str, str], tuple[str, ...]]] = set()
         yielded: list[_Dependency] = []
         dependency_raises = False
         for dependency_role, dependency in resolved.dependencies:
             key = _dependency_key(dependency, snapshot.imports, snapshot.function_keys)
-            identity = ("local", key) if key is not None else dependency.identity
+            target_identity = ("local", key) if key is not None else dependency.identity
+            identity = (target_identity, dependency.scopes)
             if dependency.cache and identity in seen_cached:
                 roles.append((
                     "dependency_cache_reuse",
