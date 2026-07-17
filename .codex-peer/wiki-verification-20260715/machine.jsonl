@@ -1,0 +1,10 @@
+{"type":"bootstrap","seq":0,"timestamp":"2026-07-15T19:15:59Z","target":"ubuntu@162.19.229.31","workspace":"/home/ubuntu/dev-sandbox","runtime":"tmux","codex":"0.144.4"}
+{"type":"frame","direction":"local_to_remote","seq":1,"op":"H","session":"wiki-verification-20260715"}
+{"type":"frame","direction":"local_to_remote","seq":2,"op":"C","workspace":"/home/ubuntu/dev-sandbox","guardrails":"no_db_destroy,no_secret_output,no_main_merge,no_restart_phase1"}
+{"type":"frame","direction":"local_to_remote","seq":3,"op":"K","codec":"ipc-ast-v1","max_len":4096,"max_depth":32,"max_nodes":512}
+{"type":"frame","direction":"local_to_remote","seq":4,"op":"D","branch":"codex/wiki-verification-workflow","expected_head":"53a347530"}
+{"type":"frame","direction":"local_to_remote","seq":5,"op":"A","task":"remote_feature_acceptance"}
+{"type":"ack","direction":"remote_to_local","ack":3,"message":"Remote H/C/K ACK; A executing under report-only guardrails."}
+{"type":"transport","event":"nested_ssh_rejected","reason":"peer already runs on target; target host has no self-SSH key"}
+{"type":"frame","direction":"local_to_remote","seq":6,"op":"A","task":"restore_only_generated_bootstrap_lock_if_changed"}
+{"type":"frame","direction":"local_to_remote","seq":7,"op":"A","task":"execute_directly_on_current_remote_workspace"}

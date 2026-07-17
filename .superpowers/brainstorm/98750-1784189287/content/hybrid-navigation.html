@@ -1,0 +1,86 @@
+<h2>Dove deve vivere l’elenco degli endpoint?</h2>
+<p class="subtitle">Abbiamo scelto l’esplorazione ibrida. Ora dobbiamo evitare che endpoint, lifecycle, grafo e dettaglio competano tutti per lo spazio.</p>
+
+<div class="cards">
+  <div class="card" data-choice="persistent-endpoints" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:420px;color:#dbeafe">
+      <div style="display:grid;grid-template-columns:230px 1fr;gap:9px;min-height:390px">
+        <div style="border:1px solid #334155;border-radius:7px;padding:10px">
+          <div style="font-size:11px;color:#94a3b8">ENTRY POINT · 1.633</div>
+          <div style="margin-top:8px;border:1px solid #475569;border-radius:5px;padding:7px;color:#94a3b8">Cerca route…</div>
+          <div style="margin-top:12px;font-size:11px;color:#94a3b8">GENERALI · 128</div>
+          <div style="padding:8px;margin-top:4px;border-radius:5px;background:#1e3a8a"><strong>GET</strong> /generale/soggetti-attivi/</div>
+          <div style="padding:8px;margin-top:4px;border-radius:5px;background:#111827"><strong>POST</strong> /generale/soggetti-attivi/</div>
+          <div style="padding:8px;margin-top:4px;border-radius:5px;background:#111827"><strong>GET</strong> /generale/aziende/</div>
+          <div style="margin-top:12px;font-size:11px;color:#94a3b8">AMMINISTRAZIONE · 94</div>
+          <div style="padding:8px;margin-top:4px;border-radius:5px;background:#111827"><strong>GET</strong> /admin/utenti/</div>
+          <div style="padding:8px;margin-top:4px;border-radius:5px;background:#111827"><strong>POST</strong> /admin/utenti/</div>
+        </div>
+        <div>
+          <div style="border:1px solid #334155;border-radius:7px;padding:10px;margin-bottom:8px">
+            <strong>GET /generale/soggetti-attivi/</strong>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">AdminController::contact_flock_roles_worker · lifecycle completo</div>
+          </div>
+          <div style="display:flex;gap:5px;margin-bottom:8px;font-size:11px">
+            <span style="padding:6px;border-radius:5px;background:#1d4ed8">Request</span>
+            <span style="padding:6px;border-radius:5px;border:1px solid #334155">Middleware · 3</span>
+            <span style="padding:6px;border-radius:5px;border:1px solid #334155">Handler</span>
+            <span style="padding:6px;border-radius:5px;border:1px solid #334155">Rami · 2</span>
+            <span style="padding:6px;border-radius:5px;border:1px solid #334155">Servizi · 7</span>
+            <span style="padding:6px;border-radius:5px;border:1px solid #334155">Response · 2</span>
+          </div>
+          <div style="border:1px solid #334155;border-radius:7px;min-height:280px;padding:12px;display:flex;align-items:center;justify-content:center">
+            <div style="display:flex;align-items:center;gap:8px;font-size:11px">
+              <span style="padding:9px;border:1px solid #2563eb;border-radius:6px">Route</span><span>→</span>
+              <span style="padding:9px;border:1px solid #7c3aed;border-radius:6px">Controller</span><span>→</span>
+              <span style="padding:9px;border:1px solid #0891b2;border-radius:6px">Service</span><span>→</span>
+              <span style="padding:9px;border:1px solid #059669;border-radius:6px">Response</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Endpoint sempre visibili</h3>
+      <p>Passaggio rapidissimo fra route; la timeline diventa orizzontale. Funziona bene su monitor ampi, ma sottrae spazio costante al grafo.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="collapsible-endpoints" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:420px;color:#dbeafe">
+      <div style="border:1px solid #334155;border-radius:7px;padding:10px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+        <div><strong>GET /generale/soggetti-attivi/</strong><div style="font-size:11px;color:#94a3b8;margin-top:4px">AdminController::contact_flock_roles_worker · lifecycle completo</div></div>
+        <div style="border:1px solid #475569;border-radius:5px;padding:7px 10px">Cambia endpoint</div>
+      </div>
+      <div style="display:grid;grid-template-columns:185px 1fr;gap:9px;min-height:340px">
+        <div style="border:1px solid #334155;border-radius:7px;padding:10px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">REQUEST LIFECYCLE</div>
+          <div style="padding:8px;border-left:2px solid #2563eb;background:#172554">Request</div>
+          <div style="padding:8px;border-left:2px solid #2563eb">Middleware · 3</div>
+          <div style="padding:8px;border-left:2px solid #7c3aed">Handler</div>
+          <div style="padding:8px;border-left:2px solid #a78bfa">Rami · 2</div>
+          <div style="padding:8px;border-left:2px solid #0891b2">Servizi · 7</div>
+          <div style="padding:8px;border-left:2px solid #0f766e">Database · 4</div>
+          <div style="padding:8px;border-left:2px solid #059669">Response · 2</div>
+          <div style="border-top:1px solid #334155;margin-top:10px;padding-top:9px;font-size:11px;color:#94a3b8">Filtri e conteggi seguono lo stadio selezionato</div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:7px;padding:12px;position:relative">
+          <div style="font-size:11px;color:#94a3b8">MAPPA · REQUEST</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:110px;font-size:11px">
+            <span style="padding:9px;border:1px solid #2563eb;border-radius:6px">Route</span><span>→</span>
+            <span style="padding:9px;border:1px solid #7c3aed;border-radius:6px">Controller</span><span>→</span>
+            <span style="padding:9px;border:1px solid #0891b2;border-radius:6px">Service</span><span>→</span>
+            <span style="padding:9px;border:1px solid #059669;border-radius:6px">Response</span>
+          </div>
+          <div style="position:absolute;right:10px;bottom:10px;border:1px solid #475569;border-radius:5px;padding:7px;font-size:11px">Dettaglio nodo si apre come drawer</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · Endpoint richiudibili — raccomandata</h3>
+      <p>La lista completa appare quando si sceglie o cambia endpoint; durante l’analisi resta solo la route selezionata. Più spazio e meno rumore.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:18px">Clicca l’organizzazione che preferisci. La lista endpoint sarà comunque ricercabile, raggruppata e caricata progressivamente.</p>

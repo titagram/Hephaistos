@@ -1,0 +1,102 @@
+<h2>Proposta finale · Request Lifecycle Explorer</h2>
+<p class="subtitle">La pagina mostra cosa accade quando viene chiamato un endpoint. Metriche interne, UUID e dettagli di proiezione restano nascosti nella sezione tecnica.</p>
+
+<div class="mockup">
+  <div class="mockup-header">/graph · modalità Request lifecycle</div>
+  <div class="mockup-body" style="background:#0f172a;color:#dbeafe;padding:14px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:21px;font-weight:700">Request lifecycle</div>
+        <div style="font-size:12px;color:#94a3b8;margin-top:4px">Segui una request dall’ingresso fino alla response e apri soltanto i rami che ti servono.</div>
+      </div>
+      <div style="display:flex;gap:5px;font-size:11px">
+        <span style="padding:7px 10px;background:#1d4ed8;border-radius:6px">Request lifecycle</span>
+        <span style="padding:7px 10px;border:1px solid #334155;border-radius:6px">Analizza un elemento</span>
+      </div>
+    </div>
+
+    <div style="border:1px solid #334155;border-radius:8px;padding:11px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;background:#111827">
+      <div>
+        <div style="display:flex;align-items:center;gap:7px"><span style="font-size:11px;padding:4px 7px;border-radius:5px;background:#166534">GET</span><strong>/generale/soggetti-attivi/</strong><span style="font-size:11px;padding:4px 7px;border-radius:10px;border:1px solid #166534;color:#86efac">Lifecycle completo</span></div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:5px">AdminController::contact_flock_roles_worker · 18 componenti · 2 rami · 1 flusso asincrono</div>
+      </div>
+      <div style="display:flex;gap:6px;font-size:11px">
+        <span style="padding:7px 10px;border:1px solid #475569;border-radius:6px">Cambia endpoint</span>
+        <span style="padding:7px 10px;border:1px solid #475569;border-radius:6px">Condividi vista</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:200px minmax(420px,1fr) 230px;gap:9px;min-height:470px">
+      <div style="border:1px solid #334155;border-radius:8px;padding:10px;background:#111827">
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">REQUEST LIFECYCLE</div>
+        <div style="padding:8px;border-left:2px solid #2563eb">Request <span style="float:right;color:#94a3b8">1</span></div>
+        <div style="padding:8px;border-left:2px solid #2563eb">Middleware <span style="float:right;color:#94a3b8">3</span></div>
+        <div style="padding:8px;border-left:2px solid #7c3aed">Handler <span style="float:right;color:#94a3b8">1</span></div>
+        <div style="padding:8px;border-left:2px solid #a78bfa;background:#2e1065;border-radius:0 5px 5px 0">Diramazioni <span style="float:right;color:#ddd6fe">2</span></div>
+        <div style="padding:8px;border-left:2px solid #0891b2">Servizi <span style="float:right;color:#94a3b8">7</span></div>
+        <div style="padding:8px;border-left:2px solid #0f766e">Persistenza <span style="float:right;color:#94a3b8">4</span></div>
+        <div style="padding:8px;border-left:2px solid #0284c7">Effetti esterni <span style="float:right;color:#94a3b8">2</span></div>
+        <div style="padding:8px;border-left:2px solid #059669">Response <span style="float:right;color:#94a3b8">2</span></div>
+        <div style="border-top:1px solid #334155;margin-top:11px;padding-top:10px;font-size:11px">
+          <div style="color:#94a3b8;margin-bottom:7px">MOSTRA NELLO STADIO</div>
+          <div style="margin:6px 0">☑ Percorso applicativo</div>
+          <div style="margin:6px 0">☑ Database</div>
+          <div style="margin:6px 0">☑ Chiamate esterne</div>
+          <div style="margin:6px 0">☐ Test collegati</div>
+        </div>
+      </div>
+
+      <div style="border:1px solid #334155;border-radius:8px;padding:11px;background:#111827;position:relative">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#94a3b8">
+          <span>MAPPA · DIRAMAZIONI</span>
+          <span style="display:flex;gap:5px"><span style="border:1px solid #475569;border-radius:5px;padding:5px">Adatta</span><span style="border:1px solid #475569;border-radius:5px;padding:5px">−</span><span style="border:1px solid #475569;border-radius:5px;padding:5px">+</span></span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:6px;font-size:10px;margin-top:52px">
+          <span style="padding:8px;border:1px solid #2563eb;border-radius:6px;opacity:.5">Request</span><span style="opacity:.5">→</span>
+          <span style="padding:8px;border:1px solid #2563eb;border-radius:6px;opacity:.5">Middleware · 3</span><span style="opacity:.5">→</span>
+          <span style="padding:8px;border:1px solid #7c3aed;border-radius:6px">Controller</span><span>→</span>
+          <span style="padding:8px;border:2px solid #a78bfa;border-radius:6px;background:#2e1065">isAdmin() · 2 rami</span><span>→</span>
+          <span style="padding:8px;border:1px solid #059669;border-radius:6px;opacity:.5">Response · 2</span>
+        </div>
+        <div style="width:2px;height:34px;background:#a78bfa;margin:0 auto"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:500px;margin:0 auto">
+          <div style="border:1px solid #334155;border-radius:7px;padding:10px;text-align:center">
+            <div style="font-size:10px;color:#c4b5fd">SE TRUE</div>
+            <div style="margin-top:8px;padding:8px;border:1px solid #0891b2;border-radius:6px">AdminService::load()</div>
+            <div style="margin-top:7px;font-size:10px;color:#94a3b8">→ Repository → tabella admin_roles</div>
+          </div>
+          <div style="border:1px solid #334155;border-radius:7px;padding:10px;text-align:center">
+            <div style="font-size:10px;color:#c4b5fd">SE FALSE</div>
+            <div style="margin-top:8px;padding:8px;border:1px solid #0891b2;border-radius:6px">CustomerService::load()</div>
+            <div style="margin-top:7px;font-size:10px;color:#94a3b8">→ Repository → tabella customer_roles</div>
+          </div>
+        </div>
+        <div style="margin-top:42px;border:1px dashed #475569;border-radius:7px;padding:9px;font-size:11px;color:#94a3b8"><strong style="color:#dbeafe">Flusso asincrono collegato:</strong> SyncRolesJob · apri come lifecycle separato</div>
+      </div>
+
+      <div style="border:1px solid #334155;border-radius:8px;padding:10px;background:#111827">
+        <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px;color:#94a3b8">DETTAGLIO NODO</span><span style="color:#94a3b8">×</span></div>
+        <div style="font-weight:700;margin-top:13px">AdminService::load()</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:5px">Service method</div>
+        <div style="margin-top:14px;font-size:11px;color:#94a3b8">POSIZIONE</div>
+        <div style="font-size:11px;margin-top:4px;word-break:break-all">src/Service/AdminService.php:84</div>
+        <div style="margin-top:14px;font-size:11px;color:#94a3b8">PERCHÉ È QUI</div>
+        <div style="font-size:11px;margin-top:4px">Chiamato nel ramo true di isAdmin().</div>
+        <div style="margin-top:14px;font-size:11px;color:#94a3b8">COLLEGAMENTI</div>
+        <div style="font-size:11px;margin-top:5px">2 dipendenze · 1 tabella · 3 chiamanti</div>
+        <div style="margin-top:14px;padding:7px;border:1px solid #475569;border-radius:6px;text-align:center;font-size:11px">Analizza questo elemento</div>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;border:1px solid #334155;border-radius:7px;padding:9px;font-size:11px;color:#94a3b8">▸ Dettagli tecnici dell’analisi · contratto, graph version, copertura, omissioni, UUID</div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:18px">
+  <div class="option" data-choice="approve-final-layout" onclick="toggleSelect(this)">
+    <div class="letter">✓</div><div class="content"><h3>Approvo questa struttura</h3><p>La useremo come riferimento UX/UI della specifica.</p></div>
+  </div>
+  <div class="option" data-choice="revise-final-layout" onclick="toggleSelect(this)">
+    <div class="letter">↺</div><div class="content"><h3>Vorrei modificarla</h3><p>Seleziona e descrivi in chat cosa cambieresti.</p></div>
+  </div>
+</div>

@@ -1,0 +1,111 @@
+<h2>Come dovrebbe presentarsi il Request Lifecycle Explorer?</h2>
+<p class="subtitle">Confronta tre strutture. Tutte partono da una route e nascondono i dettagli tecnici finché non vengono richiesti.</p>
+
+<div class="cards">
+  <div class="card" data-choice="canvas-first" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:330px;color:#dbeafe">
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <div style="flex:1;border:1px solid #334155;border-radius:6px;padding:8px;background:#111827">GET /generale/soggetti-attivi/</div>
+        <div style="padding:8px 12px;border-radius:6px;background:#2563eb">Apri lifecycle</div>
+      </div>
+      <div style="display:grid;grid-template-columns:150px 1fr 150px;gap:8px;min-height:270px">
+        <div style="border:1px solid #334155;border-radius:6px;padding:9px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">FILTRI</div>
+          <div style="margin:7px 0">☑ Middleware · 3</div>
+          <div style="margin:7px 0">☑ Handler · 1</div>
+          <div style="margin:7px 0">☑ Servizi · 7</div>
+          <div style="margin:7px 0">☑ Database · 4</div>
+          <div style="margin:7px 0">☑ Output · 2</div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:6px;padding:12px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:7px;font-size:11px;white-space:nowrap">
+            <span style="padding:7px;border:1px solid #475569;border-radius:6px">Route</span><span>→</span>
+            <span style="padding:7px;border:1px solid #475569;border-radius:6px">Auth</span><span>→</span>
+            <span style="padding:7px;border:1px solid #7c3aed;border-radius:6px">Controller</span><span>→</span>
+            <span style="padding:7px;border:1px solid #0891b2;border-radius:6px">Service</span><span>→</span>
+            <span style="padding:7px;border:1px solid #059669;border-radius:6px">Response</span>
+          </div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:6px;padding:9px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">DETTAGLIO NODO</div>
+          <strong>Controller</strong>
+          <div style="font-size:11px;margin-top:8px;color:#94a3b8">AdminController.php:206</div>
+          <div style="font-size:11px;margin-top:8px">3 chiamate in uscita</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Canvas centrale</h3>
+      <p>Il grafo domina la pagina; filtri a sinistra e dettaglio a destra. Potente, ma può intimidire chi apre la pagina per la prima volta.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="timeline-first" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:330px;color:#dbeafe">
+      <div style="border:1px solid #334155;border-radius:6px;padding:10px;margin-bottom:9px">
+        <strong>GET /generale/soggetti-attivi/</strong>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">Request lifecycle · 18 componenti · 2 rami</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 160px;gap:8px">
+        <div style="border:1px solid #334155;border-radius:6px;padding:12px">
+          <div style="border-left:2px solid #2563eb;padding-left:12px">
+            <div style="padding:7px 0"><strong>1. Request ricevuta</strong><div style="font-size:11px;color:#94a3b8">Router Symfony</div></div>
+            <div style="padding:7px 0"><strong>2. Middleware</strong><div style="font-size:11px;color:#94a3b8">Sessione → autenticazione → autorizzazione</div></div>
+            <div style="padding:7px 0"><strong>3. Controller</strong><div style="font-size:11px;color:#94a3b8">AdminController::contact_flock_roles_worker</div></div>
+            <div style="margin:6px 0;padding:8px;border:1px dashed #a78bfa;border-radius:6px"><strong>Ramo condizionale · 2 possibilità</strong><div style="font-size:11px;color:#94a3b8">Espandi per vedere i percorsi</div></div>
+            <div style="padding:7px 0"><strong>4. Response</strong><div style="font-size:11px;color:#94a3b8">Template HTML · HTTP 200</div></div>
+          </div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:6px;padding:9px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">MOSTRA</div>
+          <div style="margin:7px 0">☑ Percorso principale</div>
+          <div style="margin:7px 0">☐ Dettagli tecnici</div>
+          <div style="margin:7px 0">☐ Test collegati</div>
+          <div style="margin:7px 0">☐ Flussi asincroni</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · Timeline guidata</h3>
+      <p>Racconta il lifecycle come una sequenza leggibile. Molto chiara, ma nasconde meglio le relazioni non lineari e i servizi condivisi.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="hybrid" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:330px;color:#dbeafe">
+      <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid #334155;border-radius:6px;padding:10px;margin-bottom:9px">
+        <div><strong>GET /generale/soggetti-attivi/</strong><div style="font-size:11px;color:#94a3b8;margin-top:3px">Lifecycle completo · 18 nodi · 2 rami · 1 flusso async</div></div>
+        <div style="font-size:11px;border:1px solid #334155;border-radius:5px;padding:6px">Analizza un elemento</div>
+      </div>
+      <div style="display:grid;grid-template-columns:180px 1fr;gap:8px">
+        <div style="border:1px solid #334155;border-radius:6px;padding:9px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">LIFECYCLE</div>
+          <div style="padding:6px;border-left:2px solid #2563eb">Request</div>
+          <div style="padding:6px;border-left:2px solid #2563eb">Middleware · 3</div>
+          <div style="padding:6px;border-left:2px solid #7c3aed">Controller</div>
+          <div style="padding:6px;border-left:2px solid #a78bfa;background:#1e1b4b">Ramo · 2</div>
+          <div style="padding:6px;border-left:2px solid #0891b2">Servizi · 7</div>
+          <div style="padding:6px;border-left:2px solid #059669">Response · 2</div>
+        </div>
+        <div style="border:1px solid #334155;border-radius:6px;padding:10px">
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:12px">MAPPA DELLO STADIO SELEZIONATO: RAMO CONDIZIONALE</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:35px">
+            <span style="padding:8px;border:1px solid #7c3aed;border-radius:6px">isAdmin()</span>
+            <span>→ true →</span><span style="padding:8px;border:1px solid #0891b2;border-radius:6px">AdminService</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:22px">
+            <span style="opacity:0">isAdmin()</span>
+            <span>→ false →</span><span style="padding:8px;border:1px solid #0891b2;border-radius:6px">CustomerService</span>
+          </div>
+          <div style="margin-top:42px;padding:8px;border-top:1px solid #334155;font-size:11px;color:#94a3b8">Seleziona un nodo per aprire evidenza e codice sorgente. Dettagli tecnici nascosti.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · Esplorazione ibrida — raccomandata</h3>
+      <p>Una timeline orienta l’utente; il canvas mostra soltanto lo stadio o ramo selezionato. Mantiene comprensibilità e potenza senza caricare tutto insieme.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:18px">Clicca la struttura che ti sembra più naturale. Possiamo anche combinarne alcuni aspetti.</p>

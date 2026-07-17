@@ -1,0 +1,74 @@
+<h2>Quando apro un ramo, quanto lifecycle devo continuare a vedere?</h2>
+<p class="subtitle">La route resta selezionata e l’elenco endpoint è richiuso. Ora scegliamo il comportamento del canvas.</p>
+
+<div class="cards">
+  <div class="card" data-choice="isolated-stage" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:335px;color:#dbeafe">
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">GET /generale/soggetti-attivi/ · Rami / isAdmin()</div>
+      <div style="border:1px solid #334155;border-radius:7px;min-height:275px;padding:16px">
+        <div style="font-size:11px;color:#94a3b8">SOLO STADIO SELEZIONATO</div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:72px">
+          <span style="padding:10px;border:1px solid #a78bfa;border-radius:7px">isAdmin()</span>
+          <span>→ true →</span><span style="padding:10px;border:1px solid #0891b2;border-radius:7px">AdminService</span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:28px">
+          <span style="opacity:0;padding:10px">isAdmin()</span>
+          <span>→ false →</span><span style="padding:10px;border:1px solid #0891b2;border-radius:7px">CustomerService</span>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · Stadio isolato</h3><p>Massima leggibilità del ramo, ma route, middleware e response scompaiono dal canvas e restano soltanto nel breadcrumb.</p></div>
+  </div>
+
+  <div class="card" data-choice="full-lifecycle" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:335px;color:#dbeafe">
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">GET /generale/soggetti-attivi/ · lifecycle completo</div>
+      <div style="border:1px solid #334155;border-radius:7px;min-height:275px;padding:12px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:center;gap:5px;font-size:10px;margin-top:34px;white-space:nowrap">
+          <span style="padding:7px;border:1px solid #2563eb;border-radius:5px">Route</span><span>→</span>
+          <span style="padding:7px;border:1px solid #2563eb;border-radius:5px">Session</span><span>→</span>
+          <span style="padding:7px;border:1px solid #2563eb;border-radius:5px">Auth</span><span>→</span>
+          <span style="padding:7px;border:1px solid #7c3aed;border-radius:5px">Controller</span><span>→</span>
+          <span style="padding:7px;border:1px solid #a78bfa;border-radius:5px">isAdmin</span>
+        </div>
+        <div style="display:flex;gap:7px;justify-content:center;margin-top:28px;font-size:10px">
+          <span style="padding:7px;border:1px solid #0891b2;border-radius:5px">AdminService</span>
+          <span style="padding:7px;border:1px solid #0891b2;border-radius:5px">CustomerService</span>
+          <span style="padding:7px;border:1px solid #0f766e;border-radius:5px">Repository</span>
+          <span style="padding:7px;border:1px solid #0f766e;border-radius:5px">DB</span>
+          <span style="padding:7px;border:1px solid #059669;border-radius:5px">Template</span>
+          <span style="padding:7px;border:1px solid #059669;border-radius:5px">200</span>
+        </div>
+        <div style="text-align:center;margin-top:38px;font-size:11px;color:#94a3b8">Tutto visibile contemporaneamente · zoom e pan necessari</div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · Grafo completo</h3><p>Massimo contesto, ma il numero di nodi cresce rapidamente e riporta il problema originale della pagina troppo tecnica.</p></div>
+  </div>
+
+  <div class="card" data-choice="backbone-focus" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:12px;background:#0f172a;min-height:335px;color:#dbeafe">
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">GET /generale/soggetti-attivi/ · ramo isAdmin() aperto</div>
+      <div style="border:1px solid #334155;border-radius:7px;min-height:275px;padding:14px">
+        <div style="display:flex;align-items:center;justify-content:center;gap:7px;font-size:10px;margin-top:28px">
+          <span style="padding:8px;border:1px solid #2563eb;border-radius:5px;opacity:.55">Request</span><span style="opacity:.55">→</span>
+          <span style="padding:8px;border:1px solid #2563eb;border-radius:5px;opacity:.55">Middleware · 3</span><span style="opacity:.55">→</span>
+          <span style="padding:8px;border:1px solid #7c3aed;border-radius:5px">Controller</span><span>→</span>
+          <span style="padding:8px;border:2px solid #a78bfa;border-radius:5px;background:#2e1065">Ramo · 2</span><span>→</span>
+          <span style="padding:8px;border:1px solid #059669;border-radius:5px;opacity:.55">Response · 2</span>
+        </div>
+        <div style="width:2px;height:25px;background:#a78bfa;margin:0 auto"></div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:9px;font-size:10px">
+          <span style="padding:8px;border:1px solid #a78bfa;border-radius:5px">isAdmin()</span>
+          <span>→ true →</span><span style="padding:8px;border:1px solid #0891b2;border-radius:5px">AdminService</span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:9px;font-size:10px;margin-top:18px">
+          <span style="opacity:0;padding:8px">isAdmin()</span>
+          <span>→ false →</span><span style="padding:8px;border:1px solid #0891b2;border-radius:5px">CustomerService</span>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · Spina dorsale + espansione — raccomandata</h3><p>Il lifecycle completo resta comprensibile come contesto; soltanto lo stadio selezionato si apre e mostra i suoi nodi reali.</p></div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:18px">Clicca il comportamento che ti sembra più leggibile durante un’analisi reale.</p>

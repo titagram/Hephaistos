@@ -1,0 +1,30 @@
+- generic [ref=e2]:
+  - generic [ref=e7]:
+    - button [ref=e9] [cursor=pointer]
+    - generic [ref=e11]:
+      - generic [ref=e12]:
+        - heading "Sign in" [level=1] [ref=e13]
+        - paragraph [ref=e14]: Select a role to explore the dashboard with realistic mock data.
+      - generic [ref=e15]:
+        - button "Admin All sections incl. Admin & System." [ref=e16] [cursor=pointer]:
+          - text: Admin
+          - generic [ref=e17]: All sections incl. Admin & System.
+        - button "PM Projects, Kanban, Runs, Wiki, Graph, Artifacts." [ref=e18] [cursor=pointer]:
+          - text: PM
+          - generic [ref=e19]: Projects, Kanban, Runs, Wiki, Graph, Artifacts.
+        - button "Developer Adds Quality (read-only)." [ref=e20] [cursor=pointer]:
+          - text: Developer
+          - generic [ref=e21]: Adds Quality (read-only).
+        - button "Sysadmin Projects, Runs, Artifacts, Quality, System." [ref=e22] [cursor=pointer]:
+          - text: Sysadmin
+          - generic [ref=e23]: Projects, Runs, Artifacts, Quality, System.
+      - generic [ref=e24]:
+        - generic [ref=e25]:
+          - text: Email
+          - textbox "Email" [ref=e26]: admin@devboard.local
+        - generic [ref=e27]:
+          - text: Password
+          - textbox "Password" [ref=e28]: devboard
+      - button "Signing in…" [disabled]
+      - paragraph [ref=e30]: "Cookie/session auth · credentials: include (Laravel)"
+  - region "Notifications alt+T"
