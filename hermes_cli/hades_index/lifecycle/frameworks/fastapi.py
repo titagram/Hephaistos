@@ -112,6 +112,7 @@ _ObjectBindingTimeline = Mapping[
     tuple[str, str],
     tuple[tuple[_Order, str | None], ...],
 ]
+_NON_FRAMEWORK_BINDING = "<hades-non-framework>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +143,7 @@ class _Object:
     kind: str
     prefix: str | None
     dependencies: tuple[_Dependency, ...]
-    lifespan: str | None
+    lifespan: _Reference | None
     lifespan_declared: bool
     source_path: str
     line: int
@@ -209,7 +210,9 @@ class _Event:
     handler_name: str
     source_path: str
     line: int
+    order: tuple[str, int, int]
     ordinal: int
+    instance_ordinal: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,7 +624,21 @@ def _dependency_from(
     if not isinstance(node, ast.Call):
         return None
     name = _call_name(node)
-    if name is None or name.rsplit(".", 1)[-1] not in {"Depends", "Security"}:
+    if name is None:
+        return None
+    constructor = _resolved_reference_at(
+        name,
+        module,
+        imports,
+        import_bindings,
+        _line_order(path, node.func),
+    )
+    if constructor not in {
+        ("fastapi", "Depends"),
+        ("fastapi", "Security"),
+        ("fastapi.params", "Depends"),
+        ("fastapi.params", "Security"),
+    }:
         return None
     if not node.args:
         return None
@@ -629,11 +646,12 @@ def _dependency_from(
     if target is None:
         return None
     use_cache = _keyword(node, "use_cache")
-    cache = not (
-        isinstance(use_cache, ast.Constant)
-        and type(use_cache.value) is bool
-        and use_cache.value is False
-    )
+    if use_cache is None:
+        cache = True
+    elif isinstance(use_cache, ast.Constant) and type(use_cache.value) is bool:
+        cache = use_cache.value
+    else:
+        return None
     return _Dependency(
         target,
         module,
@@ -675,26 +693,99 @@ def _parameter_dependencies(
     imports: Mapping[str, Mapping[str, str]],
     import_bindings: _BindingTimeline,
 ) -> tuple[_Dependency, ...] | None:
-    defaults = tuple(function.args.defaults) + tuple(
-        item for item in function.args.kw_defaults if item is not None
-    )
     found: list[_Dependency] = []
-    for default in defaults:
-        if not isinstance(default, ast.Call):
-            continue
-        name = _call_name(default)
-        if name is None or name.rsplit(".", 1)[-1] not in {"Depends", "Security"}:
-            continue
+
+    positional = (*function.args.posonlyargs, *function.args.args)
+    default_arguments = (
+        positional[-len(function.args.defaults) :] if function.args.defaults else ()
+    )
+    positional_defaults: dict[str, ast.AST] = {
+        argument.arg: default
+        for argument, default in zip(
+            default_arguments,
+            function.args.defaults,
+            strict=True,
+        )
+    }
+    keyword_defaults = {
+        argument.arg: default
+        for argument, default in zip(
+            function.args.kwonlyargs,
+            function.args.kw_defaults,
+            strict=True,
+        )
+        if default is not None
+    }
+
+    def append_call(call: ast.Call) -> bool:
+        name = _call_name(call)
+        if name is None:
+            return True
         dependency = _dependency_from(
-            default,
+            call,
             module,
             path,
             imports,
             import_bindings,
         )
         if dependency is None:
-            return None
+            constructor = _resolved_reference_at(
+                name,
+                module,
+                imports,
+                import_bindings,
+                _line_order(path, call.func),
+            )
+            return not (
+                name.rsplit(".", 1)[-1] in {"Depends", "Security"}
+                or constructor
+                in {
+                    ("fastapi", "Depends"),
+                    ("fastapi", "Security"),
+                    ("fastapi.params", "Depends"),
+                    ("fastapi.params", "Security"),
+                }
+            )
         found.append(dependency)
+        return True
+
+    def append_annotation(annotation: ast.AST | None) -> bool:
+        if not isinstance(annotation, ast.Subscript):
+            return True
+        raw_wrapper = _dotted(annotation.value)
+        if raw_wrapper is None or raw_wrapper.rsplit(".", 1)[-1] != "Annotated":
+            return True
+        wrapper = _resolved_reference_at(
+            raw_wrapper,
+            module,
+            imports,
+            import_bindings,
+            _line_order(path, annotation.value),
+        )
+        if wrapper not in {
+            ("typing", "Annotated"),
+            ("typing_extensions", "Annotated"),
+        }:
+            return False
+        elements = (
+            annotation.slice.elts
+            if isinstance(annotation.slice, ast.Tuple)
+            else (annotation.slice,)
+        )
+        return all(
+            append_call(metadata)
+            for metadata in elements[1:]
+            if isinstance(metadata, ast.Call)
+        )
+
+    for argument in (*positional, *function.args.kwonlyargs):
+        if not append_annotation(argument.annotation):
+            return None
+        default = positional_defaults.get(argument.arg) or keyword_defaults.get(
+            argument.arg
+        )
+        if isinstance(default, ast.Call) and not append_call(default):
+            return None
     return tuple(found)
 
 
@@ -728,6 +819,38 @@ def _has_yield(node: ast.AST) -> bool:
             visitor.visit(statement)
     else:
         visitor.visit(node)
+    return found
+
+
+def _calls_name_in_body(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+) -> bool:
+    found = False
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:
+            nonlocal found
+            target = _dotted(node.func)
+            if target is not None and target.rsplit(".", 1)[-1] == name:
+                found = True
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    visitor = _Visitor()
+    for statement in function.body:
+        visitor.visit(statement)
     return found
 
 
@@ -811,10 +934,158 @@ def _background_targets(
     targets: list[_Reference] = []
     unresolved = False
 
+    collector = _ScopeBindingVisitor()
+    for statement in node.body:
+        collector.visit(statement)
+    arguments = {
+        argument.arg: argument
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+    }
+    arguments.update({
+        argument.arg: argument
+        for argument in (node.args.vararg, node.args.kwarg)
+        if argument is not None
+    })
+    bound_names = set(arguments) | {name for name, _binding in collector.records}
+    local_names = bound_names - collector.global_names - collector.nonlocal_names
+    runtime_global_writes = bound_names & collector.global_names
+    local_aliases: dict[str, list[tuple[_Order, str | None]]] = {}
+
+    def remember(name: str, binding: ast.AST, identity: str | None) -> None:
+        if name in local_names:
+            local_aliases.setdefault(name, []).append((
+                _line_order(path, binding),
+                identity,
+            ))
+
+    for name in arguments:
+        remember(name, node, None)
+
+    def final_global_identity(raw: str) -> str | None:
+        head, separator, tail = raw.partition(".")
+        if head in runtime_global_writes or head in collector.nonlocal_names:
+            return None
+        binding = _visible_binding(
+            import_bindings,
+            module,
+            head,
+            (path, 10**9, 10**9),
+        )
+        if binding is not None:
+            if binding[1] is None:
+                return None
+            return f"{binding[1]}.{tail}" if separator else binding[1]
+        resolved = _resolved_reference(raw, module, imports)
+        return ".".join(resolved) if resolved is not None else None
+
+    def identity_at(raw: str, occurrence: _Order) -> str | None:
+        head, separator, tail = raw.partition(".")
+        if head not in local_names:
+            return final_global_identity(raw)
+        visible = next(
+            (
+                item
+                for item in reversed(local_aliases.get(head, ()))
+                if item[0] <= occurrence
+            ),
+            None,
+        )
+        if visible is None or visible[1] is None:
+            return None
+        return f"{visible[1]}.{tail}" if separator else visible[1]
+
+    for statement in node.body:
+        order = _line_order(path, statement)
+        if isinstance(statement, ast.Assign):
+            identity = identity_at(_dotted(statement.value) or "", order)
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    remember(target.id, statement, identity)
+            continue
+        if isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            remember(
+                statement.target.id,
+                statement,
+                identity_at(_dotted(statement.value) or "", order),
+            )
+            continue
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                remember(
+                    alias.asname or alias.name.split(".", 1)[0],
+                    statement,
+                    alias.name if alias.asname else alias.name.split(".", 1)[0],
+                )
+            continue
+        if isinstance(statement, ast.ImportFrom):
+            base = _import_from_base(module, statement)
+            for alias in statement.names:
+                if alias.name != "*":
+                    remember(
+                        alias.asname or alias.name,
+                        statement,
+                        f"{base}.{alias.name}" if base is not None else None,
+                    )
+            continue
+        visitor = _ScopeBindingVisitor()
+        visitor.visit(statement)
+        for name, binding in visitor.records:
+            remember(name, binding, None)
+
+    def typed_background_receiver(raw: str) -> bool:
+        argument = arguments.get(raw)
+        if argument is None or argument.annotation is None:
+            return False
+        annotation = argument.annotation
+        if isinstance(annotation, ast.Subscript):
+            wrapper = _dotted(annotation.value)
+            if wrapper is not None and wrapper.rsplit(".", 1)[-1] == "Annotated":
+                wrapper_target = _resolved_reference_at(
+                    wrapper,
+                    module,
+                    imports,
+                    import_bindings,
+                    _line_order(path, annotation.value),
+                )
+                if wrapper_target not in {
+                    ("typing", "Annotated"),
+                    ("typing_extensions", "Annotated"),
+                }:
+                    return False
+                annotation = (
+                    annotation.slice.elts[0]
+                    if isinstance(annotation.slice, ast.Tuple) and annotation.slice.elts
+                    else annotation.slice
+                )
+        annotation_raw = _dotted(annotation)
+        if annotation_raw is None:
+            return False
+        target = _resolved_reference_at(
+            annotation_raw,
+            module,
+            imports,
+            import_bindings,
+            _line_order(path, annotation),
+        )
+        return target in {
+            ("fastapi", "BackgroundTasks"),
+            ("starlette.background", "BackgroundTasks"),
+        }
+
     class _Visitor(ast.NodeVisitor):
         def visit_Call(self, node: ast.Call) -> None:
             nonlocal unresolved
             if isinstance(node.func, ast.Attribute) and node.func.attr == "add_task":
+                receiver = _dotted(node.func.value)
+                if receiver is None or not typed_background_receiver(receiver):
+                    unresolved = True
+                    return
                 if not node.args:
                     unresolved = True
                     return
@@ -825,12 +1096,16 @@ def _background_targets(
                 targets.append(
                     _Reference(
                         raw,
-                        _resolved_reference_at(
-                            raw,
-                            module,
-                            imports,
-                            import_bindings,
-                            _line_order(path, node.args[0]),
+                        (
+                            tuple(identity.rsplit(".", 1))
+                            if (
+                                identity := identity_at(
+                                    raw,
+                                    _line_order(path, node.args[0]),
+                                )
+                            )
+                            and "." in identity
+                            else None
                         ),
                     )
                 )
@@ -1008,6 +1283,36 @@ def _import_bindings(
     })
 
 
+def _module_import_reachability(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+) -> frozenset[tuple[str, str]]:
+    known_modules = {module for _source, _tree, module in parsed.values()}
+    graph: dict[str, set[str]] = {module: set() for module in known_modules}
+    for _path, (_source, tree, module) in parsed.items():
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                graph[module].update(
+                    alias.name for alias in node.names if alias.name in known_modules
+                )
+            elif isinstance(node, ast.ImportFrom):
+                base = _import_from_base(module, node)
+                if base in known_modules:
+                    graph[module].add(base)
+
+    reachable: set[tuple[str, str]] = set()
+    for source in known_modules:
+        pending = list(graph[source])
+        visited: set[str] = set()
+        while pending:
+            target = pending.pop()
+            if target in visited:
+                continue
+            visited.add(target)
+            reachable.add((source, target))
+            pending.extend(graph.get(target, ()))
+    return frozenset(reachable)
+
+
 def _visible_binding(
     bindings: _BindingTimeline,
     module: str,
@@ -1141,23 +1446,103 @@ def _exception_aliases(
     ) -> None:
         aliases.setdefault((module, name), []).append((order, identity))
 
-    def class_header_bindings(node: ast.ClassDef) -> tuple[ast.NamedExpr, ...]:
-        values: list[ast.NamedExpr] = []
+    def class_header_bindings(
+        node: ast.ClassDef,
+    ) -> tuple[tuple[ast.NamedExpr, bool], ...]:
+        values: list[tuple[ast.NamedExpr, bool]] = []
 
         class _Visitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.conditional_depth = 0
+
             def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-                values.append(node)
+                values.append((node, bool(self.conditional_depth)))
                 self.visit(node.value)
+
+            def visit_IfExp(self, node: ast.IfExp) -> None:
+                self.visit(node.test)
+                self.conditional_depth += 1
+                self.visit(node.body)
+                self.visit(node.orelse)
+                self.conditional_depth -= 1
+
+            def visit_BoolOp(self, node: ast.BoolOp) -> None:
+                if not node.values:
+                    return
+                self.visit(node.values[0])
+                self.conditional_depth += 1
+                for value in node.values[1:]:
+                    self.visit(value)
+                self.conditional_depth -= 1
+
+            def _visit_conditional(self, node: ast.AST) -> None:
+                self.conditional_depth += 1
+                self.generic_visit(node)
+                self.conditional_depth -= 1
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_conditional(node)
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_conditional(node)
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_conditional(node)
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_conditional(node)
 
         visitor = _Visitor()
         _visit_class_header(visitor, node)
-        return tuple(sorted(values, key=lambda item: _line_order(path, item)))
+        return tuple(sorted(values, key=lambda item: _line_order(path, item[0])))
+
+    def class_global_values(node: ast.ClassDef) -> Mapping[int, str | None]:
+        values: dict[int, str | None] = {}
+
+        class _GlobalCollector(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: set[str] = set()
+
+            def visit_Global(self, node: ast.Global) -> None:
+                self.names.update(node.names)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return None
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return None
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                return None
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return None
+
+        globals_visitor = _GlobalCollector()
+        for statement in node.body:
+            globals_visitor.visit(statement)
+        for statement in node.body:
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id in globals_visitor.names
+                    ):
+                        values[id(target)] = _dotted(statement.value)
+            elif isinstance(statement, ast.AnnAssign) and isinstance(
+                statement.target, ast.Name
+            ):
+                if statement.target.id in globals_visitor.names:
+                    values[id(statement.target)] = _dotted(statement.value)
+            if isinstance(statement, ast.ClassDef):
+                values.update(class_global_values(statement))
+        return MappingProxyType(values)
 
     for path, (_source, tree, module) in parsed.items():
         for node in tree.body:
             order = _line_order(path, node)
             if isinstance(node, ast.ClassDef):
-                for binding in class_header_bindings(node):
+                for binding, conditional in class_header_bindings(node):
                     if not isinstance(binding.target, ast.Name):
                         continue
                     binding_order = _line_order(path, binding)
@@ -1165,7 +1550,24 @@ def _exception_aliases(
                         module,
                         binding.target.id,
                         binding_order,
-                        resolve(_dotted(binding.value), module, binding_order),
+                        None
+                        if conditional
+                        else resolve(_dotted(binding.value), module, binding_order),
+                    )
+                direct_values = class_global_values(node)
+                for name, binding_node in _class_global_binding_records(node):
+                    binding_order = _line_order(path, binding_node)
+                    remember(
+                        module,
+                        name,
+                        binding_order,
+                        resolve(
+                            direct_values[id(binding_node)],
+                            module,
+                            binding_order,
+                        )
+                        if id(binding_node) in direct_values
+                        else None,
                     )
                 binding_order = (
                     path,
@@ -1477,13 +1879,13 @@ def _class_global_binding_records(
 
     class _StoreCollector(_ScopeBindingVisitor):
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            return None
+            self._record(node.name, node)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            return None
+            self._record(node.name, node)
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            return None
+            self._record(node.name, node)
 
         def visit_Lambda(self, node: ast.Lambda) -> None:
             return None
@@ -1587,6 +1989,36 @@ def _framework_constructor_kind(
     return None
 
 
+def _framework_annotation_kind(
+    annotation: ast.AST,
+    path: str,
+    module: str,
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+) -> str | None:
+    raw = _dotted(annotation)
+    if raw is None:
+        return None
+    target = _resolved_reference_at(
+        raw,
+        module,
+        imports,
+        import_bindings,
+        _line_order(path, annotation),
+    )
+    if target in {
+        ("fastapi", "FastAPI"),
+        ("fastapi.applications", "FastAPI"),
+    }:
+        return "app"
+    if target in {
+        ("fastapi", "APIRouter"),
+        ("fastapi.routing", "APIRouter"),
+    }:
+        return "router"
+    return None
+
+
 def _object_reference(
     raw: str | None,
     module: str,
@@ -1674,6 +2106,23 @@ def _object_binding_timeline(
         key = f"{target[0]}:{target[1]}"
         return key if key in objects and key not in duplicate_objects else None
 
+    def proven_non_framework(node: ast.AST | None) -> bool:
+        return isinstance(
+            node,
+            (
+                ast.Constant,
+                ast.Dict,
+                ast.DictComp,
+                ast.GeneratorExp,
+                ast.Lambda,
+                ast.List,
+                ast.ListComp,
+                ast.Set,
+                ast.SetComp,
+                ast.Tuple,
+            ),
+        )
+
     object_at_order = {(item.module, item.order): item.key for item in objects.values()}
     for path, (_source, tree, module) in parsed.items():
         for node in tree.body:
@@ -1681,6 +2130,8 @@ def _object_binding_timeline(
             object_key = object_at_order.get((module, order))
             if isinstance(node, ast.Assign):
                 value = object_key or resolve(_dotted(node.value), module, order)
+                if value is None and proven_non_framework(node.value):
+                    value = _NON_FRAMEWORK_BINDING
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         remember(module, target.id, order, value)
@@ -1696,11 +2147,14 @@ def _object_binding_timeline(
                             )
                 continue
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                value = object_key or resolve(_dotted(node.value), module, order)
+                if value is None and proven_non_framework(node.value):
+                    value = _NON_FRAMEWORK_BINDING
                 remember(
                     module,
                     node.target.id,
                     order,
-                    resolve(_dotted(node.value), module, order),
+                    value,
                 )
                 continue
             if isinstance(node, ast.ImportFrom):
@@ -1722,7 +2176,20 @@ def _object_binding_timeline(
             visitor = _ScopeBindingVisitor()
             visitor.visit(node)
             for name, binding_node in visitor.records:
-                remember(module, name, _line_order(path, binding_node), None)
+                exact_non_framework = (
+                    binding_node is node
+                    and isinstance(
+                        node,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    )
+                    and not node.decorator_list
+                )
+                remember(
+                    module,
+                    name,
+                    _line_order(path, binding_node),
+                    _NON_FRAMEWORK_BINDING if exact_non_framework else None,
+                )
             if isinstance(node, ast.ClassDef):
                 for name, binding_node in _class_global_binding_records(node):
                     remember(module, name, _line_order(path, binding_node), None)
@@ -1755,8 +2222,16 @@ def _is_registration_call(
         import_bindings,
         _line_order(path, node),
     )
+    timeline = object_bindings.get((module, head), ())
+    visible = next(
+        (item for item in reversed(timeline) if item[0] <= _line_order(path, node)),
+        None,
+    )
+    if visible is not None and visible[1] == _NON_FRAMEWORK_BINDING:
+        return False
     return (
-        any(key is not None for _order, key in object_bindings.get((module, head), ()))
+        visible is not None
+        or bool(timeline)
         or (owner is not None and f"{owner[0]}:{owner[1]}" in objects)
     ) and (
         node.func.attr in _FRAMEWORK_REGISTRATION_METHODS
@@ -1916,8 +2391,11 @@ def _event_candidate(
         event.source_path,
         source,
         event.line,
-        f"fastapi/events/{event.event}/{event.ordinal}",
-        event.ordinal,
+        (
+            f"fastapi/events/{event.event}/{event.ordinal}/"
+            f"instances/{event.instance_ordinal}"
+        ),
+        event.instance_ordinal,
     )
     handler = function_keys.get((event.handler_module, event.handler_name))
     unresolved = (
@@ -1928,8 +2406,11 @@ def _event_candidate(
             event.source_path,
             "unresolved_fact",
             "ast",
-            f"fastapi/events/{event.event}/{event.ordinal}/handler",
-            event.ordinal,
+            (
+                f"fastapi/events/{event.event}/{event.ordinal}/"
+                f"instances/{event.instance_ordinal}/handler"
+            ),
+            event.instance_ordinal,
         )
     )
     evidence = IREvidence(
@@ -1962,6 +2443,7 @@ def _lifespan_candidate(
     imports: Mapping[str, Mapping[str, str]],
     source: str,
 ) -> EntrypointCandidate | None:
+    del imports
     if app.lifespan is None:
         return None
     locator = _locator(
@@ -1971,8 +2453,11 @@ def _lifespan_candidate(
         f"fastapi/lifespan/{app.name}",
         0,
     )
-    lifespan = _resolved_reference(app.lifespan, app.module, imports)
-    handler = function_keys.get(lifespan) if lifespan is not None else None
+    handler = (
+        function_keys.get(app.lifespan.target)
+        if app.lifespan.target is not None
+        else None
+    )
     unresolved = (
         None
         if handler is not None
@@ -2070,6 +2555,8 @@ def _expand_routes(
     diagnostics: _Diagnostics,
     *,
     invalid_root_apps: frozenset[str],
+    modules_by_path: Mapping[str, str],
+    import_reachability: frozenset[tuple[str, str]],
 ) -> tuple[_ResolvedRoute, ...]:
     includes_by_parent: dict[str, list[_Include]] = {}
     routes_by_owner: dict[str, list[_Route]] = {}
@@ -2117,7 +2604,10 @@ def _expand_routes(
                 if route.source_path == cutoff[0]:
                     if route.order > cutoff:
                         continue
-                elif route.source_path != current.source_path:
+                elif route.source_path != current.source_path or (
+                    (cutoff_module := modules_by_path.get(cutoff[0])) is not None
+                    and (current.module, cutoff_module) in import_reachability
+                ):
                     diagnostics.mark(
                         route.source_path,
                         CoverageCapability.ENTRYPOINT_DISCOVERY,
@@ -2152,7 +2642,10 @@ def _expand_routes(
                 if include.source_path == cutoff[0]:
                     if include.order > cutoff:
                         continue
-                elif include.source_path != current.source_path:
+                elif include.source_path != current.source_path or (
+                    (cutoff_module := modules_by_path.get(cutoff[0])) is not None
+                    and (current.module, cutoff_module) in import_reachability
+                ):
                     diagnostics.mark(
                         include.source_path,
                         CoverageCapability.ENTRYPOINT_DISCOVERY,
@@ -2201,6 +2694,121 @@ def _expand_routes(
     )
     return tuple(
         replace(item, instance_ordinal=ordinal) for ordinal, item in enumerate(ordered)
+    )
+
+
+def _expand_events(
+    objects: Mapping[str, _Object],
+    includes: Sequence[_Include],
+    events: Sequence[_Event],
+    diagnostics: _Diagnostics,
+    *,
+    invalid_root_apps: frozenset[str],
+    modules_by_path: Mapping[str, str],
+    import_reachability: frozenset[tuple[str, str]],
+) -> tuple[_Event, ...]:
+    includes_by_parent: dict[str, list[_Include]] = {}
+    events_by_owner: dict[str, list[_Event]] = {}
+    for include in includes:
+        includes_by_parent.setdefault(include.parent, []).append(include)
+    for event in events:
+        events_by_owner.setdefault(event.owner, []).append(event)
+    for values in includes_by_parent.values():
+        values.sort(key=lambda item: item.order)
+    for values in events_by_owner.values():
+        values.sort(key=lambda item: item.order)
+
+    resolved: list[tuple[str, _Event]] = []
+
+    def visible(
+        source_path: str,
+        order: _Order,
+        current: _Object,
+        cutoff: _Order | None,
+    ) -> bool:
+        if cutoff is None:
+            return True
+        if source_path == cutoff[0]:
+            return order <= cutoff
+        if source_path == current.source_path:
+            cutoff_module = modules_by_path.get(cutoff[0])
+            if (
+                cutoff_module is None
+                or (
+                    current.module,
+                    cutoff_module,
+                )
+                not in import_reachability
+            ):
+                return True
+        diagnostics.mark(
+            source_path,
+            CoverageCapability.ENTRYPOINT_DISCOVERY,
+            "router_snapshot_order_unresolved",
+        )
+        return False
+
+    def walk(
+        object_key: str,
+        cutoff: _Order | None,
+        app_key: str,
+        ancestry: frozenset[str],
+    ) -> None:
+        current = objects.get(object_key)
+        if current is None or current.unresolved:
+            diagnostics.mark(
+                current.source_path if current else None,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "framework_config_unresolved",
+            )
+            return
+        if object_key in ancestry:
+            diagnostics.mark(
+                current.source_path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "router_cycle_unresolved",
+            )
+            return
+        for event in events_by_owner.get(object_key, ()):
+            if visible(event.source_path, event.order, current, cutoff):
+                resolved.append((app_key, event))
+        for include in includes_by_parent.get(object_key, ()):
+            if not visible(include.source_path, include.order, current, cutoff):
+                continue
+            child = objects.get(include.child or "")
+            if include.unresolved or child is None or child.kind != "router":
+                diagnostics.mark(
+                    include.source_path,
+                    CoverageCapability.ENTRYPOINT_DISCOVERY,
+                    "framework_config_unresolved",
+                )
+                continue
+            walk(
+                child.key,
+                include.order,
+                app_key,
+                ancestry | {object_key},
+            )
+
+    for app in sorted(
+        (
+            item
+            for item in objects.values()
+            if item.kind == "app"
+            and item.key not in invalid_root_apps
+            and not item.lifespan_declared
+        ),
+        key=lambda item: item.order,
+    ):
+        walk(app.key, None, app.key, frozenset())
+
+    ordered = sorted(
+        resolved,
+        key=lambda item: (item[1].order, item[0], item[1].handler_name),
+    )
+    return tuple(
+        replace(event, instance_ordinal=ordinal)
+        for ordinal, (_app_key, event) in enumerate(ordered)
     )
 
 
@@ -2291,6 +2899,10 @@ class FastAPILifecycleAdapter:
         fastapi_version = self.detected_version(context)
         starlette_version = self.detected_starlette_version(context)
         import_binding_view = _import_bindings(parsed)
+        modules_by_path = MappingProxyType({
+            path: module for path, (_source, _tree, module) in parsed.items()
+        })
+        import_reachability = _module_import_reachability(parsed)
         module_binding_view = _module_binding_orders(parsed)
         fastapi_route_contract_proven = (
             fastapi_version in _FASTAPI_ROUTE_SIGNATURE_VERSIONS
@@ -2319,9 +2931,25 @@ class FastAPILifecycleAdapter:
         ] = []
         for path, (source, tree, module) in parsed.items():
             for node in tree.body:
+                constructor_call: ast.Call | None = None
+                targets: list[str] = []
                 if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                    constructor_call = node.value
+                    targets = [
+                        target.id
+                        for target in node.targets
+                        if isinstance(target, ast.Name)
+                    ]
+                elif (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and isinstance(node.value, ast.Call)
+                ):
+                    constructor_call = node.value
+                    targets = [node.target.id]
+                if constructor_call is not None:
                     kind = _framework_constructor_kind(
-                        node.value,
+                        constructor_call,
                         module,
                         imports,
                         import_binding_view,
@@ -2329,22 +2957,28 @@ class FastAPILifecycleAdapter:
                         _line_order(path, node),
                     )
                     if kind is None:
-                        call_name = _call_name(node.value)
-                        if call_name is not None and call_name.rsplit(".", 1)[-1] in {
-                            "APIRouter",
-                            "FastAPI",
-                        }:
+                        call_name = _call_name(constructor_call)
+                        annotated_kind = (
+                            _framework_annotation_kind(
+                                node.annotation,
+                                path,
+                                module,
+                                imports,
+                                import_binding_view,
+                            )
+                            if isinstance(node, ast.AnnAssign)
+                            else None
+                        )
+                        if annotated_kind is not None or (
+                            call_name is not None
+                            and call_name.rsplit(".", 1)[-1] in {"APIRouter", "FastAPI"}
+                        ):
                             diagnostics.mark(
                                 path,
                                 CoverageCapability.ENTRYPOINT_DISCOVERY,
                                 "framework_config_unresolved",
                             )
                         continue
-                    targets = [
-                        target.id
-                        for target in node.targets
-                        if isinstance(target, ast.Name)
-                    ]
                     if len(targets) != 1:
                         diagnostics.mark(
                             path,
@@ -2352,29 +2986,90 @@ class FastAPILifecycleAdapter:
                             "framework_config_unresolved",
                         )
                         continue
-                    prefix_node = _keyword(node.value, "prefix")
+                    prefix_node = _keyword(constructor_call, "prefix")
                     prefix = (
                         ""
                         if kind == "app" or prefix_node is None
                         else _literal_string(prefix_node)
                     )
                     dependencies = _dependencies(
-                        _keyword(node.value, "dependencies"),
+                        _keyword(constructor_call, "dependencies"),
                         module,
                         path,
                         imports,
                         import_binding_view,
                     )
                     lifespan_node = (
-                        _keyword(node.value, "lifespan") if kind == "app" else None
+                        _keyword(constructor_call, "lifespan")
+                        if kind == "app"
+                        else None
                     )
                     no_custom_lifespan = (
                         isinstance(lifespan_node, ast.Constant)
                         and lifespan_node.value is None
                     )
-                    lifespan = (
+                    lifespan_raw = (
                         _dotted(lifespan_node)
                         if lifespan_node is not None and not no_custom_lifespan
+                        else None
+                    )
+                    lifespan_target = (
+                        _resolved_reference_at(
+                            lifespan_raw,
+                            module,
+                            imports,
+                            import_binding_view,
+                            _line_order(path, lifespan_node),
+                        )
+                        if lifespan_raw is not None and lifespan_node is not None
+                        else None
+                    )
+                    if (
+                        lifespan_target is None
+                        and lifespan_raw is not None
+                        and "." not in lifespan_raw
+                    ):
+                        declaration = next(
+                            (
+                                candidate
+                                for candidate in tree.body
+                                if isinstance(
+                                    candidate,
+                                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                                )
+                                and candidate.name == lifespan_raw
+                                and _line_order(path, candidate)
+                                < _line_order(path, node)
+                            ),
+                            None,
+                        )
+                        visible_lifespan = _visible_binding(
+                            import_binding_view,
+                            module,
+                            lifespan_raw,
+                            _line_order(path, lifespan_node),
+                        )
+                        if (
+                            declaration is not None
+                            and visible_lifespan is not None
+                            and visible_lifespan[0] == _line_order(path, declaration)
+                            and len(declaration.decorator_list) == 1
+                            and _resolved_reference_at(
+                                _dotted(declaration.decorator_list[0]) or "",
+                                module,
+                                imports,
+                                import_binding_view,
+                                _line_order(path, declaration.decorator_list[0]),
+                            )
+                            == ("contextlib", "asynccontextmanager")
+                        ):
+                            lifespan_target = (module, lifespan_raw)
+                    lifespan = (
+                        _Reference(
+                            lifespan_raw,
+                            lifespan_target,
+                        )
+                        if lifespan_raw is not None and lifespan_node is not None
                         else None
                     )
                     lifespan_declared = (
@@ -2383,7 +3078,11 @@ class FastAPILifecycleAdapter:
                         and not no_custom_lifespan
                     )
                     unresolved = prefix is None or dependencies is None
-                    if kind == "app" and lifespan_declared and lifespan is None:
+                    if (
+                        kind == "app"
+                        and lifespan_declared
+                        and (lifespan is None or lifespan.target is None)
+                    ):
                         unresolved = True
                     name = targets[0]
                     key = f"{module}:{name}"
@@ -2608,12 +3307,7 @@ class FastAPILifecycleAdapter:
                         )
                         continue
                     local = function_keys.get((module, function.name))
-                    calls_next = any(
-                        isinstance(item, ast.Call)
-                        and _dotted(item.func)
-                        and _dotted(item.func).rsplit(".", 1)[-1] == "call_next"
-                        for item in ast.walk(function)
-                    )
+                    calls_next = _calls_name_in_body(function, "call_next")
                     middleware.setdefault(owner, []).append(
                         _Middleware(
                             owner,
@@ -2663,6 +3357,7 @@ class FastAPILifecycleAdapter:
                             function.name,
                             path,
                             decorator.lineno,
+                            _line_order(path, decorator),
                             event_ordinal,
                         )
                     )
@@ -2891,6 +3586,8 @@ class FastAPILifecycleAdapter:
             routes,
             diagnostics,
             invalid_root_apps=invalid_root_apps,
+            modules_by_path=modules_by_path,
+            import_reachability=import_reachability,
         )
         starlette_series = _version_tuple(self.detected_starlette_version(context))
         middleware_order_proven = (
@@ -2965,28 +3662,17 @@ class FastAPILifecycleAdapter:
             route_candidates.append(candidate)
             route_map[_candidate_key(candidate)] = item
 
-        shadowed_event_owners = {
-            item.key
-            for item in objects.values()
-            if item.kind == "app" and item.lifespan_declared
-        }
-        pending_shadowed = list(shadowed_event_owners)
-        includes_by_parent: dict[str, list[_Include]] = {}
-        for include in includes:
-            if not include.unresolved and include.child is not None:
-                includes_by_parent.setdefault(include.parent, []).append(include)
-        while pending_shadowed:
-            parent = pending_shadowed.pop()
-            for include in includes_by_parent.get(parent, ()):
-                child = include.child
-                if child is not None and child not in shadowed_event_owners:
-                    shadowed_event_owners.add(child)
-                    pending_shadowed.append(child)
-
         event_candidates: list[EntrypointCandidate] = []
-        for item in events:
-            if item.owner in invalid_root_apps or item.owner in shadowed_event_owners:
-                continue
+        expanded_events = _expand_events(
+            objects,
+            includes,
+            events,
+            diagnostics,
+            invalid_root_apps=invalid_root_apps,
+            modules_by_path=modules_by_path,
+            import_reachability=import_reachability,
+        )
+        for item in expanded_events:
             source = parsed.get(item.source_path, ("", None, ""))[0]
             if source:
                 event_candidates.append(

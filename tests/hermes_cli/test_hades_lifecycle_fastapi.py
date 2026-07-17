@@ -1822,7 +1822,7 @@ task_ref = task_alias
     )
     assert isinstance(task_dispatch.target, FrameworkLocalTarget)
     assert task_dispatch.target.local_key == _function_key_at(
-        tmp_path, "first.py", "task"
+        tmp_path, "second.py", "task"
     )
 
 
@@ -1920,3 +1920,557 @@ async def lexical(background_tasks: BackgroundTasks):
 
     assert "yield_dependency_cleanup" not in roles
     assert "background_task_dispatch" not in roles
+
+
+def test_background_tasks_prove_receiver_and_use_runtime_and_lexical_bindings(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    for path in ("first.py", "second.py"):
+        _write(tmp_path, path, "def task(): return None\n")
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import BackgroundTasks as Tasks, FastAPI
+from first import task as global_task
+
+app = FastAPI()
+
+@app.get("/runtime")
+async def runtime(queue: Tasks):
+    queue.add_task(global_task)
+
+@app.get("/local")
+async def local(queue: Tasks):
+    from first import task as local_task
+    queue.add_task(local_task)
+    from second import task as local_task
+
+@app.get("/unproved")
+async def unproved(worker):
+    worker.add_task(global_task)
+
+from second import task as global_task
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    syntax = tuple(
+        _syntax(tmp_path, path) for path in ("app.py", "first.py", "second.py")
+    )
+    entrypoints = adapter.entrypoints(context, syntax)
+
+    def dispatched_target(name: str) -> str | None:
+        candidate = next(item for item in entrypoints if item.public_name == name)
+        dispatch = next(
+            (
+                item
+                for item in adapter.pipeline(context, candidate)
+                if item.framework_role == "background_task_dispatch"
+            ),
+            None,
+        )
+        return (
+            dispatch.target.local_key
+            if dispatch is not None
+            and isinstance(dispatch.target, FrameworkLocalTarget)
+            else None
+        )
+
+    assert dispatched_target("runtime") == _function_key_at(
+        tmp_path, "second.py", "task"
+    )
+    assert dispatched_target("local") == _function_key_at(tmp_path, "first.py", "task")
+    assert dispatched_target("unproved") is None
+    assert any(
+        event.path == "app.py"
+        and event.reason_code == "background_task_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_lifespan_target_uses_constructor_occurrence_binding(tmp_path: Path) -> None:
+    _prepare(tmp_path)
+    for path in ("first.py", "second.py"):
+        _write(
+            tmp_path,
+            path,
+            """async def lifespan(app):
+    yield
+""",
+        )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+from first import lifespan as selected_lifespan
+
+app = FastAPI(lifespan=selected_lifespan)
+
+from second import lifespan as selected_lifespan
+
+def choose_lifespan(): return None
+dynamic_app = FastAPI(lifespan=choose_lifespan())
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(_syntax(tmp_path, path) for path in ("app.py", "first.py", "second.py")),
+    )
+
+    lifespan = next(item for item in entrypoints if item.public_name == "app_lifespan")
+    assert lifespan.handler_local_key == _function_key_at(
+        tmp_path, "first.py", "lifespan"
+    )
+    assert not any(item.public_name == "dynamic_app_lifespan" for item in entrypoints)
+    assert any(
+        event.path == "app.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_exception_class_execution_updates_globals_and_bounds_conditional_headers(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class A(Exception): pass
+class B(Exception): pass
+
+Alias = A
+class GlobalMutation:
+    global Alias
+    Alias = B
+
+global_app = FastAPI()
+
+@global_app.exception_handler(Alias)
+async def global_handler(request, exc): return None
+
+@global_app.get("/global")
+async def global_endpoint(): raise B()
+
+ConditionalAlias = A
+class ConditionalHeader(
+    (ConditionalAlias := B) if enabled else Exception
+): pass
+
+conditional_app = FastAPI()
+
+@conditional_app.exception_handler(ConditionalAlias)
+async def conditional_handler(request, exc): return None
+
+@conditional_app.get("/conditional")
+async def conditional_endpoint(): raise B()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+    global_route = next(
+        item for item in entrypoints if item.public_name == "global_endpoint"
+    )
+    conditional_route = next(
+        item for item in entrypoints if item.public_name == "conditional_endpoint"
+    )
+
+    global_handler = next(
+        item
+        for item in adapter.pipeline(context, global_route)
+        if item.framework_role == "exception_handler"
+    )
+    assert isinstance(global_handler.target, FrameworkLocalTarget)
+    assert global_handler.target.local_key == _function_key(tmp_path, "global_handler")
+    conditional_roles = {
+        item.framework_role for item in adapter.pipeline(context, conditional_route)
+    }
+    assert "exception_handler" not in conditional_roles
+    assert "exception_handler_resolution_boundary" in conditional_roles
+
+
+def test_class_body_global_def_and_class_bindings_invalidate_framework_objects(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+def_app = FastAPI()
+
+@def_app.get("/stale-def")
+async def stale_def(): return None
+
+class DefMutation:
+    global def_app
+    def def_app(): return None
+
+class_app = FastAPI()
+
+@class_app.get("/stale-class")
+async def stale_class(): return None
+
+class ClassMutation:
+    global class_app
+    class class_app: pass
+
+safe_app = FastAPI()
+
+@safe_app.get("/safe")
+async def safe(): return None
+
+class NestedBody:
+    global safe_app
+    def nested():
+        safe_app = build_app()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {"safe"}
+    assert any(
+        event.reason_code == "framework_object_rebound"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_annotated_assignments_discover_proven_framework_objects_and_bound_dynamic(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app: FastAPI = FastAPI()
+app_alias: FastAPI = app
+router: APIRouter = APIRouter(prefix="/api")
+router_alias: APIRouter = router
+
+@router_alias.get("/annotated")
+async def annotated(): return None
+
+app_alias.include_router(router_alias)
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic.py",
+        """from fastapi import FastAPI
+
+def factory(): return None
+dynamic: FastAPI = factory()
+
+@dynamic.get("/invented")
+async def invented(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "app.py"), _syntax(tmp_path, "dynamic.py")),
+    )
+
+    assert {
+        (item.public_name, item.public_path)
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {("annotated", "/api/annotated")}
+    assert any(
+        event.path == "dynamic.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_registration_detection_uses_receiver_binding_at_call_occurrence(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "proven.py",
+        """from fastapi import FastAPI
+
+receiver = {}
+receiver.get("ordinary")
+receiver = FastAPI()
+
+@receiver.get("/valid")
+async def valid(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "unknown.py",
+        """from fastapi import FastAPI
+
+if enabled:
+    receiver = build_app()
+receiver.get("/maybe")
+receiver = FastAPI()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "proven.py"), _syntax(tmp_path, "unknown.py")),
+    )
+
+    assert {item.public_name for item in entrypoints} == {"valid"}
+    assert not any(
+        event.path == "proven.py" and event.reason_code == "framework_config_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+    assert any(
+        event.path == "unknown.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_router_snapshot_and_legacy_events_are_include_instance_bounded(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "routers.py",
+        """from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.on_event("startup")
+async def before_event(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "registrar.py",
+        """from routers import router
+
+@router.get("/unknown-order")
+async def unknown_order(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+from routers import router
+
+async def lifespan(app):
+    yield
+
+lifespan_app = FastAPI(lifespan=lifespan)
+lifespan_app.include_router(router)
+
+@router.on_event("startup")
+async def after_event(): return None
+
+legacy_app = FastAPI()
+legacy_app.include_router(router)
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_app.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+from cycle_router import router
+app.include_router(router)
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_router.py",
+        """from fastapi import APIRouter
+
+router = APIRouter()
+import cycle_app
+
+@router.get("/cyclic")
+async def cyclic(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(
+            _syntax(tmp_path, path)
+            for path in (
+                "app.py",
+                "routers.py",
+                "registrar.py",
+                "cycle_app.py",
+                "cycle_router.py",
+            )
+        ),
+    )
+
+    assert not any(item.public_name == "unknown_order" for item in entrypoints)
+    assert not any(item.public_name == "cyclic" for item in entrypoints)
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.EVENT_LISTENER
+    } == {"before_event", "after_event"}
+    assert any(
+        event.path == "registrar.py"
+        and event.reason_code == "router_snapshot_order_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+    assert any(
+        event.path == "cycle_router.py"
+        and event.reason_code == "router_snapshot_order_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_middleware_call_next_discovery_excludes_nested_lexical_scopes(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def middleware(request, call_next):
+    def nested_function():
+        return call_next(request)
+    class NestedClass:
+        result = call_next(request)
+    hidden = lambda: call_next(request)
+    return None
+
+@app.get("/endpoint")
+async def endpoint(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    middleware = next(
+        item
+        for item in adapter.pipeline(context, _candidate(adapter, context, "endpoint"))
+        if item.framework_role == "middleware_request"
+    )
+
+    assert middleware.short_circuit_successors
+
+
+def test_dependency_proof_supports_annotated_and_bounds_fake_and_dynamic_cache(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from typing import Annotated
+from fastapi import Depends as FastDepends, FastAPI, Security as FastSecurity
+
+def shared(): return None
+def secured(): return None
+
+app = FastAPI()
+
+@app.get("/annotated")
+async def annotated(
+    first: Annotated[str, FastDepends(shared)],
+    second: Annotated[str, FastSecurity(secured)],
+    third: Annotated[str, FastDepends(shared)],
+): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "fake.py",
+        """from fastapi import FastAPI
+
+def Depends(target): return target
+def dependency(): return None
+
+app = FastAPI()
+
+@app.get("/fake", dependencies=[Depends(dependency)])
+async def fake(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic_cache.py",
+        """from fastapi import Depends, FastAPI
+
+def dependency(): return None
+cache_setting = build_cache_setting()
+app = FastAPI()
+
+@app.get(
+    "/dynamic-cache",
+    dependencies=[Depends(dependency, use_cache=cache_setting)],
+)
+async def dynamic_cache(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    syntax = tuple(
+        _syntax(tmp_path, path) for path in ("app.py", "fake.py", "dynamic_cache.py")
+    )
+    entrypoints = adapter.entrypoints(context, syntax)
+
+    assert {item.public_name for item in entrypoints} == {"annotated"}
+    annotated = next(item for item in entrypoints if item.public_name == "annotated")
+    dependency_segments = [
+        item
+        for item in adapter.pipeline(context, annotated)
+        if item.framework_role in {"decorator_dependency", "dependency_cache_reuse"}
+    ]
+    assert [item.framework_role for item in dependency_segments] == [
+        "decorator_dependency",
+        "decorator_dependency",
+        "dependency_cache_reuse",
+    ]
+    assert [
+        item.target.local_key
+        for item in dependency_segments[:2]
+        if isinstance(item.target, FrameworkLocalTarget)
+    ] == [
+        _function_key(tmp_path, "shared"),
+        _function_key(tmp_path, "secured"),
+    ]
+    assert {
+        event.path
+        for event in adapter.coverage_events(context)
+        if event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+    } >= {"fake.py", "dynamic_cache.py"}
