@@ -646,6 +646,10 @@ def _targets_urlpatterns(targets: Sequence[ast.AST]) -> bool:
     return any("urlpatterns" in _assignment_roots(target) for target in targets)
 
 
+def _is_urlpattern_declaration(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _dotted(node.func) in _URL_CALLS
+
+
 def _urlpatterns(tree: ast.Module) -> tuple[ast.AST, ...] | None:
     """Evaluate a bounded, source-ordered subset of Python assignment semantics."""
 
@@ -695,6 +699,31 @@ def _urlpatterns(tree: ast.Module) -> tuple[ast.AST, ...] | None:
                 return None
             values += extension
             continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call = statement.value
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "urlpatterns"
+            ):
+                continue
+            if not found or call.keywords:
+                return None
+            if call.func.attr == "extend" and len(call.args) == 1:
+                extension = _literal_urlpatterns(call.args[0])
+                if extension is not None and all(
+                    _is_urlpattern_declaration(item) for item in extension
+                ):
+                    values += extension
+                    continue
+            if (
+                call.func.attr == "append"
+                and len(call.args) == 1
+                and _is_urlpattern_declaration(call.args[0])
+            ):
+                values += (call.args[0],)
+                continue
+            return None
         if "urlpatterns" in _rebound_names(statement):
             return None
     return values if found else ()

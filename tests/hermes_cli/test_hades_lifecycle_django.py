@@ -1168,3 +1168,93 @@ urlpatterns = [path("live/", views.live, name="live")]
     assert [(route.public_path, route.public_name) for route in routes] == [
         ("/live/", "live")
     ]
+
+
+def test_urlpatterns_literal_extend_and_append_preserve_route_order(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("first/", views.first, name="first")]
+urlpatterns.extend([path("second/", views.second, name="second")])
+urlpatterns.append(path("third/", views.third, name="third"))
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """def first(request): return HttpResponse()
+def second(request): return HttpResponse()
+def third(request): return HttpResponse()
+""",
+    )
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("first", 1),
+                _function("second", 2),
+                _function("third", 3),
+            ),
+        ),
+    )
+
+    assert [(route.public_path, route.public_name) for route in routes] == [
+        ("/first/", "first"),
+        ("/second/", "second"),
+        ("/third/", "third"),
+    ]
+
+
+def test_computed_urlpatterns_mutation_discards_static_routes(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("stale/", views.stale, name="stale")]
+urlpatterns.extend(build_routes())
+""",
+    )
+    _write(tmp_path, "project/views.py", "def stale(request): return HttpResponse()\n")
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "project/views.py", _function("stale", 1)),),
+    )
+
+    assert routes == ()
+    assert ("urlpatterns_unresolved", CoverageOutcome.PARTIAL) in {
+        (event.reason_code, event.outcome) for event in adapter.coverage_events(context)
+    }
+
+
+def test_unrelated_list_mutation_does_not_invalidate_urlpatterns(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("live/", views.live, name="live")]
+other.extend(build_routes())
+""",
+    )
+    _write(tmp_path, "project/views.py", "def live(request): return HttpResponse()\n")
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        _context(tmp_path),
+        (_syntax(tmp_path, "project/views.py", _function("live", 1)),),
+    )
+
+    assert [(route.public_path, route.public_name) for route in routes] == [
+        ("/live/", "live")
+    ]
