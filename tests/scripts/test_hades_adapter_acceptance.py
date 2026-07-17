@@ -207,3 +207,28 @@ def test_cli_freezes_validates_and_returns_two_for_invalid_lock(tmp_path: Path) 
         ])
         == 2
     )
+
+
+def test_fastapi_acceptance_bundle_is_frozen() -> None:
+    module = _load_module()
+    base = ROOT / "tests" / "fixtures" / "hades" / "adapter_acceptance" / "fastapi"
+    corpus = json.loads((base / "corpus.json").read_text(encoding="utf-8"))
+    matrix = json.loads((base / "matrix.json").read_text(encoding="utf-8"))
+    lock = json.loads((base / "lock.json").read_text(encoding="utf-8"))
+    module.validate_lock(corpus, matrix, lock)
+    assert {item["id"] for item in matrix["items"]} == {
+        "FASTAPI-ROUTE-001",
+        "FASTAPI-ROUTER-001",
+        "FASTAPI-METHOD-001",
+        "FASTAPI-STARLETTE-001",
+        "FASTAPI-DEPENDENCY-001",
+        "FASTAPI-SECURITY-001",
+        "FASTAPI-MIDDLEWARE-001",
+        "FASTAPI-EXCEPTION-001",
+        "FASTAPI-LIFESPAN-001",
+        "FASTAPI-BACKGROUND-001",
+        "FASTAPI-RESPONSE-001",
+        "FASTAPI-IMPORT-001",
+        "FASTAPI-DYNAMIC-001",
+        "FASTAPI-REBIND-001",
+    }

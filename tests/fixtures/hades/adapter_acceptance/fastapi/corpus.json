@@ -1,0 +1,49 @@
+{
+  "schema": "hades.adapter_acceptance_corpus.v1",
+  "framework": "fastapi",
+  "framework_versions": ["fastapi==0.115.0", "starlette==0.37.2"],
+  "sources": [
+    {
+      "kind": "official_docs",
+      "name": "fastapi-official",
+      "url": "https://github.com/fastapi/fastapi.git",
+      "revision": "40e33e492dbf4af6172997f4e3238a32e56cbe26",
+      "paths": ["docs/en/docs", "fastapi/routing.py", "fastapi/applications.py"]
+    },
+    {
+      "kind": "official_docs",
+      "name": "starlette-official",
+      "url": "https://github.com/Kludex/starlette.git",
+      "revision": "554f368809e0d891a699667faf0cfbb20057eeb2",
+      "paths": ["docs", "starlette/routing.py", "starlette/applications.py"]
+    },
+    {
+      "kind": "public_repository",
+      "name": "full-stack-fastapi-template",
+      "url": "https://github.com/fastapi/full-stack-fastapi-template.git",
+      "revision": "88e1a607b0b4f26e1990c55bb81c82beeff853bb",
+      "paths": ["backend/app"]
+    },
+    {
+      "kind": "public_repository",
+      "name": "netflix-dispatch",
+      "url": "https://github.com/Netflix/dispatch.git",
+      "revision": "3c90e4bb604724708e3e3c4b470a51fc40ce8274",
+      "paths": ["src/dispatch"]
+    },
+    {
+      "kind": "public_repository",
+      "name": "fastapi-realworld-example-app",
+      "url": "https://github.com/nsidnev/fastapi-realworld-example-app.git",
+      "revision": "029eb7781c60d5f563ee8990a0cbfb79b244538c",
+      "paths": ["app"]
+    },
+    {
+      "kind": "owned_repository",
+      "name": "hephaistos-dashboard",
+      "url": "https://github.com/titagram/Hephaistos.git",
+      "revision": "534a8d70f8fdb6c8eeb6158e8ce5e4b273311ee2",
+      "paths": ["hermes_cli/web_server.py"]
+    }
+  ]
+}
