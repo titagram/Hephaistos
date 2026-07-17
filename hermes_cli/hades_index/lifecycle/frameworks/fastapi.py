@@ -75,24 +75,16 @@ _FRAMEWORK_REGISTRATION_METHODS = frozenset({
     "add_exception_handler",
     "add_middleware",
     "add_route",
+    "exception_handler",
     "include_router",
+    "middleware",
+    "on_event",
 })
-_DYNAMIC_CONTROL_FLOW = (
-    ast.AsyncFor,
-    ast.AsyncWith,
-    ast.For,
-    ast.If,
-    ast.Match,
-    ast.Try,
-    ast.While,
-    ast.With,
-)
 
-# These are the detected framework series whose route registration signatures
-# and defaults were source-reviewed for this adapter.  An unknown/new series is
-# intentionally partial rather than inheriting a possibly stale default.
-_FASTAPI_ROUTE_SIGNATURE_SERIES = frozenset({(0, 115)})
-_STARLETTE_ROUTE_SIGNATURE_SERIES = frozenset({(0, 37)})
+# These exact detected versions have source-reviewed route registration
+# signatures/defaults.  Patch siblings remain partial until reviewed.
+_FASTAPI_ROUTE_SIGNATURE_VERSIONS = frozenset({"0.115.0"})
+_STARLETTE_ROUTE_SIGNATURE_VERSIONS = frozenset({"0.37.2"})
 
 # These are the Starlette series for which this adapter has an explicit,
 # source-reviewed registration rule: user middleware are appended and the
@@ -156,6 +148,7 @@ class _Include:
 @dataclass(frozen=True, slots=True)
 class _Route:
     owner: str
+    flavor: str
     path: str | None
     methods: tuple[str, ...] | None
     dependencies: tuple[_Dependency, ...]
@@ -406,35 +399,48 @@ def _http_methods(
     return tuple(sorted(set(methods) | ({"HEAD"} if "GET" in methods else set())))
 
 
-def _static_type_annotation(node: ast.AST | None) -> bool | None:
+def _static_type_annotation(
+    node: ast.AST | None,
+    *,
+    quoted_depth: int = 0,
+) -> bool | None:
     if node is None:
         return False
     if isinstance(node, ast.Constant):
         if node.value is None:
             return False
-        return (
-            True if isinstance(node.value, str) and bool(node.value.strip()) else None
-        )
-    if isinstance(node, (ast.Name, ast.Attribute)):
+        if not isinstance(node.value, str) or not node.value.strip() or quoted_depth:
+            return None
+        try:
+            expression = ast.parse(node.value, mode="eval").body
+        except SyntaxError:
+            return None
+        return _static_type_annotation(expression, quoted_depth=quoted_depth + 1)
+    if isinstance(node, ast.Name):
         return True
+    if isinstance(node, ast.Attribute):
+        return True if _dotted(node) is not None else None
     if isinstance(node, ast.Subscript):
         return (
             True
-            if _static_type_annotation(node.value) is True
-            and _static_type_annotation(node.slice) is True
+            if _static_type_annotation(node.value, quoted_depth=quoted_depth) is True
+            and _static_type_annotation(node.slice, quoted_depth=quoted_depth) is True
             else None
         )
     if isinstance(node, (ast.Tuple, ast.List)):
         return (
             True
             if node.elts
-            and all(_static_type_annotation(item) is True for item in node.elts)
+            and all(
+                _static_type_annotation(item, quoted_depth=quoted_depth) is True
+                for item in node.elts
+            )
             else None
         )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
         sides = (
-            _static_type_annotation(node.left),
-            _static_type_annotation(node.right),
+            _static_type_annotation(node.left, quoted_depth=quoted_depth),
+            _static_type_annotation(node.right, quoted_depth=quoted_depth),
         )
         return True if all(item in {True, False} for item in sides) else None
     return None
@@ -452,7 +458,7 @@ def _response_model(call: ast.Call, return_annotation: ast.AST | None) -> bool |
     if value is None:
         return _static_type_annotation(return_annotation)
     if isinstance(value, ast.Constant):
-        return False if value.value is None else isinstance(value.value, str)
+        return False if value.value is None else _static_type_annotation(value)
     if isinstance(value, (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple, ast.List)):
         return True
     return None
@@ -662,18 +668,75 @@ def _exception_identity(
     raw: str | None,
     module: str,
     imports: Mapping[str, Mapping[str, str]],
+    aliases: Mapping[tuple[str, str], str | None] | None = None,
 ) -> str | None:
     if raw is None:
         return None
     if raw in {"BaseException", "Exception"}:
         return f"builtins.{raw}"
+    if "." not in raw and aliases is not None and (module, raw) in aliases:
+        return aliases[(module, raw)]
     resolved = _resolved_reference(raw, module, imports)
     return ".".join(resolved) if resolved is not None else None
+
+
+def _exception_aliases(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+    imports: Mapping[str, Mapping[str, str]],
+) -> Mapping[tuple[str, str], str | None]:
+    """Resolve direct local aliases only when their class identity is static."""
+
+    local_classes = {
+        (module, node.name)
+        for _source, tree, module in parsed.values()
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    aliases: dict[tuple[str, str], str | None] = {}
+
+    def resolve(raw: str | None, module: str) -> str | None:
+        if raw is None:
+            return None
+        if raw in {"BaseException", "Exception"}:
+            return f"builtins.{raw}"
+        if "." not in raw:
+            key = (module, raw)
+            if key in aliases:
+                return aliases[key]
+            if key in local_classes:
+                return f"{module}.{raw}"
+            binding = imports.get(module, {}).get(raw)
+            return binding if binding and "." in binding else None
+        head = raw.split(".", 1)[0]
+        if head not in imports.get(module, {}):
+            return None
+        resolved = _resolved_reference(raw, module, imports)
+        return ".".join(resolved) if resolved is not None else None
+
+    for _path, (_source, tree, module) in parsed.items():
+        for node in tree.body:
+            targets: tuple[ast.Name, ...] = ()
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets = tuple(
+                    target for target in node.targets if isinstance(target, ast.Name)
+                )
+                value = node.value
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                targets = (node.target,)
+                value = node.value
+            if not targets:
+                continue
+            identity = resolve(_dotted(value), module)
+            for target in targets:
+                aliases[(module, target.id)] = identity
+    return MappingProxyType(aliases)
 
 
 def _exception_mros(
     parsed: Mapping[str, tuple[str, ast.Module, str]],
     imports: Mapping[str, Mapping[str, str]],
+    aliases: Mapping[tuple[str, str], str | None],
 ) -> Mapping[str, tuple[str, ...] | None]:
     """Build only fully proven Python MROs for source-visible classes."""
 
@@ -687,7 +750,7 @@ def _exception_mros(
                 bases_by_class[identity] = ("builtins.object",)
                 continue
             bases = tuple(
-                _exception_identity(_dotted(base), module, imports)
+                _exception_identity(_dotted(base), module, imports, aliases)
                 for base in node.bases
             )
             bases_by_class[identity] = (
@@ -776,53 +839,128 @@ def _object_reference(
     return key if key in objects and key not in duplicate_objects else None
 
 
-def _assigned_names(node: ast.stmt) -> tuple[str, ...]:
-    """Return direct top-level names rebound by one statement.
-
-    This intentionally does not descend into control flow: a conditional,
-    computed rebinding makes framework registration order unprovable and is
-    handled by the caller as partial rather than as a synthetic branch.
-    """
-
-    targets: tuple[ast.AST, ...]
-    if isinstance(node, ast.Assign):
-        targets = tuple(node.targets)
-    elif isinstance(node, ast.AnnAssign):
-        targets = (node.target,)
-    elif isinstance(node, ast.AugAssign):
-        targets = (node.target,)
-    elif isinstance(node, ast.Delete):
-        targets = tuple(node.targets)
-    else:
-        return ()
-    return tuple(target.id for target in targets if isinstance(target, ast.Name))
+def _is_registration_call(
+    node: ast.AST,
+    module: str,
+    imports: Mapping[str, Mapping[str, str]],
+    objects: Mapping[str, _Object],
+) -> bool:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    owner = _resolved_reference(_dotted(node.func.value) or "", module, imports)
+    return (
+        owner is not None
+        and f"{owner[0]}:{owner[1]}" in objects
+        and (
+            node.func.attr in _FRAMEWORK_REGISTRATION_METHODS
+            or node.func.attr in _ROUTE_DECORATORS
+        )
+    )
 
 
-def _has_dynamic_registration(
+def _has_unmodeled_registration(
     tree: ast.Module,
     module: str,
     imports: Mapping[str, Mapping[str, str]],
     objects: Mapping[str, _Object],
 ) -> bool:
+    modeled: set[int] = set()
     for statement in tree.body:
-        if not isinstance(statement, _DYNAMIC_CONTROL_FLOW):
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            modeled.update(
+                id(decorator)
+                for decorator in statement.decorator_list
+                if _is_registration_call(decorator, module, imports, objects)
+            )
+        elif isinstance(statement, ast.Expr) and _is_registration_call(
+            statement.value, module, imports, objects
+        ):
+            modeled.add(id(statement.value))
+    return any(
+        id(node) not in modeled
+        and _is_registration_call(node, module, imports, objects)
+        for node in ast.walk(tree)
+    )
+
+
+def _module_scope_rebound_orders(
+    path: str,
+    tree: ast.Module,
+    object_orders: Mapping[str, tuple[str, int, int]],
+) -> tuple[tuple[str, tuple[str, int, int]], ...]:
+    found: list[tuple[str, tuple[str, int, int]]] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def _record(self, name: str | None, node: ast.AST) -> None:
+            order = _line_order(path, node)
+            if name in object_orders and order > object_orders[name]:
+                found.append((name, order))
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self._record(node.id, node)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._record(node.name, node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._record(node.name, node)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._record(node.name, node)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+        def visit_ListComp(self, node: ast.ListComp) -> None:
+            return None
+
+        def visit_SetComp(self, node: ast.SetComp) -> None:
+            return None
+
+        def visit_DictComp(self, node: ast.DictComp) -> None:
+            return None
+
+        def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+            return None
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            self._record(node.name, node)
+            for statement in node.body:
+                self.visit(statement)
+
+        def visit_MatchAs(self, node: ast.MatchAs) -> None:
+            self._record(node.name, node)
+            if node.pattern is not None:
+                self.visit(node.pattern)
+
+        def visit_MatchStar(self, node: ast.MatchStar) -> None:
+            self._record(node.name, node)
+
+        def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+            self._record(node.rest, node)
+            self.generic_visit(node)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                self._record(alias.asname or alias.name.split(".", 1)[0], node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            for alias in node.names:
+                self._record(alias.asname or alias.name, node)
+
+    visitor = _Visitor()
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and isinstance(statement.value, ast.Call)
+            and _call_name(statement.value)
+            and _call_name(statement.value).rsplit(".", 1)[-1]
+            in {"APIRouter", "FastAPI"}
+        ):
             continue
-        for node in ast.walk(statement):
-            if not isinstance(node, ast.Call) or not isinstance(
-                node.func, ast.Attribute
-            ):
-                continue
-            owner = _resolved_reference(_dotted(node.func.value) or "", module, imports)
-            if (
-                owner is not None
-                and f"{owner[0]}:{owner[1]}" in objects
-                and (
-                    node.func.attr in _FRAMEWORK_REGISTRATION_METHODS
-                    or node.func.attr in _ROUTE_DECORATORS
-                )
-            ):
-                return True
-    return False
+        visitor.visit(statement)
+    return tuple(found)
 
 
 def _dependency_key(
@@ -1127,9 +1265,14 @@ def _expand_routes(
                 _ResolvedRoute(
                     route,
                     _join_path(current_prefix, route.path),
-                    dependencies
-                    + tuple(
-                        ("decorator_dependency", item) for item in route.dependencies
+                    (
+                        dependencies
+                        + tuple(
+                            ("decorator_dependency", item)
+                            for item in route.dependencies
+                        )
+                        if route.flavor == "fastapi"
+                        else ()
                     ),
                     app_key,
                 )
@@ -1265,21 +1408,25 @@ class FastAPILifecycleAdapter:
             parsed[item.path] = (source, parsed_tree, module)
             imports[module] = _imports_for(item.path, module, parsed_tree)
 
-        fastapi_series = _version_tuple(self.detected_version(context))
-        starlette_series = _version_tuple(self.detected_starlette_version(context))
+        fastapi_version = self.detected_version(context)
+        starlette_version = self.detected_starlette_version(context)
         fastapi_route_contract_proven = (
-            fastapi_series in _FASTAPI_ROUTE_SIGNATURE_SERIES
+            fastapi_version in _FASTAPI_ROUTE_SIGNATURE_VERSIONS
         )
         starlette_route_contract_proven = (
-            starlette_series in _STARLETTE_ROUTE_SIGNATURE_SERIES
+            starlette_version in _STARLETTE_ROUTE_SIGNATURE_VERSIONS
         )
-        exception_mros = _exception_mros(parsed, imports)
+        exception_aliases = _exception_aliases(parsed, imports)
+        exception_mros = _exception_mros(parsed, imports, exception_aliases)
 
         objects: dict[str, _Object] = {}
         duplicate_objects: set[str] = set()
         rebound_names: dict[tuple[str, str], list[tuple[str, int, int]]] = {}
         outcomes: dict[tuple[str, str], _FunctionOutcome] = {}
         function_returns: dict[tuple[str, str], ast.AST | None] = {}
+        function_dependencies: dict[
+            tuple[str, str], tuple[_Dependency, ...] | None
+        ] = {}
         function_nodes: list[
             tuple[str, str, str, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
@@ -1295,10 +1442,6 @@ class FastAPILifecycleAdapter:
                         else None
                     )
                     if kind is None:
-                        for name in _assigned_names(node):
-                            rebound_names.setdefault((module, name), []).append(
-                                _line_order(path, node)
-                            )
                         continue
                     targets = [
                         target.id
@@ -1321,20 +1464,25 @@ class FastAPILifecycleAdapter:
                     dependencies = _dependencies(
                         _keyword(node.value, "dependencies"), module, path
                     )
+                    lifespan_node = (
+                        _keyword(node.value, "lifespan") if kind == "app" else None
+                    )
+                    no_custom_lifespan = (
+                        isinstance(lifespan_node, ast.Constant)
+                        and lifespan_node.value is None
+                    )
                     lifespan = (
-                        _dotted(_keyword(node.value, "lifespan"))
-                        if kind == "app"
+                        _dotted(lifespan_node)
+                        if lifespan_node is not None and not no_custom_lifespan
                         else None
                     )
                     lifespan_declared = (
-                        kind == "app" and _keyword(node.value, "lifespan") is not None
+                        kind == "app"
+                        and lifespan_node is not None
+                        and not no_custom_lifespan
                     )
                     unresolved = prefix is None or dependencies is None
-                    if (
-                        kind == "app"
-                        and _keyword(node.value, "lifespan") is not None
-                        and lifespan is None
-                    ):
+                    if kind == "app" and lifespan_declared and lifespan is None:
                         unresolved = True
                     name = targets[0]
                     key = f"{module}:{name}"
@@ -1355,10 +1503,6 @@ class FastAPILifecycleAdapter:
                         unresolved,
                     )
                     continue
-                for name in _assigned_names(node):
-                    rebound_names.setdefault((module, name), []).append(
-                        _line_order(path, node)
-                    )
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     background_targets = _background_targets(node)
                     if background_targets is None:
@@ -1371,7 +1515,12 @@ class FastAPILifecycleAdapter:
                         isinstance(node, ast.AsyncFunctionDef),
                         _has_yield(node),
                         tuple(
-                            _exception_identity(item, module, imports)
+                            _exception_identity(
+                                item,
+                                module,
+                                imports,
+                                exception_aliases,
+                            )
                             for item in _raised_types(node)
                         ),
                         _has_request_validation(node),
@@ -1379,14 +1528,42 @@ class FastAPILifecycleAdapter:
                     )
                     outcomes[(module, node.name)] = outcome
                     function_returns[(module, node.name)] = node.returns
+                    function_dependencies[(module, node.name)] = (
+                        _parameter_dependencies(node, module, path)
+                    )
                     function_nodes.append((path, source, module, node))
 
+        object_orders_by_module: dict[str, dict[str, tuple[str, int, int]]] = {}
+        for item in objects.values():
+            object_orders_by_module.setdefault(item.module, {})[item.name] = item.order
+        for path, (_source, tree, module) in parsed.items():
+            orders = object_orders_by_module.setdefault(module, {})
+            for node in tree.body:
+                if isinstance(node, ast.ImportFrom):
+                    local_names = tuple(
+                        alias.asname or alias.name
+                        for alias in node.names
+                        if alias.name != "*"
+                    )
+                else:
+                    local_names = ()
+                for name in local_names:
+                    target = _resolved_reference(name, module, imports)
+                    if target is not None and f"{target[0]}:{target[1]}" in objects:
+                        orders.setdefault(name, _line_order(path, node))
+        for path, (_source, tree, module) in parsed.items():
+            for name, order in _module_scope_rebound_orders(
+                path,
+                tree,
+                object_orders_by_module.get(module, {}),
+            ):
+                rebound_names.setdefault((module, name), []).append(order)
         rebound_view = MappingProxyType({
             key: tuple(sorted(value)) for key, value in rebound_names.items()
         })
         duplicate_view = frozenset(duplicate_objects)
         for path, (_source, tree, module) in parsed.items():
-            if _has_dynamic_registration(tree, module, imports, objects):
+            if _has_unmodeled_registration(tree, module, imports, objects):
                 diagnostics.mark(
                     path,
                     CoverageCapability.ENTRYPOINT_DISCOVERY,
@@ -1408,7 +1585,6 @@ class FastAPILifecycleAdapter:
         event_ordinal = 0
 
         for path, source, module, function in function_nodes:
-            parameter_dependencies = _parameter_dependencies(function, module, path)
             for decorator in function.decorator_list:
                 if not isinstance(decorator, ast.Call) or not isinstance(
                     decorator.func, ast.Attribute
@@ -1427,6 +1603,7 @@ class FastAPILifecycleAdapter:
                     continue
                 method = decorator.func.attr
                 if method in _ROUTE_DECORATORS:
+                    flavor = "starlette" if method == "route" else "fastapi"
                     path_node = (
                         decorator.args[0]
                         if decorator.args
@@ -1439,23 +1616,35 @@ class FastAPILifecycleAdapter:
                         fastapi_contract_proven=fastapi_route_contract_proven,
                         starlette_contract_proven=starlette_route_contract_proven,
                     )
-                    dependencies = _dependencies(
-                        _keyword(decorator, "dependencies"), module, path
+                    dependencies = (
+                        _dependencies(_keyword(decorator, "dependencies"), module, path)
+                        if flavor == "fastapi"
+                        else ()
                     )
-                    response_model = _response_model(decorator, function.returns)
-                    unresolved = (
-                        public_path is None
-                        or methods is None
-                        or dependencies is None
-                        or parameter_dependencies is None
+                    parameter_dependencies = (
+                        function_dependencies.get((module, function.name))
+                        if flavor == "fastapi"
+                        else ()
                     )
+                    response_model = (
+                        _response_model(decorator, function.returns)
+                        if flavor == "fastapi"
+                        else False
+                    )
+                    unresolved = public_path is None or methods is None
+                    if flavor == "fastapi":
+                        unresolved = (
+                            unresolved
+                            or dependencies is None
+                            or parameter_dependencies is None
+                        )
                     if methods is None:
                         diagnostics.mark(
                             path,
                             CoverageCapability.ENTRYPOINT_DISCOVERY,
                             "route_method_contract_unresolved",
                         )
-                    if response_model is None:
+                    if flavor == "fastapi" and response_model is None:
                         diagnostics.mark(
                             path,
                             CoverageCapability.FRAMEWORK_LIFECYCLE,
@@ -1464,6 +1653,7 @@ class FastAPILifecycleAdapter:
                     routes.append(
                         _Route(
                             owner,
+                            flavor,
                             public_path,
                             methods,
                             (dependencies or ()) + (parameter_dependencies or ()),
@@ -1512,6 +1702,7 @@ class FastAPILifecycleAdapter:
                         _dotted(decorator.args[0] if decorator.args else None),
                         module,
                         imports,
+                        exception_aliases,
                     )
                     exception_handlers.setdefault(owner, []).append(
                         _ExceptionHandler(
@@ -1597,6 +1788,7 @@ class FastAPILifecycleAdapter:
                         )
                     )
                 elif method in {"add_api_route", "add_route"}:
+                    flavor = "fastapi" if method == "add_api_route" else "starlette"
                     path_node = call.args[0] if call.args else _keyword(call, "path")
                     endpoint = _dotted(
                         call.args[1]
@@ -1610,13 +1802,34 @@ class FastAPILifecycleAdapter:
                         fastapi_contract_proven=fastapi_route_contract_proven,
                         starlette_contract_proven=starlette_route_contract_proven,
                     )
-                    dependencies = _dependencies(
-                        _keyword(call, "dependencies"), module, path
+                    registration_dependencies = (
+                        _dependencies(_keyword(call, "dependencies"), module, path)
+                        if flavor == "fastapi"
+                        else ()
                     )
                     target = _resolved_reference(endpoint or "", module, imports)
-                    response_model = _response_model(
-                        call,
-                        function_returns.get(target) if target is not None else None,
+                    endpoint_dependencies = (
+                        function_dependencies.get(target)
+                        if flavor == "fastapi"
+                        and target is not None
+                        and target in function_dependencies
+                        else ()
+                    )
+                    dependencies = (
+                        None
+                        if registration_dependencies is None
+                        or endpoint_dependencies is None
+                        else registration_dependencies + endpoint_dependencies
+                    )
+                    response_model = (
+                        _response_model(
+                            call,
+                            function_returns.get(target)
+                            if target is not None
+                            else None,
+                        )
+                        if flavor == "fastapi"
+                        else False
                     )
                     unresolved = (
                         public_path is None
@@ -1630,7 +1843,7 @@ class FastAPILifecycleAdapter:
                             CoverageCapability.ENTRYPOINT_DISCOVERY,
                             "route_method_contract_unresolved",
                         )
-                    if response_model is None:
+                    if flavor == "fastapi" and response_model is None:
                         diagnostics.mark(
                             path,
                             CoverageCapability.FRAMEWORK_LIFECYCLE,
@@ -1639,6 +1852,7 @@ class FastAPILifecycleAdapter:
                     routes.append(
                         _Route(
                             owner,
+                            flavor,
                             public_path,
                             methods,
                             dependencies or (),
@@ -1683,6 +1897,7 @@ class FastAPILifecycleAdapter:
                         _dotted(call.args[0] if call.args else None),
                         module,
                         imports,
+                        exception_aliases,
                     )
                     handler_raw = _dotted(
                         call.args[1]
@@ -1935,7 +2150,7 @@ class FastAPILifecycleAdapter:
                 )
             else:
                 roles.append(("middleware_order_boundary", None, None, False, False))
-        if outcome.has_request_validation:
+        if resolved.route.flavor == "fastapi" and outcome.has_request_validation:
             roles.append(("request_validation", None, None, True, False))
 
         seen_cached: set[tuple[str, str]] = set()
@@ -2252,6 +2467,8 @@ class FastAPILifecycleAdapter:
 
         if not raised_types or any(item is None for item in raised_types):
             return ("boundary", None)
+        if any(handler.exception_name is None for handler in handlers):
+            return ("boundary", None)
         matches: list[_ExceptionHandler | None] = []
         for raised in raised_types:
             assert raised is not None
@@ -2279,10 +2496,6 @@ class FastAPILifecycleAdapter:
                 ),
                 None,
             )
-            if selected is None and any(
-                handler.exception_name is None for handler in handlers
-            ):
-                return ("boundary", None)
             matches.append(selected)
         first = matches[0]
         if not all(item == first for item in matches):
