@@ -70,6 +70,29 @@ _HTTP_DECORATORS = frozenset({
     "trace",
 })
 _ROUTE_DECORATORS = _HTTP_DECORATORS | {"api_route", "route"}
+_FRAMEWORK_REGISTRATION_METHODS = frozenset({
+    "add_api_route",
+    "add_exception_handler",
+    "add_middleware",
+    "add_route",
+    "include_router",
+})
+_DYNAMIC_CONTROL_FLOW = (
+    ast.AsyncFor,
+    ast.AsyncWith,
+    ast.For,
+    ast.If,
+    ast.Match,
+    ast.Try,
+    ast.While,
+    ast.With,
+)
+
+# These are the detected framework series whose route registration signatures
+# and defaults were source-reviewed for this adapter.  An unknown/new series is
+# intentionally partial rather than inheriting a possibly stale default.
+_FASTAPI_ROUTE_SIGNATURE_SERIES = frozenset({(0, 115)})
+_STARLETTE_ROUTE_SIGNATURE_SERIES = frozenset({(0, 37)})
 
 # These are the Starlette series for which this adapter has an explicit,
 # source-reviewed registration rule: user middleware are appended and the
@@ -111,6 +134,7 @@ class _Object:
     prefix: str | None
     dependencies: tuple[_Dependency, ...]
     lifespan: str | None
+    lifespan_declared: bool
     source_path: str
     line: int
     order: tuple[str, int, int]
@@ -137,7 +161,7 @@ class _Route:
     dependencies: tuple[_Dependency, ...]
     handler_module: str
     handler_name: str
-    response_model: bool
+    response_model: bool | None
     source_path: str
     line: int
     order: tuple[str, int, int]
@@ -197,6 +221,7 @@ class _ResolvedRoute:
     public_path: str
     dependencies: tuple[tuple[str, _Dependency], ...]
     app_key: str
+    instance_ordinal: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +232,7 @@ class _Snapshot:
     imports: Mapping[str, Mapping[str, str]]
     middleware: Mapping[str, tuple[_Middleware, ...]]
     exception_handlers: Mapping[str, tuple[_ExceptionHandler, ...]]
+    exception_mros: Mapping[str, tuple[str, ...] | None]
     event_candidates: tuple[EntrypointCandidate, ...]
     middleware_order_proven: bool
     cleanup_before_background_proven: bool
@@ -337,39 +363,94 @@ def _join_path(*parts: str) -> str:
     return "/" + "/".join(values) if values else "/"
 
 
-def _http_methods(call: ast.Call, method: str) -> tuple[str, ...] | None:
-    if method in _HTTP_DECORATORS:
-        return (method.upper(),)
-    if method == "route":
-        return ()
-    values = _keyword(call, "methods")
-    if values is None and len(call.args) > 1:
-        values = call.args[1]
-    if not isinstance(values, (ast.List, ast.Tuple, ast.Set)):
+def _literal_http_methods(node: ast.AST | None) -> tuple[str, ...] | None:
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return None
     methods = tuple(
         item.value.upper()
-        for item in values.elts
+        for item in node.elts
         if isinstance(item, ast.Constant)
         and isinstance(item.value, str)
         and re.fullmatch(r"[A-Za-z]+", item.value)
     )
-    if len(methods) != len(values.elts) or not methods:
+    if len(methods) != len(node.elts) or not methods:
         return None
     return tuple(sorted(set(methods)))
 
 
-def _response_model(call: ast.Call) -> bool | None:
+def _http_methods(
+    call: ast.Call,
+    method: str,
+    *,
+    fastapi_contract_proven: bool,
+    starlette_contract_proven: bool,
+) -> tuple[str, ...] | None:
+    if method in _HTTP_DECORATORS:
+        return (method.upper(),)
+    if method in {"api_route", "add_api_route"}:
+        if not fastapi_contract_proven:
+            return None
+        values = _keyword(call, "methods")
+        return ("GET",) if values is None else _literal_http_methods(values)
+    if method not in {"route", "add_route"} or not starlette_contract_proven:
+        return None
+    values = _keyword(call, "methods")
+    positional_index = 1 if method == "route" else 2
+    if values is None and len(call.args) > positional_index:
+        values = call.args[positional_index]
+    if values is None:
+        return ("GET", "HEAD")
+    methods = _literal_http_methods(values)
+    if methods is None:
+        return None
+    return tuple(sorted(set(methods) | ({"HEAD"} if "GET" in methods else set())))
+
+
+def _static_type_annotation(node: ast.AST | None) -> bool | None:
+    if node is None:
+        return False
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return False
+        return (
+            True if isinstance(node.value, str) and bool(node.value.strip()) else None
+        )
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return True
+    if isinstance(node, ast.Subscript):
+        return (
+            True
+            if _static_type_annotation(node.value) is True
+            and _static_type_annotation(node.slice) is True
+            else None
+        )
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return (
+            True
+            if node.elts
+            and all(_static_type_annotation(item) is True for item in node.elts)
+            else None
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        sides = (
+            _static_type_annotation(node.left),
+            _static_type_annotation(node.right),
+        )
+        return True if all(item in {True, False} for item in sides) else None
+    return None
+
+
+def _response_model(call: ast.Call, return_annotation: ast.AST | None) -> bool | None:
     """Return whether a declared response model is statically meaningful.
 
-    ``None`` is a deliberate FastAPI opt-out.  Names, attributes, subscripts,
-    and string forward references are source-visible model declarations;
-    computed factories are not silently treated as a serializer.
+    An explicit ``response_model=None`` opts out even when the endpoint has a
+    return annotation.  Computed model factories and computed annotations are
+    retained as typed lifecycle uncertainty rather than silently omitted.
     """
 
     value = _keyword(call, "response_model")
     if value is None:
-        return False
+        return _static_type_annotation(return_annotation)
     if isinstance(value, ast.Constant):
         return False if value.value is None else isinstance(value.value, str)
     if isinstance(value, (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple, ast.List)):
@@ -577,6 +658,102 @@ def _resolved_reference(
     return (target_module, target_name)
 
 
+def _exception_identity(
+    raw: str | None,
+    module: str,
+    imports: Mapping[str, Mapping[str, str]],
+) -> str | None:
+    if raw is None:
+        return None
+    if raw in {"BaseException", "Exception"}:
+        return f"builtins.{raw}"
+    resolved = _resolved_reference(raw, module, imports)
+    return ".".join(resolved) if resolved is not None else None
+
+
+def _exception_mros(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+    imports: Mapping[str, Mapping[str, str]],
+) -> Mapping[str, tuple[str, ...] | None]:
+    """Build only fully proven Python MROs for source-visible classes."""
+
+    bases_by_class: dict[str, tuple[str, ...] | None] = {}
+    for _path, (_source, tree, module) in parsed.items():
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            identity = f"{module}.{node.name}"
+            if not node.bases:
+                bases_by_class[identity] = ("builtins.object",)
+                continue
+            bases = tuple(
+                _exception_identity(_dotted(base), module, imports)
+                for base in node.bases
+            )
+            bases_by_class[identity] = (
+                tuple(item for item in bases if item is not None)
+                if all(item is not None for item in bases)
+                else None
+            )
+
+    known: dict[str, tuple[str, ...] | None] = {
+        "builtins.object": ("builtins.object",),
+        "builtins.BaseException": (
+            "builtins.BaseException",
+            "builtins.object",
+        ),
+        "builtins.Exception": (
+            "builtins.Exception",
+            "builtins.BaseException",
+            "builtins.object",
+        ),
+    }
+    active: set[str] = set()
+
+    def linearize(identity: str) -> tuple[str, ...] | None:
+        if identity in known:
+            return known[identity]
+        bases = bases_by_class.get(identity)
+        if bases is None or identity in active:
+            known[identity] = None
+            return None
+        active.add(identity)
+        parent_mros = tuple(linearize(base) for base in bases)
+        if any(item is None for item in parent_mros):
+            active.remove(identity)
+            known[identity] = None
+            return None
+        sequences = [list(item or ()) for item in parent_mros]
+        sequences.append(list(bases))
+        merged: list[str] = []
+        while any(sequences):
+            sequences = [sequence for sequence in sequences if sequence]
+            candidate = next(
+                (
+                    sequence[0]
+                    for sequence in sequences
+                    if not any(sequence[0] in other[1:] for other in sequences)
+                ),
+                None,
+            )
+            if candidate is None:
+                active.remove(identity)
+                known[identity] = None
+                return None
+            merged.append(candidate)
+            for sequence in sequences:
+                if sequence and sequence[0] == candidate:
+                    sequence.pop(0)
+        active.remove(identity)
+        result = (identity, *merged)
+        known[identity] = result
+        return result
+
+    for identity in bases_by_class:
+        linearize(identity)
+    return MappingProxyType(known)
+
+
 def _object_reference(
     raw: str | None,
     module: str,
@@ -619,6 +796,33 @@ def _assigned_names(node: ast.stmt) -> tuple[str, ...]:
     else:
         return ()
     return tuple(target.id for target in targets if isinstance(target, ast.Name))
+
+
+def _has_dynamic_registration(
+    tree: ast.Module,
+    module: str,
+    imports: Mapping[str, Mapping[str, str]],
+    objects: Mapping[str, _Object],
+) -> bool:
+    for statement in tree.body:
+        if not isinstance(statement, _DYNAMIC_CONTROL_FLOW):
+            continue
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Call) or not isinstance(
+                node.func, ast.Attribute
+            ):
+                continue
+            owner = _resolved_reference(_dotted(node.func.value) or "", module, imports)
+            if (
+                owner is not None
+                and f"{owner[0]}:{owner[1]}" in objects
+                and (
+                    node.func.attr in _FRAMEWORK_REGISTRATION_METHODS
+                    or node.func.attr in _ROUTE_DECORATORS
+                )
+            ):
+                return True
+    return False
 
 
 def _dependency_key(
@@ -812,8 +1016,8 @@ def _route_candidate(
         spec.source_path,
         source,
         spec.line,
-        f"fastapi/routes/{spec.ordinal}",
-        spec.ordinal,
+        f"fastapi/routes/{spec.ordinal}/instances/{route.instance_ordinal}",
+        route.instance_ordinal,
     )
     handler = function_keys.get((spec.handler_module, spec.handler_name))
     unresolved = (
@@ -824,8 +1028,11 @@ def _route_candidate(
             spec.source_path,
             "unresolved_fact",
             "ast",
-            f"fastapi/routes/{spec.ordinal}/handler",
-            spec.ordinal,
+            (
+                f"fastapi/routes/{spec.ordinal}/instances/"
+                f"{route.instance_ordinal}/handler"
+            ),
+            route.instance_ordinal,
         )
     )
     evidence = IREvidence(
@@ -961,15 +1168,16 @@ def _expand_routes(
         key=lambda item: item.order,
     ):
         walk(app.key, "", (), None, app.key, frozenset())
+    ordered = sorted(
+        resolved,
+        key=lambda item: (
+            item.route.order,
+            item.public_path,
+            item.route.handler_name,
+        ),
+    )
     return tuple(
-        sorted(
-            resolved,
-            key=lambda item: (
-                item.route.order,
-                item.public_path,
-                item.route.handler_name,
-            ),
-        )
+        replace(item, instance_ordinal=ordinal) for ordinal, item in enumerate(ordered)
     )
 
 
@@ -997,6 +1205,7 @@ class FastAPILifecycleAdapter:
         return self._snapshots.get(
             self._snapshot_key(context),
             _Snapshot(
+                MappingProxyType({}),
                 MappingProxyType({}),
                 MappingProxyType({}),
                 MappingProxyType({}),
@@ -1056,10 +1265,21 @@ class FastAPILifecycleAdapter:
             parsed[item.path] = (source, parsed_tree, module)
             imports[module] = _imports_for(item.path, module, parsed_tree)
 
+        fastapi_series = _version_tuple(self.detected_version(context))
+        starlette_series = _version_tuple(self.detected_starlette_version(context))
+        fastapi_route_contract_proven = (
+            fastapi_series in _FASTAPI_ROUTE_SIGNATURE_SERIES
+        )
+        starlette_route_contract_proven = (
+            starlette_series in _STARLETTE_ROUTE_SIGNATURE_SERIES
+        )
+        exception_mros = _exception_mros(parsed, imports)
+
         objects: dict[str, _Object] = {}
         duplicate_objects: set[str] = set()
         rebound_names: dict[tuple[str, str], list[tuple[str, int, int]]] = {}
         outcomes: dict[tuple[str, str], _FunctionOutcome] = {}
+        function_returns: dict[tuple[str, str], ast.AST | None] = {}
         function_nodes: list[
             tuple[str, str, str, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
@@ -1093,7 +1313,11 @@ class FastAPILifecycleAdapter:
                         )
                         continue
                     prefix_node = _keyword(node.value, "prefix")
-                    prefix = "" if kind == "app" else _literal_string(prefix_node)
+                    prefix = (
+                        ""
+                        if kind == "app" or prefix_node is None
+                        else _literal_string(prefix_node)
+                    )
                     dependencies = _dependencies(
                         _keyword(node.value, "dependencies"), module, path
                     )
@@ -1101,6 +1325,9 @@ class FastAPILifecycleAdapter:
                         _dotted(_keyword(node.value, "lifespan"))
                         if kind == "app"
                         else None
+                    )
+                    lifespan_declared = (
+                        kind == "app" and _keyword(node.value, "lifespan") is not None
                     )
                     unresolved = prefix is None or dependencies is None
                     if (
@@ -1121,6 +1348,7 @@ class FastAPILifecycleAdapter:
                         prefix,
                         dependencies or (),
                         lifespan,
+                        lifespan_declared,
                         path,
                         node.lineno,
                         _line_order(path, node),
@@ -1142,17 +1370,28 @@ class FastAPILifecycleAdapter:
                     outcome = _FunctionOutcome(
                         isinstance(node, ast.AsyncFunctionDef),
                         _has_yield(node),
-                        _raised_types(node),
+                        tuple(
+                            _exception_identity(item, module, imports)
+                            for item in _raised_types(node)
+                        ),
                         _has_request_validation(node),
                         background_targets or (),
                     )
                     outcomes[(module, node.name)] = outcome
+                    function_returns[(module, node.name)] = node.returns
                     function_nodes.append((path, source, module, node))
 
         rebound_view = MappingProxyType({
             key: tuple(sorted(value)) for key, value in rebound_names.items()
         })
         duplicate_view = frozenset(duplicate_objects)
+        for path, (_source, tree, module) in parsed.items():
+            if _has_dynamic_registration(tree, module, imports, objects):
+                diagnostics.mark(
+                    path,
+                    CoverageCapability.ENTRYPOINT_DISCOVERY,
+                    "framework_config_unresolved",
+                )
         for object_key in duplicate_view:
             diagnostics.mark(
                 objects[object_key].source_path,
@@ -1194,18 +1433,34 @@ class FastAPILifecycleAdapter:
                         else _keyword(decorator, "path")
                     )
                     public_path = _literal_string(path_node)
-                    methods = _http_methods(decorator, method)
+                    methods = _http_methods(
+                        decorator,
+                        method,
+                        fastapi_contract_proven=fastapi_route_contract_proven,
+                        starlette_contract_proven=starlette_route_contract_proven,
+                    )
                     dependencies = _dependencies(
                         _keyword(decorator, "dependencies"), module, path
                     )
-                    response_model = _response_model(decorator)
+                    response_model = _response_model(decorator, function.returns)
                     unresolved = (
                         public_path is None
                         or methods is None
                         or dependencies is None
                         or parameter_dependencies is None
-                        or response_model is None
                     )
+                    if methods is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.ENTRYPOINT_DISCOVERY,
+                            "route_method_contract_unresolved",
+                        )
+                    if response_model is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.FRAMEWORK_LIFECYCLE,
+                            "response_model_unresolved",
+                        )
                     routes.append(
                         _Route(
                             owner,
@@ -1214,7 +1469,7 @@ class FastAPILifecycleAdapter:
                             (dependencies or ()) + (parameter_dependencies or ()),
                             module,
                             function.name,
-                            response_model is True,
+                            response_model,
                             path,
                             decorator.lineno,
                             _line_order(path, decorator),
@@ -1253,8 +1508,10 @@ class FastAPILifecycleAdapter:
                         )
                     )
                 elif method == "exception_handler":
-                    exception_name = _dotted(
-                        decorator.args[0] if decorator.args else None
+                    exception_name = _exception_identity(
+                        _dotted(decorator.args[0] if decorator.args else None),
+                        module,
+                        imports,
                     )
                     exception_handlers.setdefault(owner, []).append(
                         _ExceptionHandler(
@@ -1348,19 +1605,37 @@ class FastAPILifecycleAdapter:
                     )
                     public_path = _literal_string(path_node)
                     methods = _http_methods(
-                        call, "api_route" if method == "add_api_route" else "route"
+                        call,
+                        method,
+                        fastapi_contract_proven=fastapi_route_contract_proven,
+                        starlette_contract_proven=starlette_route_contract_proven,
                     )
                     dependencies = _dependencies(
                         _keyword(call, "dependencies"), module, path
                     )
                     target = _resolved_reference(endpoint or "", module, imports)
+                    response_model = _response_model(
+                        call,
+                        function_returns.get(target) if target is not None else None,
+                    )
                     unresolved = (
                         public_path is None
                         or methods is None
                         or dependencies is None
                         or target is None
-                        or _response_model(call) is None
                     )
+                    if methods is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.ENTRYPOINT_DISCOVERY,
+                            "route_method_contract_unresolved",
+                        )
+                    if response_model is None:
+                        diagnostics.mark(
+                            path,
+                            CoverageCapability.FRAMEWORK_LIFECYCLE,
+                            "response_model_unresolved",
+                        )
                     routes.append(
                         _Route(
                             owner,
@@ -1369,7 +1644,7 @@ class FastAPILifecycleAdapter:
                             dependencies or (),
                             target[0] if target else module,
                             target[1] if target else "unresolved_handler",
-                            _response_model(call) is True,
+                            response_model,
                             path,
                             node.lineno,
                             _line_order(path, node),
@@ -1404,7 +1679,11 @@ class FastAPILifecycleAdapter:
                         "middleware_behavior_unresolved",
                     )
                 elif method == "add_exception_handler":
-                    exception_name = _dotted(call.args[0] if call.args else None)
+                    exception_name = _exception_identity(
+                        _dotted(call.args[0] if call.args else None),
+                        module,
+                        imports,
+                    )
                     handler_raw = _dotted(
                         call.args[1]
                         if len(call.args) > 1
@@ -1523,9 +1802,27 @@ class FastAPILifecycleAdapter:
             route_candidates.append(candidate)
             route_map[_candidate_key(candidate)] = item
 
+        shadowed_event_owners = {
+            item.key
+            for item in objects.values()
+            if item.kind == "app" and item.lifespan_declared
+        }
+        pending_shadowed = list(shadowed_event_owners)
+        includes_by_parent: dict[str, list[_Include]] = {}
+        for include in includes:
+            if not include.unresolved and include.child is not None:
+                includes_by_parent.setdefault(include.parent, []).append(include)
+        while pending_shadowed:
+            parent = pending_shadowed.pop()
+            for include in includes_by_parent.get(parent, ()):
+                child = include.child
+                if child is not None and child not in shadowed_event_owners:
+                    shadowed_event_owners.add(child)
+                    pending_shadowed.append(child)
+
         event_candidates: list[EntrypointCandidate] = []
         for item in events:
-            if item.owner in invalid_root_apps:
+            if item.owner in invalid_root_apps or item.owner in shadowed_event_owners:
                 continue
             source = parsed.get(item.source_path, ("", None, ""))[0]
             if source:
@@ -1554,6 +1851,7 @@ class FastAPILifecycleAdapter:
                 key: tuple(sorted(value, key=lambda item: item.order))
                 for key, value in exception_handlers.items()
             }),
+            exception_mros,
             tuple(event_candidates),
             middleware_order_proven,
             cleanup_before_background_proven,
@@ -1690,8 +1988,16 @@ class FastAPILifecycleAdapter:
             False,
             outcome.raises,
         ))
-        if resolved.route.response_model:
+        if resolved.route.response_model is True:
             roles.append(("response_model_serialization", None, None, False, False))
+        elif resolved.route.response_model is None:
+            roles.append((
+                "response_model_resolution_boundary",
+                None,
+                None,
+                False,
+                False,
+            ))
         if yielded:
             if (
                 outcome.background_targets
@@ -1757,10 +2063,16 @@ class FastAPILifecycleAdapter:
             )
             + outcome.raised_types
         )
-        handler = self._matching_exception_handler(handlers, raised_types)
-        exception_role = (
-            "exception_handler" if handler is not None else "unhandled_exception"
+        exception_match, handler = self._matching_exception_handler(
+            handlers,
+            raised_types,
+            snapshot.exception_mros,
         )
+        exception_role = {
+            "handler": "exception_handler",
+            "unhandled": "unhandled_exception",
+            "boundary": "exception_handler_resolution_boundary",
+        }[exception_match]
         exception_local = handler.local_key if handler is not None else None
         exception_name = handler.public_name if handler is not None else None
         if dependency_raises or outcome.raises:
@@ -1793,7 +2105,12 @@ class FastAPILifecycleAdapter:
             (
                 index
                 for index, item in enumerate(roles)
-                if item[0] in {"exception_handler", "unhandled_exception"}
+                if item[0]
+                in {
+                    "exception_handler",
+                    "exception_handler_resolution_boundary",
+                    "unhandled_exception",
+                }
             ),
             None,
         )
@@ -1891,7 +2208,10 @@ class FastAPILifecycleAdapter:
                     AsyncSuccessor(local_key, AsyncDispatchKind.TASK, len(shortcuts))
                 )
 
-            if role == "unhandled_exception":
+            if role in {
+                "exception_handler_resolution_boundary",
+                "unhandled_exception",
+            }:
                 success: Successor = ReturnSuccessor(
                     _terminal_key(candidate, "exception", ordinal), ordinal
                 )
@@ -1924,26 +2244,50 @@ class FastAPILifecycleAdapter:
 
     @staticmethod
     def _matching_exception_handler(
-        handlers: Sequence[_ExceptionHandler], raised_types: tuple[str | None, ...]
-    ) -> _ExceptionHandler | None:
-        """Choose a handler only when every proven throw type has the same target."""
+        handlers: Sequence[_ExceptionHandler],
+        raised_types: tuple[str | None, ...],
+        exception_mros: Mapping[str, tuple[str, ...] | None],
+    ) -> tuple[str, _ExceptionHandler | None]:
+        """Resolve Starlette's type/MRO dispatch without suffix/order guesses."""
 
         if not raised_types or any(item is None for item in raised_types):
-            return None
-        matches: list[_ExceptionHandler] = []
+            return ("boundary", None)
+        matches: list[_ExceptionHandler | None] = []
         for raised in raised_types:
-            candidates = [
-                handler
-                for handler in handlers
-                if handler.exception_name is not None
-                and handler.exception_name.rsplit(".", 1)[-1]
-                in {raised.rsplit(".", 1)[-1], "Exception", "BaseException"}
+            assert raised is not None
+            exact = [
+                handler for handler in handlers if handler.exception_name == raised
             ]
-            if not candidates:
-                return None
-            matches.append(candidates[0])
+            if exact:
+                matches.append(exact[-1])
+                continue
+            mro = exception_mros.get(raised)
+            if mro is None:
+                return ("boundary", None)
+            selected = next(
+                (
+                    candidates[-1]
+                    for identity in mro[1:]
+                    for candidates in (
+                        [
+                            handler
+                            for handler in handlers
+                            if handler.exception_name == identity
+                        ],
+                    )
+                    if candidates
+                ),
+                None,
+            )
+            if selected is None and any(
+                handler.exception_name is None for handler in handlers
+            ):
+                return ("boundary", None)
+            matches.append(selected)
         first = matches[0]
-        return first if all(item == first for item in matches) else None
+        if not all(item == first for item in matches):
+            return ("boundary", None)
+        return ("handler", first) if first is not None else ("unhandled", None)
 
     @staticmethod
     def _boundary_pipeline(

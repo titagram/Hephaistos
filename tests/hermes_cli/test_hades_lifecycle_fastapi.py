@@ -20,6 +20,10 @@ from hermes_cli.hades_graph_v2.model import (
     MethodSemantics,
     SourceIdentity,
 )
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkAdapterRegistry,
+    run_framework_adapters,
+)
 from hermes_cli.hades_index.lifecycle.frameworks.fastapi import FastAPILifecycleAdapter
 from hermes_cli.hades_index.lifecycle.model import (
     AsyncSuccessor,
@@ -59,6 +63,7 @@ def _context(
     root: Path,
     *,
     file_accessor: Callable[[Path], bytes] | None = None,
+    fastapi_version: str = "0.115.0",
     starlette_version: str | None = "0.37.2",
 ) -> ExtractionContext:
     metadata = _location(root, "pyproject.toml")
@@ -66,7 +71,7 @@ def _context(
         FrameworkRecord(
             language="python",
             name="fastapi",
-            version="0.115.0",
+            version=fastapi_version,
             detector="pyproject",
             configuration_paths=("pyproject.toml",),
             knowledge=FrameworkKnowledge.VERIFIED,
@@ -277,7 +282,7 @@ app.include_router(parent)
         for item in adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
         if item.kind in {EntrypointKind.EVENT_LISTENER, EntrypointKind.PROCESS_MAIN}
     }
-    assert {"startup", "shutdown", "app_lifespan"} <= event_names
+    assert event_names == {"app_lifespan"}
 
 
 def test_sync_handler_and_exception_arm_are_explicit(tmp_path: Path) -> None:
@@ -482,5 +487,380 @@ app = build_app()
     assert any(
         event.outcome is CoverageOutcome.PARTIAL
         and event.reason_code == "framework_object_rebound"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_repeated_router_inclusion_has_distinct_registry_safe_pipeline_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.get("/health")
+async def health(): return {"ok": True}
+
+app.include_router(router, prefix="/v1")
+app.include_router(router, prefix="/v2")
+""",
+    )
+    context = _context(tmp_path)
+    syntax = (_syntax(tmp_path, "app.py"),)
+    registry = FrameworkAdapterRegistry()
+    registry.register(FastAPILifecycleAdapter())
+
+    result = run_framework_adapters(registry, context, syntax)
+    routes = tuple(
+        item for item in result.candidates if item.kind is EntrypointKind.HTTP_ROUTE
+    )
+
+    assert {item.public_path for item in routes} == {"/v1/health", "/v2/health"}
+    assert len({item.registration_locator.structural_path for item in routes}) == 2
+    assert len(result.framework_segments) == len({
+        item.local_key for item in result.framework_segments
+    })
+
+
+def test_apirouter_absent_prefix_is_the_static_empty_prefix(tmp_path: Path) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.get("/health")
+async def health(): return {"ok": True}
+
+app.include_router(router, prefix="/v1")
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert _candidate(adapter, context, "health").public_path == "/v1/health"
+    assert not any(
+        event.reason_code == "framework_config_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_reviewed_route_method_defaults_and_signatures_are_exact(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.api_route("/api-default")
+async def api_default(): return None
+
+@router.route("/starlette-post", methods=["POST"])
+async def starlette_post(request): return None
+
+@router.route("/starlette-default")
+async def starlette_default(request): return None
+
+async def direct(): return None
+router.add_api_route("/direct", direct)
+app.include_router(router)
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    routes = {
+        item.public_path: item
+        for item in adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    }
+
+    assert routes["/api-default"].methods == ("GET",)
+    assert routes["/direct"].methods == ("GET",)
+    assert routes["/starlette-post"].methods == ("POST",)
+    assert routes["/starlette-default"].methods == ("GET", "HEAD")
+    assert all(
+        item.method_semantics is MethodSemantics.EXPLICIT for item in routes.values()
+    )
+
+
+def test_unreviewed_route_method_contracts_are_partial_and_not_invented(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.api_route("/fastapi-unknown")
+async def fastapi_unknown(): return None
+
+@router.route("/starlette-unknown")
+async def starlette_unknown(request): return None
+
+app.include_router(router)
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(
+        tmp_path,
+        fastapi_version="9.99.0",
+        starlette_version="9.99.0",
+    )
+
+    assert adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),)) == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        and event.reason_code == "route_method_contract_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_exception_handlers_use_proven_exact_type_and_mro_specificity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class ParentProblem(Exception): pass
+class ExactProblem(ParentProblem): pass
+class ChildProblem(ParentProblem): pass
+
+app = FastAPI()
+
+@app.exception_handler(Exception)
+async def generic(request, exc): return None
+
+@app.exception_handler(ParentProblem)
+async def parent(request, exc): return None
+
+@app.exception_handler(ExactProblem)
+async def specific(request, exc): return None
+
+@app.get("/exact")
+async def exact_endpoint(): raise ExactProblem()
+
+@app.get("/inherited")
+async def inherited_endpoint(): raise ChildProblem()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    exact_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "exact_endpoint")
+    )
+    inherited_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "inherited_endpoint")
+    )
+    exact_handler = next(
+        item for item in exact_pipeline if item.framework_role == "exception_handler"
+    )
+    inherited_handler = next(
+        item
+        for item in inherited_pipeline
+        if item.framework_role == "exception_handler"
+    )
+
+    assert isinstance(exact_handler.target, FrameworkLocalTarget)
+    assert exact_handler.target.local_key == _function_key(tmp_path, "specific")
+    assert isinstance(inherited_handler.target, FrameworkLocalTarget)
+    assert inherited_handler.target.local_key == _function_key(tmp_path, "parent")
+
+
+def test_exception_handler_identity_never_matches_only_a_short_suffix(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(tmp_path, "alpha.py", "class Problem(Exception): pass\n")
+    _write(tmp_path, "beta.py", "class Problem(Exception): pass\n")
+    _write(
+        tmp_path,
+        "app.py",
+        """import alpha
+import beta
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.exception_handler(alpha.Problem)
+async def alpha_handler(request, exc): return None
+
+@app.exception_handler(Exception)
+async def generic(request, exc): return None
+
+@app.get("/beta")
+async def beta_endpoint(): raise beta.Problem()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    candidates = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "alpha.py"),
+            _syntax(tmp_path, "app.py"),
+            _syntax(tmp_path, "beta.py"),
+        ),
+    )
+    route = next(item for item in candidates if item.public_name == "beta_endpoint")
+    handler = next(
+        item
+        for item in adapter.pipeline(context, route)
+        if item.framework_role == "exception_handler"
+    )
+
+    assert isinstance(handler.target, FrameworkLocalTarget)
+    assert handler.target.local_key == _function_key(tmp_path, "generic")
+
+
+def test_unproven_exception_ancestry_is_a_boundary_not_a_guessed_handler(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """import opaque
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.exception_handler(Exception)
+async def generic(request, exc): return None
+
+@app.get("/opaque")
+async def opaque_endpoint(): raise opaque.Problem()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "opaque_endpoint")
+    )
+    roles = {item.framework_role for item in pipeline}
+
+    assert "exception_handler" not in roles
+    assert "exception_handler_resolution_boundary" in roles
+
+
+def test_return_annotation_drives_serialization_unless_explicitly_opted_out(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class Out: pass
+def model_factory(): return Out
+app = FastAPI()
+
+@app.get("/annotated")
+async def annotated() -> Out: return Out()
+
+@app.get("/opted-out", response_model=None)
+async def opted_out() -> Out: return Out()
+
+@app.get("/computed")
+async def computed() -> model_factory(): return Out()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    annotated = {
+        item.framework_role
+        for item in adapter.pipeline(context, _candidate(adapter, context, "annotated"))
+    }
+    opted_out = {
+        item.framework_role
+        for item in adapter.pipeline(context, _candidate(adapter, context, "opted_out"))
+    }
+    computed = {
+        item.framework_role
+        for item in adapter.pipeline(context, _candidate(adapter, context, "computed"))
+    }
+
+    assert "response_model_serialization" in annotated
+    assert "response_model_serialization" not in opted_out
+    assert "response_model_resolution_boundary" in computed
+
+
+def test_dynamic_control_flow_registration_is_partial_without_invented_route(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter()
+
+@router.get("/hidden")
+async def hidden(): return None
+
+if enabled:
+    app.include_router(router)
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),)) == ()
+    assert any(
+        event.outcome is CoverageOutcome.PARTIAL
+        and event.reason_code == "framework_config_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_dynamic_non_framework_call_does_not_create_registration_uncertainty(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+settings = {}
+
+if enabled:
+    settings.get("feature")
+
+@app.get("/health")
+async def health(): return {"ok": True}
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert _candidate(adapter, context, "health").public_path == "/health"
+    assert not any(
+        event.reason_code == "framework_config_unresolved"
         for event in adapter.coverage_events(context)
     )
