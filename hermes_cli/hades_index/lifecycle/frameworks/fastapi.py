@@ -214,6 +214,14 @@ _INVALID_STATIC_KEY = object()
 
 
 @dataclass(frozen=True, slots=True)
+class _HelperContainer:
+    values: tuple[tuple[object, _HelperRelation], ...]
+
+
+_HelperRelation = ast.FunctionDef | ast.AsyncFunctionDef | None | _HelperContainer
+
+
+@dataclass(frozen=True, slots=True)
 class _ExceptionHandler:
     owner: str
     exception_name: str | None
@@ -1189,8 +1197,36 @@ def _dependency_bindings(
                     continue
                 if isinstance(
                     node,
-                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
                 ):
+                    defaults = (
+                        *node.args.defaults,
+                        *(item for item in node.args.kw_defaults if item is not None),
+                    )
+                    if any(
+                        isinstance(item, ast.NamedExpr)
+                        for default in defaults
+                        for item in ast.walk(default)
+                    ):
+                        overrides: dict[
+                            str,
+                            tuple[_Dependency, ...] | None,
+                        ] = {}
+                        effects: list[tuple[str, tuple[_Dependency, ...] | None]] = []
+                        evaluate_named_expression_rhs(
+                            ast.Tuple(elts=list(defaults), ctx=ast.Load()),
+                            module,
+                            path,
+                            order,
+                            overrides,
+                            effects,
+                            {},
+                        )
+                        for name, effect in effects:
+                            remember(module, name, order, effect)
+                    remember(module, node.name, order, ())
+                    continue
+                if isinstance(node, ast.ClassDef):
                     remember(module, node.name, order, ())
                     continue
                 visitor = _ScopeBindingVisitor()
@@ -1558,6 +1594,70 @@ def _middleware_may_short_circuit(
             return True
         return None if None in values else False
 
+    def finite_destructuring_pairs(
+        target: ast.AST,
+        value: ast.AST,
+    ) -> tuple[tuple[ast.Name, ast.AST], ...] | None:
+        if any(isinstance(item, ast.Starred) for item in ast.walk(value)):
+            return None
+        if isinstance(target, ast.Name):
+            return ((target, value),)
+        if not isinstance(target, (ast.List, ast.Tuple)) or not isinstance(
+            value,
+            (ast.List, ast.Tuple),
+        ):
+            return None
+        star_positions = tuple(
+            index
+            for index, item in enumerate(target.elts)
+            if isinstance(item, ast.Starred)
+        )
+        if len(star_positions) > 1:
+            return None
+        if not star_positions and len(target.elts) != len(value.elts):
+            return None
+        if star_positions and len(value.elts) < len(target.elts) - 1:
+            return None
+        if star_positions:
+            star_index = star_positions[0]
+            suffix_count = len(target.elts) - star_index - 1
+            captured_end = len(value.elts) - suffix_count
+            starred = target.elts[star_index]
+            assert isinstance(starred, ast.Starred)
+            if not isinstance(starred.value, ast.Name):
+                return None
+            items = (
+                *zip(
+                    target.elts[:star_index],
+                    value.elts[:star_index],
+                    strict=True,
+                ),
+                (
+                    starred.value,
+                    ast.copy_location(
+                        ast.List(
+                            elts=value.elts[star_index:captured_end],
+                            ctx=ast.Load(),
+                        ),
+                        value,
+                    ),
+                ),
+                *zip(
+                    target.elts[star_index + 1 :],
+                    value.elts[captured_end:],
+                    strict=True,
+                ),
+            )
+        else:
+            items = tuple(zip(target.elts, value.elts, strict=True))
+        pairs: list[tuple[ast.Name, ast.AST]] = []
+        for nested_target, nested_value in items:
+            nested = finite_destructuring_pairs(nested_target, nested_value)
+            if nested is None:
+                return None
+            pairs.extend(nested)
+        return tuple(pairs)
+
     continuation_escaped = False
 
     def remember_target(
@@ -1572,14 +1672,11 @@ def _middleware_may_short_circuit(
             remember_target(target.value, None, statement)
             return
         if isinstance(target, (ast.List, ast.Tuple)):
-            if isinstance(value, (ast.List, ast.Tuple)) and len(target.elts) == len(
-                value.elts
-            ):
-                for nested_target, nested_value in zip(
-                    target.elts,
-                    value.elts,
-                    strict=True,
-                ):
+            pairs = (
+                finite_destructuring_pairs(target, value) if value is not None else None
+            )
+            if pairs is not None:
+                for nested_target, nested_value in pairs:
                     remember_target(nested_target, nested_value, statement)
                 return
             for nested_target in target.elts:
@@ -1669,7 +1766,22 @@ def _middleware_may_short_circuit(
                 )
             remember_target(statement.target, statement.value, statement)
             continue
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for default in (
+                *statement.args.defaults,
+                *(item for item in statement.args.kw_defaults if item is not None),
+            ):
+                visit_named_expression_effects(
+                    default,
+                    remember_named_expression_alias,
+                )
+            remember_alias(
+                statement.name,
+                statement,
+                False if not statement.decorator_list else None,
+            )
+            continue
+        if isinstance(statement, ast.ClassDef):
             remember_alias(
                 statement.name,
                 statement,
@@ -2007,20 +2119,12 @@ def _middleware_may_short_circuit(
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
         and not statement.decorator_list
     )
-    helper_aliases: dict[
-        str,
-        list[
-            tuple[
-                tuple[int, int],
-                ast.FunctionDef | ast.AsyncFunctionDef | None,
-            ]
-        ],
-    ] = {}
+    helper_aliases: dict[str, list[tuple[tuple[int, int], _HelperRelation]]] = {}
 
     def helper_at(
         name: str,
         node: ast.AST,
-    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    ) -> _HelperRelation:
         occurrence = position(node)
         return next(
             (
@@ -2033,10 +2137,38 @@ def _middleware_may_short_circuit(
             None,
         )
 
+    def helper_value(value: ast.AST | None, occurrence: ast.AST) -> _HelperRelation:
+        if isinstance(value, ast.Name):
+            return helper_at(value.id, occurrence)
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return _HelperContainer(
+                tuple(
+                    (index, helper_value(item, occurrence))
+                    for index, item in enumerate(value.elts)
+                )
+            )
+        if isinstance(value, ast.Subscript):
+            container = helper_value(value.value, occurrence)
+            key = literal_key(value.slice)
+            if (
+                not isinstance(container, _HelperContainer)
+                or key is _INVALID_STATIC_KEY
+            ):
+                return None
+            return next(
+                (
+                    relation
+                    for item_key, relation in container.values
+                    if item_key == key
+                ),
+                None,
+            )
+        return None
+
     def remember_helper_alias(
         name: str,
         node: ast.AST,
-        identity: ast.FunctionDef | ast.AsyncFunctionDef | None,
+        identity: _HelperRelation,
     ) -> None:
         helper_aliases.setdefault(name, []).append((position(node), identity))
 
@@ -2045,39 +2177,18 @@ def _middleware_may_short_circuit(
         value: ast.AST,
         statement: ast.AST,
     ) -> tuple[
-        tuple[str, ast.FunctionDef | ast.AsyncFunctionDef | None],
+        tuple[str, _HelperRelation],
         ...,
     ]:
         if isinstance(target, ast.Name):
-            return (
-                (
-                    target.id,
-                    helper_at(value.id, statement)
-                    if isinstance(value, ast.Name)
-                    else None,
-                ),
-            )
-        if (
-            isinstance(target, (ast.List, ast.Tuple))
-            and isinstance(value, (ast.List, ast.Tuple))
-            and len(target.elts) == len(value.elts)
-            and not any(
-                isinstance(item, ast.Starred) for item in (*target.elts, *value.elts)
-            )
-        ):
-            return tuple(
-                binding
-                for nested_target, nested_value in zip(
-                    target.elts,
-                    value.elts,
-                    strict=True,
+            return ((target.id, helper_value(value, statement)),)
+        if isinstance(target, (ast.List, ast.Tuple)):
+            pairs = finite_destructuring_pairs(target, value)
+            if pairs is not None:
+                return tuple(
+                    (name.id, helper_value(paired_value, statement))
+                    for name, paired_value in pairs
                 )
-                for binding in helper_target_bindings(
-                    nested_target,
-                    nested_value,
-                    statement,
-                )
-            )
         visitor = _ScopeBindingVisitor()
         visitor.visit(target)
         return tuple((name, None) for name, _binding in visitor.records)
@@ -2086,15 +2197,19 @@ def _middleware_may_short_circuit(
         node: ast.NamedExpr,
         certain: bool,
     ) -> None:
-        identity = (
-            helper_at(node.value.id, node)
-            if certain and isinstance(node.value, ast.Name)
-            else None
-        )
+        identity = helper_value(node.value, node) if certain else None
         remember_helper_alias(node.target.id, node, identity)
 
     for statement in function.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for default in (
+                *statement.args.defaults,
+                *(item for item in statement.args.kw_defaults if item is not None),
+            ):
+                visit_named_expression_effects(
+                    default,
+                    remember_helper_named_expression,
+                )
             remember_helper_alias(
                 statement.name,
                 statement,
@@ -2127,11 +2242,7 @@ def _middleware_may_short_circuit(
                     statement.value,
                     remember_helper_named_expression,
                 )
-            identity = (
-                helper_at(statement.value.id, statement)
-                if isinstance(statement.value, ast.Name)
-                else None
-            )
+            identity = helper_value(statement.value, statement)
             remember_helper_alias(statement.target.id, statement, identity)
             continue
         visitor = _ScopeBindingVisitor()
@@ -2139,18 +2250,22 @@ def _middleware_may_short_circuit(
         for name, binding in visitor.records:
             remember_helper_alias(name, binding, None)
 
-    called_helpers: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.Call]] = []
+    called_helpers: list[tuple[ast.AST, ast.Call]] = []
+
+    def helper_root_name(value: ast.AST) -> str | None:
+        while isinstance(value, ast.Subscript):
+            value = value.value
+        return value.id if isinstance(value, ast.Name) else None
 
     class _HelperCallVisitor(ast.NodeVisitor):
         def __init__(self, occurrence: ast.Call | None = None) -> None:
             self.occurrence = occurrence
 
         def visit_Call(self, node: ast.Call) -> None:
-            if isinstance(node.func, ast.Name):
+            root_name = helper_root_name(node.func)
+            if root_name is not None and root_name in helper_aliases:
                 runtime_occurrence = self.occurrence or node
-                identity = helper_at(node.func.id, runtime_occurrence)
-                if identity is not None:
-                    called_helpers.append((identity, runtime_occurrence))
+                called_helpers.append((node.func, runtime_occurrence))
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -2172,7 +2287,10 @@ def _middleware_may_short_circuit(
     processed_helpers: set[tuple[int, tuple[int, int]]] = set()
     pending_helpers = list(called_helpers)
     while pending_helpers:
-        helper, call = pending_helpers.pop(0)
+        helper_expression, call = pending_helpers.pop(0)
+        helper = helper_value(helper_expression, call)
+        if not isinstance(helper, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
         identity = (id(helper), position(call))
         if identity in processed_helpers:
             continue
@@ -2187,6 +2305,33 @@ def _middleware_may_short_circuit(
         )
         for statement in helper.body:
             helper_mutations.visit(statement)
+        nonlocal_names = frozenset(helper_bindings.nonlocal_names)
+        for statement in helper.body:
+            if isinstance(statement, ast.Assign):
+                runtime_bindings = tuple(
+                    binding
+                    for target in statement.targets
+                    for binding in helper_target_bindings(
+                        target,
+                        statement.value,
+                        call,
+                    )
+                )
+            elif isinstance(statement, ast.AnnAssign):
+                runtime_bindings = helper_target_bindings(
+                    statement.target,
+                    statement.value or ast.Constant(value=None),
+                    call,
+                )
+            else:
+                nested_bindings = _ScopeBindingVisitor()
+                nested_bindings.visit(statement)
+                runtime_bindings = tuple(
+                    (name, None) for name, _binding in nested_bindings.records
+                )
+            for name, runtime_identity in runtime_bindings:
+                if name in nonlocal_names:
+                    remember_helper_alias(name, call, runtime_identity)
         before = len(called_helpers)
         nested_calls = _HelperCallVisitor(call)
         for statement in helper.body:
@@ -2724,6 +2869,38 @@ def _wildcard_exports(
             node = node.value
         return isinstance(node, ast.Name) and node.id in all_aliases
 
+    def finite_namedexpr_rebindings(
+        node: ast.AST,
+    ) -> tuple[tuple[str, ast.AST], ...] | None:
+        if isinstance(node, ast.NamedExpr):
+            nested = finite_namedexpr_rebindings(node.value)
+            if nested is None:
+                return None
+            return (*nested, (node.target.id, node.value))
+        if isinstance(node, ast.Expr):
+            values = (node.value,)
+        elif isinstance(node, ast.Call):
+            values = (node.func, *node.args, *(item.value for item in node.keywords))
+        elif isinstance(node, (ast.List, ast.Set, ast.Tuple)):
+            values = tuple(node.elts)
+        elif isinstance(node, ast.Dict):
+            values = tuple(
+                item
+                for key, value in zip(node.keys, node.values, strict=True)
+                for item in ((key, value) if key is not None else (value,))
+            )
+        elif not any(isinstance(item, ast.NamedExpr) for item in ast.walk(node)):
+            return ()
+        else:
+            return None
+        bindings: list[tuple[str, ast.AST]] = []
+        for value in values:
+            nested = finite_namedexpr_rebindings(value)
+            if nested is None:
+                return None
+            bindings.extend(nested)
+        return tuple(bindings)
+
     def destructured_all_aliases(
         target: ast.AST,
         value: ast.AST,
@@ -2735,25 +2912,56 @@ def _wildcard_exports(
                     isinstance(value, ast.Name) and value.id in all_aliases,
                 ),
             )
-        if (
-            not isinstance(target, (ast.List, ast.Tuple))
-            or not isinstance(value, (ast.List, ast.Tuple))
-            or len(target.elts) != len(value.elts)
-            or any(
-                isinstance(item, ast.Starred) for item in (*target.elts, *value.elts)
-            )
+        if not isinstance(target, (ast.List, ast.Tuple)) or not isinstance(
+            value,
+            (ast.List, ast.Tuple),
         ):
             return None
+        if any(isinstance(item, ast.Starred) for item in ast.walk(value)):
+            return None
+        star_positions = tuple(
+            index
+            for index, item in enumerate(target.elts)
+            if isinstance(item, ast.Starred)
+        )
+        if len(star_positions) > 1:
+            return None
+        if not star_positions and len(target.elts) != len(value.elts):
+            return None
+        if star_positions and len(value.elts) < len(target.elts) - 1:
+            return None
+        if star_positions:
+            star_index = star_positions[0]
+            suffix_count = len(target.elts) - star_index - 1
+            captured_end = len(value.elts) - suffix_count
+            starred = target.elts[star_index]
+            assert isinstance(starred, ast.Starred)
+            if not isinstance(starred.value, ast.Name):
+                return None
+            items = (
+                *zip(
+                    target.elts[:star_index],
+                    value.elts[:star_index],
+                    strict=True,
+                ),
+                *zip(
+                    target.elts[star_index + 1 :],
+                    value.elts[captured_end:],
+                    strict=True,
+                ),
+            )
+        else:
+            starred = None
+            items = tuple(zip(target.elts, value.elts, strict=True))
         bindings: list[tuple[str, bool]] = []
-        for nested_target, nested_value in zip(
-            target.elts,
-            value.elts,
-            strict=True,
-        ):
+        for nested_target, nested_value in items:
             nested = destructured_all_aliases(nested_target, nested_value)
             if nested is None:
                 return None
             bindings.extend(nested)
+        if starred is not None:
+            assert isinstance(starred.value, ast.Name)
+            bindings.append((starred.value.id, False))
         return tuple(bindings)
 
     def finite_all_method(
@@ -2821,7 +3029,9 @@ def _wildcard_exports(
                 self.found = True
             if any(
                 any(
-                    isinstance(nested, ast.Name) and nested.id in all_aliases
+                    isinstance(nested, ast.Name)
+                    and isinstance(nested.ctx, ast.Load)
+                    and nested.id in all_aliases
                     for nested in ast.walk(value)
                 )
                 for value in (*node.args, *(item.value for item in node.keywords))
@@ -2994,6 +3204,22 @@ def _wildcard_exports(
             visitor = _ScopeBindingVisitor()
             visitor.visit(node)
             names = {name for name, _binding in visitor.records}
+            rebindings = finite_namedexpr_rebindings(node)
+            if rebindings is not None:
+                proven_names = {
+                    name for name, _value in rebindings if name != "__all__"
+                }
+                public.update(proven_names)
+                for name, value in rebindings:
+                    if name == "__all__":
+                        continue
+                    aliases_all = (
+                        isinstance(value, ast.Name) and value.id in all_aliases
+                    )
+                    all_aliases.discard(name)
+                    if aliases_all:
+                        all_aliases.add(name)
+                names.difference_update(proven_names)
             if names:
                 public.update(names)
                 uncertain_public = True
