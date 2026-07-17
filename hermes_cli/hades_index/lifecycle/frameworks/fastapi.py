@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -1154,12 +1154,38 @@ def _dependency_bindings(
                     node.target,
                     ast.Name,
                 ):
-                    remember(
-                        module,
-                        node.target.id,
-                        order,
-                        classify(node.value, module, path, order),
-                    )
+                    evaluated: dict[int, tuple[_Dependency, ...] | None] | None = None
+                    if node.value is not None and any(
+                        isinstance(item, ast.NamedExpr) for item in ast.walk(node.value)
+                    ):
+                        overrides: dict[
+                            str,
+                            tuple[_Dependency, ...] | None,
+                        ] = {}
+                        effects: list[tuple[str, tuple[_Dependency, ...] | None]] = []
+                        evaluated = {}
+                        evaluate_named_expression_rhs(
+                            node.value,
+                            module,
+                            path,
+                            order,
+                            overrides,
+                            effects,
+                            evaluated,
+                        )
+                        for name, effect in effects:
+                            remember(module, name, order, effect)
+                    if node.value is None:
+                        remember(module, node.target.id, order, None)
+                    else:
+                        remember_assignment(
+                            module,
+                            path,
+                            node.target,
+                            node.value,
+                            order,
+                            evaluated,
+                        )
                     continue
                 if isinstance(
                     node,
@@ -1461,6 +1487,8 @@ def _middleware_may_short_circuit(
         value: ast.AST | None,
         occurrence: ast.AST,
     ) -> _ContinuationRelation:
+        if isinstance(value, ast.NamedExpr):
+            return alias_value(value.value, occurrence)
         if isinstance(value, ast.Name):
             return alias_at(value.id, occurrence)
         if isinstance(value, ast.Constant):
@@ -1540,6 +1568,9 @@ def _middleware_may_short_circuit(
         if isinstance(target, ast.Name):
             remember_alias(target.id, statement, alias_value(value, statement))
             return
+        if isinstance(target, ast.Starred):
+            remember_target(target.value, None, statement)
+            return
         if isinstance(target, (ast.List, ast.Tuple)):
             if isinstance(value, (ast.List, ast.Tuple)) and len(target.elts) == len(
                 value.elts
@@ -1557,12 +1588,85 @@ def _middleware_may_short_circuit(
         if isinstance(target, (ast.Attribute, ast.Subscript)):
             return
 
+    def visit_named_expression_effects(
+        value: ast.AST,
+        effect: Callable[[ast.NamedExpr, bool], None],
+    ) -> None:
+        class _Visitor(ast.NodeVisitor):
+            def __init__(self, *, certain: bool = True) -> None:
+                self.certain = certain
+
+            def uncertain(self, node: ast.AST) -> None:
+                _Visitor(certain=False).visit(node)
+
+            def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+                self.visit(node.value)
+                effect(node, self.certain)
+
+            def visit_BoolOp(self, node: ast.BoolOp) -> None:
+                if not node.values:
+                    return
+                self.visit(node.values[0])
+                for item in node.values[1:]:
+                    self.uncertain(item)
+
+            def visit_IfExp(self, node: ast.IfExp) -> None:
+                self.visit(node.test)
+                self.uncertain(node.body)
+                self.uncertain(node.orelse)
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_comprehension(node)
+
+            def _visit_comprehension(self, node: ast.AST) -> None:
+                if self.certain:
+                    self.uncertain(node)
+                else:
+                    self.generic_visit(node)
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                for default in (
+                    *node.args.defaults,
+                    *(item for item in node.args.kw_defaults if item is not None),
+                ):
+                    self.visit(default)
+
+        _Visitor().visit(value)
+
+    def remember_named_expression_alias(
+        node: ast.NamedExpr,
+        certain: bool,
+    ) -> None:
+        remember_target(
+            node.target,
+            node.value if certain else None,
+            node,
+        )
+
     for statement in function.body:
         if isinstance(statement, ast.Assign):
+            visit_named_expression_effects(
+                statement.value,
+                remember_named_expression_alias,
+            )
             for target in statement.targets:
                 remember_target(target, statement.value, statement)
             continue
         if isinstance(statement, ast.AnnAssign):
+            if statement.value is not None:
+                visit_named_expression_effects(
+                    statement.value,
+                    remember_named_expression_alias,
+                )
             remember_target(statement.target, statement.value, statement)
             continue
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1978,6 +2082,17 @@ def _middleware_may_short_circuit(
         visitor.visit(target)
         return tuple((name, None) for name, _binding in visitor.records)
 
+    def remember_helper_named_expression(
+        node: ast.NamedExpr,
+        certain: bool,
+    ) -> None:
+        identity = (
+            helper_at(node.value.id, node)
+            if certain and isinstance(node.value, ast.Name)
+            else None
+        )
+        remember_helper_alias(node.target.id, node, identity)
+
     for statement in function.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             remember_helper_alias(
@@ -1987,6 +2102,10 @@ def _middleware_may_short_circuit(
             )
             continue
         if isinstance(statement, ast.Assign):
+            visit_named_expression_effects(
+                statement.value,
+                remember_helper_named_expression,
+            )
             pending = tuple(
                 binding
                 for target in statement.targets
@@ -2003,6 +2122,11 @@ def _middleware_may_short_circuit(
             statement.target,
             ast.Name,
         ):
+            if statement.value is not None:
+                visit_named_expression_effects(
+                    statement.value,
+                    remember_helper_named_expression,
+                )
             identity = (
                 helper_at(statement.value.id, statement)
                 if isinstance(statement.value, ast.Name)
@@ -2023,9 +2147,10 @@ def _middleware_may_short_circuit(
 
         def visit_Call(self, node: ast.Call) -> None:
             if isinstance(node.func, ast.Name):
-                identity = helper_at(node.func.id, node)
+                runtime_occurrence = self.occurrence or node
+                identity = helper_at(node.func.id, runtime_occurrence)
                 if identity is not None:
-                    called_helpers.append((identity, self.occurrence or node))
+                    called_helpers.append((identity, runtime_occurrence))
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -2695,7 +2820,10 @@ def _wildcard_exports(
             if isinstance(node.func, ast.Attribute) and all_receiver(node.func.value):
                 self.found = True
             if any(
-                isinstance(value, ast.Name) and value.id in all_aliases
+                any(
+                    isinstance(nested, ast.Name) and nested.id in all_aliases
+                    for nested in ast.walk(value)
+                )
                 for value in (*node.args, *(item.value for item in node.keywords))
             ):
                 self.found = True
@@ -2755,11 +2883,12 @@ def _wildcard_exports(
                         *(name for name, _binding in visitor.records),
                     }
                     public.update(target_names)
-                    uncertain_public = True
                     paired = tuple(
                         destructured_all_aliases(target, node.value)
                         for target in node.targets
                     )
+                    if not all(item is not None for item in paired):
+                        uncertain_public = True
                     all_aliases.difference_update(target_names)
                     if all(item is not None for item in paired):
                         all_aliases.update(
