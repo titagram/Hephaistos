@@ -3183,3 +3183,398 @@ lifespan_app.include_router(dynamic_router)
         event.path == "app.py" and event.reason_code == "framework_config_unresolved"
         for event in adapter.coverage_events(context)
     )
+
+
+def test_background_receiver_destructuring_is_occurrence_and_shape_bounded(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "exact.py",
+        """from fastapi import BackgroundTasks, FastAPI
+
+def before(): return None
+def after(): return None
+app = FastAPI()
+
+@app.get("/exact")
+async def exact(tasks: BackgroundTasks):
+    tasks.add_task(before)
+    (tasks, (other,)) = ({}, (1,))
+    tasks.add_task(after)
+""",
+    )
+    _write(
+        tmp_path,
+        "mismatch.py",
+        """from fastapi import BackgroundTasks, FastAPI
+
+def task(): return None
+app = FastAPI()
+
+@app.get("/mismatch")
+async def mismatch(tasks: BackgroundTasks):
+    (tasks, other) = ({},)
+    tasks.add_task(task)
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "exact.py"), _syntax(tmp_path, "mismatch.py")),
+    )
+
+    exact_route = next(item for item in entrypoints if item.public_name == "exact")
+    mismatch_route = next(
+        item for item in entrypoints if item.public_name == "mismatch"
+    )
+    exact_dispatches = [
+        item
+        for item in adapter.pipeline(context, exact_route)
+        if item.framework_role == "background_task_dispatch"
+    ]
+    assert len(exact_dispatches) == 1
+    assert isinstance(exact_dispatches[0].target, FrameworkLocalTarget)
+    assert exact_dispatches[0].target.local_key == _function_key_at(
+        tmp_path, "exact.py", "before"
+    )
+    assert not any(
+        item.framework_role == "background_task_dispatch"
+        for item in adapter.pipeline(context, mismatch_route)
+    )
+    coverage = adapter.coverage_events(context)
+    assert not any(
+        event.path == "exact.py" and event.reason_code == "background_task_unresolved"
+        for event in coverage
+    )
+    assert any(
+        event.path == "mismatch.py"
+        and event.reason_code == "background_task_unresolved"
+        for event in coverage
+    )
+
+
+def test_middleware_static_containers_preserve_only_traced_continuations(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "exact.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def static_container(request, proceed):
+    callbacks = {"request": [(proceed,)]}
+    next_step = callbacks["request"][0][0]
+    return await next_step(request)
+
+@app.get("/exact")
+async def exact_endpoint(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "escaped.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def escaped_container(request, proceed):
+    holder.callbacks = [proceed]
+    return await holder.callbacks[0](request)
+
+@app.get("/escaped")
+async def escaped_endpoint(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "overwritten.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.middleware("http")
+async def overwritten_container(request, proceed):
+    callbacks = [proceed]
+    callbacks[0] = replacement
+    return await callbacks[0](request)
+
+@app.get("/overwritten")
+async def overwritten_endpoint(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (
+            _syntax(tmp_path, "exact.py"),
+            _syntax(tmp_path, "escaped.py"),
+            _syntax(tmp_path, "overwritten.py"),
+        ),
+    )
+
+    def middleware(route_name: str):
+        route = next(item for item in entrypoints if item.public_name == route_name)
+        return next(
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "middleware_request"
+        )
+
+    assert not middleware("exact_endpoint").short_circuit_successors
+    assert middleware("escaped_endpoint").short_circuit_successors
+    assert middleware("overwritten_endpoint").short_circuit_successors
+    coverage = adapter.coverage_events(context)
+    assert not any(
+        event.path == "exact.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        for event in coverage
+    )
+    assert any(
+        event.path == "escaped.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        for event in coverage
+    )
+    assert any(
+        event.path == "overwritten.py"
+        and event.reason_code == "middleware_behavior_unresolved"
+        for event in coverage
+    )
+
+
+def test_dependency_alias_graph_handles_nested_stores_modules_and_cycles(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "providers.py",
+        """from typing import Annotated
+from fastapi import Depends
+
+def shared(): return None
+marker = Depends(shared)
+DependencyAlias = Annotated[str, Depends(shared)]
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_a.py",
+        """from cycle_b import other_marker
+cycle_marker = other_marker
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_b.py",
+        """from cycle_a import cycle_marker as other_marker
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import Depends, FastAPI
+from providers import DependencyAlias, marker
+from cycle_a import cycle_marker
+
+def local_shared(): return None
+app = FastAPI()
+
+@app.get("/marker")
+async def imported_marker(value=marker): return None
+
+@app.get("/alias")
+async def imported_alias(value: DependencyAlias): return None
+
+conditional_marker = Depends(local_shared)
+if enabled:
+    conditional_marker = build_marker()
+
+@app.get("/conditional")
+async def conditional(value=conditional_marker): return None
+
+destructured_marker = Depends(local_shared)
+(destructured_marker, other) = (build_marker(), object())
+
+@app.get("/destructured")
+async def destructured(value=destructured_marker): return None
+
+@app.get("/cycle")
+async def cyclic(value=cycle_marker): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(
+            _syntax(tmp_path, path)
+            for path in (
+                "app.py",
+                "cycle_a.py",
+                "cycle_b.py",
+                "providers.py",
+            )
+        ),
+    )
+
+    assert {item.public_name for item in entrypoints} == {
+        "imported_marker",
+        "imported_alias",
+    }
+    for route in entrypoints:
+        dependencies = [
+            item
+            for item in adapter.pipeline(context, route)
+            if item.framework_role == "decorator_dependency"
+        ]
+        assert len(dependencies) == 1
+        assert isinstance(dependencies[0].target, FrameworkLocalTarget)
+        assert dependencies[0].target.local_key == _function_key_at(
+            tmp_path, "providers.py", "shared"
+        )
+    assert any(
+        event.path == "app.py" and event.reason_code == "framework_config_unresolved"
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_exception_identity_fixed_point_is_file_order_independent_and_bounded(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "z_base.py",
+        """from fastapi import FastAPI
+class BaseError(Exception): pass
+safe_app = FastAPI()
+cycle_app = FastAPI()
+""",
+    )
+    _write(
+        tmp_path,
+        "middle.py",
+        """from z_base import BaseError as ReexportedBase
+""",
+    )
+    _write(
+        tmp_path,
+        "a_child.py",
+        """from middle import ReexportedBase
+from z_base import safe_app
+class ChildError(ReexportedBase): pass
+
+@safe_app.exception_handler(ChildError)
+async def child_handler(request, exc): return None
+
+@safe_app.get("/child")
+async def child_endpoint(): raise ChildError()
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_a.py",
+        """from cycle_b import BError
+from z_base import cycle_app
+class AError(BError): pass
+
+@cycle_app.exception_handler(AError)
+async def cycle_handler(request, exc): return None
+
+@cycle_app.get("/cycle")
+async def cycle_endpoint(): raise AError()
+""",
+    )
+    _write(
+        tmp_path,
+        "cycle_b.py",
+        """from cycle_a import AError
+class BError(AError): pass
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        tuple(
+            _syntax(tmp_path, path)
+            for path in (
+                "a_child.py",
+                "cycle_a.py",
+                "cycle_b.py",
+                "middle.py",
+                "z_base.py",
+            )
+        ),
+    )
+
+    def roles(name: str) -> set[str]:
+        route = next(item for item in entrypoints if item.public_name == name)
+        return {item.framework_role for item in adapter.pipeline(context, route)}
+
+    assert "exception_handler" in roles("child_endpoint")
+    assert "exception_handler_resolution_boundary" not in roles("child_endpoint")
+    assert "exception_handler" not in roles("cycle_endpoint")
+    assert "exception_handler_resolution_boundary" in roles("cycle_endpoint")
+
+
+def test_router_lifespans_expand_per_include_snapshot_with_custom_app_lifespan(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from contextlib import asynccontextmanager
+from fastapi import APIRouter, FastAPI
+
+@asynccontextmanager
+async def child_lifespan(app):
+    yield
+
+@asynccontextmanager
+async def app_lifespan(app):
+    yield
+
+child = APIRouter(lifespan=child_lifespan)
+parent = APIRouter()
+parent.include_router(child)
+
+legacy = FastAPI()
+legacy.include_router(parent)
+
+parent.include_router(child)
+
+custom = FastAPI(lifespan=app_lifespan)
+custom.include_router(parent)
+
+dynamic = APIRouter(lifespan=build_lifespan())
+custom.include_router(dynamic)
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+
+    lifespan_keys = [
+        item.handler_local_key
+        for item in entrypoints
+        if item.kind is EntrypointKind.PROCESS_MAIN
+    ]
+    assert lifespan_keys.count(_function_key(tmp_path, "child_lifespan")) == 3
+    assert lifespan_keys.count(_function_key(tmp_path, "app_lifespan")) == 1
+    assert any(
+        event.path == "app.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )

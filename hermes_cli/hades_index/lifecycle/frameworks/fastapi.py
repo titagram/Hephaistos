@@ -203,6 +203,14 @@ class _Middleware:
 
 
 @dataclass(frozen=True, slots=True)
+class _ContinuationContainer:
+    values: tuple[tuple[object, _ContinuationRelation], ...]
+
+
+_ContinuationRelation = bool | None | _ContinuationContainer
+
+
+@dataclass(frozen=True, slots=True)
 class _ExceptionHandler:
     owner: str
     exception_name: str | None
@@ -231,6 +239,12 @@ class _EventUncertainty:
     owner: str
     source_path: str
     order: tuple[str, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _LifespanInstance:
+    owner: _Object
+    instance_ordinal: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -819,104 +833,167 @@ def _dependency_bindings(
     imports: Mapping[str, Mapping[str, str]],
     import_bindings: _BindingTimeline,
 ) -> _DependencyBindingTimeline:
-    bindings: dict[
+    known_modules = {module for _source, _tree, module in parsed.values()}
+    reachability = _module_import_reachability(parsed)
+    previous_finals: dict[tuple[str, str], tuple[_Dependency, ...] | None] = {}
+    final_bindings: dict[
         tuple[str, str],
         list[tuple[_Order, tuple[_Dependency, ...] | None]],
     ] = {}
 
-    def visible(
-        module: str,
-        name: str,
-        occurrence: _Order,
-    ) -> tuple[_Dependency, ...] | None:
-        item = next(
-            (
-                candidate
-                for candidate in reversed(bindings.get((module, name), ()))
-                if candidate[0] <= occurrence
-            ),
-            None,
-        )
-        return item[1] if item is not None else None
+    for _iteration in range(len(known_modules) + 2):
+        bindings: dict[
+            tuple[str, str],
+            list[tuple[_Order, tuple[_Dependency, ...] | None]],
+        ] = {}
 
-    def classify(
-        value: ast.AST | None,
-        module: str,
-        path: str,
-        occurrence: _Order,
-    ) -> tuple[_Dependency, ...] | None:
-        if value is None:
+        def remember(
+            module: str,
+            name: str,
+            order: _Order,
+            value: tuple[_Dependency, ...] | None,
+        ) -> None:
+            bindings.setdefault((module, name), []).append((order, value))
+
+        def visible(
+            module: str,
+            name: str,
+            occurrence: _Order,
+        ) -> tuple[_Dependency, ...] | None:
+            item = next(
+                (
+                    candidate
+                    for candidate in reversed(bindings.get((module, name), ()))
+                    if candidate[0] <= occurrence
+                ),
+                None,
+            )
+            return item[1] if item is not None else None
+
+        def classify(
+            value: ast.AST | None,
+            module: str,
+            path: str,
+            occurrence: _Order,
+        ) -> tuple[_Dependency, ...] | None:
+            if value is None:
+                return None
+            dependency = _dependency_from(
+                value,
+                module,
+                path,
+                imports,
+                import_bindings,
+            )
+            if dependency is not None:
+                return (dependency,)
+            is_annotated, annotated = _annotated_dependencies(
+                value,
+                value,
+                quoted=False,
+                module=module,
+                path=path,
+                imports=imports,
+                import_bindings=import_bindings,
+            )
+            if is_annotated:
+                return annotated
+            if isinstance(value, ast.Name):
+                return visible(module, value.id, occurrence)
+            if isinstance(
+                value,
+                (
+                    ast.Constant,
+                    ast.Dict,
+                    ast.List,
+                    ast.Set,
+                    ast.Tuple,
+                ),
+            ):
+                return ()
             return None
-        dependency = _dependency_from(
-            value,
-            module,
-            path,
-            imports,
-            import_bindings,
-        )
-        if dependency is not None:
-            return (dependency,)
-        is_annotated, annotated = _annotated_dependencies(
-            value,
-            value,
-            quoted=False,
-            module=module,
-            path=path,
-            imports=imports,
-            import_bindings=import_bindings,
-        )
-        if is_annotated:
-            return annotated
-        if isinstance(value, ast.Name):
-            return visible(module, value.id, occurrence)
-        if isinstance(
-            value,
-            (
-                ast.Constant,
-                ast.Dict,
-                ast.List,
-                ast.Set,
-                ast.Tuple,
-            ),
-        ):
-            return ()
-        return None
 
-    def remember(
-        module: str,
-        name: str,
-        order: _Order,
-        value: tuple[_Dependency, ...] | None,
-    ) -> None:
-        bindings.setdefault((module, name), []).append((order, value))
-
-    for path, (_source, tree, module) in parsed.items():
-        for node in tree.body:
-            order = _line_order(path, node)
-            if isinstance(node, ast.Assign):
-                value = classify(node.value, module, path, order)
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        remember(module, target.id, order, value)
-                continue
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                remember(
-                    module,
-                    node.target.id,
-                    order,
-                    classify(node.value, module, path, order),
-                )
-                continue
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                remember(module, node.name, order, ())
-                continue
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
+        for path, (_source, tree, module) in parsed.items():
+            for node in tree.body:
+                order = _line_order(path, node)
+                if isinstance(node, ast.ImportFrom):
+                    base = _import_from_base(module, node)
+                    cyclic = (
+                        base is not None
+                        and base != module
+                        and (base, module) in reachability
+                    )
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        name = alias.asname or alias.name
+                        value = (
+                            previous_finals.get((base, alias.name))
+                            if base in known_modules and not cyclic
+                            else None
+                            if base in known_modules
+                            else ()
+                        )
+                        remember(module, name, order, value)
+                    continue
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        remember(
+                            module,
+                            alias.asname or alias.name.split(".", 1)[0],
+                            order,
+                            (),
+                        )
+                    continue
+                if isinstance(node, ast.Assign):
+                    value = classify(node.value, module, path, order)
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            remember(module, target.id, order, value)
+                            continue
+                        visitor = _ScopeBindingVisitor()
+                        visitor.visit(target)
+                        for name, binding in visitor.records:
+                            remember(
+                                module,
+                                name,
+                                _line_order(path, binding),
+                                None,
+                            )
+                    continue
+                if isinstance(node, ast.AnnAssign) and isinstance(
+                    node.target,
+                    ast.Name,
+                ):
+                    remember(
+                        module,
+                        node.target.id,
+                        order,
+                        classify(node.value, module, path, order),
+                    )
+                    continue
+                if isinstance(
+                    node,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                ):
+                    remember(module, node.name, order, ())
+                    continue
                 visitor = _ScopeBindingVisitor()
                 visitor.visit(node)
                 for name, binding in visitor.records:
-                    remember(module, name, _line_order(path, binding), ())
+                    remember(module, name, _line_order(path, binding), None)
 
-    return MappingProxyType({key: tuple(values) for key, values in bindings.items()})
+        current_finals = {
+            key: values[-1][1] for key, values in bindings.items() if values
+        }
+        final_bindings = bindings
+        if current_finals == previous_finals:
+            break
+        previous_finals = current_finals
+
+    return MappingProxyType({
+        key: tuple(values) for key, values in final_bindings.items()
+    })
 
 
 def _parameter_dependencies(
@@ -1106,11 +1183,12 @@ def _middleware_may_short_circuit(
             int(getattr(node, "col_offset", 0)),
         )
 
-    alias_bindings: dict[str, list[tuple[tuple[int, int], bool | None]]] = {
-        continuation: [(position(function), True)]
-    }
+    alias_bindings: dict[
+        str,
+        list[tuple[tuple[int, int], _ContinuationRelation]],
+    ] = {continuation: [(position(function), True)]}
 
-    def alias_at(name: str, node: ast.AST) -> bool | None:
+    def alias_at(name: str, node: ast.AST) -> _ContinuationRelation:
         occurrence = position(node)
         visible = next(
             (
@@ -1122,18 +1200,75 @@ def _middleware_may_short_circuit(
         )
         return visible
 
-    def remember_alias(name: str, node: ast.AST, value: bool | None) -> None:
+    def remember_alias(
+        name: str,
+        node: ast.AST,
+        value: _ContinuationRelation,
+    ) -> None:
         alias_bindings.setdefault(name, []).append((position(node), value))
 
-    def alias_value(value: ast.AST | None, occurrence: ast.AST) -> bool | None:
+    def literal_key(value: ast.AST) -> object | None:
+        try:
+            key = ast.literal_eval(value)
+            hash(key)
+        except (TypeError, ValueError):
+            return None
+        return key
+
+    def alias_value(
+        value: ast.AST | None,
+        occurrence: ast.AST,
+    ) -> _ContinuationRelation:
         if isinstance(value, ast.Name):
             return alias_at(value.id, occurrence)
-        if isinstance(
-            value,
-            (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
-        ):
+        if isinstance(value, ast.Constant):
             return False
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return _ContinuationContainer(
+                tuple(
+                    (index, alias_value(item, occurrence))
+                    for index, item in enumerate(value.elts)
+                )
+            )
+        if isinstance(value, ast.Dict):
+            items: list[tuple[object, _ContinuationRelation]] = []
+            for key_node, item in zip(value.keys, value.values, strict=True):
+                if key_node is None or (key := literal_key(key_node)) is None:
+                    return None
+                items.append((key, alias_value(item, occurrence)))
+            return _ContinuationContainer(tuple(items))
+        if isinstance(value, ast.Attribute):
+            relation = contains_continuation(alias_value(value.value, occurrence))
+            return None if relation in {True, None} else False
+        if isinstance(value, ast.Subscript):
+            container = alias_value(value.value, occurrence)
+            key = literal_key(value.slice)
+            if container is False:
+                return False
+            if not isinstance(container, _ContinuationContainer) or key is None:
+                return None
+            return next(
+                (
+                    relation
+                    for item_key, relation in container.values
+                    if item_key == key
+                ),
+                None,
+            )
+        if isinstance(value, ast.Set):
+            relations = tuple(alias_value(item, occurrence) for item in value.elts)
+            return False if all(item is False for item in relations) else None
         return None
+
+    def contains_continuation(
+        relation: _ContinuationRelation,
+    ) -> bool | None:
+        if not isinstance(relation, _ContinuationContainer):
+            return relation
+        values = tuple(contains_continuation(item) for _key, item in relation.values)
+        if True in values:
+            return True
+        return None if None in values else False
 
     continuation_escaped = False
 
@@ -1160,11 +1295,13 @@ def _middleware_may_short_circuit(
             for nested_target in target.elts:
                 remember_target(nested_target, None, statement)
             return
-        if isinstance(target, (ast.Attribute, ast.Subscript)) and isinstance(
-            value,
-            ast.Name,
-        ):
-            continuation_escaped |= alias_at(value.id, statement) in {True, None}
+        if isinstance(target, (ast.Attribute, ast.Subscript)):
+            stored = contains_continuation(alias_value(value, statement))
+            container = contains_continuation(alias_value(target.value, statement))
+            continuation_escaped |= stored in {True, None} or container in {
+                True,
+                None,
+            }
 
     for statement in function.body:
         if isinstance(statement, ast.Assign):
@@ -1201,23 +1338,14 @@ def _middleware_may_short_circuit(
             return (False, False)
         if isinstance(node, ast.Call):
             nonlocal uncertain_call
-            if isinstance(node.func, ast.Name):
-                relation = alias_at(node.func.id, node.func)
-                if relation is True:
-                    return (True, True)
-                if relation is None:
-                    uncertain_call = True
-            elif any(
-                isinstance(child, ast.Name)
-                and alias_at(child.id, child) in {True, None}
-                for child in ast.walk(node.func)
-            ):
+            relation = alias_value(node.func, node.func)
+            if relation is True:
+                return (True, True)
+            if relation is None:
                 uncertain_call = True
             if any(
-                isinstance(child, ast.Name)
-                and alias_at(child.id, child) in {True, None}
+                contains_continuation(alias_value(value, value)) in {True, None}
                 for value in (*node.args, *(item.value for item in node.keywords))
-                for child in ast.walk(value)
             ):
                 uncertain_call = True
             values = (node.func, *node.args, *(item.value for item in node.keywords))
@@ -1533,22 +1661,44 @@ def _background_targets(
             return _NON_FRAMEWORK_BINDING
         return identity
 
-    for statement in node.body:
-        order = _line_order(path, statement)
-        if isinstance(statement, ast.Assign):
-            identity = assigned_identity(statement.value, order)
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    remember(target.id, statement, identity)
-            continue
-        if isinstance(statement, ast.AnnAssign) and isinstance(
-            statement.target, ast.Name
-        ):
+    def remember_assignment(
+        target: ast.AST,
+        value: ast.AST | None,
+        statement: ast.AST,
+    ) -> None:
+        if isinstance(target, ast.Name):
             remember(
-                statement.target.id,
+                target.id,
                 statement,
-                assigned_identity(statement.value, order),
+                assigned_identity(value, _line_order(path, value or statement)),
             )
+            return
+        if isinstance(target, (ast.List, ast.Tuple)):
+            if isinstance(value, (ast.List, ast.Tuple)) and len(target.elts) == len(
+                value.elts
+            ):
+                for nested_target, nested_value in zip(
+                    target.elts,
+                    value.elts,
+                    strict=True,
+                ):
+                    remember_assignment(nested_target, nested_value, statement)
+                return
+            visitor = _ScopeBindingVisitor()
+            visitor.visit(target)
+            for name, binding in visitor.records:
+                remember(name, binding, None)
+            return
+        if isinstance(target, ast.Starred):
+            remember_assignment(target.value, None, statement)
+
+    for statement in node.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                remember_assignment(target, statement.value, statement)
+            continue
+        if isinstance(statement, ast.AnnAssign):
+            remember_assignment(statement.target, statement.value, statement)
             continue
         if isinstance(statement, ast.Import):
             for alias in statement.names:
@@ -2093,6 +2243,20 @@ def _exception_identity(
     *,
     occurrence: _Order | None,
 ) -> str | None:
+    def final_alias(identity: str, seen: frozenset[str]) -> str | None:
+        if identity in seen or "." not in identity:
+            return None if identity in seen else identity
+        target_module, target_name = identity.rsplit(".", 1)
+        timeline = aliases.get((target_module, target_name))
+        if not timeline:
+            return identity
+        target = timeline[-1][1]
+        if target is None:
+            return None
+        if target == identity:
+            return identity
+        return final_alias(target, seen | {identity})
+
     if raw is None:
         return None
     head, separator, tail = raw.partition(".")
@@ -2107,11 +2271,17 @@ def _exception_identity(
         if identity is None:
             return None
         resolved = f"{identity}.{tail}" if separator else identity
-        return resolved if _DOTTED_RE.fullmatch(resolved) else None
+        return (
+            final_alias(resolved, frozenset())
+            if _DOTTED_RE.fullmatch(resolved)
+            else None
+        )
     if raw in {"BaseException", "Exception"}:
         return f"builtins.{raw}"
     resolved = _resolved_reference(raw, module, imports)
-    return ".".join(resolved) if resolved is not None else None
+    return (
+        final_alias(".".join(resolved), frozenset()) if resolved is not None else None
+    )
 
 
 def _class_identity_preserved(node: ast.ClassDef) -> bool:
@@ -2123,6 +2293,7 @@ def _class_identity_preserved(node: ast.ClassDef) -> bool:
 def _exception_aliases(
     parsed: Mapping[str, tuple[str, ast.Module, str]],
     class_identities: Mapping[int, str],
+    proven_mros: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> _BindingTimeline:
     """Resolve source-visible exception bindings at each use occurrence."""
 
@@ -2130,7 +2301,6 @@ def _exception_aliases(
         tuple[str, str],
         list[tuple[tuple[str, int, int], str | None]],
     ] = {}
-    preserved_identities: dict[str, bool] = {}
 
     def resolve(
         raw: str | None,
@@ -2290,29 +2460,13 @@ def _exception_aliases(
                     int(getattr(node, "end_col_offset", node.col_offset)) + 1,
                 )
                 identity = class_identities[id(node)]
-                identity_preserved = _class_identity_preserved(node)
-                if identity_preserved:
-                    for base in node.bases:
-                        base_identity = resolve(
-                            _dotted(base),
-                            module,
-                            _line_order(path, base),
-                        )
-                        if base_identity in {
-                            "builtins.BaseException",
-                            "builtins.Exception",
-                            "builtins.object",
-                        }:
-                            continue
-                        if preserved_identities.get(base_identity or "") is not True:
-                            identity_preserved = False
-                            break
-                preserved_identities[identity] = identity_preserved
                 remember(
                     module,
                     node.name,
                     binding_order,
-                    identity if identity_preserved else None,
+                    identity
+                    if proven_mros is None or proven_mros.get(identity) is not None
+                    else None,
                 )
                 continue
             if isinstance(node, ast.Import):
@@ -2331,6 +2485,13 @@ def _exception_aliases(
                         continue
                     name = alias.asname or alias.name
                     identity = f"{base}.{alias.name}" if base is not None else None
+                    if (
+                        identity is not None
+                        and proven_mros is not None
+                        and identity in proven_mros
+                        and proven_mros[identity] is None
+                    ):
+                        identity = None
                     remember(module, name, order, identity)
                 continue
             targets: tuple[ast.Name, ...] = ()
@@ -3179,6 +3340,7 @@ def _lifespan_candidate(
     function_keys: Mapping[tuple[str, str], str],
     imports: Mapping[str, Mapping[str, str]],
     source: str,
+    instance_ordinal: int = 0,
 ) -> EntrypointCandidate | None:
     del imports
     if app.lifespan is None:
@@ -3187,8 +3349,12 @@ def _lifespan_candidate(
         app.source_path,
         source,
         app.line,
-        f"fastapi/lifespan/{app.name}",
-        0,
+        (
+            f"fastapi/lifespan/{app.name}"
+            if app.kind == "app"
+            else f"fastapi/lifespan/{app.name}/instances/{instance_ordinal}"
+        ),
+        instance_ordinal,
     )
     handler = (
         function_keys.get(app.lifespan.target)
@@ -3204,7 +3370,7 @@ def _lifespan_candidate(
             "unresolved_fact",
             "ast",
             f"fastapi/lifespan/{app.name}/handler",
-            0,
+            instance_ordinal,
         )
     )
     evidence = IREvidence(
@@ -3567,6 +3733,108 @@ def _expand_events(
     )
 
 
+def _expand_lifespans(
+    objects: Mapping[str, _Object],
+    includes: Sequence[_Include],
+    diagnostics: _Diagnostics,
+    *,
+    invalid_root_apps: frozenset[str],
+    modules_by_path: Mapping[str, str],
+    import_reachability: frozenset[tuple[str, str]],
+) -> tuple[_LifespanInstance, ...]:
+    includes_by_parent: dict[str, list[_Include]] = {}
+    for include in includes:
+        includes_by_parent.setdefault(include.parent, []).append(include)
+    for values in includes_by_parent.values():
+        values.sort(key=lambda item: item.order)
+
+    resolved: list[_LifespanInstance] = []
+    instance_counts: dict[str, int] = {}
+
+    def visible(
+        source_path: str,
+        order: _Order,
+        current: _Object,
+        cutoff: _Order | None,
+    ) -> bool:
+        if cutoff is None:
+            return True
+        if source_path == cutoff[0]:
+            return order <= cutoff
+        if source_path == current.source_path:
+            cutoff_module = modules_by_path.get(cutoff[0])
+            if (
+                cutoff_module is None
+                or (
+                    current.module,
+                    cutoff_module,
+                )
+                not in import_reachability
+            ):
+                return True
+        diagnostics.mark(
+            source_path,
+            CoverageCapability.ENTRYPOINT_DISCOVERY,
+            "router_snapshot_order_unresolved",
+        )
+        return False
+
+    def walk(
+        object_key: str,
+        cutoff: _Order | None,
+        ancestry: frozenset[str],
+    ) -> None:
+        current = objects.get(object_key)
+        if current is None or current.unresolved:
+            diagnostics.mark(
+                current.source_path if current else None,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "framework_config_unresolved",
+            )
+            return
+        if object_key in ancestry:
+            diagnostics.mark(
+                current.source_path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "router_cycle_unresolved",
+            )
+            return
+        if current.lifespan_declared:
+            if current.lifespan is None or current.lifespan.target is None:
+                diagnostics.mark(
+                    current.source_path,
+                    CoverageCapability.FRAMEWORK_LIFECYCLE,
+                    "framework_config_unresolved",
+                )
+            else:
+                ordinal = instance_counts.get(object_key, 0)
+                instance_counts[object_key] = ordinal + 1
+                resolved.append(_LifespanInstance(current, ordinal))
+        for include in includes_by_parent.get(object_key, ()):
+            if not visible(include.source_path, include.order, current, cutoff):
+                continue
+            child = objects.get(include.child or "")
+            if include.unresolved or child is None or child.kind != "router":
+                diagnostics.mark(
+                    include.source_path,
+                    CoverageCapability.ENTRYPOINT_DISCOVERY,
+                    "framework_config_unresolved",
+                )
+                continue
+            walk(child.key, include.order, ancestry | {object_key})
+
+    for app in sorted(
+        (
+            item
+            for item in objects.values()
+            if item.kind == "app" and item.key not in invalid_root_apps
+        ),
+        key=lambda item: item.order,
+    ):
+        walk(app.key, None, frozenset())
+    return tuple(resolved)
+
+
 class FastAPILifecycleAdapter:
     """Extract FastAPI's static routes and finite request lifecycle facts."""
 
@@ -3676,12 +3944,17 @@ class FastAPILifecycleAdapter:
             starlette_version in _STARLETTE_ROUTE_SIGNATURE_VERSIONS
         )
         exception_classes = _exception_class_identities(parsed)
-        exception_aliases = _exception_aliases(parsed, exception_classes)
+        exception_declarations = _exception_aliases(parsed, exception_classes)
         exception_mros = _exception_mros(
             parsed,
             imports,
-            exception_aliases,
+            exception_declarations,
             exception_classes,
+        )
+        exception_aliases = _exception_aliases(
+            parsed,
+            exception_classes,
+            exception_mros,
         )
 
         objects: dict[str, _Object] = {}
@@ -3770,7 +4043,7 @@ class FastAPILifecycleAdapter:
                     )
                     lifespan_node = (
                         _keyword(constructor_call, "lifespan")
-                        if kind == "app"
+                        if kind in {"app", "router"}
                         else None
                     )
                     no_custom_lifespan = (
@@ -3842,7 +4115,7 @@ class FastAPILifecycleAdapter:
                         else None
                     )
                     lifespan_declared = (
-                        kind == "app"
+                        kind in {"app", "router"}
                         and lifespan_node is not None
                         and not no_custom_lifespan
                     )
@@ -4566,12 +4839,25 @@ class FastAPILifecycleAdapter:
                 event_candidates.append(
                     _event_candidate(context, item, function_keys, source)
                 )
-        for app in objects.values():
-            if app.kind != "app" or app.key in invalid_root_apps:
-                continue
-            source = parsed.get(app.source_path, ("", None, ""))[0]
+        expanded_lifespans = _expand_lifespans(
+            objects,
+            includes,
+            diagnostics,
+            invalid_root_apps=invalid_root_apps,
+            modules_by_path=modules_by_path,
+            import_reachability=import_reachability,
+        )
+        for instance in expanded_lifespans:
+            owner = instance.owner
+            source = parsed.get(owner.source_path, ("", None, ""))[0]
             if source:
-                candidate = _lifespan_candidate(app, function_keys, imports, source)
+                candidate = _lifespan_candidate(
+                    owner,
+                    function_keys,
+                    imports,
+                    source,
+                    instance.instance_ordinal,
+                )
                 if candidate is not None:
                     event_candidates.append(candidate)
 
