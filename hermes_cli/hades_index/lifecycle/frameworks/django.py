@@ -143,6 +143,12 @@ class _ImportBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class _ImportBindings:
+    values: Mapping[str, _ImportBinding]
+    invalidated: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class _SyntaxIndex:
     functions: Mapping[tuple[str, str], str]
     classes: Mapping[tuple[str, str], str]
@@ -302,11 +308,71 @@ def _relative_import_module(path: str, module: str | None, level: int) -> str | 
     return candidate if candidate and _DOTTED_RE.fullmatch(candidate) else None
 
 
-def _import_bindings(path: str, tree: ast.Module) -> Mapping[str, _ImportBinding]:
-    """Resolve only explicit Python import bindings from one URLconf module."""
+def _source_start(node: ast.AST) -> tuple[int, int]:
+    return getattr(node, "lineno", 0), getattr(node, "col_offset", 0)
+
+
+def _source_end(node: ast.AST) -> tuple[int, int]:
+    return (
+        getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+        getattr(node, "end_col_offset", getattr(node, "col_offset", 0)),
+    )
+
+
+def _assignment_root(target: ast.AST) -> str | None:
+    """Return the import alias affected by a direct or attribute mutation."""
+
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, (ast.Attribute, ast.Subscript)):
+        return _assignment_root(target.value)
+    return None
+
+
+def _rebound_names(statement: ast.stmt) -> frozenset[str]:
+    """Collect top-level names that can invalidate an earlier import binding."""
+
+    targets: tuple[ast.AST, ...] = ()
+    if isinstance(statement, ast.Assign):
+        targets = tuple(statement.targets)
+    elif isinstance(statement, ast.AnnAssign):
+        targets = (statement.target,)
+    elif isinstance(statement, ast.AugAssign):
+        targets = (statement.target,)
+    elif isinstance(statement, ast.Delete):
+        targets = tuple(statement.targets)
+    elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return frozenset({statement.name})
+    elif isinstance(statement, (ast.For, ast.AsyncFor)):
+        targets = (statement.target,)
+    elif isinstance(statement, (ast.With, ast.AsyncWith)):
+        targets = tuple(
+            item.optional_vars
+            for item in statement.items
+            if item.optional_vars is not None
+        )
+    elif (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and _dotted(statement.value.func) in {"setattr", "delattr"}
+        and statement.value.args
+    ):
+        targets = (statement.value.args[0],)
+    return frozenset(
+        root for target in targets if (root := _assignment_root(target)) is not None
+    )
+
+
+def _import_bindings(
+    path: str, tree: ast.Module, before: ast.AST | None = None
+) -> _ImportBindings:
+    """Resolve imports that remain valid at one visible source-order use site."""
 
     values: dict[str, _ImportBinding] = {}
+    invalidated: set[str] = set()
     for statement in tree.body:
+        if before is not None and _source_end(statement) > _source_start(before):
+            continue
         if isinstance(statement, ast.Import):
             for alias in statement.names:
                 if not _DOTTED_RE.fullmatch(alias.name):
@@ -314,6 +380,7 @@ def _import_bindings(path: str, tree: ast.Module) -> Mapping[str, _ImportBinding
                 local = alias.asname or alias.name.split(".", 1)[0]
                 target = alias.name if alias.asname else local
                 values[local] = _ImportBinding(target)
+                invalidated.discard(local)
         elif isinstance(statement, ast.ImportFrom):
             base = _relative_import_module(path, statement.module, statement.level)
             if base is None:
@@ -321,23 +388,28 @@ def _import_bindings(path: str, tree: ast.Module) -> Mapping[str, _ImportBinding
             for alias in statement.names:
                 if alias.name == "*" or not _DOTTED_RE.fullmatch(alias.name):
                     continue
-                values[alias.asname or alias.name] = _ImportBinding(
-                    f"{base}.{alias.name}"
-                )
-    return MappingProxyType(values)
+                local = alias.asname or alias.name
+                values[local] = _ImportBinding(f"{base}.{alias.name}")
+                invalidated.discard(local)
+        else:
+            for name in _rebound_names(statement):
+                if name in values:
+                    values.pop(name)
+                    invalidated.add(name)
+    return _ImportBindings(MappingProxyType(values), frozenset(invalidated))
 
 
-def _resolve_reference(
-    raw: str, path: str, bindings: Mapping[str, _ImportBinding]
-) -> str | None:
+def _resolve_reference(raw: str, path: str, bindings: _ImportBindings) -> str | None:
     """Resolve a URL expression through a concrete import, never a suffix."""
 
     if not _DOTTED_RE.fullmatch(raw):
         return None
     head, *tail = raw.split(".")
-    binding = bindings.get(head)
+    binding = bindings.values.get(head)
     if binding is not None:
         return ".".join((binding.target, *tail))
+    if head in bindings.invalidated:
+        return None
     # A locally declared view is valid only if later exact SyntaxIR binding can
     # prove it.  This is not a fallback to another module.
     current = _module_name(path)
@@ -591,7 +663,6 @@ def _collect_routes(
         diagnostics.mark(path, reason_code="urlconf_unresolved")
         return ()
     content, tree = parsed
-    bindings = _import_bindings(path, tree)
     entries = _urlpatterns(tree)
     if entries is None:
         diagnostics.mark(path, reason_code="urlpatterns_unresolved")
@@ -640,7 +711,9 @@ def _collect_routes(
             diagnostics.mark(path, reason_code="route_target_unresolved")
             continue
         kind, raw_target = target_parts
-        target_reference = _resolve_reference(raw_target, path, bindings)
+        target_reference = _resolve_reference(
+            raw_target, path, _import_bindings(path, tree, item)
+        )
         if target_reference is None:
             diagnostics.mark(path, reason_code="route_target_unresolved")
             continue
@@ -714,7 +787,7 @@ def _syntax_index(syntax: Sequence[SyntaxIR]) -> _SyntaxIndex:
 def _exception_reference(
     node: ast.AST | None,
     path: str,
-    bindings: Mapping[str, _ImportBinding],
+    bindings: _ImportBindings,
     index: _SyntaxIndex,
 ) -> str | None:
     """Resolve an exception class only through visible declarations/imports."""
@@ -728,7 +801,7 @@ def _exception_reference(
     if not name or not name[0].isupper():
         return None
     head, *tail = raw.split(".")
-    binding = bindings.get(head)
+    binding = bindings.values.get(head)
     if binding is not None:
         return ".".join((binding.target, *tail))
     if tail:
@@ -757,7 +830,6 @@ def _inheritance_index(
         if module is None or parsed is None:
             continue
         _content, tree = parsed
-        bindings = _import_bindings(item.path, tree)
         for node in tree.body:
             if (
                 not isinstance(node, ast.ClassDef)
@@ -765,6 +837,7 @@ def _inheritance_index(
             ):
                 continue
             name = f"{module}.{node.name}"
+            bindings = _import_bindings(item.path, tree, node)
             visible_bases = tuple(
                 value
                 for base in node.bases
@@ -812,7 +885,7 @@ def _handler_catches(
     handler: ast.ExceptHandler,
     raised_type: str,
     path: str,
-    bindings: Mapping[str, _ImportBinding],
+    bindings: _ImportBindings,
     index: _SyntaxIndex,
     inheritance: _InheritanceIndex,
 ) -> bool | None:
@@ -837,7 +910,7 @@ def _handler_catches(
 def _exception_arms(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     path: str,
-    bindings: Mapping[str, _ImportBinding],
+    bindings: _ImportBindings,
     index: _SyntaxIndex,
     inheritance: _InheritanceIndex,
 ) -> tuple[str, ...]:
@@ -899,7 +972,7 @@ def _exception_arms(
 def _is_django_access_decorator(
     decorator: ast.AST,
     path: str,
-    bindings: Mapping[str, _ImportBinding],
+    bindings: _ImportBindings,
 ) -> bool:
     """Recognize only an explicitly imported Django auth decorator."""
 
@@ -908,7 +981,7 @@ def _is_django_access_decorator(
         return False
     # Do not use _resolve_reference's local fallback: access control is a
     # framework fact only when an import binding proves its Django origin.
-    if raw.split(".", 1)[0] not in bindings:
+    if raw.split(".", 1)[0] not in bindings.values:
         return False
     resolved = _resolve_reference(raw, path, bindings)
     return resolved in _DJANGO_ACCESS_DECORATORS
@@ -917,7 +990,7 @@ def _is_django_access_decorator(
 def _view_outcome(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     path: str,
-    bindings: Mapping[str, _ImportBinding],
+    bindings: _ImportBindings,
     index: _SyntaxIndex,
     inheritance: _InheritanceIndex,
 ) -> _ViewOutcome:
@@ -949,13 +1022,16 @@ def _function_outcomes(
         if module is None or parsed is None:
             continue
         _content, tree = parsed
-        bindings = _import_bindings(item.path, tree)
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 key = index.functions.get((module, node.name))
                 if key is not None:
                     values[key] = _view_outcome(
-                        node, item.path, bindings, index, inheritance
+                        node,
+                        item.path,
+                        _import_bindings(item.path, tree, node),
+                        index,
+                        inheritance,
                     )
             elif isinstance(node, ast.ClassDef):
                 if (module, node.name) not in index.classes:
@@ -966,7 +1042,11 @@ def _function_outcomes(
                     key = index.methods.get((module, node.name, method.name))
                     if key is not None:
                         values[key] = _view_outcome(
-                            method, item.path, bindings, index, inheritance
+                            method,
+                            item.path,
+                            _import_bindings(item.path, tree, method),
+                            index,
+                            inheritance,
                         )
     return MappingProxyType(values)
 

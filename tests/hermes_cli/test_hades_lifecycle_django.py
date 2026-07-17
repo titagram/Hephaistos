@@ -802,3 +802,92 @@ def external_error(request):
     assert "unhandled_exception" not in pipelines["local"]
     assert "unresolved_exception_boundary" in pipelines["external"]
     assert "unhandled_exception" not in pipelines["external"]
+
+
+def test_django_decorator_import_expires_after_visible_rebinding(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [
+    path("before/", views.before, name="before"),
+    path("after/", views.after, name="after"),
+]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """from django.contrib.auth.decorators import login_required
+@login_required
+def before(request): return HttpResponse()
+login_required = lambda function: function
+@login_required
+def after(request): return HttpResponse()
+""",
+    )
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("before", 3),
+                _function("after", 6),
+            ),
+        ),
+    )
+    pipelines = {
+        route.public_name: {
+            segment.framework_role for segment in adapter.pipeline(context, route)
+        }
+        for route in routes
+    }
+
+    assert "decorator_access_control" in pipelines["before"]
+    assert "decorator_access_control" not in pipelines["after"]
+
+
+def test_url_import_alias_expires_after_visible_rebinding(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "project/urls.py",
+        """from . import views
+urlpatterns = [path("before/", views.before, name="before")]
+views = replacement
+urlpatterns += [path("after/", views.after, name="after")]
+""",
+    )
+    _write(
+        tmp_path,
+        "project/views.py",
+        """def before(request): return HttpResponse()
+def after(request): return HttpResponse()
+""",
+    )
+    context = _context(tmp_path)
+    adapter = DjangoLifecycleAdapter()
+    routes = adapter.entrypoints(
+        context,
+        (
+            _syntax(
+                tmp_path,
+                "project/views.py",
+                _function("before", 1),
+                _function("after", 2),
+            ),
+        ),
+    )
+
+    assert [route.public_name for route in routes] == ["before"]
+    assert ("route_target_unresolved", CoverageOutcome.PARTIAL) in {
+        (event.reason_code, event.outcome) for event in adapter.coverage_events(context)
+    }
