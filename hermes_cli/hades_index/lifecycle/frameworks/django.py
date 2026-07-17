@@ -66,8 +66,8 @@ class _RouteContext:
 class _RouteSpec:
     path: str
     name: str | None
-    handler: str | None
-    cbv: str | None
+    handler: "_FunctionTarget | None"
+    cbv: "_ClassTarget | None"
     source_path: str
     source_line: int
     pointer: str
@@ -78,8 +78,7 @@ class _RouteSpec:
 class _ViewOutcome:
     is_async: bool
     decorator_denial: bool
-    raises: bool
-    handled_exception: bool
+    exception_arms: tuple[str, ...]
     cbv_methods: tuple[tuple[str, str], ...] = ()
 
 
@@ -91,10 +90,33 @@ class _MiddlewareFact:
 
 
 @dataclass(frozen=True, slots=True)
+class _FunctionTarget:
+    module: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ClassTarget:
+    module: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportBinding:
+    target: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SyntaxIndex:
+    functions: Mapping[tuple[str, str], str]
+    classes: Mapping[tuple[str, str], str]
+    methods: Mapping[tuple[str, str, str], str]
+
+
+@dataclass(frozen=True, slots=True)
 class _Snapshot:
     routes: Mapping[tuple[str, str, int], _RouteSpec]
     outcomes: Mapping[str, _ViewOutcome]
-    handler_keys: Mapping[str, str]
     middleware: tuple[_MiddlewareFact, ...] | None
     coverage_events: tuple[CoverageEvent, ...]
 
@@ -208,6 +230,76 @@ def _module_path(module: str) -> str | None:
     if not _DOTTED_RE.fullmatch(module):
         return None
     return f"{module.replace('.', '/')}.py"
+
+
+def _module_name(path: str) -> str | None:
+    """Map a safe Python source path to its static import module name."""
+
+    safe = _safe_path(path)
+    if safe is None or not safe.endswith(".py"):
+        return None
+    parts = safe[:-3].split("/")
+    if parts[-1] == "__init__":
+        parts.pop()
+    module = ".".join(parts)
+    return module if module and _DOTTED_RE.fullmatch(module) else None
+
+
+def _relative_import_module(path: str, module: str | None, level: int) -> str | None:
+    if level == 0:
+        return module if module is not None and _DOTTED_RE.fullmatch(module) else None
+    current = _module_name(path)
+    if current is None:
+        return None
+    parent = current.split(".")[:-1]
+    if level > len(parent) + 1:
+        return None
+    prefix = parent[: len(parent) - max(0, level - 1)]
+    parts = prefix + (module.split(".") if module else [])
+    candidate = ".".join(parts)
+    return candidate if candidate and _DOTTED_RE.fullmatch(candidate) else None
+
+
+def _import_bindings(path: str, tree: ast.Module) -> Mapping[str, _ImportBinding]:
+    """Resolve only explicit Python import bindings from one URLconf module."""
+
+    values: dict[str, _ImportBinding] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                if not _DOTTED_RE.fullmatch(alias.name):
+                    continue
+                local = alias.asname or alias.name.split(".", 1)[0]
+                target = alias.name if alias.asname else local
+                values[local] = _ImportBinding(target)
+        elif isinstance(statement, ast.ImportFrom):
+            base = _relative_import_module(path, statement.module, statement.level)
+            if base is None:
+                continue
+            for alias in statement.names:
+                if alias.name == "*" or not _DOTTED_RE.fullmatch(alias.name):
+                    continue
+                values[alias.asname or alias.name] = _ImportBinding(
+                    f"{base}.{alias.name}"
+                )
+    return MappingProxyType(values)
+
+
+def _resolve_reference(
+    raw: str, path: str, bindings: Mapping[str, _ImportBinding]
+) -> str | None:
+    """Resolve a URL expression through a concrete import, never a suffix."""
+
+    if not _DOTTED_RE.fullmatch(raw):
+        return None
+    head, *tail = raw.split(".")
+    binding = bindings.get(head)
+    if binding is not None:
+        return ".".join((binding.target, *tail))
+    # A locally declared view is valid only if later exact SyntaxIR binding can
+    # prove it.  This is not a fallback to another module.
+    current = _module_name(path)
+    return f"{current}.{raw}" if current is not None else None
 
 
 def _join(prefix: str, value: str) -> str:
@@ -406,8 +498,8 @@ def _include_target(call: ast.Call) -> tuple[str, str | None] | None:
     return module, namespace or app_name
 
 
-def _route_target(node: ast.AST) -> tuple[str | None, str | None] | None:
-    """Return (function, CBV class) only for an unambiguous static expression."""
+def _route_target(node: ast.AST) -> tuple[str, str] | None:
+    """Return (kind, raw reference) only for an unambiguous static expression."""
 
     if (
         isinstance(node, ast.Call)
@@ -415,9 +507,9 @@ def _route_target(node: ast.AST) -> tuple[str | None, str | None] | None:
         and node.func.attr == "as_view"
     ):
         cbv = _dotted(node.func.value)
-        return (None, cbv) if cbv else None
+        return ("cbv", cbv) if cbv else None
     handler = _dotted(node)
-    return (handler, None) if handler else None
+    return ("function", handler) if handler else None
 
 
 def _decorator_name(node: ast.AST) -> str | None:
@@ -442,6 +534,7 @@ def _collect_routes(
         diagnostics.mark(path, reason_code="urlconf_unresolved")
         return ()
     content, tree = parsed
+    bindings = _import_bindings(path, tree)
     entries = _urlpatterns(tree)
     if entries is None:
         diagnostics.mark(path, reason_code="urlpatterns_unresolved")
@@ -489,10 +582,18 @@ def _collect_routes(
         ):
             diagnostics.mark(path, reason_code="route_target_unresolved")
             continue
-        handler, cbv = target_parts
-        if handler is None and cbv is None:
+        kind, raw_target = target_parts
+        target_reference = _resolve_reference(raw_target, path, bindings)
+        if target_reference is None:
             diagnostics.mark(path, reason_code="route_target_unresolved")
             continue
+        target_parts = target_reference.rsplit(".", 1)
+        if len(target_parts) != 2:
+            diagnostics.mark(path, reason_code="route_target_unresolved")
+            continue
+        module, declaration = target_parts
+        handler = _FunctionTarget(module, declaration) if kind == "function" else None
+        cbv = _ClassTarget(module, declaration) if kind == "cbv" else None
         public_name = ":".join(route_context.namespaces + (name,)) if name else None
         ordinal = order[0]
         order[0] += 1
@@ -511,110 +612,195 @@ def _collect_routes(
     return tuple(result)
 
 
-def _handler_key(syntax: Sequence[SyntaxIR], dotted: str) -> str | None:
-    return _handler_keys(syntax).get(dotted)
-
-
-def _handler_keys(syntax: Sequence[SyntaxIR]) -> Mapping[str, str]:
-    """Index each unique syntax declaration at the frozen local-key formula."""
-
-    candidates: dict[str, list[str]] = {}
-    for item in syntax:
-        for ordinal, symbol in enumerate(item.symbols):
-            candidates.setdefault(symbol.name, []).append(
-                local_record_key(
-                    "python",
-                    item.path,
-                    "executable_declaration",
-                    "ast",
-                    f"symbol/{symbol.name}",
-                    ordinal,
-                )
-            )
+def _unique_index(
+    candidates: Mapping[tuple[str, ...], list[str]],
+) -> Mapping[tuple[str, ...], str]:
     return MappingProxyType({
-        name: keys[0] for name, keys in candidates.items() if len(keys) == 1
+        key: values[0] for key, values in candidates.items() if len(values) == 1
     })
 
 
+def _syntax_index(syntax: Sequence[SyntaxIR]) -> _SyntaxIndex:
+    """Index the actual Python Tree-sitter naming contract without suffixes."""
+
+    functions: dict[tuple[str, ...], list[str]] = {}
+    classes: dict[tuple[str, ...], list[str]] = {}
+    methods: dict[tuple[str, ...], list[str]] = {}
+    for item in syntax:
+        if item.language != "python":
+            continue
+        module = _module_name(item.path)
+        if module is None:
+            continue
+        for ordinal, symbol in enumerate(item.symbols):
+            key = local_record_key(
+                "python",
+                item.path,
+                "executable_declaration",
+                "ast",
+                f"symbol/{symbol.name}",
+                ordinal,
+            )
+            if symbol.kind == "class" and not symbol.container:
+                classes.setdefault((module, symbol.name), []).append(key)
+            elif symbol.kind == "function" and symbol.container:
+                methods.setdefault((module, symbol.container, symbol.name), []).append(
+                    key
+                )
+            elif symbol.kind == "function":
+                functions.setdefault((module, symbol.name), []).append(key)
+    return _SyntaxIndex(
+        _unique_index(functions), _unique_index(classes), _unique_index(methods)
+    )
+
+
+def _raised_type(node: ast.Raise) -> str | None:
+    value = node.exc
+    if isinstance(value, ast.Call):
+        name = (_dotted(value.func) or "").rsplit(".", 1)[-1]
+    else:
+        name = (_dotted(value) or "").rsplit(".", 1)[-1]
+    # A lower-case name is a runtime exception value, not an evaluable class.
+    return name if name and name[0].isupper() else None
+
+
+def _handler_catches(handler: ast.ExceptHandler, raised_type: str) -> bool | None:
+    if handler.type is None:
+        return True
+    types = (
+        handler.type.elts if isinstance(handler.type, ast.Tuple) else (handler.type,)
+    )
+    names = [(_dotted(item) or "").rsplit(".", 1)[-1] for item in types]
+    if raised_type in names or bool({"Exception", "BaseException"} & set(names)):
+        return True
+    return None if any(not name or not name[0].isupper() for name in names) else False
+
+
+def _exception_arms(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[str, ...]:
+    """Classify each raise by the handlers that lexically enclose it."""
+
+    found: set[str] = set()
+
+    def visit(node: ast.AST, handlers: tuple[ast.ExceptHandler, ...]) -> None:
+        if isinstance(node, ast.Raise):
+            raised_type = _raised_type(node)
+            if raised_type is None:
+                found.add("unresolved_exception_boundary")
+            elif any(
+                _handler_catches(handler, raised_type) is True for handler in handlers
+            ):
+                found.add("handled_exception")
+            elif any(
+                _handler_catches(handler, raised_type) is None for handler in handlers
+            ):
+                found.add("unresolved_exception_boundary")
+            else:
+                found.add("unhandled_exception")
+            return
+        if isinstance(node, ast.Try):
+            for child in node.body:
+                visit(child, handlers + tuple(node.handlers))
+            for child in node.orelse:
+                visit(child, handlers)
+            for handler in node.handlers:
+                for child in handler.body:
+                    visit(child, handlers)
+            for child in node.finalbody:
+                visit(child, handlers)
+            return
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+        ):
+            if node is not function:
+                return
+        for child in ast.iter_child_nodes(node):
+            visit(child, handlers)
+
+    for statement in function.body:
+        visit(statement, ())
+    return tuple(
+        role
+        for role in (
+            "handled_exception",
+            "unhandled_exception",
+            "unresolved_exception_boundary",
+        )
+        if role in found
+    )
+
+
+def _view_outcome(function: ast.FunctionDef | ast.AsyncFunctionDef) -> _ViewOutcome:
+    decorator_denial = any(
+        decorator_name.endswith((
+            "login_required",
+            "permission_required",
+            "user_passes_test",
+        ))
+        for decorator in function.decorator_list
+        if (decorator_name := _decorator_name(decorator)) is not None
+    )
+    return _ViewOutcome(
+        isinstance(function, ast.AsyncFunctionDef),
+        decorator_denial,
+        _exception_arms(function),
+    )
+
+
 def _function_outcomes(
-    context: ExtractionContext, syntax: Sequence[SyntaxIR]
+    context: ExtractionContext,
+    syntax: Sequence[SyntaxIR],
+    index: _SyntaxIndex,
 ) -> Mapping[str, _ViewOutcome]:
-    """Index functions and class methods only when a unique syntax symbol exists."""
+    """Map parsed function bodies only to their exact module/container symbol."""
 
     values: dict[str, _ViewOutcome] = {}
     for item in syntax:
         if item.language != "python":
             continue
+        module = _module_name(item.path)
         parsed = _tree(context, item.path)
-        if parsed is None:
+        if module is None or parsed is None:
             continue
         _content, tree = parsed
-        entries: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                entries.append((node.name, node))
+                key = index.functions.get((module, node.name))
+                if key is not None:
+                    values[key] = _view_outcome(node)
             elif isinstance(node, ast.ClassDef):
-                entries.extend(
-                    (f"{node.name}.{method.name}", method)
-                    for method in node.body
-                    if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
-                )
-        for name, function in entries:
-            matches = [
-                symbol
-                for symbol in item.symbols
-                if symbol.name == name or symbol.name.endswith(f".{name}")
-            ]
-            if len(matches) != 1:
-                continue
-            symbolic_name = matches[0].name
-            decorator_denial = any(
-                decorator_name.endswith((
-                    "login_required",
-                    "permission_required",
-                    "user_passes_test",
-                ))
-                for decorator in function.decorator_list
-                if (decorator_name := _decorator_name(decorator)) is not None
-            )
-            raises = any(isinstance(node, ast.Raise) for node in ast.walk(function))
-            handled = any(
-                isinstance(node, ast.Try) and node.handlers
-                for node in ast.walk(function)
-            )
-            values[symbolic_name] = _ViewOutcome(
-                isinstance(function, ast.AsyncFunctionDef),
-                decorator_denial,
-                raises,
-                handled,
-            )
+                if (module, node.name) not in index.classes:
+                    continue
+                for method in node.body:
+                    if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    key = index.methods.get((module, node.name, method.name))
+                    if key is not None:
+                        values[key] = _view_outcome(method)
     return MappingProxyType(values)
 
 
 def _cbv_outcome(
     outcomes: Mapping[str, _ViewOutcome],
-    cbv: str,
+    index: _SyntaxIndex,
+    cbv: _ClassTarget,
 ) -> tuple[str | None, _ViewOutcome]:
-    """Resolve a CBV only through its explicit dispatch/method declarations."""
+    """Require one exact module/class/dispatch proof before CBV expansion."""
 
-    short = cbv.rsplit(".", 1)[-1]
-    dispatch_name = next(
-        (name for name in outcomes if name.endswith(f"{short}.dispatch")), None
-    )
+    if (cbv.module, cbv.name) not in index.classes:
+        return None, _ViewOutcome(False, False, ())
+    dispatch_key = index.methods.get((cbv.module, cbv.name, "dispatch"))
+    base = outcomes.get(dispatch_key or "")
+    if dispatch_key is None or base is None:
+        return None, _ViewOutcome(False, False, ())
     methods = tuple(
-        sorted(
-            (
-                (name.rsplit(".", 1)[-1].upper(), name)
-                for name in outcomes
-                if name.endswith(f"{short}.get") or name.endswith(f"{short}.post")
-            ),
-            key=lambda item: item[0],
-        )
+        (verb.upper(), key)
+        for verb in ("get", "post")
+        if (key := index.methods.get((cbv.module, cbv.name, verb))) is not None
+        and key in outcomes
     )
-    if dispatch_name is None:
-        return None, _ViewOutcome(False, False, False, False, methods)
-    base = outcomes[dispatch_name]
-    return dispatch_name, replace(base, cbv_methods=methods)
+    return dispatch_key, replace(base, cbv_methods=methods)
 
 
 def _candidate_key(candidate: EntrypointCandidate) -> tuple[str, str, int]:
@@ -624,21 +810,21 @@ def _candidate_key(candidate: EntrypointCandidate) -> tuple[str, str, int]:
 
 def _candidate(
     context: ExtractionContext,
-    syntax: Sequence[SyntaxIR],
     spec: _RouteSpec,
     outcomes: Mapping[str, _ViewOutcome],
+    index: _SyntaxIndex,
 ) -> tuple[EntrypointCandidate, _ViewOutcome]:
     content = _text(context, spec.source_path) or ""
     locator = _locator(
         spec.source_path, content, spec.source_line, spec.pointer, spec.source_order
     )
-    view_outcome = _ViewOutcome(False, False, False, False)
-    handler_name = spec.handler
+    view_outcome = _ViewOutcome(False, False, ())
+    handler_key: str | None = None
     if spec.cbv is not None:
-        handler_name, view_outcome = _cbv_outcome(outcomes, spec.cbv)
-    elif handler_name is not None:
-        view_outcome = outcomes.get(handler_name, view_outcome)
-    handler_key = _handler_key(syntax, handler_name) if handler_name else None
+        handler_key, view_outcome = _cbv_outcome(outcomes, index, spec.cbv)
+    elif spec.handler is not None:
+        handler_key = index.functions.get((spec.handler.module, spec.handler.name))
+        view_outcome = outcomes.get(handler_key or "", view_outcome)
     unresolved = None
     if handler_key is None:
         unresolved = local_record_key(
@@ -679,6 +865,8 @@ def _candidate(
 def _command_candidates(
     context: ExtractionContext,
     syntax: Sequence[SyntaxIR],
+    index: _SyntaxIndex,
+    diagnostics: _Diagnostics,
 ) -> tuple[EntrypointCandidate, ...]:
     rows: list[EntrypointCandidate] = []
     ordinal = 0
@@ -686,34 +874,43 @@ def _command_candidates(
         marker = "/management/commands/"
         if marker not in f"/{item.path}":
             continue
+        module = _module_name(item.path)
+        parsed = _tree(context, item.path)
+        if module is None or parsed is None:
+            diagnostics.mark(
+                item.path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "management_command_unresolved",
+            )
+            continue
+        _source, tree = parsed
+        command_classes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Command"
+        ]
+        handler_key = index.methods.get((module, "Command", "handle"))
+        if (
+            len(command_classes) != 1
+            or not any(
+                isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and method.name == "handle"
+                for method in command_classes[0].body
+            )
+            or handler_key is None
+            or (module, "Command") not in index.classes
+        ):
+            diagnostics.mark(
+                item.path,
+                CoverageCapability.ENTRYPOINT_DISCOVERY,
+                "management_command_unresolved",
+            )
+            continue
         command = Path(item.path).stem
-        handler = next(
-            (
-                symbol.name
-                for symbol in item.symbols
-                if symbol.name.endswith("Command.handle")
-            ),
-            None,
-        )
         content = _text(context, item.path) or ""
         locator = _locator(item.path, content, 1, f"django/command/{ordinal}", ordinal)
-        handler_key = _handler_key((item,), handler) if handler else None
-        unresolved = (
-            None
-            if handler_key
-            else local_record_key(
-                "python",
-                item.path,
-                "unresolved_fact",
-                "config",
-                f"django/command/{ordinal}/handler",
-                ordinal,
-            )
-        )
         evidence = IREvidence(
-            EvidenceOrigin.VERIFIED_FROM_CODE
-            if handler_key
-            else EvidenceOrigin.UNRESOLVED,
+            EvidenceOrigin.VERIFIED_FROM_CODE,
             "django.command",
             locator,
             None,
@@ -731,7 +928,7 @@ def _command_candidates(
                 MatchConstraints(None, (), None),
                 locator,
                 handler_key,
-                unresolved,
+                None,
                 (),
                 evidence,
             )
@@ -861,7 +1058,6 @@ class DjangoLifecycleAdapter:
             _Snapshot(
                 MappingProxyType({}),
                 MappingProxyType({}),
-                MappingProxyType({}),
                 None,
                 (),
             ),
@@ -910,8 +1106,8 @@ class DjangoLifecycleAdapter:
         diagnostics = _Diagnostics(set())
         root = _root_urlconf(context, syntax, diagnostics)
         middleware = _middleware(context, syntax, diagnostics)
-        outcomes = _function_outcomes(context, syntax)
-        handler_keys = _handler_keys(syntax)
+        index = _syntax_index(syntax)
+        outcomes = _function_outcomes(context, syntax, index)
         specs = (
             _collect_routes(context, root, _RouteContext(), diagnostics, set(), [0])
             if root
@@ -921,7 +1117,7 @@ class DjangoLifecycleAdapter:
         route_map: dict[tuple[str, str, int], _RouteSpec] = {}
         candidate_outcomes: dict[str, _ViewOutcome] = {}
         for spec in specs:
-            candidate, outcome = _candidate(context, syntax, spec, outcomes)
+            candidate, outcome = _candidate(context, spec, outcomes, index)
             candidates.append(candidate)
             route_map[_candidate_key(candidate)] = spec
             if candidate.handler_local_key is not None:
@@ -930,18 +1126,22 @@ class DjangoLifecycleAdapter:
                 diagnostics.mark(
                     spec.source_path, reason_code="route_handler_unresolved"
                 )
+            if "unresolved_exception_boundary" in outcome.exception_arms:
+                diagnostics.mark(
+                    spec.source_path,
+                    CoverageCapability.FRAMEWORK_LIFECYCLE,
+                    "exception_resolution_unresolved",
+                )
+        commands = _command_candidates(context, syntax, index, diagnostics)
         snapshot = _Snapshot(
             MappingProxyType(route_map),
             MappingProxyType(candidate_outcomes),
-            handler_keys,
             middleware,
             diagnostics.events(),
         )
         self._remember(context, snapshot)
         all_candidates = (
-            candidates
-            + list(_command_candidates(context, syntax))
-            + list(_deployment_candidates(context, syntax))
+            candidates + list(commands) + list(_deployment_candidates(context, syntax))
         )
         return tuple(
             replace(
@@ -991,88 +1191,99 @@ class DjangoLifecycleAdapter:
         snapshot = self._snapshot(context)
         spec = snapshot.routes.get(_candidate_key(candidate))
         outcome = snapshot.outcomes.get(
-            candidate.handler_local_key or "", _ViewOutcome(False, False, False, False)
+            candidate.handler_local_key or "", _ViewOutcome(False, False, ())
         )
         middleware = snapshot.middleware
-        roles: list[tuple[str, str | None]] = [("url_resolver", None)]
+        # The final integer is the registered middleware position.  Keeping it
+        # alongside the stage prevents a request short-circuit from jumping to
+        # a later layer that was never entered.
+        roles: list[tuple[str, str | None, int | None]] = [("url_resolver", None, None)]
         if middleware is None:
-            roles.append(("middleware_unresolved_boundary", None))
+            roles.append(("middleware_unresolved_boundary", None, None))
             active_middleware: tuple[_MiddlewareFact, ...] = ()
         else:
             active_middleware = middleware
             roles.extend(
-                ("middleware_request", fact.dotted_name) for fact in active_middleware
+                ("middleware_request", fact.dotted_name, index)
+                for index, fact in enumerate(active_middleware)
             )
         if outcome.decorator_denial:
-            roles.append(("decorator_access_control", None))
+            roles.append(("decorator_access_control", None, None))
         if spec is not None and spec.cbv is not None:
             if candidate.handler_local_key is None:
-                roles.append(("cbv_dispatch_boundary", spec.cbv))
+                roles.append(("cbv_dispatch_boundary", spec.cbv.name, None))
             else:
-                roles.append(("cbv_dispatch", None))
+                roles.append(("cbv_dispatch", None, None))
                 roles.extend(
-                    (f"cbv_{method.lower()}", target)
+                    (f"cbv_{method.lower()}", target, None)
                     for method, target in outcome.cbv_methods
                 )
         else:
-            roles.append(("async_view" if outcome.is_async else "sync_view", None))
-        response_middleware = tuple(
-            fact for fact in reversed(active_middleware) if fact.has_response
-        )
-        roles.extend(
-            ("middleware_response", fact.dotted_name) for fact in response_middleware
-        )
-        roles.append(("response", None))
-        exception_roles: list[tuple[str, str | None]] = []
-        if outcome.raises:
-            exception_roles.append((
-                "handled_exception"
-                if outcome.handled_exception
-                else "unhandled_exception",
+            roles.append((
+                "async_view" if outcome.is_async else "sync_view",
+                None,
                 None,
             ))
-        roles.extend(exception_roles)
+        response_middleware = tuple(
+            (index, fact)
+            for index, fact in reversed(tuple(enumerate(active_middleware)))
+            if fact.has_response
+        )
+        roles.extend(
+            ("middleware_response", fact.dotted_name, index)
+            for index, fact in response_middleware
+        )
+        roles.append(("response", None, None))
+        roles.extend((role, None, None) for role in outcome.exception_arms)
         keys = [
             _pipeline_key(candidate, role, ordinal)
-            for ordinal, (role, _name) in enumerate(roles)
+            for ordinal, (role, _name, _middleware_index) in enumerate(roles)
         ]
+        response_index = next(
+            index
+            for index, (role, _name, _middleware_index) in enumerate(roles)
+            if role == "response"
+        )
         response_start = next(
             (
                 index
-                for index, (role, _name) in enumerate(roles)
+                for index, (role, _name, _middleware_index) in enumerate(roles)
                 if role == "middleware_response"
             ),
-            next(
-                index for index, (role, _name) in enumerate(roles) if role == "response"
-            ),
+            response_index,
         )
-        request_positions = [
-            index
-            for index, (role, _name) in enumerate(roles)
-            if role == "middleware_request"
-        ]
         response_positions = [
             index
-            for index, (role, _name) in enumerate(roles)
+            for index, (role, _name, _middleware_index) in enumerate(roles)
             if role == "middleware_response"
         ]
         response_for_request: dict[int, int] = {}
-        for request_index in request_positions:
-            name = roles[request_index][1]
-            response_for_request[request_index] = next(
-                (index for index in response_positions if roles[index][1] == name),
-                response_start,
-            )
-        exception_index = next(
-            (
+        for request_index, (_role, _name, middleware_index) in enumerate(roles):
+            if _role != "middleware_request" or middleware_index is None:
+                continue
+            eligible = [
                 index
-                for index, (role, _name) in enumerate(roles)
-                if role in {"handled_exception", "unhandled_exception"}
-            ),
-            None,
-        )
+                for index in response_positions
+                if (response_middleware_index := roles[index][2]) is not None
+                and response_middleware_index <= middleware_index
+            ]
+            response_for_request[request_index] = (
+                min(eligible, key=lambda index: -int(roles[index][2]))
+                if eligible
+                else response_index
+            )
+        exception_indices = {
+            role: index
+            for index, (role, _name, _middleware_index) in enumerate(roles)
+            if role
+            in {
+                "handled_exception",
+                "unhandled_exception",
+                "unresolved_exception_boundary",
+            }
+        }
         segments: list[FrameworkPipelineSegment] = []
-        for ordinal, (role, name) in enumerate(roles):
+        for ordinal, (role, name, middleware_index) in enumerate(roles):
             if (
                 role in {"sync_view", "async_view", "cbv_dispatch"}
                 and candidate.handler_local_key
@@ -1083,20 +1294,7 @@ class DjangoLifecycleAdapter:
                 and role not in {"cbv_dispatch", "cbv_dispatch_boundary"}
                 and name
             ):
-                method_key = snapshot.handler_keys.get(name)
-                target = (
-                    FrameworkBoundaryTarget(
-                        FrameworkBoundaryDescriptor(
-                            "django",
-                            "cbv_method_boundary",
-                            name,
-                            candidate.registration_locator,
-                            candidate.evidence,
-                        )
-                    )
-                    if method_key is None
-                    else FrameworkLocalTarget(method_key)
-                )
+                target = FrameworkLocalTarget(name)
             else:
                 target = FrameworkBoundaryTarget(
                     FrameworkBoundaryDescriptor(
@@ -1109,9 +1307,9 @@ class DjangoLifecycleAdapter:
                 )
             shortcuts: list[Successor] = []
             if role == "middleware_request":
-                middleware_fact = next(
-                    fact for fact in active_middleware if fact.dotted_name == name
-                )
+                if middleware_index is None:
+                    raise AssertionError("middleware request stage requires position")
+                middleware_fact = active_middleware[middleware_index]
                 if middleware_fact.may_short_circuit:
                     shortcuts.append(
                         AlwaysSuccessor(keys[response_for_request[ordinal]], 0)
@@ -1120,14 +1318,15 @@ class DjangoLifecycleAdapter:
                 shortcuts.append(AlwaysSuccessor(keys[response_start], 0))
             if (
                 role in {"sync_view", "async_view", "cbv_dispatch"}
-                and exception_index is not None
+                and exception_indices
             ):
-                shortcuts.append(
+                shortcuts.extend(
                     ExceptionSuccessor(
-                        keys[exception_index], _exception_scope_key(candidate), None, 0
+                        keys[index], _exception_scope_key(candidate), None, order
                     )
+                    for order, index in enumerate(exception_indices.values())
                 )
-            if role == "unhandled_exception":
+            if role in {"unhandled_exception", "unresolved_exception_boundary"}:
                 success = ReturnSuccessor(
                     _terminal_key(candidate, "exception", ordinal), ordinal
                 )
