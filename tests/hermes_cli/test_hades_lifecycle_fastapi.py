@@ -1573,3 +1573,350 @@ class ClassScope:
         and event.outcome is CoverageOutcome.PARTIAL
         for event in adapter.coverage_events(context)
     )
+
+
+def test_cross_file_include_keeps_only_the_proven_registration_snapshot(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "routers.py",
+        """from fastapi import APIRouter
+
+outer = APIRouter()
+nested = APIRouter()
+
+@outer.get("/before")
+async def before(): return None
+
+@nested.get("/nested")
+async def nested_route(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+from routers import nested, outer
+
+app = FastAPI()
+app.include_router(outer, prefix="/api")
+
+@outer.get("/late")
+async def late(): return None
+
+outer.include_router(nested, prefix="/late-nested")
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "app.py"), _syntax(tmp_path, "routers.py")),
+    )
+
+    assert {
+        (item.public_name, item.public_path)
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {("before", "/api/before")}
+
+
+def test_class_body_global_rebinds_app_but_class_local_store_does_not(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/stale")
+async def stale(): return None
+
+class GlobalMutation:
+    global app
+    app = build_app()
+
+local_app = FastAPI()
+
+@local_app.get("/class-local-valid")
+async def class_local_valid(): return None
+
+class LocalStore:
+    local_app = build_app()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {"class_local_valid"}
+    assert any(
+        event.reason_code == "framework_object_rebound"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_exception_class_headers_update_bindings_and_decorators_boundary_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class A(Exception): pass
+class B(Exception): pass
+
+Alias = A
+class HeaderEffect((Alias := B)): pass
+
+header_app = FastAPI()
+
+@header_app.exception_handler(Alias)
+async def b_handler(request, exc): return None
+
+@header_app.get("/header-binding")
+async def header_binding(): raise B()
+
+@replace_class
+class Decorated(Exception): pass
+
+decorated_app = FastAPI()
+
+@decorated_app.exception_handler(Decorated)
+async def decorated_handler(request, exc): return None
+
+@decorated_app.get("/decorated-boundary")
+async def decorated_boundary(): raise Decorated()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    header_pipeline = adapter.pipeline(
+        context, _candidate(adapter, context, "header_binding")
+    )
+    decorated_roles = {
+        item.framework_role
+        for item in adapter.pipeline(
+            context, _candidate(adapter, context, "decorated_boundary")
+        )
+    }
+
+    header_handler = next(
+        item for item in header_pipeline if item.framework_role == "exception_handler"
+    )
+    assert isinstance(header_handler.target, FrameworkLocalTarget)
+    assert header_handler.target.local_key == _function_key(tmp_path, "b_handler")
+    assert "exception_handler" not in decorated_roles
+    assert "exception_handler_resolution_boundary" in decorated_roles
+
+
+def test_all_registration_references_use_their_occurrence_import_binding(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    for path in ("first.py", "second.py"):
+        _write(
+            tmp_path,
+            path,
+            """def dependency(): return None
+def security_dependency(): return None
+def task(): return None
+async def endpoint(): return None
+async def exception_handler(request, exc): return None
+""",
+        )
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import BackgroundTasks, Depends, FastAPI, Security
+from first import dependency as dep_alias
+from first import endpoint as endpoint_alias
+from first import exception_handler as handler_alias
+from first import security_dependency as security_alias
+from first import task as task_alias
+
+dep_ref = dep_alias
+endpoint_ref = endpoint_alias
+handler_ref = handler_alias
+security_ref = security_alias
+task_ref = task_alias
+
+app = FastAPI()
+app.add_exception_handler(Exception, handler_ref)
+app.add_api_route(
+    "/direct",
+    endpoint_ref,
+    dependencies=[Depends(dep_ref), Security(security_ref)],
+)
+
+@app.get("/problem")
+async def problem(): raise Exception()
+
+@app.get("/background")
+async def background(background_tasks: BackgroundTasks):
+    background_tasks.add_task(task_ref)
+
+from second import dependency as dep_alias
+from second import endpoint as endpoint_alias
+from second import exception_handler as handler_alias
+from second import security_dependency as security_alias
+from second import task as task_alias
+
+dep_ref = dep_alias
+endpoint_ref = endpoint_alias
+handler_ref = handler_alias
+security_ref = security_alias
+task_ref = task_alias
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    syntax = (
+        _syntax(tmp_path, "app.py"),
+        _syntax(tmp_path, "first.py"),
+        _syntax(tmp_path, "second.py"),
+    )
+    entrypoints = adapter.entrypoints(context, syntax)
+    direct = next(item for item in entrypoints if item.public_path == "/direct")
+    problem = next(item for item in entrypoints if item.public_path == "/problem")
+    background = next(item for item in entrypoints if item.public_path == "/background")
+
+    assert direct.handler_local_key == _function_key_at(
+        tmp_path, "first.py", "endpoint"
+    )
+    dependency_targets = {
+        item.target.local_key
+        for item in adapter.pipeline(context, direct)
+        if item.framework_role == "decorator_dependency"
+        and isinstance(item.target, FrameworkLocalTarget)
+    }
+    assert dependency_targets == {
+        _function_key_at(tmp_path, "first.py", "dependency"),
+        _function_key_at(tmp_path, "first.py", "security_dependency"),
+    }
+    exception_handler = next(
+        item
+        for item in adapter.pipeline(context, problem)
+        if item.framework_role == "exception_handler"
+    )
+    assert isinstance(exception_handler.target, FrameworkLocalTarget)
+    assert exception_handler.target.local_key == _function_key_at(
+        tmp_path, "first.py", "exception_handler"
+    )
+    task_dispatch = next(
+        item
+        for item in adapter.pipeline(context, background)
+        if item.framework_role == "background_task_dispatch"
+    )
+    assert isinstance(task_dispatch.target, FrameworkLocalTarget)
+    assert task_dispatch.target.local_key == _function_key_at(
+        tmp_path, "first.py", "task"
+    )
+
+
+def test_local_framework_object_provenance_is_source_ordered_and_constructor_bound(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI as FrameworkFastAPI
+import fastapi as fastapi_module
+
+@before_app.get("/before-construction")
+async def before_construction(): return None
+
+before_app = FrameworkFastAPI()
+
+real_app = FrameworkFastAPI()
+alias_app = real_app
+
+@alias_app.get("/alias-valid")
+async def alias_valid(): return None
+
+qualified_app = fastapi_module.FastAPI()
+
+@qualified_app.get("/qualified-valid")
+async def qualified_valid(): return None
+""",
+    )
+    _write(
+        tmp_path,
+        "dynamic.py",
+        """def FastAPI(): return build_fake()
+fake_app = FastAPI()
+
+@fake_app.get("/fake")
+async def fake(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "app.py"), _syntax(tmp_path, "dynamic.py")),
+    )
+
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {"alias_valid", "qualified_valid"}
+    assert any(
+        event.path == "dynamic.py"
+        and event.reason_code == "framework_config_unresolved"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_yield_and_background_discovery_excludes_nested_lexical_scopes(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import BackgroundTasks, Depends, FastAPI
+
+def task(): return None
+
+def dependency():
+    def nested_generator():
+        yield None
+    return None
+
+app = FastAPI()
+
+@app.get("/lexical", dependencies=[Depends(dependency)])
+async def lexical(background_tasks: BackgroundTasks):
+    def nested_function():
+        background_tasks.add_task(task)
+    class NestedClass:
+        background_tasks.add_task(task)
+    hidden = lambda: background_tasks.add_task(task)
+    return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    roles = {
+        item.framework_role
+        for item in adapter.pipeline(context, _candidate(adapter, context, "lexical"))
+    }
+
+    assert "yield_dependency_cleanup" not in roles
+    assert "background_task_dispatch" not in roles
