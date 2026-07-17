@@ -113,6 +113,7 @@ _PHP_IMPORT_RE = re.compile(
     r"(?P<chain>[^;]{0,1200})",
     re.DOTALL,
 )
+_PHP_ROUTE_OPERATION_START_RE = re.compile(r"->(?:add|import)\s*\(")
 _PHP_CONTROLLER_RE = re.compile(
     r"->controller\s*\(\s*['\"](?P<controller>[^'\"]+)['\"]\s*\)"
 )
@@ -735,12 +736,21 @@ def _php_routes(
     if content is None:
         return []
     routes: list[_RouteSpec] = []
+    route_matches = tuple(_PHP_ROUTE_RE.finditer(content))
+    import_matches = tuple(_PHP_IMPORT_RE.finditer(content))
+    literal_operation_starts = {
+        match.start() for match in (*route_matches, *import_matches)
+    }
+    # Retain the closed literal grammar for exact facts, but do not silently
+    # skip a recognizable route-builder call whose primary argument is dynamic.
+    # One path-level diagnostic is deduplicated by ``_Diagnostics``.
+    for match in _PHP_ROUTE_OPERATION_START_RE.finditer(content):
+        if match.start() not in literal_operation_starts:
+            diagnostics.mark(path)
     operations: list[tuple[int, str, re.Match[str]]] = [
-        (match.start(), "route", match) for match in _PHP_ROUTE_RE.finditer(content)
+        (match.start(), "route", match) for match in route_matches
     ]
-    operations.extend(
-        (match.start(), "import", match) for match in _PHP_IMPORT_RE.finditer(content)
-    )
+    operations.extend((match.start(), "import", match) for match in import_matches)
     for _offset, operation, match in sorted(operations, key=lambda item: item[0]):
         chain = match.group("chain")
         if operation == "import":

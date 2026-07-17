@@ -387,6 +387,7 @@ def test_registry_runs_symfony_adapter_without_legacy_fallback(tmp_path: Path) -
     assert len(result.candidates) == 1
     assert result.candidates[0].public_path == "/health"
     assert result.framework_segments
+    assert result.coverage_events == ()
 
 
 def test_registry_propagates_partial_symfony_configuration_coverage(
@@ -439,7 +440,8 @@ return static function ($routes): void {
     )
     context = _context(tmp_path)
 
-    route = SymfonyLifecycleAdapter().entrypoints(
+    adapter = SymfonyLifecycleAdapter()
+    route = adapter.entrypoints(
         context,
         (
             _syntax(
@@ -457,6 +459,7 @@ return static function ($routes): void {
     )
     assert route.match_constraints.host == "api.example.test"
     assert route.match_constraints.condition_hash is not None
+    assert adapter.coverage_events(context) == ()
 
 
 def test_php_service_configuration_registers_ordered_kernel_listener(
@@ -904,6 +907,59 @@ def test_dynamic_php_import_prefix_is_partial_coverage_not_an_empty_prefix(
         event.outcome is CoverageOutcome.PARTIAL
         for event in adapter.coverage_events(context)
     )
+
+
+def test_dynamic_php_import_resource_is_partial_coverage_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(tmp_path, "config/routes.php", "<?php $routes->import($dynamic);")
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    events = adapter.coverage_events(context)
+    assert len(events) == 1
+    assert events[0].outcome is CoverageOutcome.PARTIAL
+    assert events[0].path == "config/routes.php"
+
+
+def test_dynamic_php_route_name_is_partial_coverage_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.php",
+        "<?php $routes->add($name, '/x')->controller('App\\Controller\\C::go');",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    events = adapter.coverage_events(context)
+    assert len(events) == 1
+    assert events[0].outcome is CoverageOutcome.PARTIAL
+    assert events[0].path == "config/routes.php"
+
+
+def test_dynamic_php_route_path_is_partial_coverage_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    _write(
+        tmp_path,
+        "config/routes.php",
+        "<?php $routes->add('x', $path)->controller('App\\Controller\\C::go');",
+    )
+    adapter = SymfonyLifecycleAdapter()
+    context = _context(tmp_path)
+
+    assert adapter.entrypoints(context, ()) == ()
+    events = adapter.coverage_events(context)
+    assert len(events) == 1
+    assert events[0].outcome is CoverageOutcome.PARTIAL
+    assert events[0].path == "config/routes.php"
 
 
 def test_dynamic_attribute_methods_is_partial_coverage_not_unrestricted(
