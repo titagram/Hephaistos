@@ -868,7 +868,7 @@ def _dependency_bindings(
                 (
                     candidate
                     for candidate in reversed(bindings.get((module, name), ()))
-                    if candidate[0] <= occurrence
+                    if candidate[0] < occurrence
                 ),
                 None,
             )
@@ -1575,6 +1575,49 @@ def _middleware_may_short_circuit(
         values[index] = (values[index][0], nested)
         return (True, _ContinuationContainer(tuple(values)))
 
+    def propagate_container_update(
+        original: _ContinuationContainer,
+        replacement: _ContinuationRelation,
+        statement: ast.AST,
+    ) -> None:
+        occurrence = position(statement)
+        replacements: dict[int, _ContinuationRelation] = {}
+
+        def replace(relation: _ContinuationRelation) -> _ContinuationRelation:
+            if relation is original:
+                return replacement
+            if not isinstance(relation, _ContinuationContainer):
+                return relation
+            if id(relation) in replacements:
+                return replacements[id(relation)]
+            values = tuple((key, replace(value)) for key, value in relation.values)
+            revised = (
+                relation
+                if all(
+                    revised_value is original_value
+                    for (_key, original_value), (_revised_key, revised_value) in zip(
+                        relation.values,
+                        values,
+                        strict=True,
+                    )
+                )
+                else _ContinuationContainer(values)
+            )
+            replacements[id(relation)] = revised
+            return revised
+
+        pending: list[tuple[str, _ContinuationRelation]] = []
+        for name, timeline in alias_bindings.items():
+            for index, (order, relation) in enumerate(timeline):
+                if order > occurrence:
+                    timeline[index] = (order, replace(relation))
+            visible = alias_at(name, statement)
+            revised = replace(visible)
+            if revised is not visible:
+                pending.append((name, revised))
+        for name, relation in pending:
+            remember_alias(name, statement, relation)
+
     def mutation_target(
         target: ast.AST,
         value: ast.AST | None,
@@ -1630,10 +1673,11 @@ def _middleware_may_short_circuit(
             container = contains_continuation(original)
             continuation_escaped |= stored in {True, None} or container in {True, None}
             return
-        remember_alias(
-            name,
-            statement,
+        assert isinstance(original, _ContinuationContainer)
+        propagate_container_update(
+            original,
             merge_relations(original, relation) if uncertain else relation,
+            statement,
         )
 
     class _MutationVisitor(ast.NodeVisitor):
@@ -1757,6 +1801,62 @@ def _middleware_may_short_circuit(
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
         and not statement.decorator_list
     }
+    helper_aliases: dict[str, list[tuple[tuple[int, int], str | None]]] = {}
+
+    def helper_at(name: str, node: ast.AST) -> str | None:
+        occurrence = position(node)
+        return next(
+            (
+                identity
+                for order, identity in reversed(
+                    sorted(helper_aliases.get(name, ()), key=lambda item: item[0])
+                )
+                if order <= occurrence
+            ),
+            None,
+        )
+
+    def remember_helper_alias(
+        name: str,
+        node: ast.AST,
+        identity: str | None,
+    ) -> None:
+        helper_aliases.setdefault(name, []).append((position(node), identity))
+
+    for statement in function.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            remember_helper_alias(
+                statement.name,
+                statement,
+                statement.name if statement.name in local_helpers else None,
+            )
+            continue
+        if isinstance(statement, ast.Assign):
+            identity = (
+                helper_at(statement.value.id, statement)
+                if isinstance(statement.value, ast.Name)
+                else None
+            )
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    remember_helper_alias(target.id, statement, identity)
+            continue
+        if isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target,
+            ast.Name,
+        ):
+            identity = (
+                helper_at(statement.value.id, statement)
+                if isinstance(statement.value, ast.Name)
+                else None
+            )
+            remember_helper_alias(statement.target.id, statement, identity)
+            continue
+        visitor = _ScopeBindingVisitor()
+        visitor.visit(statement)
+        for name, binding in visitor.records:
+            remember_helper_alias(name, binding, None)
+
     called_helpers: list[tuple[str, ast.Call]] = []
 
     class _HelperCallVisitor(ast.NodeVisitor):
@@ -1764,8 +1864,10 @@ def _middleware_may_short_circuit(
             self.occurrence = occurrence
 
         def visit_Call(self, node: ast.Call) -> None:
-            if isinstance(node.func, ast.Name) and node.func.id in local_helpers:
-                called_helpers.append((node.func.id, self.occurrence or node))
+            if isinstance(node.func, ast.Name):
+                identity = helper_at(node.func.id, node)
+                if identity is not None:
+                    called_helpers.append((identity, self.occurrence or node))
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -2320,6 +2422,7 @@ def _wildcard_exports(
         str,
         tuple[object | tuple[str, ...] | None, set[str], tuple[str | None, ...], bool],
     ] = {}
+    all_aliases: set[str] = set()
 
     def literal_all(value: ast.AST | None) -> tuple[str, ...] | None:
         if not isinstance(value, (ast.List, ast.Tuple)):
@@ -2336,11 +2439,13 @@ def _wildcard_exports(
     def all_receiver(node: ast.AST) -> bool:
         while isinstance(node, (ast.Attribute, ast.Subscript)):
             node = node.value
-        return isinstance(node, ast.Name) and node.id == "__all__"
+        return isinstance(node, ast.Name) and node.id in all_aliases
 
     def finite_all_method(
         node: ast.AST,
         current: object | tuple[str, ...] | None,
+        *,
+        mutable: bool | None,
     ) -> tuple[bool, tuple[str, ...] | None]:
         if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
             return (False, None)
@@ -2349,7 +2454,12 @@ def _wildcard_exports(
             call.func.value
         ):
             return (False, None)
-        if not isinstance(current, tuple) or call.keywords or len(call.args) != 1:
+        if (
+            not isinstance(current, tuple)
+            or mutable is not True
+            or call.keywords
+            or len(call.args) != 1
+        ):
             return (True, None)
         if call.func.attr == "append":
             value = call.args[0]
@@ -2394,6 +2504,11 @@ def _wildcard_exports(
         def visit_Call(self, node: ast.Call) -> None:
             if isinstance(node.func, ast.Attribute) and all_receiver(node.func.value):
                 self.found = True
+            if any(
+                isinstance(value, ast.Name) and value.id in all_aliases
+                for value in (*node.args, *(item.value for item in node.keywords))
+            ):
+                self.found = True
             self.generic_visit(node)
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -2410,14 +2525,18 @@ def _wildcard_exports(
 
     for path, (_source, tree, module) in parsed.items():
         explicit_all: object | tuple[str, ...] | None = absent
+        all_aliases = set()
+        all_is_list: bool | None = None
         public: set[str] = set()
         wildcard_bases: list[str | None] = []
         uncertain_public = False
         for node in tree.body:
             if isinstance(node, ast.Import):
-                public.update(
+                names = {
                     alias.asname or alias.name.split(".", 1)[0] for alias in node.names
-                )
+                }
+                public.update(names)
+                all_aliases.difference_update(names)
                 continue
             if isinstance(node, ast.ImportFrom):
                 base = _import_from_base(path, module, node)
@@ -2425,48 +2544,104 @@ def _wildcard_exports(
                     if alias.name == "*":
                         wildcard_bases.append(base)
                     else:
-                        public.add(alias.asname or alias.name)
+                        name = alias.asname or alias.name
+                        public.add(name)
+                        all_aliases.discard(name)
                 continue
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 public.add(node.name)
+                all_aliases.discard(node.name)
                 continue
             if isinstance(node, ast.Assign):
                 direct_names = tuple(
                     target.id for target in node.targets if isinstance(target, ast.Name)
                 )
                 public.update(direct_names)
+                aliases_all = (
+                    isinstance(node.value, ast.Name) and node.value.id in all_aliases
+                )
                 if "__all__" in direct_names:
-                    explicit_all = literal_all(node.value)
+                    if not aliases_all:
+                        explicit_all = literal_all(node.value)
+                        all_is_list = (
+                            True
+                            if isinstance(node.value, ast.List)
+                            else False
+                            if isinstance(node.value, ast.Tuple)
+                            else None
+                        )
+                        all_aliases.clear()
+                    all_aliases.update(direct_names)
+                else:
+                    all_aliases.difference_update(direct_names)
+                    if aliases_all:
+                        all_aliases.update(direct_names)
                 if len(direct_names) != len(node.targets):
                     visitor = _ScopeBindingVisitor()
                     for target in node.targets:
                         visitor.visit(target)
                     public.update(name for name, _binding in visitor.records)
                     uncertain_public = True
+                    if aliases_all:
+                        explicit_all = None
                 continue
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 public.add(node.target.id)
+                aliases_all = (
+                    isinstance(node.value, ast.Name) and node.value.id in all_aliases
+                )
                 if node.target.id == "__all__":
-                    explicit_all = literal_all(node.value)
+                    if not aliases_all:
+                        explicit_all = literal_all(node.value)
+                        all_is_list = (
+                            True
+                            if isinstance(node.value, ast.List)
+                            else False
+                            if isinstance(node.value, ast.Tuple)
+                            else None
+                        )
+                        all_aliases.clear()
+                    all_aliases.add("__all__")
+                else:
+                    all_aliases.discard(node.target.id)
+                    if aliases_all:
+                        all_aliases.add(node.target.id)
                 continue
-            handled_all_method, mutated_all = finite_all_method(node, explicit_all)
+            handled_all_method, mutated_all = finite_all_method(
+                node,
+                explicit_all,
+                mutable=all_is_list,
+            )
             if handled_all_method:
                 explicit_all = mutated_all
                 continue
             if (
                 isinstance(node, ast.AugAssign)
                 and isinstance(node.target, ast.Name)
-                and node.target.id == "__all__"
+                and node.target.id in all_aliases
             ):
-                public.add("__all__")
+                public.add(node.target.id)
                 names = (
                     literal_all(node.value) if isinstance(node.op, ast.Add) else None
                 )
-                explicit_all = (
-                    tuple(dict.fromkeys((*explicit_all, *names)))
-                    if isinstance(explicit_all, tuple) and names is not None
-                    else None
-                )
+                if all_is_list is True:
+                    explicit_all = (
+                        tuple(dict.fromkeys((*explicit_all, *names)))
+                        if isinstance(explicit_all, tuple) and names is not None
+                        else None
+                    )
+                elif all_is_list is False:
+                    if node.target.id == "__all__":
+                        explicit_all = (
+                            tuple(dict.fromkeys((*explicit_all, *names)))
+                            if isinstance(explicit_all, tuple) and names is not None
+                            else None
+                        )
+                        all_aliases = {"__all__"}
+                    else:
+                        all_aliases.discard(node.target.id)
+                else:
+                    explicit_all = None
                 continue
             all_mutation = _UnprovenAllMutation()
             all_mutation.visit(node)
@@ -2478,6 +2653,9 @@ def _wildcard_exports(
             if names:
                 public.update(names)
                 uncertain_public = True
+                if names & all_aliases:
+                    explicit_all = None
+                    all_aliases.difference_update(names)
                 if "__all__" in names:
                     explicit_all = None
         descriptions[module] = (
