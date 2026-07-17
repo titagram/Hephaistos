@@ -117,6 +117,10 @@ _ResponseClassTimeline = Mapping[
     tuple[str, str],
     tuple[tuple[_Order, bool | None], ...],
 ]
+_DependencyBindingTimeline = Mapping[
+    tuple[str, str],
+    tuple[tuple[_Order, tuple["_Dependency", ...] | None], ...],
+]
 _NON_FRAMEWORK_BINDING = "<hades-non-framework>"
 _BACKGROUND_TASKS_BINDING = "<hades-background-tasks>"
 
@@ -220,6 +224,13 @@ class _Event:
     order: tuple[str, int, int]
     ordinal: int
     instance_ordinal: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _EventUncertainty:
+    owner: str
+    source_path: str
+    order: tuple[str, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,12 +748,184 @@ def _dependencies(
     return values if all(value is not None for value in values) else None
 
 
+def _annotated_dependencies(
+    annotation: ast.AST,
+    occurrence_node: ast.AST,
+    *,
+    quoted: bool,
+    module: str,
+    path: str,
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+) -> tuple[bool, tuple[_Dependency, ...] | None]:
+    if not isinstance(annotation, ast.Subscript):
+        return (False, ())
+    raw_wrapper = _dotted(annotation.value)
+    if raw_wrapper is None or raw_wrapper.rsplit(".", 1)[-1] != "Annotated":
+        return (False, ())
+    wrapper = _resolved_reference_at(
+        raw_wrapper,
+        module,
+        imports,
+        import_bindings,
+        _line_order(path, occurrence_node),
+    )
+    if wrapper not in {
+        ("typing", "Annotated"),
+        ("typing_extensions", "Annotated"),
+    }:
+        return (True, None)
+    elements = (
+        annotation.slice.elts
+        if isinstance(annotation.slice, ast.Tuple)
+        else (annotation.slice,)
+    )
+
+    def proven_nondependency(metadata: ast.AST) -> bool:
+        if isinstance(metadata, ast.Constant):
+            return True
+        if isinstance(metadata, (ast.List, ast.Set, ast.Tuple)):
+            return all(proven_nondependency(item) for item in metadata.elts)
+        if isinstance(metadata, ast.Dict):
+            return all(
+                key is not None
+                and proven_nondependency(key)
+                and proven_nondependency(value)
+                for key, value in zip(metadata.keys, metadata.values, strict=True)
+            )
+        return False
+
+    found: list[_Dependency] = []
+    for metadata in elements[1:]:
+        if proven_nondependency(metadata):
+            continue
+        if quoted or not isinstance(metadata, ast.Call):
+            return (True, None)
+        dependency = _dependency_from(
+            metadata,
+            module,
+            path,
+            imports,
+            import_bindings,
+        )
+        if dependency is None:
+            return (True, None)
+        found.append(dependency)
+    return (True, tuple(found))
+
+
+def _dependency_bindings(
+    parsed: Mapping[str, tuple[str, ast.Module, str]],
+    imports: Mapping[str, Mapping[str, str]],
+    import_bindings: _BindingTimeline,
+) -> _DependencyBindingTimeline:
+    bindings: dict[
+        tuple[str, str],
+        list[tuple[_Order, tuple[_Dependency, ...] | None]],
+    ] = {}
+
+    def visible(
+        module: str,
+        name: str,
+        occurrence: _Order,
+    ) -> tuple[_Dependency, ...] | None:
+        item = next(
+            (
+                candidate
+                for candidate in reversed(bindings.get((module, name), ()))
+                if candidate[0] <= occurrence
+            ),
+            None,
+        )
+        return item[1] if item is not None else None
+
+    def classify(
+        value: ast.AST | None,
+        module: str,
+        path: str,
+        occurrence: _Order,
+    ) -> tuple[_Dependency, ...] | None:
+        if value is None:
+            return None
+        dependency = _dependency_from(
+            value,
+            module,
+            path,
+            imports,
+            import_bindings,
+        )
+        if dependency is not None:
+            return (dependency,)
+        is_annotated, annotated = _annotated_dependencies(
+            value,
+            value,
+            quoted=False,
+            module=module,
+            path=path,
+            imports=imports,
+            import_bindings=import_bindings,
+        )
+        if is_annotated:
+            return annotated
+        if isinstance(value, ast.Name):
+            return visible(module, value.id, occurrence)
+        if isinstance(
+            value,
+            (
+                ast.Constant,
+                ast.Dict,
+                ast.List,
+                ast.Set,
+                ast.Tuple,
+            ),
+        ):
+            return ()
+        return None
+
+    def remember(
+        module: str,
+        name: str,
+        order: _Order,
+        value: tuple[_Dependency, ...] | None,
+    ) -> None:
+        bindings.setdefault((module, name), []).append((order, value))
+
+    for path, (_source, tree, module) in parsed.items():
+        for node in tree.body:
+            order = _line_order(path, node)
+            if isinstance(node, ast.Assign):
+                value = classify(node.value, module, path, order)
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        remember(module, target.id, order, value)
+                continue
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                remember(
+                    module,
+                    node.target.id,
+                    order,
+                    classify(node.value, module, path, order),
+                )
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                remember(module, node.name, order, ())
+                continue
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                visitor = _ScopeBindingVisitor()
+                visitor.visit(node)
+                for name, binding in visitor.records:
+                    remember(module, name, _line_order(path, binding), ())
+
+    return MappingProxyType({key: tuple(values) for key, values in bindings.items()})
+
+
 def _parameter_dependencies(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     module: str,
     path: str,
     imports: Mapping[str, Mapping[str, str]],
     import_bindings: _BindingTimeline,
+    dependency_bindings: _DependencyBindingTimeline,
 ) -> tuple[_Dependency, ...] | None:
     found: list[_Dependency] = []
 
@@ -809,58 +992,36 @@ def _parameter_dependencies(
             except SyntaxError:
                 return True
             quoted = True
-        if not isinstance(annotation, ast.Subscript):
-            return True
-        raw_wrapper = _dotted(annotation.value)
-        if raw_wrapper is None or raw_wrapper.rsplit(".", 1)[-1] != "Annotated":
-            return True
-        wrapper = _resolved_reference_at(
-            raw_wrapper,
-            module,
-            imports,
-            import_bindings,
-            _line_order(path, occurrence_node or annotation.value),
-        )
-        if wrapper not in {
-            ("typing", "Annotated"),
-            ("typing_extensions", "Annotated"),
-        }:
-            return False
-        elements = (
-            annotation.slice.elts
-            if isinstance(annotation.slice, ast.Tuple)
-            else (annotation.slice,)
-        )
-
-        def proven_nondependency(metadata: ast.AST) -> bool:
-            if isinstance(metadata, ast.Constant):
-                return True
-            if isinstance(metadata, (ast.List, ast.Set, ast.Tuple)):
-                return all(proven_nondependency(item) for item in metadata.elts)
-            if isinstance(metadata, ast.Dict):
-                return all(
-                    key is not None
-                    and proven_nondependency(key)
-                    and proven_nondependency(value)
-                    for key, value in zip(metadata.keys, metadata.values, strict=True)
+        if isinstance(annotation, ast.Name):
+            timeline = dependency_bindings.get((module, annotation.id))
+            if timeline:
+                occurrence = _line_order(path, occurrence_node or annotation)
+                binding = next(
+                    (
+                        value
+                        for order, value in reversed(timeline)
+                        if order <= occurrence
+                    ),
+                    None,
                 )
+                if binding is None:
+                    return False
+                found.extend(binding)
+                return True
+        is_annotated, dependencies = _annotated_dependencies(
+            annotation,
+            occurrence_node or annotation,
+            quoted=quoted,
+            module=module,
+            path=path,
+            imports=imports,
+            import_bindings=import_bindings,
+        )
+        if not is_annotated:
+            return True
+        if dependencies is None:
             return False
-
-        for metadata in elements[1:]:
-            if proven_nondependency(metadata):
-                continue
-            if quoted or not isinstance(metadata, ast.Call):
-                return False
-            dependency = _dependency_from(
-                metadata,
-                module,
-                path,
-                imports,
-                import_bindings,
-            )
-            if dependency is None:
-                return False
-            found.append(dependency)
+        found.extend(dependencies)
         return True
 
     for argument in (*positional, *function.args.kwonlyargs):
@@ -869,8 +1030,24 @@ def _parameter_dependencies(
         default = positional_defaults.get(argument.arg) or keyword_defaults.get(
             argument.arg
         )
-        if isinstance(default, ast.Call) and not append_call(default):
-            return None
+        if isinstance(default, ast.Call):
+            if not append_call(default):
+                return None
+        elif isinstance(default, ast.Name):
+            timeline = dependency_bindings.get((module, default.id))
+            if timeline:
+                occurrence = _line_order(path, default)
+                binding = next(
+                    (
+                        value
+                        for order, value in reversed(timeline)
+                        if order <= occurrence
+                    ),
+                    None,
+                )
+                if binding is None:
+                    return None
+                found.extend(binding)
     return tuple(found)
 
 
@@ -948,31 +1125,54 @@ def _middleware_may_short_circuit(
     def remember_alias(name: str, node: ast.AST, value: bool | None) -> None:
         alias_bindings.setdefault(name, []).append((position(node), value))
 
+    def alias_value(value: ast.AST | None, occurrence: ast.AST) -> bool | None:
+        if isinstance(value, ast.Name):
+            return alias_at(value.id, occurrence)
+        if isinstance(
+            value,
+            (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
+        ):
+            return False
+        return None
+
+    continuation_escaped = False
+
+    def remember_target(
+        target: ast.AST,
+        value: ast.AST | None,
+        statement: ast.AST,
+    ) -> None:
+        nonlocal continuation_escaped
+        if isinstance(target, ast.Name):
+            remember_alias(target.id, statement, alias_value(value, statement))
+            return
+        if isinstance(target, (ast.List, ast.Tuple)):
+            if isinstance(value, (ast.List, ast.Tuple)) and len(target.elts) == len(
+                value.elts
+            ):
+                for nested_target, nested_value in zip(
+                    target.elts,
+                    value.elts,
+                    strict=True,
+                ):
+                    remember_target(nested_target, nested_value, statement)
+                return
+            for nested_target in target.elts:
+                remember_target(nested_target, None, statement)
+            return
+        if isinstance(target, (ast.Attribute, ast.Subscript)) and isinstance(
+            value,
+            ast.Name,
+        ):
+            continuation_escaped |= alias_at(value.id, statement) in {True, None}
+
     for statement in function.body:
         if isinstance(statement, ast.Assign):
-            value = (
-                alias_at(statement.value.id, statement)
-                if isinstance(statement.value, ast.Name)
-                else False
-                if isinstance(
-                    statement.value,
-                    (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple),
-                )
-                else None
-            )
             for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    remember_alias(target.id, statement, value)
+                remember_target(target, statement.value, statement)
             continue
-        if isinstance(statement, ast.AnnAssign) and isinstance(
-            statement.target, ast.Name
-        ):
-            value = (
-                alias_at(statement.value.id, statement)
-                if isinstance(statement.value, ast.Name)
-                else None
-            )
-            remember_alias(statement.target.id, statement, value)
+        if isinstance(statement, ast.AnnAssign):
+            remember_target(statement.target, statement.value, statement)
             continue
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             remember_alias(
@@ -1116,7 +1316,7 @@ def _middleware_may_short_circuit(
         return (active, returned, False)
 
     active, returned, unknown = walk_block(function.body, {False})
-    if unknown or uncertain_call:
+    if unknown or uncertain_call or continuation_escaped:
         return None
     terminal_states = (*returned, *active)
     if not terminal_states:
@@ -1313,26 +1513,30 @@ def _background_targets(
             return None
         return f"{visible[1]}.{tail}" if separator else visible[1]
 
+    def assigned_identity(value: ast.AST | None, order: _Order) -> str | None:
+        identity = identity_at(_dotted(value) or "", order)
+        if identity is None and isinstance(
+            value,
+            (
+                ast.Constant,
+                ast.Dict,
+                ast.DictComp,
+                ast.GeneratorExp,
+                ast.Lambda,
+                ast.List,
+                ast.ListComp,
+                ast.Set,
+                ast.SetComp,
+                ast.Tuple,
+            ),
+        ):
+            return _NON_FRAMEWORK_BINDING
+        return identity
+
     for statement in node.body:
         order = _line_order(path, statement)
         if isinstance(statement, ast.Assign):
-            identity = identity_at(_dotted(statement.value) or "", order)
-            if identity is None and isinstance(
-                statement.value,
-                (
-                    ast.Constant,
-                    ast.Dict,
-                    ast.DictComp,
-                    ast.GeneratorExp,
-                    ast.Lambda,
-                    ast.List,
-                    ast.ListComp,
-                    ast.Set,
-                    ast.SetComp,
-                    ast.Tuple,
-                ),
-            ):
-                identity = _NON_FRAMEWORK_BINDING
+            identity = assigned_identity(statement.value, order)
             for target in statement.targets:
                 if isinstance(target, ast.Name):
                     remember(target.id, statement, identity)
@@ -1343,7 +1547,7 @@ def _background_targets(
             remember(
                 statement.target.id,
                 statement,
-                identity_at(_dotted(statement.value) or "", order),
+                assigned_identity(statement.value, order),
             )
             continue
         if isinstance(statement, ast.Import):
@@ -1726,11 +1930,11 @@ def _response_class_bindings(
         )
         active.remove(id(node))
         result = (
-            True
+            None
+            if any(item is None for item in bases)
+            else True
             if True in bases
             else False
-            if all(item is False for item in bases)
-            else None
         )
         known[id(node)] = result
         return result
@@ -1926,6 +2130,7 @@ def _exception_aliases(
         tuple[str, str],
         list[tuple[tuple[str, int, int], str | None]],
     ] = {}
+    preserved_identities: dict[str, bool] = {}
 
     def resolve(
         raw: str | None,
@@ -2084,13 +2289,30 @@ def _exception_aliases(
                     int(getattr(node, "end_lineno", node.lineno)),
                     int(getattr(node, "end_col_offset", node.col_offset)) + 1,
                 )
+                identity = class_identities[id(node)]
+                identity_preserved = _class_identity_preserved(node)
+                if identity_preserved:
+                    for base in node.bases:
+                        base_identity = resolve(
+                            _dotted(base),
+                            module,
+                            _line_order(path, base),
+                        )
+                        if base_identity in {
+                            "builtins.BaseException",
+                            "builtins.Exception",
+                            "builtins.object",
+                        }:
+                            continue
+                        if preserved_identities.get(base_identity or "") is not True:
+                            identity_preserved = False
+                            break
+                preserved_identities[identity] = identity_preserved
                 remember(
                     module,
                     node.name,
                     binding_order,
-                    class_identities[id(node)]
-                    if _class_identity_preserved(node)
-                    else None,
+                    identity if identity_preserved else None,
                 )
                 continue
             if isinstance(node, ast.Import):
@@ -3216,6 +3438,7 @@ def _expand_events(
     objects: Mapping[str, _Object],
     includes: Sequence[_Include],
     events: Sequence[_Event],
+    uncertainties: Sequence[_EventUncertainty],
     diagnostics: _Diagnostics,
     *,
     invalid_root_apps: frozenset[str],
@@ -3224,13 +3447,18 @@ def _expand_events(
 ) -> tuple[_Event, ...]:
     includes_by_parent: dict[str, list[_Include]] = {}
     events_by_owner: dict[str, list[_Event]] = {}
+    uncertainties_by_owner: dict[str, list[_EventUncertainty]] = {}
     for include in includes:
         includes_by_parent.setdefault(include.parent, []).append(include)
     for event in events:
         events_by_owner.setdefault(event.owner, []).append(event)
+    for uncertainty in uncertainties:
+        uncertainties_by_owner.setdefault(uncertainty.owner, []).append(uncertainty)
     for values in includes_by_parent.values():
         values.sort(key=lambda item: item.order)
     for values in events_by_owner.values():
+        values.sort(key=lambda item: item.order)
+    for values in uncertainties_by_owner.values():
         values.sort(key=lambda item: item.order)
 
     resolved: list[tuple[str, _Event]] = []
@@ -3284,6 +3512,18 @@ def _expand_events(
                 "router_cycle_unresolved",
             )
             return
+        for uncertainty in uncertainties_by_owner.get(object_key, ()):
+            if visible(
+                uncertainty.source_path,
+                uncertainty.order,
+                current,
+                cutoff,
+            ):
+                diagnostics.mark(
+                    uncertainty.source_path,
+                    CoverageCapability.FRAMEWORK_LIFECYCLE,
+                    "framework_config_unresolved",
+                )
         for event in events_by_owner.get(object_key, ()):
             if visible(event.source_path, event.order, current, cutoff):
                 resolved.append((app_key, event))
@@ -3414,6 +3654,11 @@ class FastAPILifecycleAdapter:
         fastapi_version = self.detected_version(context)
         starlette_version = self.detected_starlette_version(context)
         import_binding_view = _import_bindings(parsed)
+        dependency_binding_view = _dependency_bindings(
+            parsed,
+            imports,
+            import_binding_view,
+        )
         response_class_view = _response_class_bindings(
             parsed,
             imports,
@@ -3451,6 +3696,7 @@ class FastAPILifecycleAdapter:
             tuple[str, str, str, ast.FunctionDef | ast.AsyncFunctionDef]
         ] = []
         events: list[_Event] = []
+        event_uncertainties: list[_EventUncertainty] = []
         event_ordinal = 0
         for path, (source, tree, module) in parsed.items():
             for node in tree.body:
@@ -3625,7 +3871,7 @@ class FastAPILifecycleAdapter:
                         _line_order(path, node),
                         unresolved,
                     )
-                    if kind == "app":
+                    if kind in {"app", "router"}:
                         for event_name, keyword_name in (
                             ("startup", "on_startup"),
                             ("shutdown", "on_shutdown"),
@@ -3639,10 +3885,12 @@ class FastAPILifecycleAdapter:
                             ):
                                 continue
                             if not isinstance(handlers_node, (ast.List, ast.Tuple)):
-                                diagnostics.mark(
-                                    path,
-                                    CoverageCapability.FRAMEWORK_LIFECYCLE,
-                                    "framework_config_unresolved",
+                                event_uncertainties.append(
+                                    _EventUncertainty(
+                                        key,
+                                        path,
+                                        _line_order(path, node),
+                                    )
                                 )
                                 continue
                             for handler_node in handlers_node.elts:
@@ -3655,10 +3903,12 @@ class FastAPILifecycleAdapter:
                                     _line_order(path, handler_node),
                                 )
                                 if handler_raw is None or target is None:
-                                    diagnostics.mark(
-                                        path,
-                                        CoverageCapability.FRAMEWORK_LIFECYCLE,
-                                        "framework_config_unresolved",
+                                    event_uncertainties.append(
+                                        _EventUncertainty(
+                                            key,
+                                            path,
+                                            _line_order(path, node),
+                                        )
                                     )
                                     continue
                                 events.append(
@@ -3714,6 +3964,7 @@ class FastAPILifecycleAdapter:
                             path,
                             imports,
                             import_binding_view,
+                            dependency_binding_view,
                         )
                     )
                     function_nodes.append((path, source, module, node))
@@ -3930,10 +4181,12 @@ class FastAPILifecycleAdapter:
                         decorator.args[0] if decorator.args else None
                     )
                     if event not in {"startup", "shutdown"}:
-                        diagnostics.mark(
-                            path,
-                            CoverageCapability.FRAMEWORK_LIFECYCLE,
-                            "framework_config_unresolved",
+                        event_uncertainties.append(
+                            _EventUncertainty(
+                                owner,
+                                path,
+                                _line_order(path, decorator),
+                            )
                         )
                         continue
                     events.append(
@@ -4023,10 +4276,12 @@ class FastAPILifecycleAdapter:
                         _line_order(path, handler_node or node),
                     )
                     if event not in {"startup", "shutdown"} or target is None:
-                        diagnostics.mark(
-                            path,
-                            CoverageCapability.FRAMEWORK_LIFECYCLE,
-                            "framework_config_unresolved",
+                        event_uncertainties.append(
+                            _EventUncertainty(
+                                owner,
+                                path,
+                                _line_order(path, node),
+                            )
                         )
                         continue
                     events.append(
@@ -4299,6 +4554,7 @@ class FastAPILifecycleAdapter:
             objects,
             includes,
             events,
+            event_uncertainties,
             diagnostics,
             invalid_root_apps=invalid_root_apps,
             modules_by_path=modules_by_path,
@@ -4435,8 +4691,7 @@ class FastAPILifecycleAdapter:
                     False,
                 ))
                 continue
-            if dependency.cache:
-                seen_cached.add(identity)
+            seen_cached.add(identity)
             # Imports were resolved during discovery for route shape.  A
             # dependency target outside the parsed syntax remains a framework
             # boundary; it is not a guessed local executable declaration.
