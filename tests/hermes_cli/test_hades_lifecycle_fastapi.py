@@ -1172,3 +1172,161 @@ app.include_router(router)
         and event.outcome is CoverageOutcome.PARTIAL
         for event in adapter.coverage_events(context)
     )
+
+
+def test_exception_alias_occurrence_preserves_registration_and_raise_identity(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class A(Exception): pass
+class B(Exception): pass
+
+Alias = A
+app = FastAPI()
+
+@app.exception_handler(Alias)
+async def a_handler(request, exc): return None
+
+Alias = B
+
+@app.get("/exact-a")
+async def exact_a(): raise A()
+
+@app.get("/alias-b")
+async def alias_b(): raise Alias()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    exact_a = adapter.pipeline(context, _candidate(adapter, context, "exact_a"))
+    alias_b = adapter.pipeline(context, _candidate(adapter, context, "alias_b"))
+
+    handler = next(
+        item for item in exact_a if item.framework_role == "exception_handler"
+    )
+    assert isinstance(handler.target, FrameworkLocalTarget)
+    assert handler.target.local_key == _function_key(tmp_path, "a_handler")
+    assert "exception_handler" not in {item.framework_role for item in alias_b}
+    assert "unhandled_exception" in {item.framework_role for item in alias_b}
+
+
+def test_exception_alias_occurrence_dynamic_state_is_a_boundary(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+class A(Exception): pass
+class B(Exception): pass
+
+Alias = A
+if enabled:
+    Alias = B
+
+app = FastAPI()
+
+@app.exception_handler(Alias)
+async def uncertain_handler(request, exc): return None
+
+@app.get("/uncertain")
+async def uncertain(): raise A()
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    roles = {
+        item.framework_role
+        for item in adapter.pipeline(context, _candidate(adapter, context, "uncertain"))
+    }
+
+    assert "exception_handler" not in roles
+    assert "exception_handler_resolution_boundary" in roles
+
+
+def test_comprehension_namedexpr_rebinds_but_iteration_target_stays_local(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "app.py",
+        """from fastapi import FastAPI
+
+local_app = FastAPI()
+
+@local_app.get("/local")
+async def local(): return None
+
+[local_app for local_app in values]
+
+rebound_app = FastAPI()
+
+@rebound_app.get("/stale")
+async def stale(): return None
+
+[(rebound_app := build_app()) for item in values]
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(context, (_syntax(tmp_path, "app.py"),))
+
+    assert {
+        item.public_name
+        for item in entrypoints
+        if item.kind is EntrypointKind.HTTP_ROUTE
+    } == {"local"}
+    assert any(
+        event.reason_code == "framework_object_rebound"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
+
+
+def test_imported_app_alias_rebind_invalidates_reference_and_lost_registrations(
+    tmp_path: Path,
+) -> None:
+    _prepare(tmp_path)
+    _write(
+        tmp_path,
+        "shared.py",
+        """from fastapi import FastAPI
+
+app = FastAPI()
+""",
+    )
+    _write(
+        tmp_path,
+        "app.py",
+        """from shared import app
+
+@app.get("/before-rebind")
+async def before_rebind(): return None
+
+app = build_app()
+
+@app.get("/after-rebind")
+async def after_rebind(): return None
+""",
+    )
+    adapter = FastAPILifecycleAdapter()
+    context = _context(tmp_path)
+    entrypoints = adapter.entrypoints(
+        context,
+        (_syntax(tmp_path, "app.py"), _syntax(tmp_path, "shared.py")),
+    )
+
+    assert entrypoints == ()
+    assert any(
+        event.reason_code == "framework_object_rebound"
+        and event.outcome is CoverageOutcome.PARTIAL
+        for event in adapter.coverage_events(context)
+    )
