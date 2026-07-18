@@ -1,0 +1,7 @@
+{
+  "bundle_sha256": "d1d9c8799e59bdd57855d89bce09b5900ff52f307ba2ae29cb064d98a64f8505",
+  "corpus_sha256": "c66edd4138fdbefa94635adb750deaecec5023e712ee134c8536e6170b0ba97e",
+  "framework": "fastapi",
+  "matrix_sha256": "ee8d209744b741f763fa9c857c01c7f1f495e767a25a3e95e62ac857fce4b25d",
+  "schema": "hades.adapter_acceptance_lock.v1"
+}

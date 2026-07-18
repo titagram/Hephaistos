@@ -1,0 +1,419 @@
+{
+  "schema": "hades.adapter_acceptance_matrix.v1",
+  "framework": "fastapi",
+  "framework_versions": ["fastapi==0.115.0", "starlette==0.37.2"],
+  "items": [
+    {
+      "id": "FASTAPI-ROUTE-001",
+      "construct": "decorator_and_api_route_registration",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": ["method", "normalized_path", "endpoint"],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-ROUTE-001-N1",
+          "construct": "dynamic_expression_registration",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_dynamic_expression_registrations_are_partial_without_invented_routes"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child"
+      ]
+    },
+    {
+      "id": "FASTAPI-ROUTER-001",
+      "construct": "nested_and_repeated_router_inclusion",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "nested_include_prefix",
+        "repeated_include_identity",
+        "dependency_inheritance"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-ROUTER-001-N1",
+          "construct": "computed_router_configuration",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_computed_router_configuration_is_reported_partial_and_never_guessed"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_repeated_router_inclusion_has_distinct_registry_safe_pipeline_identity"
+      ]
+    },
+    {
+      "id": "FASTAPI-METHOD-001",
+      "construct": "reviewed_fastapi_and_starlette_route_methods",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "starlette-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "fastapi_method_default",
+        "starlette_method_default",
+        "explicit_method_semantics"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-METHOD-001-N1",
+          "construct": "unreviewed_route_method_contract",
+          "expected_precision": "partial",
+          "required_uncertainty": ["route_method_contract_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_unreviewed_route_method_contracts_are_partial_and_not_invented"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_reviewed_route_method_defaults_and_signatures_are_exact"
+      ]
+    },
+    {
+      "id": "FASTAPI-STARLETTE-001",
+      "construct": "plain_starlette_route_pipeline",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["starlette-official"],
+      "required_facts": [
+        "plain_starlette_route",
+        "fastapi_dependency_stages_excluded",
+        "fastapi_validation_and_serialization_stages_excluded"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-STARLETTE-001-N1",
+          "construct": "unknown_starlette_middleware_order",
+          "expected_precision": "partial",
+          "required_uncertainty": [
+            "middleware_order_boundary",
+            "middleware_order_unresolved"
+          ],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_unknown_starlette_order_is_a_partial_boundary_not_a_guess"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_plain_starlette_routes_exclude_fastapi_only_pipeline_stages"
+      ]
+    },
+    {
+      "id": "FASTAPI-DEPENDENCY-001",
+      "construct": "ordered_nested_dependencies",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "registration_dependency_order",
+        "endpoint_dependency_order",
+        "nested_dependency_order",
+        "resolved_callable_identity"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-DEPENDENCY-001-N1",
+          "construct": "unproven_or_dynamic_dependency_configuration",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_dependency_proof_supports_annotated_and_bounds_fake_and_dynamic_cache"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_add_api_route_merges_registration_and_endpoint_dependencies"
+      ]
+    },
+    {
+      "id": "FASTAPI-SECURITY-001",
+      "construct": "security_scope_dependency_cache_identity",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "normalized_security_scopes",
+        "scopes_in_dependency_cache_identity",
+        "dependency_cache_reuse"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-SECURITY-001-N1",
+          "construct": "unproven_annotated_dependency_metadata",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_annotated_metadata_requires_proven_dependency_or_nondependency"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_security_scopes_participate_in_dependency_cache_identity"
+      ]
+    },
+    {
+      "id": "FASTAPI-MIDDLEWARE-001",
+      "construct": "middleware_continuation_and_must_call_proof",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "starlette-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "continuation_binding",
+        "must_call_proof",
+        "short_circuit_successor"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-MIDDLEWARE-001-N1",
+          "construct": "unproven_middleware_continuation_behavior",
+          "expected_precision": "partial",
+          "required_uncertainty": ["middleware_behavior_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_middleware_binds_continuation_and_requires_must_call_proof"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_middleware_binds_continuation_and_requires_must_call_proof"
+      ]
+    },
+    {
+      "id": "FASTAPI-EXCEPTION-001",
+      "construct": "exception_handler_type_and_mro_resolution",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": ["handler_type_identity", "mro_specificity"],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-EXCEPTION-001-N1",
+          "construct": "unproven_exception_ancestry",
+          "expected_precision": "partial",
+          "required_uncertainty": ["exception_handler_resolution_boundary"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_unproven_exception_ancestry_is_a_boundary_not_a_guessed_handler"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_exception_handlers_use_proven_exact_type_and_mro_specificity"
+      ]
+    },
+    {
+      "id": "FASTAPI-LIFESPAN-001",
+      "construct": "lifespan_and_legacy_event_composition",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "explicit_lifespan_identity",
+        "literal_none_preserves_legacy_events",
+        "lifespan_and_legacy_event_exclusivity"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-LIFESPAN-001-N1",
+          "construct": "dynamic_lifespan_target",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_lifespan_target_uses_constructor_occurrence_binding"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_literal_none_lifespan_preserves_routes_and_legacy_events",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_lifespan_target_uses_constructor_occurrence_binding",
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_nested_routers_methods_dependencies_cache_cleanup_and_background_child"
+      ]
+    },
+    {
+      "id": "FASTAPI-BACKGROUND-001",
+      "construct": "background_task_receiver_and_child_dispatch",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": ["fastapi-official"],
+      "required_facts": [
+        "proven_background_tasks_receiver",
+        "runtime_callable_binding",
+        "lexical_callable_binding",
+        "background_child_dispatch"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-BACKGROUND-001-N1",
+          "construct": "rebound_or_uncertain_background_receiver",
+          "expected_precision": "partial",
+          "required_uncertainty": ["background_task_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_background_receiver_binding_at_call_controls_dispatch"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_background_tasks_prove_receiver_and_use_runtime_and_lexical_bindings"
+      ]
+    },
+    {
+      "id": "FASTAPI-RESPONSE-001",
+      "construct": "response_identity_and_serialization_boundary",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": [
+        "fastapi-official",
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "annotation_driven_serialization",
+        "explicit_response_model_none_opt_out",
+        "response_identity_boundary"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-RESPONSE-001-N1",
+          "construct": "unproven_response_subclass_identity",
+          "expected_precision": "partial",
+          "required_uncertainty": ["response_model_resolution_boundary"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_response_annotations_prove_response_identity_and_subclass_boundaries"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_return_annotation_drives_serialization_unless_explicitly_opted_out"
+      ]
+    },
+    {
+      "id": "FASTAPI-IMPORT-001",
+      "construct": "imported_router_and_dependency_identity",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": [
+        "full-stack-fastapi-template",
+        "netflix-dispatch",
+        "fastapi-realworld-example-app"
+      ],
+      "required_facts": [
+        "imported_router_identity",
+        "imported_dependency_callable_identity",
+        "cross_file_dependency_cache_identity"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "FASTAPI-IMPORT-001-N1",
+          "construct": "rebound_imported_application_alias",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_object_rebound"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_imported_app_alias_rebind_invalidates_reference_and_lost_registrations"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_imported_router_and_dependency_cache_use_resolved_callable_identity"
+      ]
+    },
+    {
+      "id": "FASTAPI-DYNAMIC-001",
+      "construct": "dynamic_or_conditional_route_registration_boundary",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "partial",
+      "sources": [
+        "fastapi-official",
+        "starlette-official",
+        "hephaistos-dashboard"
+      ],
+      "required_facts": ["no_invented_route", "explicit_partial_coverage"],
+      "allowed_unknowns": [
+        "dynamic_registration_target",
+        "conditional_registration_path"
+      ],
+      "negative_variants": [],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_dynamic_control_flow_registration_is_partial_without_invented_route"
+      ]
+    },
+    {
+      "id": "FASTAPI-REBIND-001",
+      "construct": "rebound_framework_object_identity_boundary",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "partial",
+      "sources": [
+        "fastapi-official",
+        "starlette-official",
+        "hephaistos-dashboard"
+      ],
+      "required_facts": ["stale_registration_invalidated", "explicit_partial_coverage"],
+      "allowed_unknowns": [
+        "rebound_framework_object_identity",
+        "post_rebind_registration_set"
+      ],
+      "negative_variants": [],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_fastapi.py::test_rebound_application_object_is_partial_not_an_old_registration"
+      ]
+    }
+  ]
+}

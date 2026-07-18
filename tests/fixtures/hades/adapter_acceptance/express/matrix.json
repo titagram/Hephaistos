@@ -1,0 +1,282 @@
+{
+  "schema": "hades.adapter_acceptance_matrix.v1",
+  "framework": "express",
+  "framework_versions": ["express==5.2.1"],
+  "items": [
+    {
+      "id": "EXPRESS-ROUTER-001",
+      "construct": "nested_router_mount_with_literal_path_prefix",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": [
+        "express-official",
+        "owasp-juice-shop",
+        "nodebb",
+        "ghost"
+      ],
+      "required_facts": [
+        "parent_mount_prefix",
+        "nested_router_identity",
+        "composed_normalized_path",
+        "mounted_handler_identity"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-ROUTER-001-N1",
+          "construct": "computed_router_mount_prefix_or_target",
+          "expected_precision": "partial",
+          "required_uncertainty": [
+            "mount_prefix_unresolved",
+            "router_target_unresolved"
+          ],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_router_mount_is_partial_with_explicit_mount_uncertainty"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_nested_router_mount_composes_literal_path_prefix_exactly"
+      ]
+    },
+    {
+      "id": "EXPRESS-METHOD-001",
+      "construct": "same_literal_path_with_multiple_explicit_verbs",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": [
+        "express-official",
+        "owasp-juice-shop",
+        "nodebb",
+        "ghost"
+      ],
+      "required_facts": [
+        "normalized_path",
+        "distinct_http_methods",
+        "per_method_handler_identity",
+        "registration_order"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-METHOD-001-N1",
+          "construct": "computed_http_verb_registration",
+          "expected_precision": "unresolved",
+          "required_uncertainty": ["route_method_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_verb_registration_is_unresolved_without_an_invented_method"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_same_path_explicit_verbs_remain_distinct_and_ordered"
+      ]
+    },
+    {
+      "id": "EXPRESS-ALL-001",
+      "construct": "all_registration_with_unrestricted_method_constraint",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["express-official", "nodebb"],
+      "required_facts": [
+        "normalized_path",
+        "method_constraint_unrestricted",
+        "handler_identity",
+        "no_invented_single_method"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-ALL-001-N1",
+          "construct": "all_registration_with_computed_path",
+          "expected_precision": "partial",
+          "required_uncertainty": ["route_path_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_all_with_computed_path_is_partial_without_an_invented_path"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_all_registration_remains_method_unrestricted"
+      ]
+    },
+    {
+      "id": "EXPRESS-ORDER-001",
+      "construct": "registration_ordered_use_and_route_handler_chain",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": [
+        "express-official",
+        "owasp-juice-shop",
+        "nodebb",
+        "ghost"
+      ],
+      "required_facts": [
+        "use_registration_order",
+        "route_handler_argument_order",
+        "middleware_identity",
+        "route_handler_identity"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-ORDER-001-N1",
+          "construct": "computed_middleware_or_handler_collection",
+          "expected_precision": "partial",
+          "required_uncertainty": [
+            "middleware_order_unresolved",
+            "handler_target_unresolved"
+          ],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_handler_collection_is_partial_with_explicit_order_uncertainty"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_use_and_route_handlers_preserve_registration_order"
+      ]
+    },
+    {
+      "id": "EXPRESS-NEXT-001",
+      "construct": "proven_next_next_route_and_next_error_continuations",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": ["express-official", "owasp-juice-shop", "nodebb"],
+      "required_facts": [
+        "next_continues_current_ordered_stack",
+        "next_route_skips_remaining_current_route_handlers",
+        "next_route_resumes_at_next_matching_route",
+        "next_error_enters_ordered_error_flow",
+        "ordinary_handlers_skipped_during_error_flow"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-NEXT-001-N1",
+          "construct": "next_with_computed_argument",
+          "expected_precision": "partial",
+          "required_uncertainty": [
+            "continuation_kind_unresolved",
+            "error_flow_unresolved"
+          ],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_next_argument_is_partial_without_an_invented_continuation"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_proven_next_forms_select_the_correct_continuation"
+      ]
+    },
+    {
+      "id": "EXPRESS-TERMINAL-001",
+      "construct": "send_json_end_and_redirect_terminal_response_outcomes",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": ["express-official", "owasp-juice-shop", "nodebb"],
+      "required_facts": [
+        "send_terminal_outcome",
+        "json_terminal_outcome",
+        "end_terminal_outcome",
+        "redirect_terminal_outcome",
+        "no_fallthrough_without_proven_next"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-TERMINAL-001-N1",
+          "construct": "computed_response_terminal_method",
+          "expected_precision": "partial",
+          "required_uncertainty": ["response_outcome_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_response_terminal_is_partial_without_an_invented_outcome"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_send_json_end_and_redirect_are_terminal_outcomes"
+      ]
+    },
+    {
+      "id": "EXPRESS-ERROR-001",
+      "construct": "direct_throw_and_returned_handler_promise_rejection",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["express-official", "owasp-juice-shop", "nodebb", "ghost"],
+      "required_facts": [
+        "direct_throw_enters_error_flow",
+        "returned_rejected_promise_enters_error_flow",
+        "error_value_identity_when_proven",
+        "ordinary_handlers_skipped_during_error_flow"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-ERROR-001-N1",
+          "construct": "detached_async_rejection_not_returned_from_handler",
+          "expected_precision": "partial",
+          "required_uncertainty": ["async_error_flow_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_detached_async_rejection_is_partial_with_explicit_error_flow_uncertainty"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_direct_throw_and_returned_async_rejection_enter_error_flow"
+      ]
+    },
+    {
+      "id": "EXPRESS-ERROR-MIDDLEWARE-001",
+      "construct": "four_parameter_error_middleware_selection",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["express-official", "nodebb"],
+      "required_facts": [
+        "declared_four_parameter_arity",
+        "error_middleware_identity",
+        "error_flow_only_selection",
+        "ordinary_three_parameter_middleware_excluded_from_error_flow"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "EXPRESS-ERROR-MIDDLEWARE-001-N1",
+          "construct": "computed_error_middleware_handler_target",
+          "expected_precision": "partial",
+          "required_uncertainty": [
+            "error_middleware_arity_unresolved",
+            "handler_target_unresolved"
+          ],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_error_middleware_target_is_partial_with_explicit_arity_uncertainty"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_four_parameter_error_middleware_is_selected_by_arity"
+      ]
+    },
+    {
+      "id": "EXPRESS-COMPUTED-001",
+      "construct": "computed_route_registration_target_or_method",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "unresolved",
+      "sources": ["nodebb"],
+      "required_facts": [
+        "no_invented_route",
+        "no_invented_method",
+        "explicit_uncertainty_coverage"
+      ],
+      "allowed_unknowns": [
+        "registration_target",
+        "route_method",
+        "route_path",
+        "handler_target"
+      ],
+      "negative_variants": [],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_express.py::test_computed_registration_target_is_unresolved_without_an_invented_route"
+      ]
+    }
+  ]
+}
