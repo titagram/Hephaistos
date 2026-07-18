@@ -101,20 +101,32 @@ def _syntax(path: str, language: str) -> SyntaxIR:
 def _extract(root: Path, language: str, *paths: str):
     context = _context(root, language)
     adapter = NextJSLifecycleAdapter(language)
-    candidates = adapter.entrypoints(
-        context, tuple(_syntax(path, language) for path in paths)
+    syntax = tuple(_syntax(path, language) for path in paths)
+    candidates = adapter.entrypoints(context, syntax)
+    pipelines = tuple(adapter.pipeline(context, candidate) for candidate in candidates)
+    coverage = adapter.coverage_events(context)
+    assert adapter.entrypoints(context, syntax) == candidates
+    assert (
+        tuple(adapter.pipeline(context, candidate) for candidate in candidates)
+        == pipelines
     )
+    assert adapter.coverage_events(context) == coverage
     return adapter, context, candidates
 
 
 def _assert_candidates(adapter, context, candidates) -> None:
     """Assert common public-IR invariants on every emitted HTTP boundary."""
 
-    assert tuple(candidates) == tuple(
-        sorted(
-            candidates, key=lambda item: item.registration_locator.source_location.path
-        )
+    candidate_key = lambda item: (
+        item.registration_locator.source_location.path,
+        item.registration_locator.source_location.start_line,
+        item.registration_locator.structural_path,
+        item.registration_locator.ordinal,
+        item.methods,
     )
+    assert tuple(candidates) == tuple(sorted(candidates, key=candidate_key))
+    local_keys: set[str] = set()
+    pipeline_keys: set[str] = set()
     for candidate in candidates:
         assert candidate.framework == "nextjs"
         assert candidate.kind is EntrypointKind.HTTP_ROUTE
@@ -130,10 +142,24 @@ def _assert_candidates(adapter, context, candidates) -> None:
         if candidate.public_path is not None:
             assert candidate.public_path.startswith("/")
             assert ".." not in candidate.public_path
-        assert candidate.handler_local_key or candidate.unresolved_fact_local_key
-        assert candidate.framework_segment_keys == tuple(
-            segment.local_key for segment in adapter.pipeline(context, candidate)
+        locator = candidate.registration_locator
+        content = context.file_accessor(Path(locator.source_location.path))
+        assert (
+            locator.source_location.file_sha256 == hashlib.sha256(content).hexdigest()
         )
+        assert 1 <= locator.source_location.start_line <= content.count(b"\n") + 1
+        assert locator.source_location.start_line == locator.source_location.end_line
+        local_key = candidate.handler_local_key or candidate.unresolved_fact_local_key
+        assert local_key is not None
+        assert local_key not in local_keys
+        local_keys.add(local_key)
+        pipeline = adapter.pipeline(context, candidate)
+        assert candidate.framework_segment_keys == tuple(
+            segment.local_key for segment in pipeline
+        )
+        assert len({segment.local_key for segment in pipeline}) == len(pipeline)
+        assert not pipeline_keys.intersection(candidate.framework_segment_keys)
+        pipeline_keys.update(candidate.framework_segment_keys)
     events = adapter.coverage_events(context)
     assert events == tuple(
         sorted(
@@ -142,9 +168,14 @@ def _assert_candidates(adapter, context, candidates) -> None:
                 event.path or "",
                 event.capability.value,
                 event.reason_code or "",
+                event.outcome.value,
             ),
         )
     )
+    assert len({
+        (event.path, event.capability, event.reason_code, event.outcome)
+        for event in events
+    }) == len(events)
 
 
 def _by_path(candidates, path: str):
@@ -157,6 +188,12 @@ def _by_path(candidates, path: str):
 
 def _reasons(adapter, context) -> set[str | None]:
     return {event.reason_code for event in adapter.coverage_events(context)}
+
+
+def _event(adapter, context, reason: str):
+    return next(
+        item for item in adapter.coverage_events(context) if item.reason_code == reason
+    )
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
@@ -179,20 +216,31 @@ def test_app_route_static_get_and_post_exports_are_method_entrypoints(
     ]
     assert all(item.method_semantics is MethodSemantics.EXPLICIT for item in candidates)
     assert all(item.handler_local_key is not None for item in candidates)
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
 def test_app_route_reexport_with_unresolved_target_is_partial(tmp_path: Path) -> None:
-    _write(tmp_path, "app/api/items/route.ts", 'export { GET } from "./handler"\n')
+    _write(
+        tmp_path,
+        "app/api/items/route.ts",
+        '// export { GET } from "./comment"\n'
+        "const note = 'export { GET as DELETE } from \"./string\"'\n"
+        'export { GET as POST, HEAD as ignored } from "./handler"\n',
+    )
     adapter, context, candidates = _extract(
         tmp_path, "typescript", "app/api/items/route.ts"
     )
 
     assert len(candidates) == 1
-    assert candidates[0].methods == ("GET",)
+    assert candidates[0].methods == ("POST",)
     assert candidates[0].handler_local_key is None
     assert candidates[0].unresolved_fact_local_key is not None
     assert "route_handler_export_target_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "route_handler_export_target_unresolved").outcome
+        is CoverageOutcome.PARTIAL
+    )
     _assert_candidates(adapter, context, candidates)
 
 
@@ -216,7 +264,11 @@ def test_pages_api_exhaustive_method_switch_and_unrestricted_fallback(
         "pages/api/fallback.ts",
         """export default function handler(req, res) {
   switch (req.method) {
-    case "GET": return res.status(200).end()
+    case "GET":
+      switch (mode) {
+        case "POST": return res.status(200).end()
+        default: return res.status(201).end()
+      }
   }
 }
 """,
@@ -235,6 +287,7 @@ def test_pages_api_exhaustive_method_switch_and_unrestricted_fallback(
     assert fallback.methods == ()
     assert fallback.method_semantics is MethodSemantics.UNRESTRICTED
     assert "pages_api_method_dispatch_unresolved" not in _reasons(adapter, context)
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -251,6 +304,10 @@ def test_pages_api_computed_method_dispatch_is_partial(tmp_path: Path) -> None:
     assert len(candidates) == 1
     assert candidates[0].method_semantics is MethodSemantics.UNRESTRICTED
     assert "pages_api_method_dispatch_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "pages_api_method_dispatch_unresolved").outcome
+        is CoverageOutcome.PARTIAL
+    )
     _assert_candidates(adapter, context, candidates)
 
 
@@ -271,6 +328,7 @@ def test_route_groups_dynamic_and_catch_all_segments_normalize_public_paths(
         ("/api/:slug*", ("GET",)),
         ("/api/:optional*?", ("GET",)),
     ]
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -281,6 +339,10 @@ def test_unsupported_filesystem_segment_syntax_is_unresolved(tmp_path: Path) -> 
 
     assert candidates == ()
     assert "route_pattern_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "route_pattern_unresolved").outcome
+        is CoverageOutcome.UNSUPPORTED
+    )
     _assert_candidates(adapter, context, candidates)
 
 
@@ -310,6 +372,10 @@ def test_nonliteral_package_version_without_detection_is_unresolved(
     assert _detected_version(context, "typescript") == (None, "unresolved")
     assert candidates == ()
     assert "framework_version_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "framework_version_unresolved").outcome
+        is CoverageOutcome.UNSUPPORTED
+    )
 
 
 def test_static_middleware_matcher_is_exact(tmp_path: Path) -> None:
@@ -317,7 +383,8 @@ def test_static_middleware_matcher_is_exact(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
-        """export const config = { matcher: ["/one", { source: "/two" }, "/three"] }
+        """const internal = { matcher: "/fake" }
+export const config = { matcher: ["/one", { source: "/two" }, "/three"] }
 export function middleware() { return NextResponse.next() }
 """,
     )
@@ -329,6 +396,7 @@ export function middleware() { return NextResponse.next() }
         "/two",
         "/three",
     ]
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -337,12 +405,17 @@ def test_computed_middleware_matcher_is_partial(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
-        "const matcher = process.env.MATCHER\nexport const config = { matcher }\n"
+        'const internal = { matcher: "/fake" }\n'
+        'const matcher = process.env.MATCHER\nexport const config = { matcher, runtime: "edge" }\n'
         "export function middleware() { return NextResponse.next() }\n",
     )
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert "middleware_matcher_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "middleware_matcher_unresolved").outcome
+        is CoverageOutcome.PARTIAL
+    )
     assert not [
         segment
         for segment in adapter.pipeline(context, candidates[0])
@@ -357,6 +430,7 @@ def test_middleware_redirect_response_and_next_outcomes(tmp_path: Path) -> None:
         tmp_path,
         path,
         """export function middleware(request) {
+  NextResponse.redirect("/ignored")
   if (request.nextUrl.pathname === "/redirect") return NextResponse.redirect("/login")
   if (request.nextUrl.pathname === "/response") return new NextResponse("blocked")
   return NextResponse.next()
@@ -372,6 +446,7 @@ def test_middleware_redirect_response_and_next_outcomes(tmp_path: Path) -> None:
         "middleware_next",
     ]
     assert pipeline[0].target.descriptor.public_name == "/login"
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -380,11 +455,23 @@ def test_unproven_middleware_outcome_is_partial(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
-        "export function middleware(request) { return decide(request) }\n",
+        """function unused() { return NextResponse.next() }
+export function middleware(request) {
+  NextResponse.redirect("/ignored")
+  return decide(request)
+}
+""",
     )
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert "middleware_outcome_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "middleware_outcome_unresolved").outcome
+        is CoverageOutcome.PARTIAL
+    )
+    assert not {
+        segment.framework_role for segment in adapter.pipeline(context, candidates[0])
+    }.intersection({"middleware_redirect", "middleware_response", "middleware_next"})
     _assert_candidates(adapter, context, candidates)
 
 
@@ -393,7 +480,8 @@ def test_static_next_config_rewrites_are_exact(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
-        """export default {
+        """function rewrites() { return [{ source: "/ghost", destination: "/nope" }] }
+export default {
   async rewrites() { return { beforeFiles: [{ source: "/one", destination: "/a" }], afterFiles: [{ source: "/two", destination: "/b" }] } }
 }
 """,
@@ -411,6 +499,7 @@ def test_static_next_config_rewrites_are_exact(tmp_path: Path) -> None:
         "rewrite_before_files",
         "rewrite_after_files",
     ]
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -419,12 +508,17 @@ def test_computed_rewrite_entry_is_partial(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
+        'function rewrites() { return [{ source: "/ghost", destination: "/nope" }] }\n'
         'export default { async rewrites() { return [{ source: prefix, destination: "/a" }] } }\n',
     )
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert candidates == ()
     assert "framework_config_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "framework_config_unresolved").outcome
+        is CoverageOutcome.UNSUPPORTED
+    )
     _assert_candidates(adapter, context, candidates)
 
 
@@ -433,7 +527,8 @@ def test_static_next_config_redirects_are_exact(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
-        """export default {
+        """function redirects() { return [{ source: "/ghost", destination: "/nope", permanent: false }] }
+export default {
   async redirects() { return [
     { source: "/old", destination: "/new", permanent: false },
     { source: "/forever", destination: "/ever", permanent: true },
@@ -454,6 +549,7 @@ def test_static_next_config_redirects_are_exact(tmp_path: Path) -> None:
         "redirect_307",
         "redirect_308",
     ]
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -462,12 +558,17 @@ def test_computed_redirect_entry_is_partial(tmp_path: Path) -> None:
     _write(
         tmp_path,
         path,
+        'function redirects() { return [{ source: "/ghost", destination: "/nope", permanent: false }] }\n'
         'export default { async redirects() { return [{ source: "/old", destination, permanent }] } }\n',
     )
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert candidates == ()
     assert "framework_config_unresolved" in _reasons(adapter, context)
+    assert (
+        _event(adapter, context, "framework_config_unresolved").outcome
+        is CoverageOutcome.UNSUPPORTED
+    )
     _assert_candidates(adapter, context, candidates)
 
 
@@ -478,17 +579,14 @@ def test_computed_middleware_config_reports_explicit_uncertainty(
     _write(
         tmp_path,
         path,
-        "export const config = { matcher: buildMatcher() }\n"
+        'const internal = { matcher: "/fake" }\n'
+        'export const config = { matcher: buildMatcher(), runtime: "edge" }\n'
         "export function middleware() { return NextResponse.next() }\n",
     )
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert len(candidates) == 1
-    event = next(
-        item
-        for item in adapter.coverage_events(context)
-        if item.reason_code == "middleware_matcher_unresolved"
-    )
+    event = _event(adapter, context, "middleware_matcher_unresolved")
     assert event.outcome is CoverageOutcome.PARTIAL
     assert not [
         segment
@@ -508,11 +606,7 @@ def test_computed_rewrite_or_redirect_config_is_unresolved(tmp_path: Path) -> No
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert candidates == ()
-    event = next(
-        item
-        for item in adapter.coverage_events(context)
-        if item.reason_code == "framework_config_unresolved"
-    )
+    event = _event(adapter, context, "framework_config_unresolved")
     assert event.outcome is CoverageOutcome.UNSUPPORTED
     _assert_candidates(adapter, context, candidates)
 
@@ -542,6 +636,7 @@ def test_render_graph_files_are_not_http_entrypoints(tmp_path: Path) -> None:
         "pages/api/legacy.ts",
         "middleware.ts",
     }
+    assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
 
 
@@ -551,5 +646,6 @@ def test_ambiguous_nonstandard_render_file_role_is_partial(tmp_path: Path) -> No
     adapter, context, candidates = _extract(tmp_path, "typescript", path)
 
     assert candidates == ()
-    assert "http_entrypoint_file_role_unresolved" in _reasons(adapter, context)
+    event = _event(adapter, context, "http_entrypoint_file_role_unresolved")
+    assert event.outcome is CoverageOutcome.PARTIAL
     _assert_candidates(adapter, context, candidates)

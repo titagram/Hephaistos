@@ -179,15 +179,27 @@ def _file_role(path: str, language: str) -> _FileRole:
             path, language, "unsupported", None, ("route_pattern_unresolved",)
         )
     if _APP_ROUTE_RE.search(safe_path):
-        public_path, reasons = _public_pattern(safe_path)
-        return _FileRole(safe_path, language, "app_route", public_path, reasons)
+        public_path, parameters_or_reasons = _public_pattern(safe_path)
+        return _FileRole(
+            safe_path,
+            language,
+            "app_route",
+            public_path,
+            () if public_path is not None else parameters_or_reasons,
+        )
     pages_match = _PAGES_API_RE.search(safe_path)
     if pages_match:
-        public_path, reasons = _segments_pattern((
+        public_path, parameters_or_reasons = _segments_pattern((
             "api",
             *pages_match.group(1).split("/"),
         ))
-        return _FileRole(safe_path, language, "pages_api", public_path, reasons)
+        return _FileRole(
+            safe_path,
+            language,
+            "pages_api",
+            public_path,
+            () if public_path is not None else parameters_or_reasons,
+        )
     if _MIDDLEWARE_RE.search(safe_path):
         return _FileRole(safe_path, language, "middleware", "/", ())
     if _CONFIG_RE.search(safe_path):
@@ -211,25 +223,99 @@ def _line(source: str, offset: int) -> int:
     return source.count("\n", 0, max(0, offset)) + 1
 
 
+def _code_mask(source: str) -> str:
+    """Mask comments and quoted literals without disturbing source offsets."""
+
+    masked = list(source)
+    index = 0
+    state: str | None = None
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if state == "line":
+            if character == "\n":
+                state = None
+            else:
+                masked[index] = " "
+            index += 1
+            continue
+        if state == "block":
+            masked[index] = " " if character != "\n" else "\n"
+            if character == "*" and following == "/":
+                masked[index + 1] = " "
+                index += 2
+                state = None
+                continue
+            index += 1
+            continue
+        if state is not None:
+            masked[index] = " " if character != "\n" else "\n"
+            if character == "\\":
+                if index + 1 < len(source):
+                    masked[index + 1] = " "
+                    index += 2
+                    continue
+            elif character == state:
+                state = None
+            index += 1
+            continue
+        if character == "/" and following == "/":
+            masked[index] = masked[index + 1] = " "
+            index += 2
+            state = "line"
+        elif character == "/" and following == "*":
+            masked[index] = masked[index + 1] = " "
+            index += 2
+            state = "block"
+        elif character in {"'", '"', "`"}:
+            masked[index] = " "
+            state = character
+            index += 1
+        else:
+            index += 1
+    return "".join(masked)
+
+
+def _depths(masked: str) -> tuple[int, ...]:
+    depth = 0
+    values: list[int] = []
+    for character in masked:
+        values.append(depth)
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(0, depth - 1)
+    return tuple(values)
+
+
 def _http_exports(source: str, path: str) -> tuple[_HttpExport, ...]:
     exports: list[_HttpExport] = []
+    masked = _code_mask(source)
     declaration = re.compile(
         r"\bexport\s+(?:async\s+)?function\s+(?P<name>[A-Z]+)\s*\(|"
         r"\bexport\s+const\s+(?P<const>[A-Z]+)\s*=",
         re.MULTILINE,
     )
-    for match in declaration.finditer(source):
+    for match in declaration.finditer(masked):
         name = match.group("name") or match.group("const")
         if name in _HTTP_METHODS:
             exports.append(
                 _HttpExport(path, name, _line(source, match.start()), name, True)
             )
     reexports = re.compile(
-        r"\bexport\s*{(?P<names>[^}]+)}\s*from\s*[\"'][^\"']+[\"']",
+        r"\bexport\s*{(?P<names>[^}]+)}\s*from\b",
         re.MULTILINE,
     )
-    for match in reexports.finditer(source):
-        for name in re.findall(r"\b[A-Z]+\b", match.group("names")):
+    for match in reexports.finditer(masked):
+        for specifier in match.group("names").split(","):
+            names = re.fullmatch(
+                r"\s*(?P<local>[A-Za-z_$][A-Za-z0-9_$]*)"
+                r"(?:\s+as\s+(?P<exported>[A-Za-z_$][A-Za-z0-9_$]*))?\s*",
+                specifier,
+            )
+            if names is None:
+                continue
+            name = names.group("exported") or names.group("local")
             if name in _HTTP_METHODS:
                 exports.append(
                     _HttpExport(path, name, _line(source, match.start()), name, False)
@@ -238,27 +324,32 @@ def _http_exports(source: str, path: str) -> tuple[_HttpExport, ...]:
 
 
 def _pages_api_methods(source: str) -> tuple[tuple[str, ...] | None, bool]:
-    switch = re.search(r"\bswitch\s*\(\s*req\.method\s*\)\s*{", source)
+    masked = _code_mask(source)
+    switch = re.search(r"\bswitch\s*\(\s*req\.method\s*\)\s*{", masked)
     if switch is None:
         return None, False
     body = _balanced(source, switch.end() - 1)
     if body is None:
         return None, False
-    methods = tuple(sorted(set(re.findall(r"\bcase\s*[\"']([A-Z]+)[\"']\s*:", body))))
-    exhaustive = bool(methods) and "default:" in body
+    labels = _direct_switch_labels(body)
+    methods = tuple(sorted({value for value, _default in labels if value is not None}))
+    exhaustive = bool(methods) and any(default for _value, default in labels)
     return (methods if exhaustive else None), exhaustive
 
 
 def _pages_api_dispatch_unresolved(source: str) -> bool:
     """Separate computed dispatch from a literal but non-exhaustive switch."""
 
-    switch = re.search(r"\bswitch\s*\(\s*req\.method\s*\)\s*{", source)
+    masked = _code_mask(source)
+    switch = re.search(r"\bswitch\s*\(\s*req\.method\s*\)\s*{", masked)
     if switch is None:
         return "req.method" in source
     body = _balanced(source, switch.end() - 1)
     if body is None:
         return True
-    return bool(re.search(r"\bcase\s+(?![\"'])", body))
+    return any(
+        value is None and not default for value, default in _direct_switch_labels(body)
+    )
 
 
 def _balanced(source: str, start: int) -> str | None:
@@ -269,8 +360,19 @@ def _balanced(source: str, start: int) -> str | None:
     depth = 0
     quote: str | None = None
     escaped = False
+    line_comment = False
+    block_comment = False
     for index in range(start, len(source)):
         character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if character == "\n":
+                line_comment = False
+            continue
+        if block_comment:
+            if character == "*" and following == "/":
+                block_comment = False
+            continue
         if quote:
             if escaped:
                 escaped = False
@@ -279,7 +381,11 @@ def _balanced(source: str, start: int) -> str | None:
             elif character == quote:
                 quote = None
             continue
-        if character in {"'", '"'}:
+        if character == "/" and following == "/":
+            line_comment = True
+        elif character == "/" and following == "*":
+            block_comment = True
+        elif character in {"'", '"', "`"}:
             quote = character
         elif character == opening:
             depth += 1
@@ -288,6 +394,22 @@ def _balanced(source: str, start: int) -> str | None:
             if depth == 0:
                 return source[start : index + 1]
     return None
+
+
+def _direct_switch_labels(body: str) -> tuple[tuple[str | None, bool], ...]:
+    masked = _code_mask(body)
+    depths = _depths(masked)
+    labels: list[tuple[str | None, bool]] = []
+    for match in re.finditer(r"\b(?:case|default)\b", masked):
+        if depths[match.start()] != 1:
+            continue
+        if match.group() == "default":
+            if re.match(r"\s*:", masked[match.end() :]):
+                labels.append((None, True))
+            continue
+        literal = re.match(r"\s*([\"'])([A-Z]+)\1\s*:", source := body[match.end() :])
+        labels.append((literal.group(2) if literal else None, False))
+    return tuple(labels)
 
 
 def _literal_string(value: str) -> str | None:
@@ -328,63 +450,105 @@ def _literal_matchers(value: str) -> tuple[str, ...] | None:
     return tuple(values)
 
 
-def _middleware_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
+def _exported_const_object(source: str, name: str) -> str | None:
+    masked = _code_mask(source)
+    binding = re.search(rf"\bexport\s+const\s+{name}\s*=\s*", masked)
+    if binding is None:
+        return None
+    start = binding.end()
+    return (
+        _balanced(source, start)
+        if start < len(source) and source[start] == "{"
+        else None
+    )
+
+
+def _default_config_object(source: str) -> str | None:
+    masked = _code_mask(source)
+    binding = re.search(r"\bexport\s+default\s*", masked)
+    if binding is None:
+        return None
+    start = binding.end()
+    return (
+        _balanced(source, start)
+        if start < len(source) and source[start] == "{"
+        else None
+    )
+
+
+def _top_level_member(source: str, name: str) -> tuple[bool, str | None]:
+    """Return one direct object property value, preserving computed shorthand."""
+
+    masked = _code_mask(source)
+    depths = _depths(masked)
+    for match in re.finditer(rf"\b{name}\b", masked):
+        if depths[match.start()] != 1:
+            continue
+        index = match.end()
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index >= len(source) or source[index] != ":":
+            return True, None
+        index += 1
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index < len(source) and source[index] in "[{":
+            return True, _balanced(source, index)
+        if index < len(source) and source[index] in "'\"":
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                if source[end] == quote:
+                    return True, source[index : end + 1]
+                end += 1
+            return True, None
+        end = index
+        while end < len(source) and source[end] not in ",}\n":
+            end += 1
+        return True, source[index:end].strip() or None
+    return False, None
+
+
+def _exported_function_body(source: str, name: str) -> str | None:
+    masked = _code_mask(source)
+    match = re.search(
+        rf"\bexport\s+(?:async\s+)?function\s+{name}\s*\([^)]*\)\s*{{",
+        masked,
+    )
+    return _balanced(source, match.end() - 1) if match else None
+
+
+def _returned_rules(body: str, path: str, order: int) -> tuple[_ConfigRule, ...]:
+    masked = _code_mask(body)
     rules: list[_ConfigRule] = []
-    matcher = re.search(r"\bmatcher\s*:\s*", source)
-    if matcher:
-        start = matcher.end()
-        while start < len(source) and source[start].isspace():
-            start += 1
-        if start < len(source) and source[start] in "[{":
-            value = _balanced(source, start)
-        else:
-            value_match = re.match(r"[^,}\n]+", source[start:])
-            value = value_match.group(0) if value_match else None
-        matchers = _literal_matchers(value) if value else None
-        if matchers is None:
-            rules.append(
-                _ConfigRule(
-                    path,
-                    "unresolved",
-                    None,
-                    None,
-                    None,
-                    None,
-                    0,
-                    ("middleware_matcher_unresolved",),
-                )
-            )
-        else:
-            rules.extend(
-                _ConfigRule(path, "matcher", item, None, None, None, index, ())
-                for index, item in enumerate(matchers)
-            )
-    elif re.search(r"\bconfig\s*=\s*\{\s*matcher\s*}\s*", source):
-        rules.append(
-            _ConfigRule(
-                path,
-                "unresolved",
-                None,
-                None,
-                None,
-                None,
-                0,
-                ("middleware_matcher_unresolved",),
-            )
+    for match in re.finditer(r"\breturn\s+", masked):
+        expression = body[match.end() :].lstrip()
+        redirect = re.match(
+            r"NextResponse\.redirect\s*\(\s*([\"'][^\"']*[\"'])", expression
         )
-    order = len(rules)
-    for match in re.finditer(
-        r"\bNextResponse\.redirect\s*\(\s*([\"'][^\"']*[\"'])", source
-    ):
-        destination = _literal_string(match.group(1))
-        if destination is not None:
+        if redirect:
+            destination = _literal_string(redirect.group(1))
+            if destination is not None:
+                rules.append(
+                    _ConfigRule(
+                        path, "redirect", None, destination, None, None, order, ()
+                    )
+                )
+                order += 1
+                continue
+        if re.match(r"new\s+NextResponse\s*\(", expression):
             rules.append(
-                _ConfigRule(path, "redirect", None, destination, None, None, order, ())
+                _ConfigRule(path, "response", None, None, None, None, order, ())
             )
             order += 1
-    if "NextResponse.redirect" in source and not any(
-        rule.kind == "redirect" for rule in rules
-    ):
+            continue
+        if re.match(r"NextResponse\.next\s*\(", expression):
+            rules.append(_ConfigRule(path, "next", None, None, None, None, order, ()))
+            order += 1
+            continue
         rules.append(
             _ConfigRule(
                 path,
@@ -398,41 +562,38 @@ def _middleware_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
             )
         )
         order += 1
-    for _match in re.finditer(r"\bnew\s+NextResponse\s*\(", source):
-        rules.append(_ConfigRule(path, "response", None, None, None, None, order, ()))
-        order += 1
-    for _match in re.finditer(r"\bNextResponse\.next\s*\(", source):
-        rules.append(_ConfigRule(path, "next", None, None, None, None, order, ()))
-        order += 1
-    if re.search(
-        r"\breturn\s+(?!NextResponse\.(?:redirect|next)|new\s+NextResponse)", source
-    ):
-        rules.append(
-            _ConfigRule(
-                path,
-                "unresolved",
-                None,
-                None,
-                None,
-                None,
-                order,
-                ("middleware_outcome_unresolved",),
-            )
-        )
     return tuple(rules)
 
 
-def _return_expression(source: str, name: str) -> str | None:
-    function = re.search(rf"\b{name}\s*\([^)]*\)\s*{{", source)
-    if function is None:
-        return None
-    returned = re.search(r"\breturn\s+", source[function.end() :])
-    if returned is None:
-        return None
-    start = function.end() + returned.end()
-    while start < len(source) and source[start].isspace():
-        start += 1
-    return _balanced(source, start)
+def _middleware_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
+    rules: list[_ConfigRule] = []
+    config = _exported_const_object(source, "config")
+    if config is not None:
+        has_matcher, value = _top_level_member(config, "matcher")
+        if has_matcher:
+            matchers = _literal_matchers(value) if value is not None else None
+            if matchers is None:
+                rules.append(
+                    _ConfigRule(
+                        path,
+                        "unresolved",
+                        None,
+                        None,
+                        None,
+                        None,
+                        0,
+                        ("middleware_matcher_unresolved",),
+                    )
+                )
+            else:
+                rules.extend(
+                    _ConfigRule(path, "matcher", item, None, None, None, index, ())
+                    for index, item in enumerate(matchers)
+                )
+    body = _exported_function_body(source, "middleware")
+    if body is not None:
+        rules.extend(_returned_rules(body, path, len(rules)))
+    return tuple(rules)
 
 
 def _objects(array: str) -> tuple[str, ...] | None:
@@ -598,14 +759,59 @@ def _config_entries(
     return tuple(rules), order
 
 
+def _registered_config_return(config: str, name: str) -> tuple[bool, str | None]:
+    """Read a direct config method's direct return expression, if provable."""
+
+    masked = _code_mask(config)
+    depths = _depths(masked)
+    for match in re.finditer(rf"\b{name}\b", masked):
+        if depths[match.start()] != 1:
+            continue
+        index = match.end()
+        while index < len(masked) and masked[index].isspace():
+            index += 1
+        if index >= len(masked) or masked[index] != "(":
+            return True, None
+        close = masked.find(")", index)
+        if close == -1:
+            return True, None
+        body_start = close + 1
+        while body_start < len(masked) and masked[body_start].isspace():
+            body_start += 1
+        if body_start >= len(masked) or masked[body_start] != "{":
+            return True, None
+        body = _balanced(config, body_start)
+        if body is None:
+            return True, None
+        body_mask = _code_mask(body)
+        body_depths = _depths(body_mask)
+        returned = next(
+            (
+                item
+                for item in re.finditer(r"\breturn\s+", body_mask)
+                if body_depths[item.start()] == 1
+            ),
+            None,
+        )
+        if returned is None:
+            return True, None
+        start = returned.end()
+        while start < len(body) and body[start].isspace():
+            start += 1
+        return True, _balanced(body, start)
+    return False, None
+
+
 def _next_config_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
+    config = _default_config_object(source)
+    if config is None:
+        return ()
     rules: list[_ConfigRule] = []
     order = 0
     for kind, name in (("rewrite", "rewrites"), ("redirect", "redirects")):
-        if re.search(rf"\b{name}\s*\(", source):
-            entries, order = _config_entries(
-                path, kind, _return_expression(source, name), order
-            )
+        present, expression = _registered_config_return(config, name)
+        if present:
+            entries, order = _config_entries(path, kind, expression, order)
             rules.extend(entries)
     return tuple(rules)
 
@@ -808,7 +1014,16 @@ def _build_snapshot(
         role = _file_role(item.path, language)
         if role.reasons:
             coverage.extend(
-                _coverage(language, role.path, reason, CoverageOutcome.UNSUPPORTED)
+                _coverage(
+                    language,
+                    role.path,
+                    reason,
+                    (
+                        CoverageOutcome.PARTIAL
+                        if reason == "http_entrypoint_file_role_unresolved"
+                        else CoverageOutcome.UNSUPPORTED
+                    ),
+                )
                 for reason in role.reasons
             )
         if (
