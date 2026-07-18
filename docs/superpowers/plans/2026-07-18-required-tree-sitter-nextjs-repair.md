@@ -403,7 +403,7 @@ TreeSitterAdapter().require_languages(("javascript", "typescript", "php", "pytho
 
 Expected: exit 0 with no output.
 
-- [ ] **Step 3: Review and publish**
+- [x] **Step 3: Review and publish**
 
 Run:
 
@@ -413,4 +413,14 @@ git log --oneline --decorate main..HEAD
 git diff --check main...HEAD
 ```
 
-Request an independent code review of dependency policy, parser fail-fast behavior, privacy, and both Next.js regressions. After approval, merge `codex/tree-sitter-required-indexer` into `main`, push `main`, update the installed Hades Agent, and rerun the four-language canary with the installed interpreter.
+Review dependency policy, parser fail-fast behavior, privacy, TSX coverage, and both Next.js regressions. When session policy permits delegation, request an independent reviewer; otherwise record that the primary agent performed the review and rely on the executable gates below. After approval, merge `codex/tree-sitter-required-indexer` into `main`, push `main`, update the installed Hades Agent, and rerun the four-language canary with the installed interpreter.
+
+**Completion record (2026-07-18):**
+
+- Primary-agent review found and repaired two publication-critical gaps before merge: `language_tsx` was not canary-tested and `build_graph_for_workspace()` swallowed `RequiredParserUnavailable`. Session policy did not permit starting an independent subagent reviewer.
+- The focused tranche passed `292` tests before and after the merge; Ruff and `git diff --check` passed.
+- A clean virtual environment installed the checkout with `jsonschema==4.26.0` and the five exact Tree-sitter packages. JavaScript, TypeScript, TSX, PHP, and Python canaries passed without `tree_sitter_language_pack` or `tree_sitter_languages`.
+- `main` was merged and pushed at `c86447722`; the managed installation at `~/.hermes/hermes-agent` was updated to that commit and repeated the same parser canaries successfully.
+- The thin Codex plugin was validated, cache-busted, reinstalled, and confirmed to delegate graph work to the Hades CLI without its own parser or graph HTTP client.
+
+This focused repair does **not** complete Plan 1 Task 17. The v2 job/upload/sync/cache cutover remains the next integration task; in particular, legacy graph finalization must not be presented as a completed graph-v2 publication path until Task 17 replaces it.
