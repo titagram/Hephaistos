@@ -1,0 +1,7 @@
+{
+  "bundle_sha256": "27b490ad91f90c45d226a451eb6e71e0b3ed525290250805878bbb53ef01c7ac",
+  "corpus_sha256": "cc3050838bbe47d02763ac948ab2b47bd6f045daaf08986ccdc7876af214ee3b",
+  "framework": "express",
+  "matrix_sha256": "7c02219284b61e2213d3b00e74e55d1f2d8253f4c9e8dd9e3ea9632061760093",
+  "schema": "hades.adapter_acceptance_lock.v1"
+}

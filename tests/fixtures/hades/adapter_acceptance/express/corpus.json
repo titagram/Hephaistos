@@ -1,0 +1,63 @@
+{
+  "schema": "hades.adapter_acceptance_corpus.v1",
+  "framework": "express",
+  "framework_versions": ["express==5.2.1"],
+  "sources": [
+    {
+      "kind": "official_docs",
+      "name": "express-official",
+      "url": "https://github.com/expressjs/express.git",
+      "revision": "ae6dd37680e3a00618d6c8a3e522f0ee4eeba1a4",
+      "paths": [
+        "package.json",
+        "lib/application.js",
+        "lib/response.js",
+        "test/app.all.js",
+        "test/app.route.js",
+        "test/app.router.js",
+        "test/app.use.js",
+        "test/Router.js"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "owasp-juice-shop",
+      "url": "https://github.com/juice-shop/juice-shop.git",
+      "revision": "33518f5a0911e25d9df747b1e70fb7af279a755c",
+      "paths": [
+        "package.json",
+        "server.ts",
+        "routes/dataErasure.ts",
+        "routes/currentUser.ts",
+        "routes/redirect.ts"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "nodebb",
+      "url": "https://github.com/NodeBB/NodeBB.git",
+      "revision": "6067a49f06fc08de0ad427788dc1dc2f3a6a00bb",
+      "paths": [
+        "src/routes/index.js",
+        "src/routes/api.js",
+        "src/routes/helpers.js",
+        "src/middleware/index.js",
+        "src/controllers/errors.js"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "ghost",
+      "url": "https://github.com/TryGhost/Ghost.git",
+      "revision": "6e15b9d5bcceffcfef78e488f30692ce370ba928",
+      "paths": [
+        "ghost/core/package.json",
+        "ghost/core/core/server/web/parent/app.js",
+        "ghost/core/core/server/web/parent/backend.js",
+        "ghost/core/core/server/web/api/app.js",
+        "ghost/core/core/server/web/api/endpoints/admin/app.js",
+        "ghost/core/core/server/web/api/endpoints/admin/routes.js"
+      ]
+    }
+  ]
+}

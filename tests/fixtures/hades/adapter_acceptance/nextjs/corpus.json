@@ -1,0 +1,68 @@
+{
+  "schema": "hades.adapter_acceptance_corpus.v1",
+  "framework": "nextjs",
+  "framework_versions": ["next==15.5.7"],
+  "sources": [
+    {
+      "kind": "official_docs",
+      "name": "nextjs-official",
+      "url": "https://github.com/vercel/next.js.git",
+      "revision": "3eaf68b09b2b6b8c0c8e080a9713e131a78dc529",
+      "paths": [
+        "packages/next/package.json",
+        "docs/01-app/03-api-reference/03-file-conventions/route.mdx",
+        "docs/01-app/03-api-reference/03-file-conventions/dynamic-routes.mdx",
+        "docs/01-app/03-api-reference/03-file-conventions/route-groups.mdx",
+        "docs/01-app/03-api-reference/03-file-conventions/middleware.mdx",
+        "docs/01-app/03-api-reference/03-file-conventions/page.mdx",
+        "docs/01-app/01-getting-started/05-server-and-client-components.mdx",
+        "docs/02-pages/03-building-your-application/01-routing/07-api-routes.mdx",
+        "docs/01-app/03-api-reference/05-config/01-next-config-js/rewrites.mdx",
+        "docs/01-app/03-api-reference/05-config/01-next-config-js/redirects.mdx"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "calcom",
+      "url": "https://github.com/calcom/cal.com.git",
+      "revision": "f00434927386c9ecdcbd7e6c5f82d22044a245bc",
+      "paths": [
+        "apps/web/package.json",
+        "apps/web/app/api/version/route.ts",
+        "apps/web/app/api/auth/signup/route.ts",
+        "apps/web/pages/api/stripe/webhook.ts",
+        "apps/web/next.config.ts",
+        "apps/web/app/(use-page-wrapper)/apps/installation/[[...step]]/page.tsx"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "dub",
+      "url": "https://github.com/dubinc/dub.git",
+      "revision": "3698dd2d9e2a7b3ffcd74537af020ae3001a136c",
+      "paths": [
+        "apps/web/package.json",
+        "apps/web/app/(ee)/api/admin/analytics/route.ts",
+        "apps/web/app/(ee)/api/admin/ban/route.ts",
+        "apps/web/app/(ee)/api/scim/v2.0/[...directory]/route.ts",
+        "apps/web/middleware.ts",
+        "apps/web/next.config.js",
+        "apps/web/app/(ee)/admin.dub.co/(dashboard)/page.tsx"
+      ]
+    },
+    {
+      "kind": "public_repository",
+      "name": "formbricks",
+      "url": "https://github.com/formbricks/formbricks.git",
+      "revision": "fd6bc935d4bf0b2385e6a6238ce54d37d1331304",
+      "paths": [
+        "apps/web/package.json",
+        "apps/web/app/api/v1/management/action-classes/route.ts",
+        "apps/web/app/(redirects)/environments/[environmentId]/[...path]/route.ts",
+        "apps/web/app/(redirects)/legacy-organization-settings/[workspaceId]/[[...path]]/route.ts",
+        "apps/web/next.config.mjs",
+        "apps/web/app/(app)/workspaces/[workspaceId]/page.tsx"
+      ]
+    }
+  ]
+}

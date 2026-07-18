@@ -1,0 +1,300 @@
+{
+  "schema": "hades.adapter_acceptance_matrix.v1",
+  "framework": "nextjs",
+  "framework_versions": ["next==15.5.7"],
+  "items": [
+    {
+      "id": "NEXTJS-APP-ROUTE-001",
+      "construct": "app_router_static_get_and_post_exports",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "calcom", "dub", "formbricks"],
+      "required_facts": [
+        "source_file",
+        "normalized_public_path",
+        "one_method_per_get_or_post_export",
+        "resolved_handler_export"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-APP-ROUTE-001-N1",
+          "construct": "app_route_method_reexport_from_unresolved_module",
+          "expected_precision": "partial",
+          "required_uncertainty": ["route_handler_export_target_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_app_route_reexport_with_unresolved_target_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_app_route_static_get_and_post_exports_are_method_entrypoints"
+      ]
+    },
+    {
+      "id": "NEXTJS-PAGES-API-001",
+      "construct": "pages_api_exhaustive_method_switch_and_unrestricted_fallback",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "calcom"],
+      "required_facts": [
+        "source_file",
+        "normalized_api_path",
+        "single_default_handler",
+        "literal_method_arms_when_exhaustive",
+        "unrestricted_method_when_dispatch_is_not_exhaustive"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-PAGES-API-001-N1",
+          "construct": "pages_api_computed_or_delegated_method_dispatch",
+          "expected_precision": "partial",
+          "required_uncertainty": ["pages_api_method_dispatch_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_pages_api_computed_method_dispatch_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_pages_api_exhaustive_method_switch_and_unrestricted_fallback"
+      ]
+    },
+    {
+      "id": "NEXTJS-FILESYSTEM-ROUTE-001",
+      "construct": "route_groups_dynamic_segments_and_catch_all_patterns",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "dub", "formbricks"],
+      "required_facts": [
+        "route_group_omitted_from_public_path",
+        "dynamic_segment_parameter",
+        "catch_all_segment_parameter",
+        "optional_catch_all_segment_parameter",
+        "normalized_public_pattern",
+        "source_file"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-FILESYSTEM-ROUTE-001-N1",
+          "construct": "malformed_or_unsupported_bracketed_route_segment",
+          "expected_precision": "unresolved",
+          "required_uncertainty": ["route_pattern_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_unsupported_filesystem_segment_syntax_is_unresolved"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_route_groups_dynamic_and_catch_all_segments_normalize_public_paths"
+      ]
+    },
+    {
+      "id": "NEXTJS-VERSION-001",
+      "construct": "detected_version_precedes_package_metadata_fallback",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "calcom", "dub", "formbricks"],
+      "required_facts": [
+        "detected_framework_record_precedence",
+        "package_metadata_fallback",
+        "selected_version_provenance"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-VERSION-001-N1",
+          "construct": "missing_detection_with_nonliteral_package_version",
+          "expected_precision": "unresolved",
+          "required_uncertainty": ["framework_version_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_nonliteral_package_version_without_detection_is_unresolved"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_detected_nextjs_version_precedes_package_metadata"
+      ]
+    },
+    {
+      "id": "NEXTJS-MIDDLEWARE-MATCHER-001",
+      "construct": "static_middleware_matcher_configuration",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "dub"],
+      "required_facts": [
+        "middleware_source_file",
+        "literal_string_matcher",
+        "literal_array_matcher_order",
+        "literal_object_source_matcher"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-MIDDLEWARE-MATCHER-001-N1",
+          "construct": "computed_middleware_matcher_value",
+          "expected_precision": "partial",
+          "required_uncertainty": ["middleware_matcher_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_computed_middleware_matcher_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_static_middleware_matcher_is_exact"
+      ]
+    },
+    {
+      "id": "NEXTJS-MIDDLEWARE-OUTCOME-001",
+      "construct": "middleware_redirect_response_and_next_outcomes",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official"],
+      "required_facts": [
+        "next_response_redirect_terminal",
+        "literal_redirect_target",
+        "response_or_next_response_terminal",
+        "next_response_next_continuation"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-MIDDLEWARE-OUTCOME-001-N1",
+          "construct": "delegated_or_unproven_middleware_outcome",
+          "expected_precision": "partial",
+          "required_uncertainty": ["middleware_outcome_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_unproven_middleware_outcome_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_middleware_redirect_response_and_next_outcomes"
+      ]
+    },
+    {
+      "id": "NEXTJS-REWRITE-001",
+      "construct": "static_next_config_rewrite_entries",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "dub", "formbricks"],
+      "required_facts": [
+        "literal_source",
+        "literal_destination",
+        "registration_order",
+        "array_or_named_rewrite_phase"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-REWRITE-001-N1",
+          "construct": "computed_rewrite_source_or_destination",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_computed_rewrite_entry_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_static_next_config_rewrites_are_exact"
+      ]
+    },
+    {
+      "id": "NEXTJS-REDIRECT-001",
+      "construct": "static_next_config_redirect_entries",
+      "common_rule": "two_independent_repositories",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "dub", "formbricks"],
+      "required_facts": [
+        "literal_source",
+        "literal_destination",
+        "literal_permanent_flag",
+        "derived_307_or_308_status",
+        "registration_order"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-REDIRECT-001-N1",
+          "construct": "computed_redirect_source_destination_or_permanence",
+          "expected_precision": "partial",
+          "required_uncertainty": ["framework_config_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_computed_redirect_entry_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_static_next_config_redirects_are_exact"
+      ]
+    },
+    {
+      "id": "NEXTJS-COMPUTED-MATCHER-001",
+      "construct": "computed_middleware_matcher_configuration",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "partial",
+      "sources": ["nextjs-official"],
+      "required_facts": [
+        "middleware_file_detected",
+        "no_invented_matcher",
+        "explicit_partial_coverage"
+      ],
+      "allowed_unknowns": ["computed_matcher_values"],
+      "negative_variants": [],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_computed_middleware_config_reports_explicit_uncertainty"
+      ]
+    },
+    {
+      "id": "NEXTJS-COMPUTED-CONFIG-001",
+      "construct": "computed_rewrite_or_redirect_configuration",
+      "common_rule": "fundamental_lifecycle_stage",
+      "expected_precision": "unresolved",
+      "sources": ["nextjs-official", "calcom"],
+      "required_facts": [
+        "next_config_boundary_detected",
+        "no_invented_rewrite_or_redirect",
+        "explicit_unresolved_coverage"
+      ],
+      "allowed_unknowns": [
+        "computed_source",
+        "computed_destination",
+        "conditional_configuration_entries"
+      ],
+      "negative_variants": [],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_computed_rewrite_or_redirect_config_is_unresolved"
+      ]
+    },
+    {
+      "id": "NEXTJS-RENDER-EXCLUSION-001",
+      "construct": "server_and_client_render_graphs_excluded_as_http_entrypoints",
+      "common_rule": "official_core_idiom",
+      "expected_precision": "exact",
+      "sources": ["nextjs-official", "calcom", "dub", "formbricks"],
+      "required_facts": [
+        "page_files_excluded_from_http_entrypoints",
+        "layout_and_component_files_excluded_from_http_entrypoints",
+        "no_render_graph_traversal",
+        "explicit_http_boundary_files_remain_eligible"
+      ],
+      "allowed_unknowns": [],
+      "negative_variants": [
+        {
+          "id": "NEXTJS-RENDER-EXCLUSION-001-N1",
+          "construct": "render_file_role_obscured_by_nonstandard_project_configuration",
+          "expected_precision": "partial",
+          "required_uncertainty": ["http_entrypoint_file_role_unresolved"],
+          "test_nodes": [
+            "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_ambiguous_nonstandard_render_file_role_is_partial"
+          ]
+        }
+      ],
+      "test_nodes": [
+        "tests/hermes_cli/test_hades_lifecycle_nextjs.py::test_render_graph_files_are_not_http_entrypoints"
+      ]
+    }
+  ]
+}

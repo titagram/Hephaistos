@@ -1,0 +1,7 @@
+{
+  "bundle_sha256": "c0c6d651bbce5f096a61cb72fa66c2080c39d1b4e6c18342295d7e5974cf3af2",
+  "corpus_sha256": "81519ad1f915eb1602b805ca868022b3b552f2d3dc871b9c6da01689dcbcac61",
+  "framework": "nextjs",
+  "matrix_sha256": "f565cab93ec97868652e55b99ac008479953b1a6cb05856d1439bcc3974d3a00",
+  "schema": "hades.adapter_acceptance_lock.v1"
+}

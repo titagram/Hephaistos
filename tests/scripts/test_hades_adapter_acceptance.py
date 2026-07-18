@@ -209,13 +209,19 @@ def test_cli_freezes_validates_and_returns_two_for_invalid_lock(tmp_path: Path) 
     )
 
 
-def test_fastapi_acceptance_bundle_is_frozen() -> None:
+@pytest.mark.parametrize("framework", ["fastapi", "express", "nextjs"])
+def test_adapter_acceptance_bundle_is_frozen(framework: str) -> None:
     module = _load_module()
-    base = ROOT / "tests" / "fixtures" / "hades" / "adapter_acceptance" / "fastapi"
+    base = ROOT / "tests" / "fixtures" / "hades" / "adapter_acceptance" / framework
     corpus = json.loads((base / "corpus.json").read_text(encoding="utf-8"))
     matrix = json.loads((base / "matrix.json").read_text(encoding="utf-8"))
     lock = json.loads((base / "lock.json").read_text(encoding="utf-8"))
     module.validate_lock(corpus, matrix, lock)
+
+
+def test_fastapi_acceptance_matrix_has_exact_frozen_ids() -> None:
+    base = ROOT / "tests" / "fixtures" / "hades" / "adapter_acceptance" / "fastapi"
+    matrix = json.loads((base / "matrix.json").read_text(encoding="utf-8"))
     assert {item["id"] for item in matrix["items"]} == {
         "FASTAPI-ROUTE-001",
         "FASTAPI-ROUTER-001",
