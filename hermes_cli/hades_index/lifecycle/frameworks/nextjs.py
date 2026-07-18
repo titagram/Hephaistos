@@ -512,53 +512,62 @@ def _top_level_member(source: str, name: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def _exported_function_body(source: str, name: str) -> str | None:
-    masked = _code_mask(source)
-    match = re.search(
-        rf"\bexport\s+(?:async\s+)?function\s+{name}\s*\([^)]*\)\s*{{",
-        masked,
+def _has_exported_middleware(source: str) -> bool:
+    return bool(
+        re.search(
+            r"\bexport\s+(?:async\s+)?function\s+middleware\b",
+            _code_mask(source),
+        )
     )
-    return _balanced(source, match.end() - 1) if match else None
 
 
-def _nested_callable_bodies(body: str) -> tuple[tuple[int, int], ...]:
-    """Return spans whose returns belong to a nested callable, not middleware."""
-
-    masked = _code_mask(body)
-    spans: list[tuple[int, int]] = []
-    patterns = (
-        r"\b(?:async\s+)?function\b[^{}]*{",
-        r"\bclass\b[^{}]*{",
-        r"=>\s*{",
+def _returned_rules(
+    source: str,
+    path: str,
+    order: int,
+    syntax: SyntaxIR,
+) -> tuple[_ConfigRule, ...]:
+    middleware_symbols = tuple(
+        symbol
+        for symbol in syntax.symbols
+        if symbol.name == "middleware"
+        and symbol.kind == "function"
+        and symbol.structural_path
     )
-    for pattern in patterns:
-        for match in re.finditer(pattern, masked):
-            nested = _balanced(body, match.end() - 1)
-            if nested is not None:
-                spans.append((match.end() - 1, match.end() - 1 + len(nested)))
+    if len(middleware_symbols) != 1 or not _has_exported_middleware(source):
+        return (
+            _ConfigRule(
+                path,
+                "unresolved",
+                None,
+                None,
+                None,
+                None,
+                order,
+                ("middleware_outcome_unresolved",),
+            ),
+        )
 
-    controls = frozenset({"if", "for", "while", "switch", "catch", "with"})
-    methods = re.compile(
-        r"\b(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*"
-        r"\([^{}]*\)\s*(?::\s*[^{}=;]+)?\s*{"
+    owner = middleware_symbols[0].structural_path
+    source_bytes = source.encode("utf-8")
+    returns = sorted(
+        (
+            control
+            for control in syntax.controls
+            if control.kind == "return" and control.owner_structural_path == owner
+        ),
+        key=lambda control: control.start_byte,
     )
-    for match in methods.finditer(masked):
-        if match.group("name") in controls:
-            continue
-        nested = _balanced(body, match.end() - 1)
-        if nested is not None:
-            spans.append((match.end() - 1, match.end() - 1 + len(nested)))
-    return tuple(spans)
-
-
-def _returned_rules(body: str, path: str, order: int) -> tuple[_ConfigRule, ...]:
-    masked = _code_mask(body)
-    nested_callable_bodies = _nested_callable_bodies(body)
     rules: list[_ConfigRule] = []
-    for match in re.finditer(r"\breturn\s+", masked):
-        if any(start < match.start() < end for start, end in nested_callable_bodies):
+    for control in returns:
+        statement = source_bytes[control.start_byte : control.end_byte].decode(
+            "utf-8", errors="replace"
+        )
+        masked = _code_mask(statement)
+        match = re.match(r"\s*return\s+", masked)
+        if match is None:
             continue
-        expression = body[match.end() :].lstrip()
+        expression = statement[match.end() :].lstrip()
         redirect = re.match(
             r"NextResponse\.redirect\s*\(\s*([\"'][^\"']*[\"'])", expression
         )
@@ -598,7 +607,9 @@ def _returned_rules(body: str, path: str, order: int) -> tuple[_ConfigRule, ...]
     return tuple(rules)
 
 
-def _middleware_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
+def _middleware_rules(
+    source: str, path: str, syntax: SyntaxIR
+) -> tuple[_ConfigRule, ...]:
     rules: list[_ConfigRule] = []
     config = _exported_const_object(source, "config")
     if config is not None:
@@ -623,9 +634,7 @@ def _middleware_rules(source: str, path: str) -> tuple[_ConfigRule, ...]:
                     _ConfigRule(path, "matcher", item, None, None, None, index, ())
                     for index, item in enumerate(matchers)
                 )
-    body = _exported_function_body(source, "middleware")
-    if body is not None:
-        rules.extend(_returned_rules(body, path, len(rules)))
+    rules.extend(_returned_rules(source, path, len(rules), syntax))
     return tuple(rules)
 
 
@@ -1119,7 +1128,7 @@ def _build_snapshot(
                     )
                 )
         elif role.role == "middleware":
-            rules = _middleware_rules(source, role.path)
+            rules = _middleware_rules(source, role.path, item)
             candidate = _candidate(
                 language,
                 role.path,
@@ -1130,7 +1139,7 @@ def _build_snapshot(
                 role.public_path,
                 "middleware",
                 (),
-                bool(re.search(r"\b(?:export\s+)?function\s+middleware\b", source)),
+                _has_exported_middleware(source),
             )
             candidates.append(candidate)
             candidate_rules[_candidate_key(candidate)] = rules

@@ -27,7 +27,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     FrameworkLocalTarget,
     SourceLocationIR,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import ParsedFile, SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR, TreeSitterAdapter
 
 
 LANGUAGES = ("javascript", "typescript")
@@ -94,14 +94,19 @@ def _context(
     )
 
 
-def _syntax(path: str, language: str) -> SyntaxIR:
-    return SyntaxIR(ParsedFile(path, language, (), (), ()), ())
+def _syntax(root: Path, path: str, language: str) -> SyntaxIR:
+    parsed = TreeSitterAdapter().parse_bytes(
+        (root / path).read_bytes(), path=path, language=language
+    )
+    assert parsed.status == "parsed"
+    assert parsed.syntax is not None
+    return parsed.syntax
 
 
 def _extract(root: Path, language: str, *paths: str):
     context = _context(root, language)
     adapter = NextJSLifecycleAdapter(language)
-    syntax = tuple(_syntax(path, language) for path in paths)
+    syntax = tuple(_syntax(root, path, language) for path in paths)
     candidates = adapter.entrypoints(context, syntax)
     pipelines = tuple(adapter.pipeline(context, candidate) for candidate in candidates)
     coverage = adapter.coverage_events(context)
@@ -493,6 +498,48 @@ export function middleware(request) {
         "middleware_rewrite",
         "middleware_response",
     })
+    _assert_candidates(adapter, context, candidates)
+
+
+def test_destructured_nested_function_return_is_not_a_middleware_outcome(
+    tmp_path: Path,
+) -> None:
+    path = "middleware.ts"
+    _write(
+        tmp_path,
+        path,
+        """export function middleware() {
+  function unused({ value }) { return NextResponse.redirect("/ghost") }
+  return NextResponse.next()
+}
+""",
+    )
+    adapter, context, candidates = _extract(tmp_path, "typescript", path)
+
+    assert [
+        segment.framework_role for segment in adapter.pipeline(context, candidates[0])
+    ] == ["middleware_next"]
+    _assert_candidates(adapter, context, candidates)
+
+
+def test_for_await_return_remains_owned_by_middleware(tmp_path: Path) -> None:
+    path = "middleware.ts"
+    _write(
+        tmp_path,
+        path,
+        """export async function middleware(request) {
+  for await (const item of request.items) {
+    if (item) return NextResponse.redirect("/loop")
+  }
+  return NextResponse.next()
+}
+""",
+    )
+    adapter, context, candidates = _extract(tmp_path, "typescript", path)
+
+    assert [
+        segment.framework_role for segment in adapter.pipeline(context, candidates[0])
+    ] == ["middleware_redirect", "middleware_next"]
     _assert_candidates(adapter, context, candidates)
 
 
