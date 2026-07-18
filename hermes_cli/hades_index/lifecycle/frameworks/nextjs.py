@@ -521,10 +521,43 @@ def _exported_function_body(source: str, name: str) -> str | None:
     return _balanced(source, match.end() - 1) if match else None
 
 
+def _nested_callable_bodies(body: str) -> tuple[tuple[int, int], ...]:
+    """Return spans whose returns belong to a nested callable, not middleware."""
+
+    masked = _code_mask(body)
+    spans: list[tuple[int, int]] = []
+    patterns = (
+        r"\b(?:async\s+)?function\b[^{}]*{",
+        r"\bclass\b[^{}]*{",
+        r"=>\s*{",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, masked):
+            nested = _balanced(body, match.end() - 1)
+            if nested is not None:
+                spans.append((match.end() - 1, match.end() - 1 + len(nested)))
+
+    controls = frozenset({"if", "for", "while", "switch", "catch", "with"})
+    methods = re.compile(
+        r"\b(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*"
+        r"\([^{}]*\)\s*(?::\s*[^{}=;]+)?\s*{"
+    )
+    for match in methods.finditer(masked):
+        if match.group("name") in controls:
+            continue
+        nested = _balanced(body, match.end() - 1)
+        if nested is not None:
+            spans.append((match.end() - 1, match.end() - 1 + len(nested)))
+    return tuple(spans)
+
+
 def _returned_rules(body: str, path: str, order: int) -> tuple[_ConfigRule, ...]:
     masked = _code_mask(body)
+    nested_callable_bodies = _nested_callable_bodies(body)
     rules: list[_ConfigRule] = []
     for match in re.finditer(r"\breturn\s+", masked):
+        if any(start < match.start() < end for start, end in nested_callable_bodies):
+            continue
         expression = body[match.end() :].lstrip()
         redirect = re.match(
             r"NextResponse\.redirect\s*\(\s*([\"'][^\"']*[\"'])", expression

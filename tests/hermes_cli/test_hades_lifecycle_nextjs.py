@@ -474,6 +474,27 @@ export function middleware(request) {
     }.intersection({"middleware_redirect", "middleware_response", "middleware_next"})
     _assert_candidates(adapter, context, candidates)
 
+    _write(
+        tmp_path,
+        path,
+        """export function middleware() {
+  function unused() { return NextResponse.redirect("/ghost") }
+  const callback = () => { return new NextResponse("ghost") }
+  return NextResponse.next()
+}
+""",
+    )
+    adapter, context, candidates = _extract(tmp_path, "typescript", path)
+
+    pipeline = adapter.pipeline(context, candidates[0])
+    assert [segment.framework_role for segment in pipeline] == ["middleware_next"]
+    assert not {segment.framework_role for segment in pipeline}.intersection({
+        "middleware_redirect",
+        "middleware_rewrite",
+        "middleware_response",
+    })
+    _assert_candidates(adapter, context, candidates)
+
 
 def test_static_next_config_rewrites_are_exact(tmp_path: Path) -> None:
     path = "next.config.ts"
