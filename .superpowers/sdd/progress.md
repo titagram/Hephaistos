@@ -120,7 +120,6 @@ Start commit: `3ef5f91d848393bac5332926db44eba9a402c612`
 ### Plan 1 / Task 1 — Create Closed Root Schemas and Golden Fixtures
 
 - Status: complete
-
 - Base: `78a664ebeb0c99a282858bb43d6af94c83ffdd1c`
 - Brief: `.superpowers/sdd/task-1-brief.md`
 - Implementer report: `.superpowers/sdd/task-1-report.md`

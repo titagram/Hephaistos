@@ -2,12 +2,13 @@
 
 ## Closed assignment
 
+- Brief path: `.superpowers/sdd/task-12-brief.md`.
 - Implementer: `gpt-5.6-terra` with `high` reasoning; no delegation and no subagents.
 - Required branch/base: begin only from shared base commit `06ed97dd50298a29cb209fecc3baa7ee995de062` on `codex/graph-lifecycle-v2-agent`.
 - At execution time, start through `superpowers:using-git-worktrees`: create this Express worktree and the separate Next.js worktree from that same shared base. Do not create either worktree while preparing this handoff.
 - Frozen Express bundle SHA-256: `27b490ad91f90c45d226a451eb6e71e0b3ed525290250805878bbb53ef01c7ac`.
 - Frozen bundle paths (read-only): `tests/fixtures/hades/adapter_acceptance/express/corpus.json`, `tests/fixtures/hades/adapter_acceptance/express/matrix.json`, and `tests/fixtures/hades/adapter_acceptance/express/lock.json`.
-- The two and only writable implementation source/test files are `hermes_cli/hades_index/lifecycle/frameworks/express.py` and `tests/hermes_cli/test_hades_lifecycle_express.py`. Every other production, test, fixture, lock, registry, integration, plan, spec, and controller path is read-only.
+- The two and only writable implementation source/test files are `hermes_cli/hades_index/lifecycle/frameworks/express.py` and `tests/hermes_cli/test_hades_lifecycle_express.py`. Every other production, test, fixture, lock, registry, integration, plan, spec, and controller path is read-only except the role-specific controller artifacts named in **Artifact routing and completion definition** below.
 - Required source commit subject: `feat(hades): extract Express request lifecycles`.
 
 Before editing, validate the frozen bundle and stop if its output is not the stated digest:
@@ -75,6 +76,14 @@ git add hermes_cli/hades_index/lifecycle/frameworks/express.py tests/hermes_cli/
 git diff --cached --check
 git commit -m "feat(hades): extract Express request lifecycles"
 ```
+
+## Artifact routing and completion definition
+
+- Implementer report: `.superpowers/sdd/task-12-report.md`.
+- Reviewer dispatch brief: `.superpowers/sdd/task-12-review-brief.md`; independent review report: `.superpowers/sdd/task-12-review.md`.
+- Conditional repair brief: `.superpowers/sdd/task-12-repair-brief.md`; conditional repair report: `.superpowers/sdd/task-12-repair-report.md`; scoped re-review report: `.superpowers/sdd/task-12-rereview.md`.
+- During implementation, only the two owned source/test files and `.superpowers/sdd/task-12-report.md` are writable; the report is excluded from the two-file source commit. During review, repair, and scoped re-review, only that role's explicitly named controller artifact is writable in addition to any role-authorized source repair files: the reviewer writes `.superpowers/sdd/task-12-review.md`, the repair role writes `.superpowers/sdd/task-12-repair-report.md`, and the scoped re-reviewer writes `.superpowers/sdd/task-12-rereview.md`. The dispatch brief is the reviewer's read-only input. All implementer, review, repair, and re-review reports must quote the locked Express bundle digest `27b490ad91f90c45d226a451eb6e71e0b3ed525290250805878bbb53ef01c7ac`.
+- Completion requires: exact validation of the locked bundle digest; an observed matrix RED result before production implementation; focused GREEN; Ruff format/check, compilation, and scoped diff evidence; self-review of every frozen matrix ID and test node; the exact two-file source commit with the stated subject; the implementer report; one complete independent verdict; and then either clean approval or one repaired scoped approval. Any other terminal result is design escalation.
 
 ## Independent finite review and stop conditions
 

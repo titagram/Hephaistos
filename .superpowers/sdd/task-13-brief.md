@@ -2,12 +2,13 @@
 
 ## Closed assignment
 
+- Brief path: `.superpowers/sdd/task-13-brief.md`.
 - Implementer: `gpt-5.6-terra` with `high` reasoning; no delegation and no subagents.
 - Required branch/base: begin only from shared base commit `06ed97dd50298a29cb209fecc3baa7ee995de062` on `codex/graph-lifecycle-v2-agent`.
 - At execution time, start through `superpowers:using-git-worktrees`: create this Next.js worktree and the separate Express worktree from that same shared base. Do not create either worktree while preparing this handoff.
 - Frozen Next.js bundle SHA-256: `c0c6d651bbce5f096a61cb72fa66c2080c39d1b4e6c18342295d7e5974cf3af2`.
 - Frozen bundle paths (read-only): `tests/fixtures/hades/adapter_acceptance/nextjs/corpus.json`, `tests/fixtures/hades/adapter_acceptance/nextjs/matrix.json`, and `tests/fixtures/hades/adapter_acceptance/nextjs/lock.json`.
-- The two and only writable implementation source/test files are `hermes_cli/hades_index/lifecycle/frameworks/nextjs.py` and `tests/hermes_cli/test_hades_lifecycle_nextjs.py`. Every other production, test, fixture, lock, registry, integration, plan, spec, and controller path is read-only.
+- The two and only writable implementation source/test files are `hermes_cli/hades_index/lifecycle/frameworks/nextjs.py` and `tests/hermes_cli/test_hades_lifecycle_nextjs.py`. Every other production, test, fixture, lock, registry, integration, plan, spec, and controller path is read-only except the role-specific controller artifacts named in **Artifact routing and completion definition** below.
 - Required source commit subject: `feat(hades): extract Next.js request lifecycles`.
 
 Before editing, validate the frozen bundle and stop if its output is not the stated digest:
@@ -86,6 +87,14 @@ git add hermes_cli/hades_index/lifecycle/frameworks/nextjs.py tests/hermes_cli/t
 git diff --cached --check
 git commit -m "feat(hades): extract Next.js request lifecycles"
 ```
+
+## Artifact routing and completion definition
+
+- Implementer report: `.superpowers/sdd/task-13-report.md`.
+- Reviewer dispatch brief: `.superpowers/sdd/task-13-review-brief.md`; independent review report: `.superpowers/sdd/task-13-review.md`.
+- Conditional repair brief: `.superpowers/sdd/task-13-repair-brief.md`; conditional repair report: `.superpowers/sdd/task-13-repair-report.md`; scoped re-review report: `.superpowers/sdd/task-13-rereview.md`.
+- During implementation, only the two owned source/test files and `.superpowers/sdd/task-13-report.md` are writable; the report is excluded from the two-file source commit. During review, repair, and scoped re-review, only that role's explicitly named controller artifact is writable in addition to any role-authorized source repair files: the reviewer writes `.superpowers/sdd/task-13-review.md`, the repair role writes `.superpowers/sdd/task-13-repair-report.md`, and the scoped re-reviewer writes `.superpowers/sdd/task-13-rereview.md`. The dispatch brief is the reviewer's read-only input. All implementer, review, repair, and re-review reports must quote the locked Next.js bundle digest `c0c6d651bbce5f096a61cb72fa66c2080c39d1b4e6c18342295d7e5974cf3af2`.
+- Completion requires: exact validation of the locked bundle digest; an observed matrix RED result before production implementation; focused GREEN; Ruff format/check, compilation, and scoped diff evidence; self-review of every frozen matrix ID and test node; the exact two-file source commit with the stated subject; the implementer report; one complete independent verdict; and then either clean approval or one repaired scoped approval. Any other terminal result is design escalation.
 
 ## Independent finite review and stop conditions
 
