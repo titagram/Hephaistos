@@ -21,10 +21,10 @@
 - Producer flow membership and lifecycle stages are authoritative. The backend validates/maps them one-to-one and does not reconstruct them.
 - The browser keeps at most 200 canonical lifecycle nodes and receives at most 120 in the initial backbone.
 - `@xyflow/react` is pinned to exactly `12.11.2`; do not add ELK, D3, Cytoscape, or another graph renderer.
-- `tree-sitter` is pinned to `0.26.0`; `tree-sitter-language-pack` is pinned to `1.12.5`.
+- `jsonschema==4.26.0`, `tree-sitter==0.26.0`, and the exact official JavaScript, TypeScript/TSX, PHP, and Python grammar wheels are mandatory base dependencies, never extras or lazy installs. Grammar loading never downloads at runtime. A failed detected-language canary escapes the legacy graph builder and blocks publication; only a failure confined to one ordinary source file becomes partial coverage.
 - Ordinary `hades backend sync` reads and caches verification counts only; it never claims work, invokes a model, or injects conversation messages.
 - Verification work is processed one item at a time, with project, binding, capability, lease, target-version, and structured-result checks.
-- No new core model tool is added. Agent capability is CLI + skills + the service-gated Hades backend plugin surface.
+- No new core model tool is added. Agent capability is CLI + skills + the service-gated Hades backend plugin surface. The separately distributed Codex plugin delegates index, sync, lifecycle queries, and verification to the installed Hades CLI and never embeds a second parser or backend client.
 - Inertia must not be reintroduced. `frontend/src/pages/GraphPage.tsx` stays a thin composition root.
 - Traefik remains separate from the application Compose stack and is not reconfigured by these plans.
 - Never run `migrate:fresh`, drop PostgreSQL, clear Neo4j globally, or delete users/projects/memory/Wiki/Kanban data.

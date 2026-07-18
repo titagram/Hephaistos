@@ -422,68 +422,69 @@ def _enabled(payload: dict[str, Any], key: str, *, default: bool = True) -> bool
     return bool(value)
 
 
+def _source_language(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".ts", ".tsx"}:
+        return "typescript"
+    if suffix in {".js", ".jsx"}:
+        return "javascript"
+    if suffix == ".py":
+        return "python"
+    if suffix == ".php":
+        return "php"
+    return ""
+
+
 def enrich_graph_for_workspace(
     workspace_root: Path,
     candidates: list[Path],
     graph: dict[str, Any],
     payload: dict[str, Any],
 ) -> None:
-    """Run optional enrichers. The baseline graph remains valid on any failure."""
+    """Run graph enrichers after the mandatory structural parser canary."""
+    detected_languages = tuple(
+        sorted({
+            language for path in candidates if (language := _source_language(path))
+        })
+    )
+    adapter = TreeSitterAdapter()
+    adapter.require_languages(detected_languages)
+
     max_symbols = int(payload.get("max_symbols") or 5_000)
     max_edges = int(payload.get("max_edges") or max_symbols * 2)
     max_file_bytes = int(payload.get("max_file_bytes") or 512_000)
     analysis = graph.setdefault("analysis", {})
 
-    if _enabled(payload, "tree_sitter", default=True):
-        adapter = TreeSitterAdapter()
-        parser_status: dict[str, str] = {}
-        for path in candidates:
-            suffix = path.suffix.lower()
-            language = (
-                "typescript"
-                if suffix in {".ts", ".tsx"}
-                else "javascript"
-                if suffix in {".js", ".jsx"}
-                else "python"
-                if suffix == ".py"
-                else "php"
-                if suffix == ".php"
-                else ""
-            )
-            if not language:
-                continue
-            if language in parser_status and parser_status[language] == "unavailable":
-                continue
-            if not adapter.is_available(language):
-                parser_status[language] = "unavailable"
-                continue
-            rel = path.relative_to(workspace_root).as_posix()
-            parse_result = adapter.parse_file(
-                path, relative_path=rel, language=language, max_bytes=max_file_bytes
-            )
-            if parse_result.status == "failed" or parse_result.syntax is None:
-                parser_status.setdefault(language, "degraded")
-                if parse_result.coverage_event is not None:
-                    graph.setdefault("coverage_events", []).append({
-                        "language": parse_result.coverage_event.language,
-                        "capability": parse_result.coverage_event.capability.value,
-                        "outcome": parse_result.coverage_event.outcome.value,
-                        "reason_code": parse_result.coverage_event.reason_code,
-                        "path": parse_result.coverage_event.path,
-                        "represented_count": parse_result.coverage_event.represented_count,
-                        "omitted_count": parse_result.coverage_event.omitted_count,
-                    })
-                continue
-            parser_status[language] = "ok"
-            graph["truncated"] = merge_structural_facts(
-                graph,
-                parse_result.syntax.parsed_file,
-                max_symbols=max_symbols,
-                max_edges=max_edges,
-            ) or bool(graph.get("truncated"))
-        analysis["tree_sitter"] = parser_status or {"status": "not_applicable"}
-    else:
-        analysis["tree_sitter"] = {"status": "disabled"}
+    parser_status: dict[str, str] = {}
+    for path in candidates:
+        language = _source_language(path)
+        if not language:
+            continue
+        rel = path.relative_to(workspace_root).as_posix()
+        parse_result = adapter.parse_file(
+            path, relative_path=rel, language=language, max_bytes=max_file_bytes
+        )
+        if parse_result.status == "failed" or parse_result.syntax is None:
+            parser_status[language] = "degraded"
+            if parse_result.coverage_event is not None:
+                graph.setdefault("coverage_events", []).append({
+                    "language": parse_result.coverage_event.language,
+                    "capability": parse_result.coverage_event.capability.value,
+                    "outcome": parse_result.coverage_event.outcome.value,
+                    "reason_code": parse_result.coverage_event.reason_code,
+                    "path": parse_result.coverage_event.path,
+                    "represented_count": parse_result.coverage_event.represented_count,
+                    "omitted_count": parse_result.coverage_event.omitted_count,
+                })
+            continue
+        parser_status.setdefault(language, "ok")
+        graph["truncated"] = merge_structural_facts(
+            graph,
+            parse_result.syntax.parsed_file,
+            max_symbols=max_symbols,
+            max_edges=max_edges,
+        ) or bool(graph.get("truncated"))
+    analysis["tree_sitter"] = parser_status or {"status": "not_applicable"}
 
     if _enabled(payload, "advanced_call_graph", default=True):
         timeout = float(payload.get("analyzer_timeout_seconds") or 5.0)

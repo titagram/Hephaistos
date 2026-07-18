@@ -6,7 +6,7 @@
 
 **Architecture:** Closed JSON Schemas and golden vectors define the wire contract. Frozen extraction IR separates language/framework parsing from canonical graph construction. One builder assigns stable IDs, one traversal computes bounded flow membership, one pruner removes whole semantic units under configured budgets, and one bundler emits referentially complete chunks.
 
-**Tech Stack:** Python 3.11+, pytest, dataclasses/enums, `jsonschema`, RFC 8785 JCS, SHA-256, tree-sitter 0.26.0, tree-sitter-language-pack 1.12.5, gzip.
+**Tech Stack:** Python 3.11+, pytest, dataclasses/enums, `jsonschema`, RFC 8785 JCS, SHA-256, tree-sitter 0.26.0, exact official JavaScript/TypeScript/PHP/Python grammar wheels, gzip.
 
 ## Global Constraints
 
@@ -806,45 +806,65 @@ git add hermes_cli/hades_graph_v2/pruning.py hermes_cli/hades_graph_v2/bundle.py
 git commit -m "feat(hades): bundle graph v2 without silent truncation"
 ```
 
-### Task 16: Pin Parser Dependencies at the Explicit Index Boundary
+### Task 16: Install and Validate the Required Parser at the Explicit Index Boundary
 
 **Files:**
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
-- Modify: `tools/lazy_deps.py`
+- Modify: `hermes_cli/hades_index/tree_sitter_adapter.py`
+- Modify: `hermes_cli/hades_index/resolution.py`
 - Modify: `tests/test_project_metadata.py`
+- Modify: `tests/hermes_cli/test_hades_index_enrichment.py`
+- Modify: `tests/hermes_cli/test_hades_lifecycle_control_flow.py`
 
 **Interfaces:**
-- Optional extra `hades-indexer = ["tree-sitter==0.26.0", "tree-sitter-language-pack==1.12.5"]`.
-- Lazy dependency group exposes those exact pins and is invoked only before an explicit graph-index command.
+- Mandatory base dependencies are exactly `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0`.
+- No `hades-indexer` extra or `tools.lazy_deps` group exists.
+- `TreeSitterAdapter.require_languages(languages)` performs a real in-memory parse canary for every detected supported language and raises `RequiredParserUnavailable` before graph construction on any failure.
+- Once canaries pass, an individual source-file parse failure remains a typed partial coverage event.
 
-- [ ] **Step 1: Add RED metadata/lazy-boundary tests**
+- [ ] **Step 1: Add RED metadata and parser-boundary tests**
 
 ```python
-def test_hades_indexer_dependency_pins_match_lazy_group(project_metadata):
-    expected = {"tree-sitter==0.26.0", "tree-sitter-language-pack==1.12.5"}
-    assert set(project_metadata.optional_dependencies["hades-indexer"]) == expected
-    assert set(lazy_dependency_group("hades-indexer")) == expected
+def test_tree_sitter_is_an_exact_mandatory_dependency(project_metadata):
+    expected = {
+        "jsonschema==4.26.0",
+        "tree-sitter==0.26.0",
+        "tree-sitter-javascript==0.25.0",
+        "tree-sitter-typescript==0.23.2",
+        "tree-sitter-php==0.24.1",
+        "tree-sitter-python==0.25.0",
+    }
+    assert expected <= set(project_metadata.dependencies)
+    assert "hades-indexer" not in project_metadata.optional_dependencies
 
-def test_normal_chat_never_installs_hades_indexer(monkeypatch):
-    called = []
-    monkeypatch.setattr("tools.lazy_deps.ensure_group", called.append)
-    create_agent_for_cached_conversation()
-    assert called == []
+def test_missing_required_parser_blocks_graph_index(tmp_path):
+    adapter = TreeSitterAdapter(parser_loader=lambda _language: None)
+    with pytest.raises(RequiredParserUnavailable, match="typescript"):
+        adapter.require_languages(("typescript",))
+
+def test_one_bad_file_after_canary_is_partial(tmp_path):
+    adapter = TreeSitterAdapter(parser_loader=lambda _language: ParserWithSelectiveFailure())
+    adapter.require_languages(("typescript",))
+    result = adapter.parse_bytes(b"invalid", path="src/bad.ts", language="typescript")
+    assert result.failure.code == "parser_failed"
+    assert result.coverage_event.outcome is CoverageOutcome.PARTIAL
 ```
 
 - [ ] **Step 2: Run RED**
 
-Run: `.venv/bin/python -m pytest tests/test_project_metadata.py -k hades_indexer -q`
+Run: `.venv/bin/python -m pytest tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py -q`
 
-- [ ] **Step 3: Add pins, refresh lock, run GREEN, commit**
+- [ ] **Step 3: Add pins, one package loader, canaries, fail-fast boundary, refresh lock, run GREEN, commit**
+
+`_load_parser()` imports only `tree_sitter` and the exact language-specific grammar module; remove compatibility probing of `tree_sitter_language_pack` and `tree_sitter_languages` so a runtime download cache or stale binding cannot silently win. `require_languages()` uses fixed safe snippets for JavaScript, TypeScript, TSX, PHP, and Python, maps a TSX grammar failure back to the public `typescript` language, and includes only public language names in its exception. `.tsx` files select `language_tsx` internally while retaining `SyntaxIR.language == "typescript"`. `enrich_graph_for_workspace()` computes detected supported languages first and calls the canary before it emits or merges graph facts. It does not provide a `tree_sitter=false` bypass. `build_graph_for_workspace()` re-raises `RequiredParserUnavailable` instead of converting it to degraded optional enrichment.
 
 Run: `uv lock`
 
-Run: `.venv/bin/python -m pytest tests/test_project_metadata.py -k hades_indexer -q`
+Run: `.venv/bin/python -m pytest tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py -q`
 
 ```bash
-git add pyproject.toml uv.lock tools/lazy_deps.py tests/test_project_metadata.py
+git add pyproject.toml uv.lock hermes_cli/hades_index/tree_sitter_adapter.py hermes_cli/hades_index/resolution.py tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py
 git commit -m "build(hades): pin lifecycle parser dependencies"
 ```
 

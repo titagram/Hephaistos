@@ -1066,16 +1066,18 @@ Framework adapters MUST follow this exact discovery and ordering table. A source
 
 Each fixture asserts entrypoint identity, source order, all short-circuit/error/async arms, stage assignment, evidence origin, and exact completeness reasons. Adapters MUST NOT shell out to framework applications or execute repository code. Version-specific behavior is selected from detected locked versions; an unknown version uses only version-independent facts and marks version-dependent lifecycle portions partial.
 
-The implementation adds this exact optional dependency group in `pyproject.toml`:
+The implementation adds these exact mandatory base dependencies in `pyproject.toml`:
 
 ```toml
-hades-indexer = [
-  "tree-sitter==0.26.0",
-  "tree-sitter-language-pack==1.12.5",
-]
+"jsonschema==4.26.0",
+"tree-sitter==0.26.0",
+"tree-sitter-javascript==0.25.0",
+"tree-sitter-typescript==0.23.2",
+"tree-sitter-php==0.24.1",
+"tree-sitter-python==0.25.0",
 ```
 
-The same pins are registered for lazy installation and locked in `uv.lock`. The language pack supplies the required PHP, Python, JavaScript, and TypeScript grammars. Installation is tested in a clean virtual environment. When a required grammar is absent, the result is partial, never silently full.
+They are not registered for lazy installation. `jsonschema` is a direct dependency because the mandatory graph-v2 contract imports it. Every pin is locked in `uv.lock`; the official precompiled grammar wheels supply PHP, Python, JavaScript, TypeScript, and TSX without a runtime download or mutable grammar cache. Installation is tested in a clean virtual environment. TypeScript validation includes both TypeScript and TSX canaries while preserving `typescript` as the public language. A missing or incompatible required parser/grammar escapes the legacy graph builder, blocks publication, and is never converted into degraded enrichment; only a failure confined to an ordinary source file after successful canaries is partial.
 
 ### 7.5 Graphify
 
@@ -2478,11 +2480,14 @@ Modify:
 ```text
 pyproject.toml
 uv.lock
-tools/lazy_deps.py
 tests/test_project_metadata.py
 ```
 
-Add optional extra `hades-indexer` with exactly `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5`. Register the same pins in the lazy-dependency mechanism and add metadata tests that prevent drift. Lazy installation is allowed only at the explicit graph-index command boundary, before extraction starts; it must never occur in the middle of an ordinary cached agent conversation.
+Add exactly `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0` to the mandatory project dependencies. They are not an optional extra and are never lazy-installed. The four grammar wheels total less than 1 MB on supported macOS and Linux platforms and avoid role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary. No grammar may be downloaded at graph-index runtime. The TypeScript wheel's `language_tsx` factory is mandatory and canary-tested alongside `language_typescript`.
+
+Before indexing any supported source language, the graph producer runs a real in-memory parse canary for every detected supported language. A missing package, missing grammar, incompatible parser, or failed canary is an installation failure and blocks graph publication; it is never reported as a partial graph. After the canary passes, a parse failure confined to one ordinary source file produces a typed per-file partial coverage event and indexing continues. Tests assert the exact dependency pins, absence of a `hades-indexer` extra/lazy group, all supported canaries, global fail-fast behavior, and per-file partial behavior.
+
+The separately distributed Codex `hades-backend` plugin does not bundle Tree-sitter or reimplement indexing. It verifies the installed Hades CLI, invokes its graph index/sync commands, polls backend projection state, exposes lifecycle/verification workflows when the v2 API is deployed, and reports parser installation failures verbatim. This keeps one producer implementation and one parser version surface.
 
 ### 12.4 Jobs, sync, cache, clients, and provider
 

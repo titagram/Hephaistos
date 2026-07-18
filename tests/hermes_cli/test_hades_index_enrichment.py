@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 class _Node:
     def __init__(
@@ -70,19 +72,100 @@ def test_tree_sitter_adapter_extracts_bounded_metadata_only():
     assert not hasattr(parsed, "source")
 
 
-def test_tree_sitter_adapter_fails_closed_when_optional_parser_is_missing():
-    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+def test_required_parser_canary_fails_before_graph_enrichment():
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        RequiredParserUnavailable,
+        TreeSitterAdapter,
+    )
 
     def unavailable(_language: str):
-        raise ImportError("optional grammar missing")
+        raise ImportError("required grammar missing")
 
     adapter = TreeSitterAdapter(parser_loader=unavailable)
 
-    parsed = adapter.parse_bytes(
-        b"export function ok() {}", path="src/a.ts", language="typescript"
+    with pytest.raises(RequiredParserUnavailable) as raised:
+        adapter.require_languages(("typescript", "javascript", "typescript"))
+
+    assert raised.value.languages == ("javascript", "typescript")
+    assert "required grammar missing" not in str(raised.value)
+
+
+def test_required_canary_has_no_payload_bypass_or_partial_graph_mutation(
+    tmp_path: Path, monkeypatch
+):
+    from hermes_cli.hades_index import resolution
+    from hermes_cli.hades_index.tree_sitter_adapter import RequiredParserUnavailable
+
+    source = tmp_path / "src" / "app.ts"
+    source.parent.mkdir()
+    source.write_text("export function app() {}", encoding="utf-8")
+    graph = {"symbols": [], "edges": []}
+
+    class BrokenAdapter:
+        def require_languages(self, languages):
+            assert tuple(languages) == ("typescript",)
+            raise RequiredParserUnavailable(languages)
+
+        def parse_file(self, *_args, **_kwargs):
+            pytest.fail("no source file may be parsed after a failed canary")
+
+    monkeypatch.setattr(resolution, "TreeSitterAdapter", BrokenAdapter)
+
+    with pytest.raises(RequiredParserUnavailable):
+        resolution.enrich_graph_for_workspace(
+            tmp_path,
+            [source],
+            graph,
+            {"tree_sitter": False},
+        )
+
+    assert graph == {"symbols": [], "edges": []}
+
+
+def test_required_canary_failure_escapes_the_real_graph_publication_boundary(
+    tmp_path: Path, monkeypatch
+):
+    from hermes_cli.hades_index import build_graph_for_workspace, resolution
+    from hermes_cli.hades_index.tree_sitter_adapter import RequiredParserUnavailable
+
+    source = tmp_path / "app.py"
+    source.write_text("def app():\n    return 1\n", encoding="utf-8")
+
+    def fail_before_enrichment(*_args, **_kwargs):
+        raise RequiredParserUnavailable(("python",))
+
+    monkeypatch.setattr(
+        resolution, "enrich_graph_for_workspace", fail_before_enrichment
     )
-    assert parsed.status == "failed"
-    assert parsed.failure is not None and parsed.failure.code == "parser_unavailable"
+
+    with pytest.raises(RequiredParserUnavailable) as raised:
+        build_graph_for_workspace(tmp_path, [source], [], {})
+
+    assert raised.value.languages == ("python",)
+
+
+def test_source_parse_failure_after_successful_canary_remains_partial():
+    from hermes_cli.hades_index.lifecycle.model import CoverageOutcome
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+
+    class SelectiveParser:
+        def __init__(self):
+            self.calls = 0
+
+        def parse(self, _source: bytes):
+            self.calls += 1
+            root = type("Root", (), {"has_error": self.calls > 1})()
+            return type("Tree", (), {"root_node": root})()
+
+    adapter = TreeSitterAdapter(parser_loader=lambda _language: SelectiveParser())
+    adapter.require_languages(("typescript",))
+
+    result = adapter.parse_bytes(b"invalid", path="src/bad.ts", language="typescript")
+
+    assert result.status == "failed"
+    assert result.failure is not None and result.failure.code == "parser_failed"
+    assert result.coverage_event is not None
+    assert result.coverage_event.outcome is CoverageOutcome.PARTIAL
 
 
 def test_call_graph_resolution_is_monotonic_without_a_route_table_lifecycle_shortcut():
