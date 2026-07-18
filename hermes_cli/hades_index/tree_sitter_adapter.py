@@ -291,8 +291,7 @@ class RequiredParserUnavailable(RuntimeError):
     def __init__(self, languages: Iterable[str]) -> None:
         self.languages = tuple(sorted(set(languages)))
         super().__init__(
-            "required structural parser unavailable for: "
-            + ", ".join(self.languages)
+            "required structural parser unavailable for: " + ", ".join(self.languages)
         )
 
 
@@ -367,7 +366,9 @@ class TreeSitterAdapter:
         """Fail atomically when a detected supported grammar cannot really parse."""
 
         failed: list[str] = []
-        required = tuple(sorted({item for item in languages if item in _LANGUAGE_CANARIES}))
+        required = tuple(
+            sorted({item for item in languages if item in _LANGUAGE_CANARIES})
+        )
         for language in required:
             parser = self._parser(language)
             if parser is None:

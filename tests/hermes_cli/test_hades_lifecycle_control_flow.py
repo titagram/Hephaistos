@@ -548,7 +548,9 @@ def test_return_controls_retain_nearest_callable_owner_and_byte_span():
 
     assert result.status == "parsed"
     assert result.syntax is not None
-    returns = [control for control in result.syntax.controls if control.kind == "return"]
+    returns = [
+        control for control in result.syntax.controls if control.kind == "return"
+    ]
     assert len(returns) == 3
     assert returns[0].owner_structural_path != returns[1].owner_structural_path
     assert returns[1].owner_structural_path == returns[2].owner_structural_path

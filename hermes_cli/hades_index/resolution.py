@@ -442,11 +442,11 @@ def enrich_graph_for_workspace(
     payload: dict[str, Any],
 ) -> None:
     """Run graph enrichers after the mandatory structural parser canary."""
-    detected_languages = tuple(sorted({
-        language
-        for path in candidates
-        if (language := _source_language(path))
-    }))
+    detected_languages = tuple(
+        sorted({
+            language for path in candidates if (language := _source_language(path))
+        })
+    )
     adapter = TreeSitterAdapter()
     adapter.require_languages(detected_languages)
 
