@@ -1,12 +1,60 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from hermes_cli.hades_index.inventory import (
     inventory_coverage,
     merge_inventory_coverage,
 )
+from hermes_cli.hades_index.lifecycle.model import AdapterResult, IRValidationError
+
+
+_LOCAL_IR_FAMILIES = (
+    "declarations",
+    "blocks",
+    "structures",
+    "call_sites",
+    "edge_facts",
+    "exception_scopes",
+    "terminals",
+    "effects",
+    "framework_segments",
+    "unresolved_facts",
+)
+
+
+def aggregate_adapter_results(
+    results: Sequence[AdapterResult],
+) -> tuple[AdapterResult, ...]:
+    """Validate v2 adapter facts and reject cross-adapter semantic collisions.
+
+    Results remain immutable adapter-owned units because their local references
+    are closed within each adapter boundary.  The canonical builder performs
+    public-ID deduplication; this seam only proves that a reused local key has
+    byte-for-byte identical meaning before aggregation proceeds.
+    """
+
+    collected = tuple(results)
+    seen: dict[str, tuple[str, object]] = {}
+    for result in collected:
+        if type(result) is not AdapterResult:
+            raise IRValidationError(
+                "invalid_adapter_result",
+                "lifecycle aggregation accepts exact AdapterResult objects only",
+            )
+        result.validate()
+        for family in _LOCAL_IR_FAMILIES:
+            for record in getattr(result, family):
+                local_key = record.local_key
+                previous = seen.setdefault(local_key, (family, record))
+                if previous != (family, record):
+                    raise IRValidationError(
+                        "semantic_collision",
+                        "one adapter-local key has conflicting semantic facts",
+                    )
+    return collected
 
 
 def _stable_json(value: object) -> str:
