@@ -600,6 +600,44 @@ def test_typescript_canary_covers_tsx_and_tsx_files_use_the_tsx_grammar():
     assert result.syntax.language == "typescript"
 
 
+def test_tree_sitter_traversal_stays_stable_with_large_route_inventory(tmp_path):
+    from hermes_cli.hades_index import typescript
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    path = source_dir / "routes.ts"
+    path.write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        + "".join(
+            f"router.get('/route/{index}', handler{index});\n" for index in range(501)
+        ),
+        encoding="utf-8",
+    )
+    legacy_graph = typescript.build_graph(
+        tmp_path,
+        [path],
+        [],
+        truncated=False,
+        max_symbols=5_000,
+        max_edges=10_000,
+        max_file_bytes=512_000,
+    )
+
+    result = TreeSitterAdapter().parse_file(
+        path,
+        relative_path="src/routes.ts",
+        language="typescript",
+        max_bytes=512_000,
+    )
+
+    assert len(legacy_graph["routes"]) == 500
+    assert result.status == "parsed"
+    assert result.syntax is not None
+    assert sum(control.kind == "call" for control in result.syntax.controls) == 502
+
+
 def test_control_flow_is_finite_and_keeps_branch_return_exception_loop_and_async_boundaries():
     from hermes_cli.hades_index.lifecycle.control_flow import build_control_flow
 

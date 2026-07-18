@@ -304,9 +304,10 @@ class RequiredParserUnavailable(RuntimeError):
 
 
 def _point_row(point: Any) -> int:
-    if hasattr(point, "row"):
+    try:
+        return int(point[0])
+    except (IndexError, KeyError, TypeError):
         return int(point.row)
-    return int(point[0])
 
 
 def _bounded_node_text(source: bytes, node: Any | None, *, limit: int = 512) -> str:
@@ -541,6 +542,7 @@ class TreeSitterAdapter:
                     )
 
             visit(root)
+
             parsed = ParsedFile(
                 path=path,
                 language=language,
