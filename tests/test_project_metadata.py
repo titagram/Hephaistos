@@ -28,8 +28,13 @@ def test_tree_sitter_is_required_and_never_lazy_installed():
     dependencies = set(_load_dependencies())
     optional_dependencies = _load_optional_dependencies()
 
-    assert "tree-sitter==0.26.0" in dependencies
-    assert "tree-sitter-language-pack==1.12.5" in dependencies
+    assert {
+        "tree-sitter==0.26.0",
+        "tree-sitter-javascript==0.25.0",
+        "tree-sitter-typescript==0.23.2",
+        "tree-sitter-php==0.24.1",
+        "tree-sitter-python==0.25.0",
+    } <= dependencies
     assert "hades-indexer" not in optional_dependencies
 
     from tools.lazy_deps import LAZY_DEPS

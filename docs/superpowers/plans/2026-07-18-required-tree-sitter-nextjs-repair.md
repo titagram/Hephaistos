@@ -4,9 +4,9 @@
 
 **Goal:** Make Tree-sitter a guaranteed Hades Agent dependency, fail graph indexing before publication when the parser installation is broken, and replace the fragile Next.js middleware-return ownership regex with Tree-sitter structural ownership.
 
-**Architecture:** Hades ships one pinned Tree-sitter runtime and one pinned 306-language grammar pack. The graph-index boundary runs fixed in-memory canaries for detected supported languages; after that boundary, only a failure confined to an ordinary source file becomes partial coverage. `SyntaxIR` records byte spans and nearest callable ownership without retaining source, and the Next.js adapter uses those facts to classify only returns owned by the exported middleware function. The Codex plugin remains a thin Hades CLI orchestrator.
+**Architecture:** Hades ships one pinned Tree-sitter runtime and four pinned official precompiled grammar wheels for JavaScript/TypeScript, PHP, and Python. Grammar loading is offline and never creates a runtime download cache. The graph-index boundary runs fixed in-memory canaries for detected supported languages; after that boundary, only a failure confined to an ordinary source file becomes partial coverage. `SyntaxIR` records byte spans and nearest callable ownership without retaining source, and the Next.js adapter uses those facts to classify only returns owned by the exported middleware function. The Codex plugin remains a thin Hades CLI orchestrator.
 
-**Tech Stack:** Python 3.11–3.13, `tree-sitter==0.26.0`, `tree-sitter-language-pack==1.12.5`, pytest, uv, Hades CLI, Codex personal plugin marketplace.
+**Tech Stack:** Python 3.11–3.13, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, `tree-sitter-python==0.25.0`, pytest, uv, Hades CLI, Codex personal plugin marketplace.
 
 ## Global Constraints
 
@@ -33,7 +33,7 @@
 - Modify: `tests/test_project_metadata.py`
 
 **Interfaces:**
-- Produces mandatory exact requirements `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5` in `project.dependencies`.
+- Produces mandatory exact requirements for Tree-sitter plus the official JavaScript, TypeScript, PHP, and Python grammar wheels in `project.dependencies`.
 - Guarantees `project.optional-dependencies` has no `hades-indexer` key and `tools.lazy_deps.LAZY_DEPS` contains neither parser package.
 
 - [ ] **Step 1: Add the RED metadata test**
@@ -51,8 +51,13 @@ def test_tree_sitter_is_required_and_never_lazy_installed():
     dependencies = set(_load_dependencies())
     optional_dependencies = _load_optional_dependencies()
 
-    assert "tree-sitter==0.26.0" in dependencies
-    assert "tree-sitter-language-pack==1.12.5" in dependencies
+    assert {
+        "tree-sitter==0.26.0",
+        "tree-sitter-javascript==0.25.0",
+        "tree-sitter-typescript==0.23.2",
+        "tree-sitter-php==0.24.1",
+        "tree-sitter-python==0.25.0",
+    } <= dependencies
     assert "hades-indexer" not in optional_dependencies
 
     from tools.lazy_deps import LAZY_DEPS
@@ -80,11 +85,13 @@ Expected: FAIL because neither exact requirement is in `project.dependencies`.
 Add these entries to the core `dependencies` array in `pyproject.toml`, next to other built-in capability dependencies:
 
 ```toml
-  # Required structural parser for Hades graph indexing. The grammar pack
-  # is compact and keeps role-specific installations from producing graphs
-  # with different structural truth.
+  # Required structural parser for Hades graph indexing. Official grammar
+  # wheels are available offline and produce the same structural truth.
   "tree-sitter==0.26.0",
-  "tree-sitter-language-pack==1.12.5",
+  "tree-sitter-javascript==0.25.0",
+  "tree-sitter-typescript==0.23.2",
+  "tree-sitter-php==0.24.1",
+  "tree-sitter-python==0.25.0",
 ```
 
 Do not edit `tools/lazy_deps.py`.
@@ -181,13 +188,15 @@ Replace `_load_parser()` compatibility probing with exactly:
 def _load_parser(language: str) -> Any | None:
     grammar_name = "typescript" if language == "typescript" else language
     try:
-        language_pack = importlib.import_module("tree_sitter_language_pack")
-        return language_pack.get_parser(grammar_name)
+        tree_sitter = importlib.import_module("tree_sitter")
+        grammar_module, factory_name = _GRAMMAR_FACTORIES[grammar_name]
+        grammar = importlib.import_module(grammar_module)
+        return tree_sitter.Parser(tree_sitter.Language(getattr(grammar, factory_name)()))
     except (ImportError, AttributeError, TypeError, ValueError):
         return None
 ```
 
-Do not probe `tree_sitter_languages` or individual grammar wheels.
+Do not probe `tree_sitter_language_pack` or `tree_sitter_languages`, and never download a grammar at runtime.
 
 - [ ] **Step 4: Implement canaries and callable ownership**
 
@@ -396,4 +405,3 @@ git diff --check main...HEAD
 ```
 
 Request an independent code review of dependency policy, parser fail-fast behavior, privacy, and both Next.js regressions. After approval, merge `codex/tree-sitter-required-indexer` into `main`, push `main`, update the installed Hades Agent, and rerun the four-language canary with the installed interpreter.
-

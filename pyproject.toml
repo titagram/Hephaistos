@@ -104,11 +104,14 @@ dependencies = [
   "websockets==15.0.1",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
-  # Required structural parser for Hades graph indexing. The compact grammar
-  # pack keeps role-specific installations from producing different graph
-  # truth, while parser loading remains confined to graph-index operations.
+  # Required structural parser for Hades graph indexing. Official precompiled
+  # grammar wheels make parsing available offline and keep every installation
+  # on the same structural truth without a runtime grammar cache/download.
   "tree-sitter==0.26.0",
-  "tree-sitter-language-pack==1.12.5",
+  "tree-sitter-javascript==0.25.0",
+  "tree-sitter-typescript==0.23.2",
+  "tree-sitter-php==0.24.1",
+  "tree-sitter-python==0.25.0",
   "fastapi>=0.104.0,<1",
   "uvicorn[standard]>=0.24.0,<1",
   # Streaming multipart uploads for the dashboard file manager (NS-501).

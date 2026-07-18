@@ -1070,10 +1070,13 @@ The implementation adds these exact mandatory base dependencies in `pyproject.to
 
 ```toml
 "tree-sitter==0.26.0",
-"tree-sitter-language-pack==1.12.5",
+"tree-sitter-javascript==0.25.0",
+"tree-sitter-typescript==0.23.2",
+"tree-sitter-php==0.24.1",
+"tree-sitter-python==0.25.0",
 ```
 
-They are not registered for lazy installation. Both pins are locked in `uv.lock`; the language pack supplies the required PHP, Python, JavaScript, and TypeScript grammars. Installation is tested in a clean virtual environment. A missing or incompatible required parser/grammar fails the graph-index canary and blocks publication; only a failure confined to an ordinary source file after successful canaries is partial.
+They are not registered for lazy installation. Every pin is locked in `uv.lock`; the official precompiled grammar wheels supply PHP, Python, JavaScript, TypeScript, and TSX without a runtime download or mutable grammar cache. Installation is tested in a clean virtual environment. A missing or incompatible required parser/grammar fails the graph-index canary and blocks publication; only a failure confined to an ordinary source file after successful canaries is partial.
 
 ### 7.5 Graphify
 
@@ -2479,7 +2482,7 @@ uv.lock
 tests/test_project_metadata.py
 ```
 
-Add exactly `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5` to the mandatory project dependencies. They are not an optional extra and are never lazy-installed. This adds about 2–3 MB of download and about 5–6 MB installed while avoiding role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary.
+Add exactly `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0` to the mandatory project dependencies. They are not an optional extra and are never lazy-installed. The four grammar wheels total less than 1 MB on supported macOS and Linux platforms and avoid role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary. No grammar may be downloaded at graph-index runtime.
 
 Before indexing any supported source language, the graph producer runs a real in-memory parse canary for every detected supported language. A missing package, missing grammar, incompatible parser, or failed canary is an installation failure and blocks graph publication; it is never reported as a partial graph. After the canary passes, a parse failure confined to one ordinary source file produces a typed per-file partial coverage event and indexing continues. Tests assert the exact dependency pins, absence of a `hades-indexer` extra/lazy group, all supported canaries, global fail-fast behavior, and per-file partial behavior.
 
