@@ -818,7 +818,7 @@ git commit -m "feat(hades): bundle graph v2 without silent truncation"
 - Modify: `tests/hermes_cli/test_hades_lifecycle_control_flow.py`
 
 **Interfaces:**
-- Mandatory base dependencies are exactly `tree-sitter==0.26.0` plus `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0`.
+- Mandatory base dependencies are exactly `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0`.
 - No `hades-indexer` extra or `tools.lazy_deps` group exists.
 - `TreeSitterAdapter.require_languages(languages)` performs a real in-memory parse canary for every detected supported language and raises `RequiredParserUnavailable` before graph construction on any failure.
 - Once canaries pass, an individual source-file parse failure remains a typed partial coverage event.
@@ -828,6 +828,7 @@ git commit -m "feat(hades): bundle graph v2 without silent truncation"
 ```python
 def test_tree_sitter_is_an_exact_mandatory_dependency(project_metadata):
     expected = {
+        "jsonschema==4.26.0",
         "tree-sitter==0.26.0",
         "tree-sitter-javascript==0.25.0",
         "tree-sitter-typescript==0.23.2",
@@ -856,7 +857,7 @@ Run: `.venv/bin/python -m pytest tests/test_project_metadata.py tests/hermes_cli
 
 - [ ] **Step 3: Add pins, one package loader, canaries, fail-fast boundary, refresh lock, run GREEN, commit**
 
-`_load_parser()` imports only `tree_sitter` and the exact language-specific grammar module; remove compatibility probing of `tree_sitter_language_pack` and `tree_sitter_languages` so a runtime download cache or stale binding cannot silently win. `require_languages()` uses fixed safe snippets for JavaScript, TypeScript, PHP, and Python and includes only language names in its exception. `enrich_graph_for_workspace()` computes detected supported languages first and calls the canary before it emits or merges graph facts. It does not provide a `tree_sitter=false` bypass.
+`_load_parser()` imports only `tree_sitter` and the exact language-specific grammar module; remove compatibility probing of `tree_sitter_language_pack` and `tree_sitter_languages` so a runtime download cache or stale binding cannot silently win. `require_languages()` uses fixed safe snippets for JavaScript, TypeScript, TSX, PHP, and Python, maps a TSX grammar failure back to the public `typescript` language, and includes only public language names in its exception. `.tsx` files select `language_tsx` internally while retaining `SyntaxIR.language == "typescript"`. `enrich_graph_for_workspace()` computes detected supported languages first and calls the canary before it emits or merges graph facts. It does not provide a `tree_sitter=false` bypass. `build_graph_for_workspace()` re-raises `RequiredParserUnavailable` instead of converting it to degraded optional enrichment.
 
 Run: `uv lock`
 

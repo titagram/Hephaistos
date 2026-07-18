@@ -6,7 +6,7 @@
 
 **Architecture:** Hades ships one pinned Tree-sitter runtime and four pinned official precompiled grammar wheels for JavaScript/TypeScript, PHP, and Python. Grammar loading is offline and never creates a runtime download cache. The graph-index boundary runs fixed in-memory canaries for detected supported languages; after that boundary, only a failure confined to an ordinary source file becomes partial coverage. `SyntaxIR` records byte spans and nearest callable ownership without retaining source, and the Next.js adapter uses those facts to classify only returns owned by the exported middleware function. The Codex plugin remains a thin Hades CLI orchestrator.
 
-**Tech Stack:** Python 3.11–3.13, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, `tree-sitter-python==0.25.0`, pytest, uv, Hades CLI, Codex personal plugin marketplace.
+**Tech Stack:** Python 3.11–3.13, `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, `tree-sitter-python==0.25.0`, pytest, uv, Hades CLI, Codex personal plugin marketplace.
 
 ## Global Constraints
 
@@ -36,7 +36,7 @@
 - Produces mandatory exact requirements for Tree-sitter plus the official JavaScript, TypeScript, PHP, and Python grammar wheels in `project.dependencies`.
 - Guarantees `project.optional-dependencies` has no `hades-indexer` key and `tools.lazy_deps.LAZY_DEPS` contains neither parser package.
 
-- [ ] **Step 1: Add the RED metadata test**
+- [x] **Step 1: Add the RED metadata test**
 
 Add this helper and test to `tests/test_project_metadata.py`:
 
@@ -52,6 +52,7 @@ def test_tree_sitter_is_required_and_never_lazy_installed():
     optional_dependencies = _load_optional_dependencies()
 
     assert {
+        "jsonschema==4.26.0",
         "tree-sitter==0.26.0",
         "tree-sitter-javascript==0.25.0",
         "tree-sitter-typescript==0.23.2",
@@ -70,7 +71,7 @@ def test_tree_sitter_is_required_and_never_lazy_installed():
     assert not any("tree-sitter" in requirement for requirement in flattened)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -80,11 +81,13 @@ Run:
 
 Expected: FAIL because neither exact requirement is in `project.dependencies`.
 
-- [ ] **Step 3: Add the exact base requirements**
+- [x] **Step 3: Add the exact base requirements**
 
 Add these entries to the core `dependencies` array in `pyproject.toml`, next to other built-in capability dependencies:
 
 ```toml
+  # Imported directly by the mandatory Hades graph-v2 contract validator.
+  "jsonschema==4.26.0",
   # Required structural parser for Hades graph indexing. Official grammar
   # wheels are available offline and produce the same structural truth.
   "tree-sitter==0.26.0",
@@ -96,7 +99,7 @@ Add these entries to the core `dependencies` array in `pyproject.toml`, next to 
 
 Do not edit `tools/lazy_deps.py`.
 
-- [ ] **Step 4: Regenerate the lock and run GREEN**
+- [x] **Step 4: Regenerate the lock and run GREEN**
 
 Run:
 
@@ -107,7 +110,7 @@ uv lock
 
 Expected: all metadata tests PASS and `uv.lock` contains both exact packages.
 
-- [ ] **Step 5: Verify the wheel footprint and commit**
+- [x] **Step 5: Verify the wheel footprint and commit**
 
 Run:
 
@@ -128,6 +131,7 @@ git commit -m "build(hades): require lifecycle parser dependencies"
 **Files:**
 - Modify: `hermes_cli/hades_index/tree_sitter_adapter.py`
 - Modify: `hermes_cli/hades_index/resolution.py`
+- Modify: `hermes_cli/hades_index/__init__.py`
 - Modify: `tests/hermes_cli/test_hades_index_enrichment.py`
 - Modify: `tests/hermes_cli/test_hades_lifecycle_control_flow.py`
 
@@ -137,8 +141,10 @@ git commit -m "build(hades): require lifecycle parser dependencies"
 - Extends `StructuralSymbol` with `structural_path: str`.
 - Extends `SyntaxControl` with `owner_structural_path: str`, `start_byte: int`, and `end_byte: int`.
 - `SyntaxIR` still retains no source bytes or native tree.
+- The public `typescript` canary validates both `language_typescript` and `language_tsx`; `.tsx` selects the latter without changing the public language value.
+- `build_graph_for_workspace()` re-raises `RequiredParserUnavailable`; its generic optional-enricher fallback must not swallow an installation defect.
 
-- [ ] **Step 1: Add RED canary and ownership tests**
+- [x] **Step 1: Add RED canary and ownership tests**
 
 Add tests that assert these exact invariants:
 
@@ -170,7 +176,7 @@ def test_return_controls_retain_nearest_callable_owner_and_byte_span():
 
 Add a separate fake-parser test proving that `require_languages()` passes canaries, then `parse_bytes()` can still return `parser_failed` with `CoverageOutcome.PARTIAL` for a later ordinary file.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -180,7 +186,7 @@ Run:
 
 Expected: FAIL because the exception, canary method, byte spans, and callable owner do not exist.
 
-- [ ] **Step 3: Implement one pinned parser loader**
+- [x] **Step 3: Implement one pinned parser loader**
 
 Replace `_load_parser()` compatibility probing with exactly:
 
@@ -198,7 +204,7 @@ def _load_parser(language: str) -> Any | None:
 
 Do not probe `tree_sitter_language_pack` or `tree_sitter_languages`, and never download a grammar at runtime.
 
-- [ ] **Step 4: Implement canaries and callable ownership**
+- [x] **Step 4: Implement canaries and callable ownership**
 
 Use this fixed canary table:
 
@@ -206,16 +212,17 @@ Use this fixed canary table:
 _LANGUAGE_CANARIES = {
     "javascript": b"function hadesCanary() { return 1; }\n",
     "typescript": b"function hadesCanary(): number { return 1; }\n",
+    "tsx": b"function HadesCanary() { return <main>ok</main>; }\n",
     "php": b"<?php function hades_canary(): int { return 1; }\n",
     "python": b"def hades_canary() -> int:\n    return 1\n",
 }
 ```
 
-`require_languages()` sorts and deduplicates supported names, loads each parser, parses its canary directly, and raises once with every failed language. Do not call `parse_bytes()` from the canary because `parse_bytes()` intentionally converts installation failures into per-file results.
+`require_languages()` sorts and deduplicates supported names, loads each parser, parses its canary directly, and raises once with every failed public language. The public `typescript` language requires both the TypeScript and TSX variants. Do not call `parse_bytes()` from the canary because `parse_bytes()` intentionally converts installation failures into per-file results.
 
 During `visit()`, carry `owner_structural_path`. Set it to the current node path when entering a JavaScript/TypeScript/PHP/Python executable callable node; branches, loops, and `for await` never replace it. Emit every control with the nearest owner plus exact node byte offsets. Fill `StructuralSymbol.structural_path` from the symbol node path.
 
-- [ ] **Step 5: Enforce fail-fast only at the graph-index boundary**
+- [x] **Step 5: Enforce fail-fast only at the graph-index boundary**
 
 In `enrich_graph_for_workspace()`:
 
@@ -225,7 +232,9 @@ In `enrich_graph_for_workspace()`:
 4. remove the `tree_sitter=false` disabled branch;
 5. keep existing per-file `ParseResult.failed(...)` coverage handling after the canary.
 
-- [ ] **Step 6: Run GREEN, privacy checks, and commit**
+In `build_graph_for_workspace()`, re-raise `RequiredParserUnavailable` before the generic optional-enricher `except Exception` fallback. Add a regression through this real publication boundary; a direct `enrich_graph_for_workspace()` test alone is insufficient.
+
+- [x] **Step 6: Run GREEN, privacy checks, and commit**
 
 Run:
 
@@ -255,7 +264,7 @@ git commit -m "feat(hades): require structural parser canaries"
 - `_middleware_rules(source: str, path: str, syntax: SyntaxIR) -> tuple[_ConfigRule, ...]` classifies only return controls owned by the exported `middleware` callable.
 - No `_nested_callable_bodies()` function or brace/method ownership regex remains.
 
-- [ ] **Step 1: Import the reviewed remote commits without merging them**
+- [x] **Step 1: Import the reviewed remote commits without merging them**
 
 Fetch the server-local branch and cherry-pick its three existing commits in order:
 
@@ -266,7 +275,7 @@ git cherry-pick e5ed5bc54 0b412baa4 4ddf8dbba
 
 Verify exactly the expected two code/test paths were introduced by those commits. Do not treat `4ddf8dbba` as approved; its review found the two regressions below.
 
-- [ ] **Step 2: Add exact RED regressions**
+- [x] **Step 2: Add exact RED regressions**
 
 Extend `test_unproven_middleware_outcome_is_partial` with both sources and assert:
 
@@ -293,7 +302,7 @@ assert _middleware_roles(tmp_path, for_await) == [
 
 Update the test `_syntax()` helper to parse the actual fixture bytes with `TreeSitterAdapter`; do not fabricate empty `SyntaxIR` for JavaScript/TypeScript adapter acceptance.
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
 Run:
 
@@ -303,26 +312,26 @@ Run:
 
 Expected: the destructured parameter leaks `middleware_redirect` and `for await` loses it, matching review findings `T13-NEXT-005-R2A` and `T13-NEXT-005-R2B`.
 
-- [ ] **Step 4: Implement Tree-sitter return ownership**
+- [x] **Step 4: Implement Tree-sitter return ownership**
 
 In `_build_snapshot()`, pass the current `SyntaxIR` to `_middleware_rules()`. Locate exactly one exported middleware function symbol by `name == "middleware"`, `kind == "function"`, and non-empty `structural_path`. Select `return` controls whose `owner_structural_path` equals that symbol path. Sort them by `start_byte`, slice only `source.encode("utf-8")[start_byte:end_byte]`, and apply the existing bounded outcome patterns to that exact return statement.
 
 If the middleware symbol is absent or ambiguous, emit one `_ConfigRule(kind="unresolved", reasons=("middleware_outcome_unresolved",))`; never fall back to the removed ownership regex. Preserve literal redirect destinations and existing rule ordering.
 
-- [ ] **Step 5: Run focused and aggregate GREEN gates**
+- [x] **Step 5: Run focused and aggregate GREEN gates**
 
 Run:
 
 ```bash
 /Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_lifecycle_nextjs.py
-/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_express.py tests/hermes_cli/test_hades_lifecycle_nextjs.py
+/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest -q tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_nextjs.py
 /Users/gabriele/Dev/Hephaistos/.venv/bin/ruff check hermes_cli/hades_index/lifecycle/frameworks/nextjs.py tests/hermes_cli/test_hades_lifecycle_nextjs.py
 git diff --check
 ```
 
 Run the locked Next.js acceptance validator from `docs/superpowers/plans/2026-07-17-finite-adapter-acceptance-gates-implementation.md` and require its checked-in digest to remain valid unless the new test corpus is deliberately versioned.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add hermes_cli/hades_index/lifecycle/frameworks/nextjs.py tests/hermes_cli/test_hades_lifecycle_nextjs.py
@@ -340,7 +349,7 @@ git commit -m "fix(hades): derive Next.js returns from syntax"
 - A user-authorized `hades backend sync` or `bootstrap-awareness` automatically receives mandatory parser validation from the installed Hades Agent.
 - The plugin reports `RequiredParserUnavailable` as an installation defect and stops; it does not retry sync or describe the result as partial.
 
-- [ ] **Step 1: Add the graph-index contract to the source skill**
+- [x] **Step 1: Add the graph-index contract to the source skill**
 
 Add a `Graph Index And Lifecycle` section stating:
 
@@ -356,7 +365,7 @@ If Hades reports a required parser or grammar canary failure, stop. Report it as
 Use lifecycle query commands only when they appear in `hades backend --help` for the installed version. Until then, do not invent command names; use the frontend for lifecycle exploration.
 ```
 
-- [ ] **Step 2: Reinstall and verify the plugin**
+- [x] **Step 2: Reinstall and verify the plugin**
 
 Run:
 
@@ -367,7 +376,7 @@ codex plugin list
 
 Verify the enabled plugin path/version changed and the installed cached `skills/hades-backend/SKILL.md` contains `Graph Index And Lifecycle`. Start a new Codex task only for the final manual plugin smoke because the current task's skill catalog is immutable.
 
-- [ ] **Step 3: Run agent-to-plugin smoke checks**
+- [x] **Step 3: Run agent-to-plugin smoke checks**
 
 From a temporary Hades workspace configuration, run read-only `hades backend status --json` and `hades backend quality-report --json`. Do not run a state-changing graph sync without a linked test project and explicit authorization. Confirm the plugin instructs Codex to delegate to Hades and exposes no duplicate parser dependency.
 
@@ -376,13 +385,13 @@ From a temporary Hades workspace configuration, run read-only `hades backend sta
 **Files:**
 - Verify only; modify nothing unless a gate exposes a regression.
 
-- [ ] **Step 1: Run the focused full tranche suite**
+- [x] **Step 1: Run the focused full tranche suite**
 
 ```bash
-/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest -q tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_express.py tests/hermes_cli/test_hades_lifecycle_nextjs.py
+/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest -q tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_nextjs.py tests/scripts/test_hades_adapter_acceptance.py
 ```
 
-- [ ] **Step 2: Prove a clean install can parse every supported canary**
+- [x] **Step 2: Prove a clean install can parse every supported canary**
 
 Create a disposable virtual environment under `/private/tmp`, install the current checkout with development dependencies, and run:
 

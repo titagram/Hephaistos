@@ -89,6 +89,7 @@ _CALLABLE_TYPES = {
 }
 _GRAMMAR_FACTORIES = {
     "typescript": ("tree_sitter_typescript", "language_typescript"),
+    "tsx": ("tree_sitter_typescript", "language_tsx"),
     "javascript": ("tree_sitter_javascript", "language"),
     "php": ("tree_sitter_php", "language_php"),
     "python": ("tree_sitter_python", "language"),
@@ -96,8 +97,15 @@ _GRAMMAR_FACTORIES = {
 _LANGUAGE_CANARIES = {
     "javascript": b"function hadesCanary() { return 1; }\n",
     "typescript": b"function hadesCanary(): number { return 1; }\n",
+    "tsx": b"function HadesCanary() { return <main>ok</main>; }\n",
     "php": b"<?php function hades_canary(): int { return 1; }\n",
     "python": b"def hades_canary() -> int:\n    return 1\n",
+}
+_LANGUAGE_VARIANTS = {
+    "javascript": ("javascript",),
+    "typescript": ("typescript", "tsx"),
+    "php": ("php",),
+    "python": ("python",),
 }
 
 SyntaxControlKind: TypeAlias = Literal[
@@ -360,27 +368,31 @@ class TreeSitterAdapter:
         return self._parsers[language]
 
     def is_available(self, language: str) -> bool:
-        return self._parser(language) is not None
+        variants = _LANGUAGE_VARIANTS.get(language, (language,))
+        return all(self._parser(variant) is not None for variant in variants)
 
     def require_languages(self, languages: Iterable[str]) -> None:
         """Fail atomically when a detected supported grammar cannot really parse."""
 
         failed: list[str] = []
         required = tuple(
-            sorted({item for item in languages if item in _LANGUAGE_CANARIES})
+            sorted({item for item in languages if item in _LANGUAGE_VARIANTS})
         )
         for language in required:
-            parser = self._parser(language)
-            if parser is None:
-                failed.append(language)
-                continue
-            try:
-                tree = parser.parse(_LANGUAGE_CANARIES[language])
-                root = tree.root_node
-                if bool(getattr(root, "has_error", True)):
+            for variant in _LANGUAGE_VARIANTS[language]:
+                parser = self._parser(variant)
+                if parser is None:
                     failed.append(language)
-            except Exception:
-                failed.append(language)
+                    break
+                try:
+                    tree = parser.parse(_LANGUAGE_CANARIES[variant])
+                    root = tree.root_node
+                    if bool(getattr(root, "has_error", True)):
+                        failed.append(language)
+                        break
+                except Exception:
+                    failed.append(language)
+                    break
         if failed:
             raise RequiredParserUnavailable(failed)
 
@@ -404,7 +416,12 @@ class TreeSitterAdapter:
             return ParseResult.failed("file_read_failed", relative_path, language)
 
     def parse_bytes(self, source: bytes, *, path: str, language: str) -> ParseResult:
-        parser = self._parser(language)
+        parser_language = (
+            "tsx"
+            if language == "typescript" and Path(path).suffix.lower() == ".tsx"
+            else language
+        )
+        parser = self._parser(parser_language)
         if parser is None:
             return ParseResult.failed("parser_unavailable", path, language)
         tree = None

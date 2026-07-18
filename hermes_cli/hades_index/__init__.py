@@ -51,8 +51,10 @@ def build_graph_for_workspace(
         (
             "typescript",
             typescript_indexer,
-            lambda path: path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"}
-            or path.name in manifest_names,
+            lambda path: (
+                path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".prisma"}
+                or path.name in manifest_names
+            ),
         ),
         ("sql", sql_indexer, lambda path: path.suffix.lower() == ".sql"),
         ("python", python_indexer, lambda path: path.suffix.lower() == ".py"),
@@ -60,7 +62,9 @@ def build_graph_for_workspace(
     detected = [
         (name, indexer, [path for path in candidates if predicate(path)])
         for name, indexer, predicate in adapter_specs
-        if any(predicate(path) and path.name not in manifest_names for path in candidates)
+        if any(
+            predicate(path) and path.name not in manifest_names for path in candidates
+        )
     ]
     if not detected:
         detected = [("python", python_indexer, candidates)]
@@ -99,12 +103,17 @@ def build_graph_for_workspace(
             max_edges=max_edges,
         )
 
-    # Optional parsers and analyzers only enrich the proven legacy graph. Any
-    # failure here must leave that baseline usable.
+    # The structural parser is mandatory: an installation canary failure must
+    # escape this boundary so no graph can be published from a broken parser.
+    # Other optional analyzer failures may still degrade the legacy baseline.
+    from hermes_cli.hades_index.tree_sitter_adapter import RequiredParserUnavailable
+
     try:
         from hermes_cli.hades_index.resolution import enrich_graph_for_workspace
 
         enrich_graph_for_workspace(workspace_root, candidates, graph, payload)
+    except RequiredParserUnavailable:
+        raise
     except Exception:
         graph.setdefault("analysis", {})["enrichment"] = {"status": "degraded"}
 
@@ -113,4 +122,6 @@ def build_graph_for_workspace(
 
     from hermes_cli.hades_graph_contract import finalize_graph_artifact
 
-    return finalize_graph_artifact(graph, payload=payload, candidates=candidates, omitted=omitted)
+    return finalize_graph_artifact(
+        graph, payload=payload, candidates=candidates, omitted=omitted
+    )

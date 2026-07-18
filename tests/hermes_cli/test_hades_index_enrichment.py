@@ -122,6 +122,28 @@ def test_required_canary_has_no_payload_bypass_or_partial_graph_mutation(
     assert graph == {"symbols": [], "edges": []}
 
 
+def test_required_canary_failure_escapes_the_real_graph_publication_boundary(
+    tmp_path: Path, monkeypatch
+):
+    from hermes_cli.hades_index import build_graph_for_workspace, resolution
+    from hermes_cli.hades_index.tree_sitter_adapter import RequiredParserUnavailable
+
+    source = tmp_path / "app.py"
+    source.write_text("def app():\n    return 1\n", encoding="utf-8")
+
+    def fail_before_enrichment(*_args, **_kwargs):
+        raise RequiredParserUnavailable(("python",))
+
+    monkeypatch.setattr(
+        resolution, "enrich_graph_for_workspace", fail_before_enrichment
+    )
+
+    with pytest.raises(RequiredParserUnavailable) as raised:
+        build_graph_for_workspace(tmp_path, [source], [], {})
+
+    assert raised.value.languages == ("python",)
+
+
 def test_source_parse_failure_after_successful_canary_remains_partial():
     from hermes_cli.hades_index.lifecycle.model import CoverageOutcome
     from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter

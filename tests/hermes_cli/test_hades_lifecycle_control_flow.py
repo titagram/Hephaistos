@@ -560,6 +560,46 @@ def test_return_controls_retain_nearest_callable_owner_and_byte_span():
     )
 
 
+def test_typescript_canary_covers_tsx_and_tsx_files_use_the_tsx_grammar():
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        RequiredParserUnavailable,
+        TreeSitterAdapter,
+    )
+
+    loaded: list[str] = []
+
+    class CanaryParser:
+        def parse(self, _source: bytes):
+            root = type("Root", (), {"has_error": False})()
+            return type("Tree", (), {"root_node": root})()
+
+    adapter = TreeSitterAdapter(
+        parser_loader=lambda language: loaded.append(language) or CanaryParser()
+    )
+    adapter.require_languages(("typescript",))
+
+    assert loaded == ["typescript", "tsx"]
+
+    broken_tsx = TreeSitterAdapter(
+        parser_loader=lambda language: (
+            CanaryParser() if language == "typescript" else None
+        )
+    )
+    with pytest.raises(RequiredParserUnavailable) as raised:
+        broken_tsx.require_languages(("typescript",))
+
+    assert raised.value.languages == ("typescript",)
+
+    source = b"export default function Page() { return <main>Hello</main> }"
+    result = TreeSitterAdapter().parse_bytes(
+        source, path="app/page.tsx", language="typescript"
+    )
+
+    assert result.status == "parsed"
+    assert result.syntax is not None
+    assert result.syntax.language == "typescript"
+
+
 def test_control_flow_is_finite_and_keeps_branch_return_exception_loop_and_async_boundaries():
     from hermes_cli.hades_index.lifecycle.control_flow import build_control_flow
 
