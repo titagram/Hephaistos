@@ -29,6 +29,7 @@ def test_tree_sitter_is_required_and_never_lazy_installed():
     optional_dependencies = _load_optional_dependencies()
 
     assert {
+        "jsonschema==4.26.0",
         "tree-sitter==0.26.0",
         "tree-sitter-javascript==0.25.0",
         "tree-sitter-typescript==0.23.2",

@@ -104,6 +104,8 @@ dependencies = [
   "websockets==15.0.1",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
+  # Imported directly by the mandatory Hades graph-v2 contract validator.
+  "jsonschema==4.26.0",
   # Required structural parser for Hades graph indexing. Official precompiled
   # grammar wheels make parsing available offline and keep every installation
   # on the same structural truth without a runtime grammar cache/download.
