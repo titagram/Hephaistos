@@ -11,11 +11,35 @@ def _load_optional_dependencies():
     return project["optional-dependencies"]
 
 
+def _load_dependencies():
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as handle:
+        return tomllib.load(handle)["project"]["dependencies"]
+
+
 def _load_package_data():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         tool = tomllib.load(handle)["tool"]
     return tool["setuptools"]["package-data"]
+
+
+def test_tree_sitter_is_required_and_never_lazy_installed():
+    dependencies = set(_load_dependencies())
+    optional_dependencies = _load_optional_dependencies()
+
+    assert "tree-sitter==0.26.0" in dependencies
+    assert "tree-sitter-language-pack==1.12.5" in dependencies
+    assert "hades-indexer" not in optional_dependencies
+
+    from tools.lazy_deps import LAZY_DEPS
+
+    flattened = {
+        requirement
+        for value in LAZY_DEPS.values()
+        for requirement in ((value,) if isinstance(value, str) else value)
+    }
+    assert not any("tree-sitter" in requirement for requirement in flattened)
 
 
 def test_matrix_extra_not_in_all():

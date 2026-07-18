@@ -1066,16 +1066,14 @@ Framework adapters MUST follow this exact discovery and ordering table. A source
 
 Each fixture asserts entrypoint identity, source order, all short-circuit/error/async arms, stage assignment, evidence origin, and exact completeness reasons. Adapters MUST NOT shell out to framework applications or execute repository code. Version-specific behavior is selected from detected locked versions; an unknown version uses only version-independent facts and marks version-dependent lifecycle portions partial.
 
-The implementation adds this exact optional dependency group in `pyproject.toml`:
+The implementation adds these exact mandatory base dependencies in `pyproject.toml`:
 
 ```toml
-hades-indexer = [
-  "tree-sitter==0.26.0",
-  "tree-sitter-language-pack==1.12.5",
-]
+"tree-sitter==0.26.0",
+"tree-sitter-language-pack==1.12.5",
 ```
 
-The same pins are registered for lazy installation and locked in `uv.lock`. The language pack supplies the required PHP, Python, JavaScript, and TypeScript grammars. Installation is tested in a clean virtual environment. When a required grammar is absent, the result is partial, never silently full.
+They are not registered for lazy installation. Both pins are locked in `uv.lock`; the language pack supplies the required PHP, Python, JavaScript, and TypeScript grammars. Installation is tested in a clean virtual environment. A missing or incompatible required parser/grammar fails the graph-index canary and blocks publication; only a failure confined to an ordinary source file after successful canaries is partial.
 
 ### 7.5 Graphify
 
@@ -2478,11 +2476,14 @@ Modify:
 ```text
 pyproject.toml
 uv.lock
-tools/lazy_deps.py
 tests/test_project_metadata.py
 ```
 
-Add optional extra `hades-indexer` with exactly `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5`. Register the same pins in the lazy-dependency mechanism and add metadata tests that prevent drift. Lazy installation is allowed only at the explicit graph-index command boundary, before extraction starts; it must never occur in the middle of an ordinary cached agent conversation.
+Add exactly `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5` to the mandatory project dependencies. They are not an optional extra and are never lazy-installed. This adds about 2–3 MB of download and about 5–6 MB installed while avoiding role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary.
+
+Before indexing any supported source language, the graph producer runs a real in-memory parse canary for every detected supported language. A missing package, missing grammar, incompatible parser, or failed canary is an installation failure and blocks graph publication; it is never reported as a partial graph. After the canary passes, a parse failure confined to one ordinary source file produces a typed per-file partial coverage event and indexing continues. Tests assert the exact dependency pins, absence of a `hades-indexer` extra/lazy group, all supported canaries, global fail-fast behavior, and per-file partial behavior.
+
+The separately distributed Codex `hades-backend` plugin does not bundle Tree-sitter or reimplement indexing. It verifies the installed Hades CLI, invokes its graph index/sync commands, polls backend projection state, exposes lifecycle/verification workflows when the v2 API is deployed, and reports parser installation failures verbatim. This keeps one producer implementation and one parser version surface.
 
 ### 12.4 Jobs, sync, cache, clients, and provider
 

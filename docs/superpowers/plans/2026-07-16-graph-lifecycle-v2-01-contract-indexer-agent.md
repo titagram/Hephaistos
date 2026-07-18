@@ -806,45 +806,58 @@ git add hermes_cli/hades_graph_v2/pruning.py hermes_cli/hades_graph_v2/bundle.py
 git commit -m "feat(hades): bundle graph v2 without silent truncation"
 ```
 
-### Task 16: Pin Parser Dependencies at the Explicit Index Boundary
+### Task 16: Install and Validate the Required Parser at the Explicit Index Boundary
 
 **Files:**
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
-- Modify: `tools/lazy_deps.py`
+- Modify: `hermes_cli/hades_index/tree_sitter_adapter.py`
+- Modify: `hermes_cli/hades_index/resolution.py`
 - Modify: `tests/test_project_metadata.py`
+- Modify: `tests/hermes_cli/test_hades_index_enrichment.py`
+- Modify: `tests/hermes_cli/test_hades_lifecycle_control_flow.py`
 
 **Interfaces:**
-- Optional extra `hades-indexer = ["tree-sitter==0.26.0", "tree-sitter-language-pack==1.12.5"]`.
-- Lazy dependency group exposes those exact pins and is invoked only before an explicit graph-index command.
+- Mandatory base dependencies are exactly `tree-sitter==0.26.0` and `tree-sitter-language-pack==1.12.5`.
+- No `hades-indexer` extra or `tools.lazy_deps` group exists.
+- `TreeSitterAdapter.require_languages(languages)` performs a real in-memory parse canary for every detected supported language and raises `RequiredParserUnavailable` before graph construction on any failure.
+- Once canaries pass, an individual source-file parse failure remains a typed partial coverage event.
 
-- [ ] **Step 1: Add RED metadata/lazy-boundary tests**
+- [ ] **Step 1: Add RED metadata and parser-boundary tests**
 
 ```python
-def test_hades_indexer_dependency_pins_match_lazy_group(project_metadata):
+def test_tree_sitter_is_an_exact_mandatory_dependency(project_metadata):
     expected = {"tree-sitter==0.26.0", "tree-sitter-language-pack==1.12.5"}
-    assert set(project_metadata.optional_dependencies["hades-indexer"]) == expected
-    assert set(lazy_dependency_group("hades-indexer")) == expected
+    assert expected <= set(project_metadata.dependencies)
+    assert "hades-indexer" not in project_metadata.optional_dependencies
 
-def test_normal_chat_never_installs_hades_indexer(monkeypatch):
-    called = []
-    monkeypatch.setattr("tools.lazy_deps.ensure_group", called.append)
-    create_agent_for_cached_conversation()
-    assert called == []
+def test_missing_required_parser_blocks_graph_index(tmp_path):
+    adapter = TreeSitterAdapter(parser_loader=lambda _language: None)
+    with pytest.raises(RequiredParserUnavailable, match="typescript"):
+        adapter.require_languages(("typescript",))
+
+def test_one_bad_file_after_canary_is_partial(tmp_path):
+    adapter = TreeSitterAdapter(parser_loader=lambda _language: ParserWithSelectiveFailure())
+    adapter.require_languages(("typescript",))
+    result = adapter.parse_bytes(b"invalid", path="src/bad.ts", language="typescript")
+    assert result.failure.code == "parser_failed"
+    assert result.coverage_event.outcome is CoverageOutcome.PARTIAL
 ```
 
 - [ ] **Step 2: Run RED**
 
-Run: `.venv/bin/python -m pytest tests/test_project_metadata.py -k hades_indexer -q`
+Run: `.venv/bin/python -m pytest tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py -q`
 
-- [ ] **Step 3: Add pins, refresh lock, run GREEN, commit**
+- [ ] **Step 3: Add pins, one package loader, canaries, fail-fast boundary, refresh lock, run GREEN, commit**
+
+`_load_parser()` imports only `tree_sitter_language_pack`; remove compatibility probing of `tree_sitter_languages` and individual grammar packages so stale bindings cannot silently win. `require_languages()` uses fixed safe snippets for JavaScript, TypeScript, PHP, and Python and includes only language names in its exception. `enrich_graph_for_workspace()` computes detected supported languages first and calls the canary before it emits or merges graph facts. It does not provide a `tree_sitter=false` bypass.
 
 Run: `uv lock`
 
-Run: `.venv/bin/python -m pytest tests/test_project_metadata.py -k hades_indexer -q`
+Run: `.venv/bin/python -m pytest tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py -q`
 
 ```bash
-git add pyproject.toml uv.lock tools/lazy_deps.py tests/test_project_metadata.py
+git add pyproject.toml uv.lock hermes_cli/hades_index/tree_sitter_adapter.py hermes_cli/hades_index/resolution.py tests/test_project_metadata.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_lifecycle_control_flow.py
 git commit -m "build(hades): pin lifecycle parser dependencies"
 ```
 
