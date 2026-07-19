@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import copy
+from types import SimpleNamespace
+
 
 def test_hades_backend_memory_provider_piggybacks_sync_once_per_interval(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -273,3 +277,168 @@ def test_hades_backend_memory_provider_skips_sync_when_cached_binding_is_unlinke
 
     assert provider._binding is None
     assert calls == []
+
+
+def test_graph_v2_local_artifact_selection_requires_exact_active_identity():
+    import plugins.memory.hades_backend as provider_mod
+    from tests.hermes_cli.test_hades_graph_contract import _valid_flow_artifact
+
+    exact_graph = _valid_flow_artifact()
+    source_identity = exact_graph["source"]
+    active = {
+        "schema": "hades.code_graph.v2",
+        "project_id": exact_graph["project"]["project_id"],
+        "workspace_binding_id": exact_graph["project"]["workspace_binding_id"],
+        "source_identity": source_identity,
+        "artifact_graph_version": exact_graph["graph_contract"]["artifact_graph_version"],
+        "projection_version": "c" * 64,
+        "publication_status": "ready",
+    }
+
+    sources = [
+        {
+            "origin": "legacy",
+            "item": {
+                "id": "legacy",
+                "schema": "hades.code_graph.v1",
+                "payload": {"schema": "hades.code_graph.v1", "symbols": [], "edges": []},
+            },
+        },
+        {
+            "origin": "stale-v2",
+            "item": {
+                "id": "stale",
+                "schema": "hades.code_graph.v2",
+                "projection_version": "e" * 64,
+                "payload": copy.deepcopy(exact_graph),
+            },
+        },
+        {
+            "origin": "active-v2",
+            "item": {
+                "id": "active",
+                "schema": "hades.code_graph.v2",
+                "projection_version": "c" * 64,
+                "payload": copy.deepcopy(exact_graph),
+            },
+        },
+    ]
+
+    selected = provider_mod._local_graph_artifacts(
+        sources, active_graph_identity=active
+    )
+
+    assert provider_mod.GRAPH_ARTIFACT_SCHEMAS == {
+        "hades.code_graph.v2",
+        "hades.organism_graph.v1",
+    }
+    assert len(selected) == 1
+    assert selected[0]["artifact_id"] == "active"
+    assert selected[0]["artifact"]["graph_contract"]["artifact_graph_version"] == active[
+        "artifact_graph_version"
+    ]
+    assert provider_mod._local_graph_artifacts(sources) == []
+
+
+def test_graph_search_resolves_vector_candidate_with_exact_topology_query():
+    import plugins.memory.hades_backend as provider_mod
+
+    provider = object.__new__(provider_mod.HadesBackendMemoryProvider)
+    provider._binding = SimpleNamespace(
+        project_id="project-1",
+        backend_workspace_binding_id="binding-1",
+    )
+    traverse_calls = []
+    provider._backend_memory_search = lambda **_kwargs: (
+        {
+            "project_id": "project-1",
+            "workspace_binding_id": "binding-1",
+            "domain": "artifacts",
+            "items": [
+                {
+                    "id": "vector-hit",
+                    "kind": "vector_candidate",
+                    "summary": "Order handler candidate",
+                    "graph_handle": "hades:node:v2:order-handler",
+                    "score": 91,
+                }
+            ],
+        },
+        None,
+    )
+
+    def topology(**payload):
+        traverse_calls.append(payload)
+        return (
+            {
+                "project_id": "project-1",
+                "workspace_binding_id": "binding-1",
+                "schema": "hades.code_graph.v2",
+                "projection_version": "c" * 64,
+                "start": payload["start"],
+                "direction": payload["direction"],
+                "max_depth": payload["max_depth"],
+                "limit": payload["limit"],
+                "nodes": [
+                    {
+                        "id": "hades:node:v2:order-handler",
+                        "kind": "function",
+                        "label": "OrderHandler",
+                    }
+                ],
+                "edges": [],
+            },
+            None,
+        )
+
+    provider._backend_graph_traverse = topology
+
+    result = json.loads(provider._handle_graph_search({"query": "order", "limit": 5}))
+
+    assert result["topology_resolved"] is True
+    assert result["schema"] == "hades.code_graph.v2"
+    assert result["nodes"][0]["id"] == "hades:node:v2:order-handler"
+    assert result["vector_candidate_handles"] == ["hades:node:v2:order-handler"]
+    assert traverse_calls == [
+        {
+            "start": "hades:node:v2:order-handler",
+            "direction": "any",
+            "max_depth": 1,
+            "limit": 5,
+            "scope": "project",
+        }
+    ]
+
+
+def test_vector_candidate_without_graph_query_remains_hint_not_topology():
+    import plugins.memory.hades_backend as provider_mod
+
+    provider = object.__new__(provider_mod.HadesBackendMemoryProvider)
+    provider._binding = SimpleNamespace(
+        project_id="project-1",
+        backend_workspace_binding_id="binding-1",
+    )
+    provider._backend_memory_search = lambda **_kwargs: (
+        {
+            "domain": "artifacts",
+            "items": [
+                {
+                    "id": "vector-hit",
+                    "kind": "vector_candidate",
+                    "summary": "Unresolved order candidate",
+                    "graph_handle": "hades:node:v2:missing",
+                    "score": 80,
+                }
+            ],
+        },
+        None,
+    )
+    provider._backend_graph_traverse = lambda **_kwargs: (None, "graph query unavailable")
+
+    result = json.loads(provider._handle_graph_search({"query": "order", "limit": 5}))
+
+    assert result["topology_resolved"] is False
+    assert result["vector_candidate_handles"] == ["hades:node:v2:missing"]
+    assert result["backend_topology_error"] == "graph query unavailable"
+    assert "nodes" not in result
+    assert "edges" not in result

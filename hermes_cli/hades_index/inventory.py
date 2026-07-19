@@ -29,6 +29,38 @@ class SourceSnapshot:
     branch: str | None
     excluded_count: int
     partial_reasons: tuple[str, ...]
+    records: tuple[tuple[str, str], ...]
+
+
+def is_test_source_path(path: str) -> bool:
+    """Return whether a safe inventory path uses a conventional test layout."""
+
+    normalized = path.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    parts = normalized.split("/")
+    directories = {part.casefold() for part in parts[:-1]}
+    if directories & {"test", "tests", "__tests__", "spec", "specs"}:
+        return True
+    name = parts[-1].casefold()
+    stem = PurePosixPath(name).stem
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or name.endswith(
+            (
+                ".test.js",
+                ".test.jsx",
+                ".test.ts",
+                ".test.tsx",
+                ".spec.js",
+                ".spec.jsx",
+                ".spec.ts",
+                ".spec.tsx",
+                "test.php",
+            )
+        )
+    )
 
 
 # These are source-scope policy, not user-configurable defaults.  A user may
@@ -825,4 +857,5 @@ def build_source_snapshot(root: Path, *, user_excluded_paths: tuple[str, ...] = 
         branch=branch,
         excluded_count=excluded_count,
         partial_reasons=tuple(sorted(partial_reasons)),
+        records=current_records,
     )

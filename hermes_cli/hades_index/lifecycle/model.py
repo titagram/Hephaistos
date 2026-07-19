@@ -982,7 +982,7 @@ class EdgeFactIR:
     source_node_local_key: str
     target: EdgeTargetIR
     relation: Relation
-    flow: EdgeFlow
+    flow: EdgeFlow | None
     condition: ConditionIR | None
     branch_group_key: str | None
     call_site_key: str | None
@@ -997,7 +997,8 @@ class EdgeFactIR:
         if type(self.target) not in {LocalNodeTarget, BoundaryTarget}:
             _fail("invalid_discriminator", "edge target must be a closed target union")
         _require_enum(self.relation, Relation, field_name="edge.relation")
-        _require_enum(self.flow, EdgeFlow, field_name="edge.flow")
+        if self.flow is not None:
+            _require_enum(self.flow, EdgeFlow, field_name="edge.flow")
         if self.condition is not None and type(self.condition) is not ConditionIR:
             _fail("invalid_condition", "edge.condition must be ConditionIR or null")
         for field_name, value in (
@@ -1551,6 +1552,9 @@ class InventoryFile:
     file_sha256: str
     language: str | None
     parser_candidate: bool
+    byte_size: int | None = None
+    is_test: bool = False
+    is_generated: bool = False
 
     def __post_init__(self) -> None:
         _safe_path(self.path, field_name="inventory.path")
@@ -1564,6 +1568,111 @@ class InventoryFile:
                 )
         if type(self.parser_candidate) is not bool:
             _fail("invalid_scalar", "inventory.parser_candidate must be boolean")
+        if self.byte_size is not None:
+            _nonnegative(self.byte_size, field_name="inventory.byte_size")
+        if type(self.is_test) is not bool:
+            _fail("invalid_scalar", "inventory.is_test must be boolean")
+        if type(self.is_generated) is not bool:
+            _fail("invalid_scalar", "inventory.is_generated must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceNodeIR:
+    """A non-executable source declaration materialized as a canonical node."""
+
+    local_key: str
+    language: str
+    kind: NodeKind
+    name: str
+    qualified_name: str
+    namespace: str | None
+    locator: AstLocatorIR
+    evidence: IREvidence
+
+    def __post_init__(self) -> None:
+        _key(self.local_key, field_name="source_node.local_key")
+        language = _nfc(self.language, field_name="source_node.language", limit=32)
+        if not _IDENTIFIER_RE.fullmatch(language):
+            _fail("invalid_identifier", "source_node.language must be a lower identifier")
+        _require_enum(self.kind, NodeKind, field_name="source_node.kind")
+        if self.kind not in {
+            NodeKind.CLASS,
+            NodeKind.INTERFACE,
+            NodeKind.TRAIT,
+            NodeKind.ENUM,
+            NodeKind.TEST,
+        }:
+            _fail(
+                "invalid_source_node_kind",
+                "source nodes must be class/interface/trait/enum/test declarations",
+            )
+        _nfc(self.name, field_name="source_node.name", limit=256)
+        _nfc(
+            self.qualified_name,
+            field_name="source_node.qualified_name",
+            limit=512,
+        )
+        if self.namespace is not None:
+            _nfc(self.namespace, field_name="source_node.namespace", limit=512)
+        if type(self.locator) is not AstLocatorIR:
+            _fail("invalid_locator", "source nodes require exact AST locators")
+        _require_context_evidence(self.evidence, field_name="source_node.evidence")
+        if self.evidence.locator != self.locator:
+            _fail(
+                "invalid_evidence",
+                "source node evidence must reference the exact declaration locator",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DataNodeIR:
+    """A verified data resource emitted directly by a source adapter."""
+
+    local_key: str
+    language: str
+    kind: NodeKind
+    name: str
+    qualified_name: str | None
+    public_resource_name: str
+    locator: AstLocatorIR
+    evidence: IREvidence
+
+    def __post_init__(self) -> None:
+        _key(self.local_key, field_name="data_node.local_key")
+        language = _nfc(self.language, field_name="data_node.language", limit=32)
+        if not _IDENTIFIER_RE.fullmatch(language):
+            _fail("invalid_identifier", "data_node.language must be a lower identifier")
+        _require_enum(self.kind, NodeKind, field_name="data_node.kind")
+        if self.kind not in {
+            NodeKind.MODEL,
+            NodeKind.TABLE,
+            NodeKind.QUERY,
+            NodeKind.STORAGE,
+        }:
+            _fail(
+                "invalid_data_node_kind",
+                "data nodes must be model/table/query/storage resources",
+            )
+        _nfc(self.name, field_name="data_node.name", limit=256)
+        if self.qualified_name is not None:
+            _nfc(
+                self.qualified_name,
+                field_name="data_node.qualified_name",
+                limit=1024,
+            )
+        _nfc(
+            self.public_resource_name,
+            field_name="data_node.public_resource_name",
+            limit=1024,
+        )
+        if type(self.locator) is not AstLocatorIR:
+            _fail("invalid_locator", "data nodes require exact AST locators")
+        _require_context_evidence(self.evidence, field_name="data_node.evidence")
+        if self.evidence.locator != self.locator:
+            _fail(
+                "invalid_evidence",
+                "data node evidence must reference the exact resource locator",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1848,6 +1957,8 @@ class AdapterResult:
     unresolved_facts: tuple[UnresolvedFact, ...]
     coverage_events: tuple[CoverageEvent, ...]
     diagnostics: tuple[AdapterDiagnostic, ...]
+    source_nodes: tuple[SourceNodeIR, ...] = ()
+    data_nodes: tuple[DataNodeIR, ...] = ()
 
     def validate(self) -> None:
         """Validate a result as read-only facts; never repair or reorder adapter data."""
@@ -1863,6 +1974,8 @@ class AdapterResult:
             ("effects", self.effects, Effect),
             ("framework_segments", self.framework_segments, FrameworkPipelineSegment),
             ("unresolved_facts", self.unresolved_facts, UnresolvedFact),
+            ("source_nodes", self.source_nodes, SourceNodeIR),
+            ("data_nodes", self.data_nodes, DataNodeIR),
         )
         for name, records, record_type in local_families:
             _result_family(
@@ -1942,6 +2055,8 @@ class AdapterResult:
             **blocks,
             **terminals,
             **segments,
+            **indexes["source_nodes"],
+            **indexes["data_nodes"],
         }
         node_kinds: dict[str, NodeKind] = {
             **{
@@ -1952,6 +2067,14 @@ class AdapterResult:
             **{
                 key: _TERMINAL_NODE_KINDS[terminal.kind]
                 for key, terminal in terminals.items()
+            },
+            **{
+                key: source_node.kind
+                for key, source_node in indexes["source_nodes"].items()
+            },
+            **{
+                key: data_node.kind
+                for key, data_node in indexes["data_nodes"].items()
             },
         }
 
@@ -2175,17 +2298,23 @@ class AdapterResult:
                             "branch successor must resolve to one exact branch arm",
                         )
                 if type(successor) is ExceptionSuccessor:
-                    structure = need(
-                        structures,
+                    scope = need(
+                        scopes,
                         successor.exception_scope_key,
-                        "exception successor structure",
+                        "exception successor scope",
+                    )
+                    structure = need(
+                        structures, scope.structure_key, "exception successor structure"
                     )
                     if structure.kind is not StructureKind.EXCEPTION_SCOPE:
                         _fail(
                             "invalid_structure",
                             "exception successor must reference exception_scope structure",
                         )
-                    if structure.owner_declaration_key != block.declaration_key:
+                    if (
+                        scope.declaration_key != block.declaration_key
+                        or structure.owner_declaration_key != block.declaration_key
+                    ):
                         _fail(
                             "cross_declaration_control_flow",
                             "exception successor scope must belong to the same declaration",
@@ -2426,9 +2555,14 @@ class AdapterResult:
                                 "framework branch successor must resolve to one exact branch arm",
                             )
                     if type(successor) is ExceptionSuccessor:
+                        scope = need(
+                            scopes,
+                            successor.exception_scope_key,
+                            "framework exception scope",
+                        )
                         structure = need(
                             structures,
-                            successor.exception_scope_key,
+                            scope.structure_key,
                             "framework exception scope structure",
                         )
                         if structure.kind is not StructureKind.EXCEPTION_SCOPE:
@@ -2758,6 +2892,7 @@ __all__ = [
     "CoverageCapability",
     "CoverageEvent",
     "CoverageOutcome",
+    "DataNodeIR",
     "DeclarationIdentityKind",
     "DiagnosticLevel",
     "EdgeFactIR",
@@ -2798,6 +2933,7 @@ __all__ = [
     "ResolutionKind",
     "ReturnSuccessor",
     "SourceLocationIR",
+    "SourceNodeIR",
     "StructureIR",
     "StructureKind",
     "StructureSubtype",

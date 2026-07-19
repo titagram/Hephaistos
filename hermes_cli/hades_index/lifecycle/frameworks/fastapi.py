@@ -60,7 +60,11 @@ from hermes_cli.hades_index.lifecycle.model import (
     TerminalKind,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import StructuralSymbol, SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import (
+    StructuralSymbol,
+    SyntaxIR,
+    declaration_local_key,
+)
 
 
 _PYPROJECT_FILES = ("pyproject.toml", "requirements.txt", "requirements/base.txt")
@@ -2896,14 +2900,7 @@ def _function_key_index(syntax: Sequence[SyntaxIR]) -> Mapping[tuple[str, str], 
         for ordinal, symbol in enumerate(item.symbols):
             if symbol.kind != "function" or symbol.container:
                 continue
-            key = local_record_key(
-                "python",
-                item.path,
-                "executable_declaration",
-                "ast",
-                f"symbol/{symbol.name}",
-                ordinal,
-            )
+            key = declaration_local_key("python", item.path, symbol, ordinal)
             values.setdefault((module, symbol.name), []).append(key)
     return MappingProxyType({
         item: keys[0] for item, keys in values.items() if len(keys) == 1

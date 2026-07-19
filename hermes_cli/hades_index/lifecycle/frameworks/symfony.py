@@ -57,7 +57,11 @@ from hermes_cli.hades_index.lifecycle.model import (
     SourceLocationIR,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import StructuralSymbol, SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import (
+    StructuralSymbol,
+    SyntaxIR,
+    declaration_local_key,
+)
 
 
 _COMPOSER_FILES = ("composer.lock", "composer.json")
@@ -1757,9 +1761,7 @@ def _handler_keys(
             namespace_match.group("name") if namespace_match is not None else None
         )
         for index, symbol in enumerate(item.symbols):
-            key = local_record_key(
-                "php", item.path, "executable_declaration", "ast", f"symbols/{index}", 0
-            )
+            key = declaration_local_key("php", item.path, symbol, index)
             normalized_name = symbol.name.replace("::", ".")
             names = {normalized_name}
             if symbol.container:

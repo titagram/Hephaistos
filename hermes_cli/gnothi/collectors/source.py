@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from hermes_cli.gnothi.collectors.base import (
 from hermes_cli.gnothi.contract import stable_id
 from hermes_cli.gnothi.redaction import redact_value, safe_exception_class
 from hermes_cli.hades_backend_jobs import execute_job
+from hermes_cli import hades_backend_db as backend_db
 
 MAX_FILES = 10_000
 MAX_BYTES = 2_000_000
@@ -27,6 +29,14 @@ _SOURCE_SUFFIXES = frozenset(
     }
 )
 _IGNORED_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "dist", "build"})
+
+
+class GraphBindingUnavailable(RuntimeError):
+    """The local organism has no real backend graph identity."""
+
+
+class GraphCoveragePartial(RuntimeError):
+    """The canonical v2 graph truthfully reports partial coverage."""
 
 
 def _source_path(path: str | Path) -> bool:
@@ -52,6 +62,61 @@ def _probe_source(context: CollectorContext) -> str:
             if len(rows) >= MAX_FILES:
                 return fingerprint_payload({"head": context.head_commit, "files": rows})
     return fingerprint_payload({"head": context.head_commit, "files": rows})
+
+
+def _binding_for_workspace(root: Path) -> backend_db.WorkspaceBinding | None:
+    resolved = root.resolve()
+    with backend_db.connect_closing() as conn:
+        agent = backend_db.get_default_agent(conn)
+        if agent is None:
+            return None
+        candidates = [
+            binding
+            for binding in backend_db.list_workspace_bindings(conn, status="linked")
+            if binding.agent_id == agent.agent_id
+            and binding.project_id == agent.project_id
+            and Path(binding.repo_root).resolve() == resolved
+        ]
+    return min(candidates, key=lambda item: item.backend_workspace_binding_id) if candidates else None
+
+
+def _load_graph_v2_spool(
+    binding: backend_db.WorkspaceBinding, artifact: dict[str, Any]
+) -> dict[str, Any]:
+    from hermes_constants import get_hermes_home
+    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS, GraphBundleWriter
+
+    if artifact.get("schema") != "hades.code_graph.v2":
+        raise TypeError("source collector accepts only a graph v2 descriptor")
+    version = str(artifact.get("artifact_graph_version") or "")
+    manifest = artifact.get("bundle")
+    spool = (
+        get_hermes_home()
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / binding.project_id
+        / binding.backend_workspace_binding_id
+        / version
+    )
+    state = GraphBundleWriter().resume_state(spool)
+    if state.manifest != manifest or state.artifact_graph_version != version:
+        raise ValueError("source collector graph spool identity mismatch")
+    graph = {
+        "schema": "hades.code_graph.v2",
+        **{
+            key: state.manifest[key]
+            for key in (
+                "generated_at", "project", "source", "graph_contract",
+                "frameworks", "languages",
+            )
+        },
+        **{kind: [] for kind in CHUNK_KINDS},
+    }
+    for path in state.chunk_paths:
+        chunk = json.loads(gzip.decompress(path.read_bytes()))
+        graph[str(chunk["kind"])].extend(chunk["records"])
+    return graph
 
 
 def _fingerprint(
@@ -176,6 +241,7 @@ class SourceCollector:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
         evidence: list[dict[str, Any]] = []
+        tree_partial = False
 
         try:
             tree_result = execute_job(
@@ -195,6 +261,7 @@ class SourceCollector:
             if not isinstance(tree, dict):
                 raise TypeError("sync_git_tree returned no artifact")
             self._adapt_tree(context, tree, nodes, edges, evidence)
+            tree_partial = bool(tree.get("truncated") or tree.get("omitted"))
         except Exception as exc:
             return _result(
                 context=context,
@@ -206,6 +273,9 @@ class SourceCollector:
             )
 
         try:
+            binding = _binding_for_workspace(context.workspace_root)
+            if binding is None:
+                raise GraphBindingUnavailable("workspace is not linked to a backend graph identity")
             graph_result = execute_job(
                 {
                     "capability": "populate_backend_ast",
@@ -214,16 +284,25 @@ class SourceCollector:
                         "max_symbols": MAX_SYMBOLS,
                         "max_edges": MAX_EDGES,
                         "head_commit": context.head_commit,
+                        "project_id": binding.project_id,
+                        "workspace_binding_id": binding.backend_workspace_binding_id,
                     },
                 },
                 workspace_root=context.workspace_root,
             )
             if graph_result.get("status") != "completed":
                 raise RuntimeError("populate_backend_ast did not complete")
-            graph = graph_result.get("artifact")
-            if not isinstance(graph, dict):
+            descriptor = graph_result.get("artifact")
+            if not isinstance(descriptor, dict):
                 raise TypeError("populate_backend_ast returned no artifact")
+            graph = _load_graph_v2_spool(binding, descriptor)
             self._adapt_graph(context, graph, nodes, edges, evidence)
+            contract = graph.get("graph_contract")
+            completeness = contract.get("completeness") if isinstance(contract, dict) else None
+            if not isinstance(completeness, dict) or completeness.get("status") != "full":
+                raise GraphCoveragePartial("graph v2 coverage is partial")
+            if tree_partial:
+                raise GraphCoveragePartial("source tree coverage is partial")
         except Exception as exc:
             return _result(
                 context=context,
@@ -340,9 +419,11 @@ class SourceCollector:
         }
         workspace_evidence = workspace_node["evidence_refs"]
         schema = str(graph.get("schema") or "hades.code_graph.v1")
+        if schema != "hades.code_graph.v2":
+            raise TypeError("source collector accepts only hades.code_graph.v2")
         graph_rows = graph.get("nodes")
         if not isinstance(graph_rows, list):
-            graph_rows = graph.get("symbols", [])
+            raise TypeError("graph v2 nodes are missing")
 
         endpoint_ids: dict[str, str] = {}
         name_ids: dict[str, list[str]] = {}
@@ -353,7 +434,8 @@ class SourceCollector:
             name = str(row.get("label") or row.get("name") or canonical_id)
             source_kind = str(row.get("kind") or row.get("type") or "symbol")
             properties = row.get("properties") if isinstance(row.get("properties"), dict) else {}
-            path = str(row.get("path") or properties.get("path") or "")
+            location = row.get("location") if isinstance(row.get("location"), dict) else {}
+            path = str(location.get("path") or "")
             if not name or (path and not _source_path(path)):
                 continue
             identity = {
@@ -373,7 +455,7 @@ class SourceCollector:
                     "source_schema": schema,
                     "source_kind": source_kind,
                     "path": path or None,
-                    "line": row.get("line") or properties.get("line"),
+                    "line": location.get("start_line"),
                 },
                 workspace_root=context.workspace_root,
             )
@@ -401,7 +483,9 @@ class SourceCollector:
 
         relationship_rows = graph.get("relationships")
         if not isinstance(relationship_rows, list):
-            relationship_rows = graph.get("edges", [])
+            relationship_rows = graph.get("edges")
+        if not isinstance(relationship_rows, list):
+            raise TypeError("graph v2 edges are missing")
         for row in relationship_rows:
             if not isinstance(row, dict):
                 continue
@@ -415,7 +499,7 @@ class SourceCollector:
                 target_id = name_ids[raw_target][0]
             if not source_id or not target_id:
                 continue
-            kind = str(row.get("kind") or row.get("type") or "relates_to")
+            kind = str(row.get("relation") or row.get("kind") or "relates_to")
             refs = sorted(
                 {
                     *next(node for node in nodes if node["id"] == source_id)["evidence_refs"],

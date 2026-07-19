@@ -1,10 +1,82 @@
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import subprocess
 
 import pytest
+
+
+GRAPH_V2_PROJECT_ID = "01KXJD0SV73EBGWKNE2EK3M4KD"
+GRAPH_V2_BINDING_ID = "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+
+
+@pytest.fixture(autouse=True)
+def _supply_legacy_graph_jobs_with_backend_identity(
+    monkeypatch, request, tmp_path_factory, _hermetic_environment
+):
+    """Run pre-cutover graph fixtures under a schema-valid backend binding."""
+
+    del _hermetic_environment
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.mktemp("graph-v2-home")))
+    monkeypatch.delenv("HADES_HOME", raising=False)
+    if request.node.name == "test_graph_v2_rejects_missing_backend_binding_identity":
+        return
+    import hermes_cli.hades_backend_jobs as jobs
+    original = jobs._execute_populate_backend_ast
+
+    def execute_with_binding(job, workspace_root):
+        copied = {**job, "payload": dict(job.get("payload") or {})}
+        copied["payload"].setdefault("project_id", GRAPH_V2_PROJECT_ID)
+        copied["payload"].setdefault("workspace_binding_id", GRAPH_V2_BINDING_ID)
+        return original(copied, workspace_root)
+
+    monkeypatch.setattr(jobs, "_execute_populate_backend_ast", execute_with_binding)
+
+
+def _materialize_graph_v2(result: dict) -> dict:
+    """Reconstruct and validate the canonical artifact behind a job descriptor."""
+
+    from hermes_constants import get_hermes_home
+    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS, GraphBundleWriter
+    from hermes_cli.hades_graph_v2.model import artifact_from_payload
+    from hermes_cli.hades_graph_v2.validation import validate_artifact
+
+    descriptor = result["artifact"]
+    manifest = descriptor["bundle"]
+    project = manifest["project"]
+    spool = (
+        get_hermes_home()
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / project["project_id"]
+        / project["workspace_binding_id"]
+        / descriptor["artifact_graph_version"]
+    )
+    state = GraphBundleWriter().resume_state(spool)
+    artifact = {
+        "schema": "hades.code_graph.v2",
+        **{
+            key: manifest[key]
+            for key in (
+                "generated_at",
+                "project",
+                "source",
+                "graph_contract",
+                "frameworks",
+                "languages",
+            )
+        },
+        **{kind: [] for kind in CHUNK_KINDS},
+    }
+    for path in state.chunk_paths:
+        chunk = json.loads(gzip.decompress(path.read_bytes()))
+        artifact[chunk["kind"]].extend(chunk["records"])
+    model = artifact_from_payload(artifact)
+    validate_artifact(model)
+    return artifact
 
 
 def _extract_wiki_agent_context(content_markdown: str) -> dict:
@@ -21,6 +93,57 @@ def _symlink_or_skip(link, target, *, target_is_directory=False):
         link.symlink_to(target, target_is_directory=target_is_directory)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+
+def test_source_node_ir_rejects_noncanonical_key_and_mismatched_evidence():
+    from hermes_cli.hades_graph_v2.model import EvidenceOrigin, NodeKind
+    from hermes_cli.hades_index.lifecycle.model import (
+        AstLocatorIR,
+        IREvidence,
+        IRValidationError,
+        SourceLocationIR,
+        SourceNodeIR,
+    )
+
+    locator = AstLocatorIR(
+        SourceLocationIR("src/app.py", 1, 2, "a" * 64),
+        "root/class_definition[0]",
+        0,
+    )
+    other = AstLocatorIR(
+        SourceLocationIR("src/app.py", 3, 4, "a" * 64),
+        "root/class_definition[1]",
+        0,
+    )
+    evidence = IREvidence(
+        EvidenceOrigin.VERIFIED_FROM_CODE,
+        "tree-sitter.lifecycle-v2",
+        locator,
+        None,
+    )
+
+    with pytest.raises(IRValidationError, match="source_node.local_key"):
+        SourceNodeIR(
+            "not-a-digest",
+            "python",
+            NodeKind.CLASS,
+            "Example",
+            "Example",
+            None,
+            locator,
+            evidence,
+        )
+    with pytest.raises(IRValidationError, match="exact declaration locator"):
+        SourceNodeIR(
+            "b" * 64,
+            "python",
+            NodeKind.CLASS,
+            "Example",
+            "Example",
+            None,
+            other,
+            evidence,
+        )
 
 
 def test_php_validation_database_rule_refs_keep_only_sanitized_identifiers():
@@ -167,31 +290,67 @@ def test_sync_git_tree_returns_bounded_manifest(tmp_path):
     assert all(not path.startswith(".git") for path in paths)
 
 
-def test_populate_backend_ast_rejects_source_change_during_extraction(tmp_path, monkeypatch):
-    """The job boundary must not publish a graph from a moving workspace."""
+def test_graph_v2_source_change_preserves_preexisting_resumable_spool(
+    tmp_path, monkeypatch
+):
+    """A failed staging attempt must never delete an already resumable bundle."""
     from hermes_cli.hades_graph_config import SourceIdentityError
-    import hermes_cli.hades_index as hades_index
+    import hermes_cli.hades_graph_config as graph_config
     from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
 
-    source = tmp_path / "src" / "app.py"
+    workspace = tmp_path / "workspace"
+    source = workspace / "src" / "app.py"
     source.parent.mkdir(parents=True)
-    source.write_text("before\n", encoding="utf-8")
+    source.write_text("def before():\n    return 1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    payload = {
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+    }
+    first = execute_job(
+        {"job_id": "job_first", "capability": "populate_backend_ast", "payload": payload},
+        workspace_root=workspace,
+    )
+    version = first["artifact"]["artifact_graph_version"]
+    spool = (
+        home
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / payload["project_id"]
+        / payload["workspace_binding_id"]
+        / version
+    )
+    before = {
+        path.name: path.read_bytes()
+        for path in spool.iterdir()
+        if path.name != ".lock"
+    }
+    GraphBundleWriter().resume_state(spool)
 
-    def mutating_builder(workspace_root, candidates, omitted, payload):
-        source.write_text("after\n", encoding="utf-8")
-        return {"summary": "synthetic graph", "symbols": []}
+    original_verify = graph_config.verify_source_unchanged
 
-    monkeypatch.setattr(hades_index, "build_graph_for_workspace", mutating_builder)
+    def mutate_then_verify(root, config, source_before):
+        source.write_text("def after():\n    return 2\n", encoding="utf-8")
+        return original_verify(root, config, source_before)
+
+    monkeypatch.setattr(graph_config, "verify_source_unchanged", mutate_then_verify)
 
     with pytest.raises(SourceIdentityError, match="source_changed_during_index"):
         execute_job(
-            {
-                "job_id": "job_source_change",
-                "capability": "populate_backend_ast",
-                "payload": {"max_files": 10},
-            },
-            workspace_root=tmp_path,
+            {"job_id": "job_changed", "capability": "populate_backend_ast", "payload": payload},
+            workspace_root=workspace,
         )
+
+    assert {
+        path.name: path.read_bytes()
+        for path in spool.iterdir()
+        if path.name != ".lock"
+    } == before
+    GraphBundleWriter().resume_state(spool)
+    assert not any(".staging-" in path.name for path in spool.parent.iterdir())
 
 
 def test_sync_git_tree_includes_dirty_worktree_metadata_without_sensitive_paths(tmp_path):
@@ -302,16 +461,17 @@ def test_populate_backend_ast_includes_source_slice_candidates_for_laravel(tmp_p
         workspace_root=tmp_path,
     )
 
-    artifact = result["artifact"]
+    descriptor = result["artifact"]
+    artifact = _materialize_graph_v2(result)
     assert result["status"] == "completed"
-    assert artifact["schema"] == "hades.php_graph.v1"
-    assert artifact["graph_contract"]["version"] == "hades.graph_artifact.v1"
-    assert artifact["graph_contract"]["extractor"]["name"] == "hades-native-php"
-    assert artifact["graph_contract"]["source"]["head_commit"] == "abc123"
-    assert artifact["source_slice_candidates"]
-    assert {item["reason"] for item in artifact["source_slice_candidates"]} >= {"laravel_controller", "eloquent_model"}
-    assert "source_slice_candidates:" in result["summary"]
-    assert "return Booking::create" not in str(artifact["source_slice_candidates"])
+    assert descriptor["schema"] == "hades.code_graph.v2"
+    assert artifact["schema"] == "hades.code_graph.v2"
+    assert artifact["graph_contract"]["version"] == "hades.graph_artifact.v2"
+    assert artifact["source"] == descriptor["source_identity"]
+    assert result["source_slice_candidates"]
+    assert {item["reason"] for item in result["source_slice_candidates"]} >= {"domain_data_integration"}
+    assert "Built graph lifecycle v2 bundle" in result["summary"]
+    assert "return Booking::create" not in str(result["source_slice_candidates"])
 
 
 def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
@@ -344,26 +504,55 @@ def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
         workspace_root=tmp_path,
     )
 
-    artifact = result["artifact"]
+    descriptor = result["artifact"]
+    artifact = _materialize_graph_v2(result)
     assert result["status"] == "completed"
-    assert artifact["language"] == "polyglot"
-    assert artifact["graph_contract"]["coverage"]["languages"] == [
-        "php",
-        "typescript",
-    ]
-    assert {item.get("name") for item in artifact["symbols"]} >= {
-        "App\\PhpController",
+    assert descriptor["schema"] == "hades.code_graph.v2"
+    assert {item["name"] for item in artifact["languages"]} == {"php", "typescript"}
+    assert {item.get("name") for item in artifact["nodes"]} >= {
+        "PhpController",
         "healthHandler",
     }
-    assert any(
-        route.get("framework") == "express"
-        and route.get("method") == "GET"
-        and route.get("path") == "/health"
-        for route in artifact["routes"]
+    # Express is not a registered v2 lifecycle adapter.  Preserve the
+    # polyglot syntax inventory without manufacturing an HTTP entrypoint.
+    assert not any(
+        entrypoint.get("public_path") == "/health"
+        for entrypoint in artifact["entrypoints"]
     )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Task 12/18 owns the pending Express lifecycle adapter",
+)
+def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    route = tmp_path / "server" / "api.ts"
+    route.parent.mkdir(parents=True)
+    route.write_text(
+        "import express from 'express';\n"
+        "const router = express.Router();\n"
+        "router.get('/health', healthHandler);\n"
+        "export function healthHandler() { return { ok: true }; }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_express_route",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = _materialize_graph_v2(result)
     assert any(
-        node.get("kind") == "route" and node.get("uri") == "/health"
-        for node in artifact["nodes"]
+        entrypoint.get("framework") == "express"
+        and entrypoint.get("methods") == ["GET"]
+        and entrypoint.get("public_path") == "/health"
+        for entrypoint in artifact["entrypoints"]
     )
 
 
@@ -392,14 +581,19 @@ def test_populate_backend_ast_polyglot_coverage_deduplicates_adapter_failures(
         workspace_root=workspace,
     )
 
-    artifact = result["artifact"]
-    coverage = artifact["graph_contract"]["coverage"]
-    assert artifact["omitted"] == [
-        {"path": "src/oversized.ts", "reason": "file_too_large"}
-    ]
-    assert coverage["files_total"] == 2
-    assert coverage["files_analyzed"] == 1
-    assert coverage["files_failed"] == 1
+    artifact = _materialize_graph_v2(result)
+    coverage = artifact["graph_contract"]["coverage"]["files"]
+    assert coverage["discovered"] == 2
+    assert coverage["analyzed"] == 1
+    assert coverage["too_large"] == 0
+    assert coverage["failed"] == 1
+    assert any(
+        node.get("kind") == "file"
+        and node.get("qualified_name") == "src/oversized.ts"
+        and node["properties"]["analysis_status"] == "failed"
+        and node["properties"]["omission_reason"] == "parser_failed"
+        for node in artifact["nodes"]
+    )
 
 
 def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path):
@@ -422,13 +616,11 @@ def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path)
         workspace_root=tmp_path,
     )
 
-    artifact = result["artifact"]
-    assert "Class1000" in {item.get("name") for item in artifact["symbols"]}
-    assert artifact["graph_contract"]["coverage"]["files_analyzed"] == 1_001
-    assert not any(
-        item.get("reason") == "file_budget_exceeded"
-        for item in artifact.get("omitted", [])
-    )
+    artifact = _materialize_graph_v2(result)
+    coverage = artifact["graph_contract"]["coverage"]["files"]
+    assert "Class1000" in {item.get("name") for item in artifact["nodes"]}
+    assert coverage["analyzed"] == 1_001
+    assert coverage["budget_omitted"] == 0
 
 
 def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
@@ -4048,36 +4240,19 @@ def test_populate_backend_ast_extracts_sql_schema_graph_without_source(tmp_path)
         workspace_root=tmp_path,
     )
 
-    artifact = result["artifact"]
-    tables = {item["table"]: item for item in artifact["database"]["tables"]}
-    edges = {(item["kind"], item["from"], item["to"]) for item in artifact["edges"]}
-
+    descriptor = result["artifact"]
+    artifact = _materialize_graph_v2(result)
+    tables = {
+        item["name"]: item
+        for item in artifact["nodes"]
+        if item.get("kind") == "table"
+    }
     assert result["status"] == "completed"
-    assert artifact["schema"] == "hades.code_graph.v1"
-    assert artifact["language"] == "sql"
-    assert artifact["framework"] == "sql"
+    assert descriptor["schema"] == "hades.code_graph.v2"
+    assert {item["name"] for item in artifact["languages"]} == {"sql"}
     assert set(tables) == {"customers", "orders"}
-    assert {column["name"] for column in tables["orders"]["columns"]} >= {"id", "customer_id", "total"}
-    assert tables["orders"]["foreign_keys"] == [
-        {
-            "table": "orders",
-            "column": "customer_id",
-            "references_table": "customers",
-            "references_column": "id",
-            "path": "schema.sql",
-            "line": 7,
-        },
-        {
-            "table": "orders",
-            "column": "customer_id",
-            "references_table": "customers",
-            "references_column": "id",
-            "path": "schema.sql",
-            "line": 9,
-        },
-    ]
-    assert ("schema_table", "schema.sql", "table:orders") in edges
-    assert ("foreign_key", "table:orders.customer_id", "table:customers") in edges
+    assert artifact["entrypoints"] == []
+    assert tables["orders"]["location"]["path"] == "schema.sql"
     assert "CREATE TABLE" not in str(artifact)
     assert "CONSTRAINT orders_customer_fk" not in str(artifact)
 
@@ -4143,3 +4318,214 @@ def test_populate_backend_ast_omits_per_file_read_errors(monkeypatch, tmp_path):
     assert "Good" in names
     assert "Bad" not in names
     assert omitted["bad.py"] == "read_error:13"
+
+
+def test_populate_backend_ast_graph_v2_builds_private_bundle_before_upload(
+    monkeypatch, tmp_path
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "hermes-home"
+    workspace.mkdir()
+    (workspace / "requirements.txt").write_text(
+        "fastapi==0.115.0\nstarlette==0.37.2\n", encoding="utf-8"
+    )
+    (workspace / "api.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "def helper():\n    return 1\n\n"
+        "@app.get('/items/{item_id}')\n"
+        "def item(item_id: int):\n"
+        "    if item_id:\n        return helper()\n"
+        "    return 0\n\n"
+        "class AdminControllerBulkDeleteBehavior:\n"
+        "    def bulk_delete(self):\n"
+        "        return helper()\n",
+        encoding="utf-8",
+    )
+    (workspace / "sample.php").write_text(
+        "<?php\n"
+        "function php_helper() { return 1; }\n"
+        "function php_route($value) {\n"
+        "  if ($value) { return php_helper(); }\n"
+        "  return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (workspace / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "14.2.0"}}), encoding="utf-8"
+    )
+    route = workspace / "app" / "api" / "status" / "route.ts"
+    route.parent.mkdir(parents=True)
+    route.write_text(
+        "function helper() { return Response.json({ ok: true }) }\n"
+        "export async function GET() { return helper() }\n"
+        "export const POST = async () => GET()\n",
+        encoding="utf-8",
+    )
+    test_source = workspace / "tests" / "test_api.py"
+    test_source.parent.mkdir(parents=True)
+    test_source.write_text(
+        "def test_item_route():\n    assert True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HADES_HOME", raising=False)
+    parsed_paths = []
+    real_parse_file = TreeSitterAdapter.parse_file
+
+    def tracked_parse_file(self, path, *, relative_path, language, max_bytes):
+        parsed_paths.append(relative_path)
+        return real_parse_file(
+            self,
+            path,
+            relative_path=relative_path,
+            language=language,
+            max_bytes=max_bytes,
+        )
+
+    monkeypatch.setattr(TreeSitterAdapter, "parse_file", tracked_parse_file)
+
+    result = execute_job(
+        {
+            "job_id": "job_graph_v2",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+                "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+            },
+        },
+        workspace_root=workspace,
+    )
+
+    artifact = result["artifact"]
+    spool = home / "cache" / "hades" / "graph-imports" / (
+        "01KXJD0SV73EBGWKNE2EK3M4KD/01KXJD1BDMQ2TFABMVJV6EFE8Q/"
+        + artifact["artifact_graph_version"]
+    )
+    resumed = GraphBundleWriter().resume_state(spool)
+
+    assert result["status"] == "completed"
+    assert set(parsed_paths) == {
+        "api.py",
+        "sample.php",
+        "app/api/status/route.ts",
+        "tests/test_api.py",
+    }
+    assert not {"requirements.txt", "package.json"} & set(parsed_paths)
+    assert result["source_slice_candidates"]
+    assert result["source_slice_candidates"][0]["reason"] == "entrypoint_root"
+    assert any(
+        candidate["path"] == "tests/test_api.py" and candidate["reason"] == "test"
+        for candidate in result["source_slice_candidates"]
+    )
+    assert artifact["schema"] == "hades.code_graph.v2"
+    assert artifact["bundle"]["schema"] == "hades.graph_bundle.v2"
+    assert artifact["bundle"] == resumed.manifest
+    assert "spool_path" not in artifact
+    assert artifact["source_identity"] == artifact["bundle"]["source"]
+    families = {}
+    for path in resumed.chunk_paths:
+        chunk = json.loads(gzip.decompress(path.read_bytes()))
+        families.setdefault(chunk["kind"], []).extend(chunk["records"])
+    nodes = families["nodes"]
+    edges = families["edges"]
+    entrypoints = families["entrypoints"]
+    assert {node.get("language") for node in nodes} >= {
+        "php",
+        "python",
+        "typescript",
+    }
+    assert sum(node.get("kind") in {"function", "method"} for node in nodes) >= 7
+    assert any(item.get("public_path") == "/api/status" for item in entrypoints)
+    assert any(item.get("public_path") == "/items/{item_id}" for item in entrypoints)
+    assert any(edge.get("relation") == "invokes" for edge in edges)
+    admin = next(
+        node
+        for node in nodes
+        if node.get("kind") == "class"
+        and node.get("name") == "AdminControllerBulkDeleteBehavior"
+    )
+    bulk_delete = next(
+        node
+        for node in nodes
+        if node.get("kind") == "method"
+        and node.get("name") == "bulk_delete"
+    )
+    assert any(
+        edge.get("relation") == "contains"
+        and edge.get("source_id") == admin["id"]
+        and edge.get("target_id") == bulk_delete["id"]
+        for edge in edges
+    )
+    assert any(
+        node.get("kind") == "test"
+        and node.get("location", {}).get("path") == "tests/test_api.py"
+        for node in nodes
+    )
+    assert any(
+        edge.get("relation") in {"passes_through", "routes_to"} for edge in edges
+    )
+    assert families["flows"]
+    assert families["flow_steps"]
+    assert resumed.missing_chunk_indexes == tuple(
+        range(len(artifact["bundle"]["chunks"]))
+    )
+    assert not any(key in artifact for key in ("symbols", "routes", "database"))
+
+
+def test_graph_v2_bounds_metadata_reads_and_reports_typed_partial(monkeypatch, tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    (home / "config.yaml").write_text(
+        "hades:\n  graph_index:\n    max_file_bytes: 1024\n",
+        encoding="utf-8",
+    )
+    (workspace / "package.json").write_text(
+        json.dumps({
+            "dependencies": {"next": "14.2.0"},
+            "padding": "x" * 4096,
+        }),
+        encoding="utf-8",
+    )
+    route = workspace / "app" / "api" / "status" / "route.ts"
+    route.parent.mkdir(parents=True)
+    route.write_text(
+        "export async function GET() { return Response.json({ ok: true }) }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    result = execute_job(
+        {
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+                "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+            },
+        },
+        workspace_root=workspace,
+    )
+
+    assert result["status"] == "completed"
+    assert "file_too_large" in json.dumps(result["artifact"]["bundle"])
+    assert result["artifact"]["bundle"]["frameworks"] == []
+
+
+def test_graph_v2_rejects_missing_backend_binding_identity(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires project_id and workspace_binding_id"):
+        execute_job(
+            {"capability": "populate_backend_ast", "payload": {}},
+            workspace_root=tmp_path,
+        )

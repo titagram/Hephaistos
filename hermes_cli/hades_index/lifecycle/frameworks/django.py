@@ -53,7 +53,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     TerminalKind,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR, declaration_local_key
 
 
 _PYPROJECT_FILES = ("pyproject.toml", "requirements.txt", "requirements/base.txt")
@@ -887,14 +887,7 @@ def _syntax_index(syntax: Sequence[SyntaxIR]) -> _SyntaxIndex:
         if module is None:
             continue
         for ordinal, symbol in enumerate(item.symbols):
-            key = local_record_key(
-                "python",
-                item.path,
-                "executable_declaration",
-                "ast",
-                f"symbol/{symbol.name}",
-                ordinal,
-            )
+            key = declaration_local_key("python", item.path, symbol, ordinal)
             if symbol.kind == "class" and not symbol.container:
                 classes.setdefault((module, symbol.name), []).append(key)
             elif symbol.kind == "function" and symbol.container:

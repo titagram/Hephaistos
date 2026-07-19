@@ -46,7 +46,11 @@ from hermes_cli.hades_index.lifecycle.model import (
     Terminal,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import StructuralSymbol, SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import (
+    StructuralSymbol,
+    SyntaxIR,
+    declaration_local_key,
+)
 
 if TYPE_CHECKING:
     from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
@@ -272,13 +276,8 @@ def _generic_candidate(
         structural_path,
         0,
     )
-    handler_key = local_record_key(
-        syntax.language,
-        syntax.path,
-        "executable_declaration",
-        "ast",
-        f"symbols/{ordinal}",
-        0,
+    handler_key = declaration_local_key(
+        syntax.language, syntax.path, symbol, ordinal
     )
     return EntrypointCandidate(
         kind=kind,

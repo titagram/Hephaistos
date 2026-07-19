@@ -58,11 +58,11 @@ def test_source_collector_emits_source_anatomy_without_absolute_paths(tmp_path: 
 
     result = SourceCollector().collect(_context(workspace))
 
-    assert result.status == "current"
+    assert result.status == "partial"
+    assert result.error_code == "GraphBindingUnavailable"
     assert {node["kind"] for node in result.nodes} >= {
         "workspace",
         "source_file",
-        "symbol",
     }
     assert any(edge["kind"] == "contains" for edge in result.edges)
     assert result.evidence
@@ -73,7 +73,7 @@ def test_source_collector_emits_source_anatomy_without_absolute_paths(tmp_path: 
 
     repeated = SourceCollector().collect(_context(workspace))
     assert repeated.fingerprint == result.fingerprint
-    assert result.fingerprint == SourceCollector().probe_fingerprint(_context(workspace))
+    assert SourceCollector().probe_fingerprint(_context(workspace)).startswith("sha256:")
 
 
 def test_source_collector_degrades_without_exposing_parser_error(
@@ -85,6 +85,7 @@ def test_source_collector_degrades_without_exposing_parser_error(
     (workspace / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
 
     from hermes_cli.gnothi.collectors import source
+    from types import SimpleNamespace
 
     real_execute_job = source.execute_job
 
@@ -94,6 +95,14 @@ def test_source_collector_degrades_without_exposing_parser_error(
         return real_execute_job(job, workspace_root=workspace_root)
 
     monkeypatch.setattr(source, "execute_job", failing_parser)
+    monkeypatch.setattr(
+        source,
+        "_binding_for_workspace",
+        lambda _root: SimpleNamespace(
+            project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+            backend_workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        ),
+    )
 
     result = SourceCollector().collect(_context(workspace))
 
@@ -102,6 +111,94 @@ def test_source_collector_degrades_without_exposing_parser_error(
     assert "parser failed" not in str(result)
     assert "token=secret" not in str(result)
     assert any(node["kind"] == "source_file" for node in result.nodes)
+
+
+def test_source_collector_rejects_graph_v1_descriptor_without_legacy_adaptation(
+    tmp_path: Path, monkeypatch
+):
+    from types import SimpleNamespace
+    from hermes_cli.gnothi.collectors import source
+
+    workspace = tmp_path / "demo"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    real_execute_job = source.execute_job
+
+    def v1_graph(job, *, workspace_root):
+        if job["capability"] == "populate_backend_ast":
+            return {
+                "status": "completed",
+                "artifact": {
+                    "schema": "hades.code_graph.v1",
+                    "symbols": [{"name": "run", "path": "app.py", "line": 1}],
+                    "edges": [],
+                },
+            }
+        return real_execute_job(job, workspace_root=workspace_root)
+
+    monkeypatch.setattr(source, "execute_job", v1_graph)
+    monkeypatch.setattr(
+        source,
+        "_binding_for_workspace",
+        lambda _root: SimpleNamespace(
+            project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+            backend_workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        ),
+    )
+
+    result = SourceCollector().collect(_context(workspace))
+
+    assert result.status == "partial"
+    assert result.error_code == "TypeError"
+    assert not any(node["kind"] == "symbol" for node in result.nodes)
+
+
+def test_bound_source_collector_reconstructs_v2_spool_but_keeps_partial_coverage(
+    tmp_path: Path, monkeypatch
+):
+    from hermes_cli import hades_backend_db as hdb
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "demo"
+    workspace.mkdir()
+    (workspace / "app.py").write_text(
+        "def run():\n    return helper()\n\ndef helper():\n    return 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    project_id = "01KXJD0SV73EBGWKNE2EK3M4KD"
+    binding_id = "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn,
+            agent_id="agent-1",
+            project_id=project_id,
+            base_url="https://backend.example",
+            label="dev",
+            token_env_key="TOKEN_TEST",
+            capabilities={"populate_backend_ast": True},
+        )
+        hdb.upsert_workspace_binding(
+            conn,
+            project_id=project_id,
+            agent_id="agent-1",
+            local_project_id="local-1",
+            workspace_fingerprint="wf-1",
+            display_path=str(workspace),
+            repo_root=str(workspace),
+            git_remote_display="",
+            git_remote_hash="",
+            head_commit="",
+            backend_workspace_binding_id=binding_id,
+        )
+
+    result = SourceCollector().collect(_context(workspace))
+
+    assert result.status == "partial"
+    assert result.error_code == "GraphCoveragePartial"
+    labels = {node["label"] for node in result.nodes if node["kind"] == "symbol"}
+    assert {"run", "helper"} <= labels
+    assert str(tmp_path) not in str(result.nodes)
 
 
 class _FakeToolRegistry:

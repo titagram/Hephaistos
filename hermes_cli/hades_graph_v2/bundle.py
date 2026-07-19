@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import gzip
 import hashlib
 import os
@@ -49,6 +49,10 @@ _RESUME_FIELDS = frozenset({
     "artifact_graph_version",
     "manifest_sha256",
     "uploaded_chunk_indexes",
+    "import_id",
+    "import_state_version",
+    "validation_status",
+    "publication_status",
 })
 
 
@@ -136,6 +140,51 @@ class BundleResumeState:
     chunk_paths: tuple[Path, ...]
     uploaded_chunk_indexes: tuple[int, ...]
     missing_chunk_indexes: tuple[int, ...]
+    import_id: str | None
+    import_state_version: int | None
+    validation_status: str | None
+    publication_status: str | None
+
+
+@dataclass(slots=True)
+class BundleSpoolSession:
+    """One continuously locked spool used by an upload attempt."""
+
+    _writer: "GraphBundleWriter"
+    state: BundleResumeState
+    _deleted: bool = False
+
+    def record_uploaded(self, index: int) -> None:
+        self._require_live()
+        self.state = self._writer._record_uploaded_unlocked(self.state, index)
+
+    def record_import_state(
+        self,
+        *,
+        import_id: str,
+        state_version: int,
+        validation_status: str,
+        publication_status: str,
+    ) -> None:
+        self._require_live()
+        self.state = self._writer._record_import_state_unlocked(
+            self.state,
+            import_id=import_id,
+            state_version=state_version,
+            validation_status=validation_status,
+            publication_status=publication_status,
+        )
+
+    def delete(self, *, outcome: str) -> None:
+        self._require_live()
+        if outcome not in {"published", "canceled"}:
+            raise ValueError("spool deletion requires published or canceled outcome")
+        shutil.rmtree(self.state.spool)
+        self._deleted = True
+
+    def _require_live(self) -> None:
+        if self._deleted:
+            raise GraphBundleError("graph bundle spool session was already deleted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,12 +542,21 @@ def _resume_payload(
     artifact_graph_version: str,
     manifest_sha256: str,
     uploaded: list[int],
+    *,
+    import_id: str | None = None,
+    import_state_version: int | None = None,
+    validation_status: str | None = None,
+    publication_status: str | None = None,
 ) -> dict[str, JsonValue]:
     return {
         "schema": "hades.graph_bundle_resume.v1",
         "artifact_graph_version": artifact_graph_version,
         "manifest_sha256": manifest_sha256,
         "uploaded_chunk_indexes": uploaded,
+        "import_id": import_id,
+        "import_state_version": import_state_version,
+        "validation_status": validation_status,
+        "publication_status": publication_status,
     }
 
 
@@ -638,6 +696,28 @@ class GraphBundleWriter:
             or any(not 0 <= index < len(chunk_paths) for index in uploaded)
         ):
             raise GraphBundleError("graph bundle uploaded-chunk state is invalid")
+        import_id = resume.get("import_id")
+        state_version = resume.get("import_state_version")
+        validation_status = resume.get("validation_status")
+        publication_status = resume.get("publication_status")
+        if import_id is not None and (
+            not isinstance(import_id, str) or not import_id.strip()
+        ):
+            raise GraphBundleError("graph bundle import id is invalid")
+        if state_version is not None and (
+            type(state_version) is not int or state_version < 1
+        ):
+            raise GraphBundleError("graph bundle import state version is invalid")
+        if any(
+            value is not None and (not isinstance(value, str) or not value.strip())
+            for value in (validation_status, publication_status)
+        ):
+            raise GraphBundleError("graph bundle import status is invalid")
+        if import_id is None and any(
+            value is not None
+            for value in (state_version, validation_status, publication_status)
+        ):
+            raise GraphBundleError("graph bundle import metadata is incomplete")
         return BundleResumeState(
             spool,
             cast(str, version),
@@ -645,6 +725,10 @@ class GraphBundleWriter:
             tuple(chunk_paths),
             tuple(uploaded),
             tuple(index for index in range(len(chunk_paths)) if index not in uploaded),
+            cast(str | None, import_id),
+            cast(int | None, state_version),
+            cast(str | None, validation_status),
+            cast(str | None, publication_status),
         )
 
     def resume_state(self, spool: Path) -> BundleResumeState:
@@ -652,24 +736,156 @@ class GraphBundleWriter:
         with _exclusive_lock(spool):
             return self._resume_state_unlocked(spool)
 
-    def _record_uploaded(self, spool: Path, index: int) -> None:
+    def materialize_artifact(self, spool: Path) -> dict[str, JsonValue]:
+        """Reconstruct and validate the exact local artifact behind one bundle.
+
+        The wire descriptor intentionally does not duplicate graph records.  Local
+        consumers such as wiki generation may nevertheless need the complete graph;
+        they must obtain it from the already digested private spool, never from an
+        unverified compatibility payload.
+        """
+
         spool = Path(spool)
         with _exclusive_lock(spool):
             state = self._resume_state_unlocked(spool)
-            if type(index) is not int or not 0 <= index < len(state.chunk_paths):
-                raise ValueError("uploaded graph chunk index is outside the manifest")
-            uploaded = sorted({*state.uploaded_chunk_indexes, index})
-            manifest_raw = (spool / "manifest.json").read_bytes()
-            _atomic_write(
-                spool / "resume.json",
-                canonical_json_bytes(
-                    _resume_payload(
-                        state.artifact_graph_version,
-                        _sha256(manifest_raw),
-                        uploaded,
+            manifest = state.manifest
+            records: dict[str, list[dict[str, JsonValue]]] = {
+                kind: [] for kind in CHUNK_KINDS
+            }
+            descriptors = cast(list[dict[str, Any]], manifest["chunks"])
+            for descriptor, path in zip(descriptors, state.chunk_paths, strict=True):
+                compressed = path.read_bytes()
+                raw = _decode_single_gzip_member(
+                    compressed,
+                    ceiling=min(
+                        cast(int, descriptor["uncompressed_bytes"]),
+                        MAX_WIRE_CHUNK_BYTES,
+                    ),
+                )
+                chunk = cast(dict[str, Any], load_json_bytes(raw))
+                records[cast(str, descriptor["kind"])].extend(
+                    cast(list[dict[str, JsonValue]], chunk["records"])
+                )
+            payload: dict[str, JsonValue] = {
+                "schema": cast(JsonValue, manifest["artifact_schema"]),
+                "generated_at": cast(JsonValue, manifest["generated_at"]),
+                "source": cast(JsonValue, copy.deepcopy(manifest["source"])),
+                "project": cast(JsonValue, copy.deepcopy(manifest["project"])),
+                "graph_contract": cast(
+                    JsonValue, copy.deepcopy(manifest["graph_contract"])
+                ),
+                "frameworks": cast(
+                    JsonValue, copy.deepcopy(manifest["frameworks"])
+                ),
+                "languages": cast(JsonValue, copy.deepcopy(manifest["languages"])),
+                **{kind: cast(JsonValue, values) for kind, values in records.items()},
+            }
+            model = artifact_from_payload(payload)
+            validate_artifact(model)
+            return artifact_to_payload(model)
+
+    @contextmanager
+    def upload_session(self, spool: Path) -> Iterator[BundleSpoolSession]:
+        """Hold the spool lock across validation, network reads, and promotion."""
+
+        spool = Path(spool)
+        with _exclusive_lock(spool):
+            yield BundleSpoolSession(self, self._resume_state_unlocked(spool))
+
+    def promote_staged(
+        self, staging: Path, final: Path
+    ) -> BundleResumeState:
+        """Atomically publish one complete sibling spool without replacing a valid one."""
+
+        staging = Path(staging)
+        final = Path(final)
+        if staging.parent != final.parent or staging == final:
+            raise ValueError("staged and final graph spools must be distinct siblings")
+        staged = self.resume_state(staging)
+        promotion_lock = final.parent / f".{final.name}.promotion-lock"
+        with _exclusive_lock(promotion_lock):
+            if final.exists():
+                existing = self.resume_state(final)
+                if existing.artifact_graph_version != staged.artifact_graph_version:
+                    raise GraphBundleError(
+                        "existing graph spool has a conflicting artifact version"
                     )
+                return existing
+            os.replace(staging, final)
+            return self.resume_state(final)
+
+    def _write_resume_unlocked(
+        self, state: BundleResumeState
+    ) -> BundleResumeState:
+        manifest_raw = (state.spool / "manifest.json").read_bytes()
+        _atomic_write(
+            state.spool / "resume.json",
+            canonical_json_bytes(
+                _resume_payload(
+                    state.artifact_graph_version,
+                    _sha256(manifest_raw),
+                    list(state.uploaded_chunk_indexes),
+                    import_id=state.import_id,
+                    import_state_version=state.import_state_version,
+                    validation_status=state.validation_status,
+                    publication_status=state.publication_status,
+                )
+            ),
+        )
+        return state
+
+    def _record_uploaded_unlocked(
+        self, state: BundleResumeState, index: int
+    ) -> BundleResumeState:
+        if type(index) is not int or not 0 <= index < len(state.chunk_paths):
+            raise ValueError("uploaded graph chunk index is outside the manifest")
+        uploaded = tuple(sorted({*state.uploaded_chunk_indexes, index}))
+        return self._write_resume_unlocked(
+            replace(
+                state,
+                uploaded_chunk_indexes=uploaded,
+                missing_chunk_indexes=tuple(
+                    candidate
+                    for candidate in range(len(state.chunk_paths))
+                    if candidate not in uploaded
                 ),
             )
+        )
+
+    def _record_import_state_unlocked(
+        self,
+        state: BundleResumeState,
+        *,
+        import_id: str,
+        state_version: int,
+        validation_status: str,
+        publication_status: str,
+    ) -> BundleResumeState:
+        if not str(import_id).strip():
+            raise ValueError("graph import id is required")
+        if type(state_version) is not int or state_version < 1:
+            raise ValueError("graph import state version must be positive")
+        if not str(validation_status).strip() or not str(publication_status).strip():
+            raise ValueError("graph import statuses are required")
+        return self._write_resume_unlocked(
+            replace(
+                state,
+                import_id=str(import_id),
+                import_state_version=state_version,
+                validation_status=str(validation_status),
+                publication_status=str(publication_status),
+            )
+        )
+
+    def _record_uploaded(self, spool: Path, index: int) -> None:
+        spool = Path(spool)
+        with _exclusive_lock(spool):
+            self._record_uploaded_unlocked(self._resume_state_unlocked(spool), index)
+
+    def record_uploaded(self, spool: Path, index: int) -> None:
+        """Persist one backend-accepted chunk in resumable local metadata."""
+
+        self._record_uploaded(spool, index)
 
     def delete(self, spool: Path, *, outcome: str) -> None:
         if outcome not in {"published", "canceled"}:
@@ -728,6 +944,7 @@ __all__ = [
     "BundleManifest",
     "BundlePlan",
     "BundleResumeState",
+    "BundleSpoolSession",
     "CHUNK_KINDS",
     "GraphBundleError",
     "GraphBundleWriter",

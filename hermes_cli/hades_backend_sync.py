@@ -39,6 +39,10 @@ BACKGROUND_SYNC_STATE_KEY = "background_sync"
 ARTIFACT_UPLOAD_CACHE_PREFIX = "artifact_upload_cache"
 ARTIFACT_COMPRESSION_MIN_BYTES = 64 * 1024
 ORGANISM_GRAPH_SCHEMA = "hades.organism_graph.v1"
+GRAPH_V2_UPLOAD_CACHE_PREFIX = "graph_v2_upload_cache"
+GRAPH_V2_ACTIVE_CACHE_PREFIX = "graph_v2_active"
+GRAPH_IMPORT_POLL_TIMEOUT_SECONDS = 180.0
+GRAPH_IMPORT_POLL_INTERVAL_SECONDS = 2.0
 _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
@@ -52,6 +56,69 @@ def _persisted_credential_fingerprint(agent: db.BackendAgent) -> str | None:
     from hermes_cli.config import load_env
 
     return _credential_fingerprint(load_env().get(agent.token_env_key, ""))
+
+
+def _graph_v2_cache_key(
+    binding: db.WorkspaceBinding,
+    source_identity: dict[str, object],
+    artifact_graph_version: str,
+) -> str:
+    source_digest = hashlib.sha256(
+        canonical_artifact_bytes(source_identity)
+    ).hexdigest()
+    return ":".join((
+        GRAPH_V2_UPLOAD_CACHE_PREFIX,
+        binding.project_id,
+        binding.backend_workspace_binding_id,
+        source_digest,
+        artifact_graph_version,
+    ))
+
+
+def _graph_v2_active_cache_key(binding: db.WorkspaceBinding) -> str:
+    return ":".join((
+        GRAPH_V2_ACTIVE_CACHE_PREFIX,
+        binding.project_id,
+        binding.backend_workspace_binding_id,
+    ))
+
+
+def _graph_v2_spool(
+    binding: db.WorkspaceBinding, artifact_graph_version: str
+) -> Path:
+    from hermes_constants import get_hermes_home
+
+    return (
+        get_hermes_home()
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / binding.project_id
+        / binding.backend_workspace_binding_id
+        / artifact_graph_version
+    )
+
+
+def _verification_summary_counts(value: object) -> dict[str, object]:
+    """Keep only fail-open aggregate counts; never cache verification payloads."""
+
+    source = value if isinstance(value, dict) else {}
+
+    def count(key: str) -> int:
+        raw = source.get(key)
+        return raw if type(raw) is int and raw >= 0 else 0
+
+    raw_domains = source.get("verification_by_domain")
+    domains = {
+        str(key): raw
+        for key, raw in raw_domains.items()
+        if isinstance(key, str) and type(raw) is int and raw >= 0
+    } if isinstance(raw_domains, dict) else {}
+    return {
+        "verification_queued": count("verification_queued"),
+        "verification_high_priority": count("verification_high_priority"),
+        "verification_by_domain": dict(sorted(domains.items())),
+    }
 
 
 def run_backend_sync(
@@ -379,7 +446,15 @@ def run_backend_sync(
                 client.update_job_status(jid, **_status_payload(binding_agent, binding, "started"))
 
                 result = execute_job(
-                    {"job_id": jid, "capability": capability, "payload": payload},
+                    {
+                        "job_id": jid,
+                        "capability": capability,
+                        "payload": {
+                            **payload,
+                            "project_id": binding.project_id,
+                            "workspace_binding_id": binding.backend_workspace_binding_id,
+                        },
+                    },
                     workspace_root=binding.repo_root,
                 )
                 final_status = str(result.get("status") or "completed")
@@ -390,8 +465,7 @@ def run_backend_sync(
                 if final_status == "completed":
                     uploaded, upload_failed, upload_skipped = _upload_job_artifact(client, binding_agent, binding, jid, result)
                     slices_uploaded, slices_failed = _upload_job_source_slice(client, binding_agent, binding, jid, result)
-                    artifact = result.get("artifact") if isinstance(result, dict) else None
-                    candidates = artifact.get("source_slice_candidates") if isinstance(artifact, dict) else None
+                    candidates = result.get("source_slice_candidates") if isinstance(result, dict) else None
                     if isinstance(candidates, list):
                         source_slice_candidates += len(candidates)
                     artifacts_uploaded += uploaded
@@ -565,6 +639,8 @@ def _sync_baseline_artifacts(
         if not _agent_has_capability(agent, capability):
             continue
         payload: dict[str, object] = {
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
             "head_commit": head_commit,
             "workspace_head_commit": head_commit,
             "max_source_slice_candidates": 25,
@@ -577,8 +653,7 @@ def _sync_baseline_artifacts(
         if final_status != "completed":
             failed += 1
             continue
-        artifact = result.get("artifact") if isinstance(result, dict) else None
-        candidates = artifact.get("source_slice_candidates") if isinstance(artifact, dict) else None
+        candidates = result.get("source_slice_candidates") if isinstance(result, dict) else None
         if isinstance(candidates, list):
             source_slice_candidates += len(candidates)
         artifact_uploaded, artifact_failed, artifact_skipped = _upload_job_artifact(
@@ -1091,6 +1166,199 @@ def _artifact_file_delta(cached_manifest: object, current_manifest: dict[str, ob
     }
 
 
+def _upload_graph_v2_bundle(
+    client: object,
+    binding: db.WorkspaceBinding,
+    artifact: dict[str, object],
+) -> tuple[int, int, int]:
+    """Resume immutable chunks and cache only a projection reported ready."""
+
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.hades_backend_client import ChunkHeaders, redact_secret
+    from hermes_cli.hades_graph_config import load_hades_graph_index_config
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
+
+    version = str(artifact.get("artifact_graph_version") or "")
+    source = artifact.get("source_identity")
+    manifest = artifact.get("bundle")
+    if (
+        re.fullmatch(r"[a-f0-9]{64}", version) is None
+        or not isinstance(source, dict)
+        or not isinstance(manifest, dict)
+        or manifest.get("schema") != "hades.graph_bundle.v2"
+        or manifest.get("artifact_schema") != "hades.code_graph.v2"
+        or manifest.get("artifact_graph_version") != version
+        or manifest.get("source") != source
+    ):
+        return (0, 1, 0)
+    project = manifest.get("project")
+    if not isinstance(project, dict) or (
+        project.get("project_id") != binding.project_id
+        or project.get("workspace_binding_id")
+        != binding.backend_workspace_binding_id
+    ):
+        return (0, 1, 0)
+
+    cache_key = _graph_v2_cache_key(binding, source, version)
+    cache_identity = {
+        "schema": "hades.code_graph.v2",
+        "project_id": binding.project_id,
+        "workspace_binding_id": binding.backend_workspace_binding_id,
+        "source_identity": source,
+        "artifact_graph_version": version,
+        "publication_status": "ready",
+    }
+    with db.connect_closing() as conn:
+        cached = db.get_sync_state(conn, cache_key)
+        active = db.get_sync_state(conn, _graph_v2_active_cache_key(binding))
+    writer = GraphBundleWriter()
+    spool = _graph_v2_spool(binding, version)
+    graph_config = load_hades_graph_index_config(load_config_readonly())
+    writer.cleanup_stale(
+        spool.parents[2],
+        ttl_seconds=graph_config.spool_ttl_seconds,
+        now=time.time(),
+    )
+    if (
+        isinstance(cached, dict)
+        and isinstance(active, dict)
+        and all(cached.get(key) == value for key, value in cache_identity.items())
+        and active == cached
+        and re.fullmatch(
+            r"[a-f0-9]{64}", str(cached.get("projection_version") or "")
+        )
+        is not None
+    ):
+        writer.delete(spool, outcome="published")
+        return (0, 0, 1)
+
+    try:
+        with writer.upload_session(spool) as session:
+            local = session.state
+            if local.manifest != manifest or local.artifact_graph_version != version:
+                raise RuntimeError("local graph spool does not match the immutable manifest")
+            descriptors = manifest.get("chunks")
+            if not isinstance(descriptors, list) or len(descriptors) != len(
+                local.chunk_paths
+            ):
+                raise RuntimeError("graph manifest chunk descriptors are incomplete")
+
+            state = client.create_graph_import(manifest)
+
+            def remember_import_state() -> None:
+                session.record_import_state(
+                    import_id=state.import_id,
+                    state_version=max(1, int(state.attempt_generation or 1)),
+                    validation_status=state.validation_status,
+                    publication_status=state.publication_status,
+                )
+
+            remember_import_state()
+            for index in state.missing_chunk_indexes:
+                if not 0 <= index < len(local.chunk_paths):
+                    raise RuntimeError("backend requested a graph chunk outside the manifest")
+                descriptor = descriptors[index]
+                if not isinstance(descriptor, dict) or descriptor.get("index") != index:
+                    raise RuntimeError("graph chunk descriptor index is not canonical")
+                headers = ChunkHeaders(
+                    sha256=str(descriptor.get("sha256") or ""),
+                    uncompressed_bytes=int(descriptor.get("uncompressed_bytes") or 0),
+                    compressed_sha256=str(
+                        descriptor.get("compressed_sha256") or ""
+                    ),
+                    compressed_bytes=int(descriptor.get("compressed_bytes") or 0),
+                )
+                with local.chunk_paths[index].open("rb") as body:
+                    client.upload_graph_chunk(state.import_id, index, body, headers)
+                session.record_uploaded(index)
+
+            if not state.is_ready:
+                state = client.complete_graph_import(state.import_id, version)
+                remember_import_state()
+            poll_started = time.monotonic()
+            max_polls = max(
+                1,
+                int(
+                    GRAPH_IMPORT_POLL_TIMEOUT_SECONDS
+                    / GRAPH_IMPORT_POLL_INTERVAL_SECONDS
+                ),
+            )
+            for _attempt in range(max_polls):
+                if state.is_ready:
+                    break
+                if state.validation_status in {"failed", "stale"} or (
+                    state.publication_status in {"failed", "stale"}
+                ):
+                    raise RuntimeError("backend graph import reached a terminal failure")
+                if time.monotonic() - poll_started >= GRAPH_IMPORT_POLL_TIMEOUT_SECONDS:
+                    break
+                time.sleep(GRAPH_IMPORT_POLL_INTERVAL_SECONDS)
+                state = client.graph_import(state.import_id)
+                remember_import_state()
+            if not state.is_ready:
+                logger.info(
+                    "hades_backend.graph_v2.import_pending",
+                    extra={
+                        "hades_event": "graph_v2.import_pending",
+                        "hades_project_id": binding.project_id,
+                        "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                        "hades_import_id": state.import_id,
+                        "hades_validation_status": state.validation_status,
+                        "hades_publication_status": state.publication_status,
+                    },
+                )
+                return (0, 0, 1)
+
+            verification_summary = _verification_summary_counts(None)
+            summary_fetch = getattr(client, "graph_verification_summary", None)
+            if callable(summary_fetch):
+                try:
+                    verification_summary = _verification_summary_counts(
+                        summary_fetch(
+                            project_id=binding.project_id,
+                            workspace_binding_id=binding.backend_workspace_binding_id,
+                            projection_version=state.projection_version,
+                        )
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "hades_backend.graph_v2.verification_summary_unavailable",
+                        extra={
+                            "hades_event": "graph_v2.verification_summary_unavailable",
+                            "hades_project_id": binding.project_id,
+                            "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                            "hades_error": redact_secret(str(exc)),
+                        },
+                    )
+
+            ready_identity = {
+                **cache_identity,
+                "projection_version": state.projection_version,
+                "verification_summary": verification_summary,
+            }
+            with db.connect_closing() as conn:
+                db.record_sync_states(
+                    conn,
+                    {
+                        cache_key: ready_identity,
+                        _graph_v2_active_cache_key(binding): ready_identity,
+                    },
+                )
+            session.delete(outcome="published")
+        return (1, 0, 0)
+    except Exception as exc:
+        logger.warning(
+            "hades_backend.graph_v2.upload_failed",
+            extra={
+                "hades_event": "graph_v2.upload_failed",
+                "hades_project_id": binding.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
+        return (0, 1, 0)
+
+
 def _upload_job_artifact(
     client: object,
     agent: db.BackendAgent,
@@ -1102,11 +1370,13 @@ def _upload_job_artifact(
     if not isinstance(artifact, dict):
         return (0, 0, 0)
     schema = str(artifact.get("schema") or "").strip()
+    if schema == "hades.code_graph.v2":
+        return _upload_graph_v2_bundle(client, binding, artifact)
+    if schema in {"hades.php_graph.v1", "hades.code_graph.v1"}:
+        return (0, 1, 0)
     if schema not in {
         "hades.git_tree.v1",
         "hades.symbols.v1",
-        "hades.php_graph.v1",
-        "hades.code_graph.v1",
         ORGANISM_GRAPH_SCHEMA,
     }:
         return (0, 0, 0)

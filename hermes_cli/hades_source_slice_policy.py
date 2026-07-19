@@ -12,19 +12,23 @@ from typing import Any
 SENSITIVE_NAMES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
 SKIP_PARTS = {".git", "vendor", "node_modules", "__pycache__", "storage", "var", "tmp"}
 ROLE_PRIORITY = {
-    "controller": 10,
-    "laravel_controller": 10,
-    "eloquent_model": 20,
-    "model": 20,
-    "policy": 30,
-    "authorization_policy": 30,
-    "middleware": 40,
-    "form_request": 50,
-    "schema_migration": 60,
-    "route_file": 70,
-    "test": 80,
-    "log": 90,
+    "entrypoint_root": 10,
+    "middleware_security_input": 20,
+    "branch_unresolved": 30,
+    "domain_data_integration": 40,
+    "test": 50,
 }
+
+_PIPELINE_NODE_KINDS = frozenset({
+    "middleware", "guard", "authorization", "validator", "binding",
+})
+_BRANCH_NODE_KINDS = frozenset({
+    "branch", "merge", "loop", "unknown_boundary",
+})
+_DOMAIN_NODE_KINDS = frozenset({
+    "service", "domain", "model", "repository", "table", "query", "cache",
+    "storage", "integration", "external_boundary",
+})
 
 
 @dataclass(frozen=True)
@@ -67,51 +71,92 @@ def plan_source_slice_candidates(
     max_candidates: int = 200,
 ) -> list[dict[str, Any]]:
     root = Path(workspace_root)
+    if graph.get("schema") != "hades.code_graph.v2":
+        return []
     candidates: dict[tuple[str, str], SourceSliceCandidate] = {}
-    for symbol in _iter_mappings(graph.get("symbols")):
-        path = str(symbol.get("path") or "").strip()
-        if not _path_allowed(root, path):
-            continue
-        reason = _reason_for_symbol(symbol, path)
-        candidate = _candidate_for_path(
-            root=root,
-            path=path,
-            line=_bounded_line(symbol.get("line")),
-            symbol=str(symbol.get("name") or symbol.get("symbol") or ""),
-            reason=reason,
-            head_commit=head_commit,
-        )
-        _put_best(candidates, candidate)
+    nodes = {
+        str(node.get("id") or ""): node
+        for node in _iter_mappings(graph.get("nodes"))
+        if str(node.get("id") or "")
+    }
 
-    database = graph.get("database")
-    tables = database.get("tables") if isinstance(database, Mapping) else None
-    for table in _iter_mappings(tables):
-        path = str(table.get("path") or "").strip()
-        if not _path_allowed(root, path):
-            continue
-        candidate = _candidate_for_path(
-            root=root,
-            path=path,
-            line=_bounded_line(table.get("line")),
-            symbol=str(table.get("name") or ""),
-            reason="schema_migration",
-            head_commit=head_commit,
+    for entrypoint in _iter_mappings(graph.get("entrypoints")):
+        symbol = str(
+            entrypoint.get("public_name")
+            or entrypoint.get("public_path")
+            or entrypoint.get("label")
+            or entrypoint.get("id")
+            or ""
         )
-        _put_best(candidates, candidate)
+        handler = nodes.get(str(entrypoint.get("handler_node_id") or ""))
+        if handler is not None:
+            _put_node_candidate(
+                candidates,
+                root=root,
+                node=handler,
+                symbol=symbol,
+                reason="entrypoint_root",
+                head_commit=head_commit,
+            )
+        occurrence = entrypoint.get("registration_occurrence")
+        if isinstance(occurrence, Mapping):
+            path = str(occurrence.get("path") or "").strip()
+            if _path_allowed(root, path):
+                _put_best(
+                    candidates,
+                    _candidate_for_path(
+                        root=root,
+                        path=path,
+                        line=1,
+                        symbol=symbol,
+                        reason="entrypoint_root",
+                        head_commit=head_commit,
+                    ),
+                )
 
-    for route in _iter_mappings(graph.get("routes")):
-        path = str(route.get("path") or route.get("source_path") or "").strip()
-        if not path or not _path_allowed(root, path):
-            continue
-        candidate = _candidate_for_path(
-            root=root,
-            path=path,
-            line=_bounded_line(route.get("line")),
-            symbol=str(route.get("name") or route.get("handler") or route.get("path") or ""),
-            reason="route_file",
-            head_commit=head_commit,
+    for node in nodes.values():
+        kind = str(node.get("kind") or "").strip()
+        location = node.get("location")
+        source_path = (
+            str(location.get("path") or "").strip()
+            if isinstance(location, Mapping)
+            else ""
         )
-        _put_best(candidates, candidate)
+        reason = ""
+        if kind in _PIPELINE_NODE_KINDS:
+            reason = "middleware_security_input"
+        elif kind in _BRANCH_NODE_KINDS or node.get("uncertainty_id"):
+            reason = "branch_unresolved"
+        elif kind in _DOMAIN_NODE_KINDS:
+            reason = "domain_data_integration"
+        elif kind == "test" or _is_test_source_path(source_path):
+            reason = "test"
+        if reason:
+            _put_node_candidate(
+                candidates,
+                root=root,
+                node=node,
+                symbol=str(node.get("qualified_name") or node.get("name") or node.get("id") or ""),
+                reason=reason,
+                head_commit=head_commit,
+            )
+
+    for uncertainty in _iter_mappings(graph.get("uncertainties")):
+        for source_ref in _iter_mappings(uncertainty.get("source_refs")):
+            path = str(source_ref.get("path") or "").strip()
+            if not _path_allowed(root, path):
+                continue
+            _put_best(
+                candidates,
+                _candidate_for_path(
+                    root=root,
+                    path=path,
+                    line=_bounded_line(source_ref.get("line")),
+                    symbol=str(uncertainty.get("id") or "unresolved"),
+                    reason="branch_unresolved",
+                    head_commit=head_commit,
+                ),
+            )
 
     ordered = sorted(candidates.values(), key=lambda item: (item.priority, item.path, item.start_line, item.symbol))
     return [candidate.to_dict() for candidate in ordered[: max(0, int(max_candidates))]]
@@ -123,27 +168,69 @@ def _iter_mappings(value: Any) -> list[Mapping[str, Any]]:
     return [item for item in value if isinstance(item, Mapping)]
 
 
-def _reason_for_symbol(symbol: Mapping[str, Any], path: str) -> str:
-    role = str(symbol.get("role") or "").strip().lower()
-    lowered = path.lower()
-    if "controller" in role or "/controllers/" in lowered:
-        return "laravel_controller"
-    if "policy" in role or "/policies/" in lowered:
-        return "authorization_policy"
-    if "middleware" in role or "/middleware/" in lowered:
-        return "middleware"
-    if "request" in role or "/requests/" in lowered:
-        return "form_request"
-    if "eloquent" in role or "/models/" in lowered:
-        return "eloquent_model"
-    return role or "symbol"
+def _is_test_source_path(path: str) -> bool:
+    """Recognize conventional test locations without changing graph node kinds."""
+
+    normalized = path.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    parts = normalized.split("/")
+    directories = {part.casefold() for part in parts[:-1]}
+    if directories & {"test", "tests", "__tests__", "spec", "specs"}:
+        return True
+    name = parts[-1].casefold()
+    stem = Path(name).stem
+    return (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or name.endswith(
+            (
+                ".test.js",
+                ".test.jsx",
+                ".test.ts",
+                ".test.tsx",
+                ".spec.js",
+                ".spec.jsx",
+                ".spec.ts",
+                ".spec.tsx",
+                "test.php",
+            )
+        )
+    )
+
+
+def _put_node_candidate(
+    candidates: dict[tuple[str, str], SourceSliceCandidate],
+    *,
+    root: Path,
+    node: Mapping[str, Any],
+    symbol: str,
+    reason: str,
+    head_commit: str,
+) -> None:
+    location = node.get("location")
+    if not isinstance(location, Mapping):
+        return
+    path = str(location.get("path") or "").strip()
+    if not _path_allowed(root, path):
+        return
+    _put_best(
+        candidates,
+        _candidate_for_path(
+            root=root,
+            path=path,
+            line=_bounded_line(location.get("start_line")),
+            symbol=symbol,
+            reason=reason,
+            head_commit=head_commit,
+        ),
+    )
 
 
 def _candidate_for_path(*, root: Path, path: str, line: int, symbol: str, reason: str, head_commit: str) -> SourceSliceCandidate:
-    total_lines = _line_count(root / path)
     center = line if line > 0 else 1
     start_line = max(1, center - 12)
-    end_line = min(max(total_lines, start_line), center + 24)
+    end_line = center + 24
     return SourceSliceCandidate(
         path=path,
         start_line=start_line,
@@ -182,11 +269,4 @@ def _bounded_line(value: Any) -> int:
     try:
         return max(1, int(value))
     except (TypeError, ValueError):
-        return 1
-
-
-def _line_count(path: Path) -> int:
-    try:
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines()) or 1
-    except OSError:
         return 1

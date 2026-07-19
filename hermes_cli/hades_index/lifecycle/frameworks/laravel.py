@@ -54,7 +54,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     TerminalKind,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR, declaration_local_key
 
 
 _COMPOSER_FILES = ("composer.lock", "composer.json")
@@ -979,13 +979,8 @@ def _handler_key(
             short = name.replace("::", ".").split(".")
             if len(short) >= 2 and short[-1] == method and short[-2] == short_class:
                 exact.append(
-                    local_record_key(
-                        "php",
-                        item.parsed_file.path,
-                        "executable_declaration",
-                        "ast",
-                        f"symbol/{name}",
-                        ordinal,
+                    declaration_local_key(
+                        "php", item.parsed_file.path, symbol, ordinal
                     )
                 )
     return exact[0] if len(exact) == 1 else None
@@ -1000,13 +995,8 @@ def _async_target_keys(syntax: Sequence[SyntaxIR]) -> Mapping[str, str]:
             parts = symbol.name.replace("::", ".").split(".")
             if len(parts) < 2 or parts[-1] not in {"handle", "__invoke"}:
                 continue
-            key = local_record_key(
-                "php",
-                item.parsed_file.path,
-                "executable_declaration",
-                "ast",
-                f"symbol/{symbol.name}",
-                ordinal,
+            key = declaration_local_key(
+                "php", item.parsed_file.path, symbol, ordinal
             )
             candidates.setdefault(parts[-2], []).append(key)
     return MappingProxyType({

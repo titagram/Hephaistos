@@ -22,6 +22,8 @@ _LOCAL_IR_FAMILIES = (
     "effects",
     "framework_segments",
     "unresolved_facts",
+    "source_nodes",
+    "data_nodes",
 )
 
 

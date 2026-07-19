@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from hermes_cli.hades_persephone_messages import AGENT_MESSAGE_SCHEMA
 
 
@@ -1140,6 +1142,389 @@ def test_sync_runner_uploads_code_graph_artifacts(monkeypatch, tmp_path):
     assert skipped == 0
     assert client.uploads[0]["schema"] == "hades.code_graph.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
+
+
+def test_sync_graph_v2_resumes_server_missing_chunks_and_marks_exact_cache_only_when_ready(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import GraphChunkState, GraphImportState
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_backend_sync import (
+        _graph_v2_active_cache_key,
+        _graph_v2_cache_key,
+        _upload_job_artifact,
+    )
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (home / "config.yaml").parent.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "hades:\n"
+        "  graph_index:\n"
+        "    max_chunk_uncompressed_bytes: 65536\n"
+        "    max_bundle_uncompressed_bytes: 8388608\n",
+        encoding="utf-8",
+    )
+    for index in range(180):
+        (workspace / f"source-{index:03d}.md").write_text(
+            f"# inventory {index}\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("hermes_cli.hades_backend_sync.time.sleep", lambda _delay: None)
+
+    result = execute_job(
+        {
+            "job_id": "job_graph_v2",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+                "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+            },
+        },
+        workspace_root=workspace,
+    )
+    artifact = result["artifact"]
+    descriptors = artifact["bundle"]["chunks"]
+    assert len(descriptors) >= 2
+    server_missing = tuple(range(1, len(descriptors), 2))
+
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        display_path=str(workspace),
+        repo_root=str(workspace),
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="",
+        status="active",
+    )
+    cache_key = _graph_v2_cache_key(
+        binding,
+        artifact["source_identity"],
+        artifact["artifact_graph_version"],
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.uploaded_indexes = []
+            self.poll_count = 0
+            self.summary_calls = []
+            self.cleanup_during_upload = []
+
+        def create_graph_import(self, manifest):
+            assert manifest == artifact["bundle"]
+            return GraphImportState(
+                "import-1", 1, "staging", "not_requested", server_missing,
+                "2026-07-20T00:00:00Z", 0, len(descriptors), None, None,
+            )
+
+        def upload_graph_chunk(self, import_id, index, body, headers):
+            assert import_id == "import-1"
+            assert body.read() == (artifact_path / f"chunk-{index:05d}.gz").read_bytes()
+            assert headers.compressed_sha256 == descriptors[index]["compressed_sha256"]
+            self.cleanup_during_upload.append(
+                GraphBundleWriter().cleanup_stale(
+                    artifact_path.parents[2],
+                    ttl_seconds=1,
+                    now=time.time() + 100_000,
+                )
+            )
+            self.uploaded_indexes.append(index)
+            return GraphChunkState(index, "accepted")
+
+        def complete_graph_import(self, import_id, artifact_graph_version):
+            assert import_id == "import-1"
+            assert artifact_graph_version == artifact["artifact_graph_version"]
+            return GraphImportState(
+                "import-1", 1, "validating", "not_requested", (), None,
+                len(descriptors), len(descriptors), None, None,
+            )
+
+        def graph_import(self, import_id):
+            assert import_id == "import-1"
+            self.poll_count += 1
+            if self.poll_count == 1:
+                with hdb.connect_closing() as conn:
+                    assert hdb.get_sync_state(conn, cache_key) is None
+                    assert hdb.get_sync_state(
+                        conn, _graph_v2_active_cache_key(binding)
+                    ) is None
+                return GraphImportState(
+                    "import-1", 1, "validated", "queued", (), None,
+                    len(descriptors), len(descriptors), None, None,
+                )
+            return GraphImportState(
+                "import-1", 1, "validated", "ready", (), None,
+                len(descriptors), len(descriptors), None,
+                "e" * 64,
+            )
+
+        def graph_verification_summary(self, **payload):
+            self.summary_calls.append(payload)
+            return {
+                "verification_queued": 3,
+                "verification_high_priority": 1,
+                "verification_by_domain": {"wiki": 1, "graph": 2},
+                "items": [{"secret": "must-not-cache"}],
+            }
+
+    artifact_path = (
+        home
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / binding.project_id
+        / binding.backend_workspace_binding_id
+        / artifact["artifact_graph_version"]
+    )
+    client = FakeClient()
+    assert _upload_job_artifact(
+        client, agent, binding, "job_graph_v2", result
+    ) == (1, 0, 0)
+
+    assert tuple(client.uploaded_indexes) == server_missing
+    assert all(
+        artifact_path not in removed
+        for removed in client.cleanup_during_upload
+    )
+    assert client.summary_calls == [
+        {
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "projection_version": "e" * 64,
+        }
+    ]
+    assert not artifact_path.exists()
+    with hdb.connect_closing() as conn:
+        cached = hdb.get_sync_state(conn, cache_key)
+        active = hdb.get_sync_state(conn, _graph_v2_active_cache_key(binding))
+    assert cached == {
+        "schema": "hades.code_graph.v2",
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+        "source_identity": artifact["source_identity"],
+        "artifact_graph_version": artifact["artifact_graph_version"],
+        "projection_version": "e" * 64,
+        "publication_status": "ready",
+        "verification_summary": {
+            "verification_queued": 3,
+            "verification_high_priority": 1,
+            "verification_by_domain": {"graph": 2, "wiki": 1},
+        },
+    }
+    assert active == cached
+
+    rebuilt = execute_job(
+        {
+            "job_id": "job_graph_v2_retry",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": binding.project_id,
+                "workspace_binding_id": binding.backend_workspace_binding_id,
+            },
+        },
+        workspace_root=workspace,
+    )
+    assert rebuilt["artifact"]["artifact_graph_version"] == artifact[
+        "artifact_graph_version"
+    ]
+
+    class NoNetworkClient:
+        def create_graph_import(self, _manifest):
+            raise AssertionError("exact ready cache must skip backend import calls")
+
+    assert _upload_job_artifact(
+        NoNetworkClient(), agent, binding, "job_graph_v2_retry", rebuilt
+    ) == (0, 0, 1)
+    assert not artifact_path.exists()
+
+
+def test_graph_v2_pending_import_keeps_locked_resume_and_retry_uses_same_import(
+    monkeypatch, tmp_path
+):
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import GraphChunkState, GraphImportState
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_backend_sync import (
+        _graph_v2_active_cache_key,
+        _graph_v2_cache_key,
+        _upload_job_artifact,
+    )
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / "app.py").write_text(
+        "def handler():\n    return 200\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(
+        "hermes_cli.hades_backend_sync.GRAPH_IMPORT_POLL_TIMEOUT_SECONDS",
+        0.0,
+    )
+
+    project_id = "01KXJD0SV73EBGWKNE2EK3M4KD"
+    binding_id = "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+    result = execute_job(
+        {
+            "job_id": "job-pending",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": project_id,
+                "workspace_binding_id": binding_id,
+            },
+        },
+        workspace_root=workspace,
+    )
+    artifact = result["artifact"]
+    descriptors = artifact["bundle"]["chunks"]
+    agent = BackendAgent(
+        "agent-1", project_id, "https://backend.example", "dev", "TOKEN_TEST",
+        {"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        "wf-1", project_id, "agent-1", "local-1", binding_id,
+        str(workspace), str(workspace), "", "", "", "active",
+    )
+    spool = (
+        home / "cache" / "hades" / "graph-imports" / project_id / binding_id
+        / artifact["artifact_graph_version"]
+    )
+    cache_key = _graph_v2_cache_key(
+        binding, artifact["source_identity"], artifact["artifact_graph_version"]
+    )
+
+    class PendingClient:
+        def __init__(self):
+            self.uploaded = []
+
+        def create_graph_import(self, manifest):
+            assert manifest == artifact["bundle"]
+            return GraphImportState(
+                "same-import", 4, "staging", "not_requested",
+                tuple(range(len(descriptors))), None, 0, len(descriptors), None, None,
+            )
+
+        def upload_graph_chunk(self, import_id, index, body, headers):
+            assert import_id == "same-import"
+            assert body.read()
+            self.uploaded.append(index)
+            return GraphChunkState(index, "accepted")
+
+        def complete_graph_import(self, import_id, version):
+            assert import_id == "same-import"
+            assert version == artifact["artifact_graph_version"]
+            return GraphImportState(
+                "same-import", 4, "validating", "not_requested", (), None,
+                len(descriptors), len(descriptors), None, None,
+            )
+
+    pending = PendingClient()
+    assert _upload_job_artifact(
+        pending, agent, binding, "job-pending", result
+    ) == (0, 0, 1)
+    assert pending.uploaded == list(range(len(descriptors)))
+    resumed = GraphBundleWriter().resume_state(spool)
+    assert resumed.import_id == "same-import"
+    assert resumed.import_state_version == 4
+    assert resumed.validation_status == "validating"
+    assert resumed.publication_status == "not_requested"
+    assert resumed.missing_chunk_indexes == ()
+    with hdb.connect_closing() as conn:
+        assert hdb.get_sync_state(conn, cache_key) is None
+        assert hdb.get_sync_state(
+            conn, _graph_v2_active_cache_key(binding)
+        ) is None
+
+    class ReadyRetryClient:
+        def create_graph_import(self, manifest):
+            assert manifest == artifact["bundle"]
+            return GraphImportState(
+                "same-import", 4, "validated", "ready", (), None,
+                len(descriptors), len(descriptors), None, "f" * 64,
+            )
+
+        def upload_graph_chunk(self, *_args):
+            raise AssertionError("ready retry must not duplicate chunk uploads")
+
+        def graph_verification_summary(self, **_payload):
+            return {"verification_queued": 0}
+
+    assert _upload_job_artifact(
+        ReadyRetryClient(), agent, binding, "job-pending-retry", result
+    ) == (1, 0, 0)
+    assert not spool.exists()
+    with hdb.connect_closing() as conn:
+        exact = hdb.get_sync_state(conn, cache_key)
+        active = hdb.get_sync_state(conn, _graph_v2_active_cache_key(binding))
+    assert active == exact
+    assert active["artifact_graph_version"] == artifact["artifact_graph_version"]
+    assert active["projection_version"] == "f" * 64
+
+
+def test_sync_rejects_legacy_graph_v1_without_generic_artifact_fallback(
+    monkeypatch, tmp_path
+):
+    from hermes_cli.hades_backend_db import BackendAgent, WorkspaceBinding
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    class FakeClient:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_artifact(self, **payload):
+            self.uploads.append(payload)
+
+    client = FakeClient()
+    agent = BackendAgent(
+        agent_id="agent_1",
+        project_id="proj_1",
+        base_url="https://backend.example",
+        label="dev",
+        token_env_key="TOKEN_TEST",
+        capabilities={"artifacts": True},
+    )
+    binding = WorkspaceBinding(
+        workspace_fingerprint="wf_1",
+        project_id="proj_1",
+        agent_id="agent_1",
+        local_project_id="local_1",
+        backend_workspace_binding_id="wb_1",
+        display_path="~/repo",
+        repo_root="/tmp/repo",
+        git_remote_display="",
+        git_remote_hash="",
+        head_commit="",
+        status="active",
+    )
+
+    assert _upload_job_artifact(
+        client,
+        agent,
+        binding,
+        "job-v1",
+        {"artifact": {"schema": "hades.code_graph.v1"}},
+    ) == (0, 1, 0)
+    assert client.uploads == []
 
 
 def test_sync_runner_compresses_large_artifact_uploads(monkeypatch, tmp_path):

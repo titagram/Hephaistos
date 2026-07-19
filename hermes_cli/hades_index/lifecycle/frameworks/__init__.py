@@ -221,7 +221,7 @@ def framework_pipeline_facts(
         raise FrameworkAdapterError(
             "framework exception facts require a resolved handler declaration"
         )
-    for ordinal, (structure_key, values) in enumerate(
+    for ordinal, (scope_key, values) in enumerate(
         sorted(exception_successors.items())
     ):
         locator = _framework_fact_locator(candidate, f"framework_exception/{ordinal}")
@@ -245,6 +245,14 @@ def framework_pipeline_facts(
             if type(locator) is AstLocatorIR
             else locator.structural_pointer
         )
+        structure_key = local_record_key(
+            "framework",
+            locator.source_location.path,
+            "exception_scope_structure",
+            "ast" if type(locator) is AstLocatorIR else "config",
+            structural,
+            ordinal,
+        )
         structures.append(
             StructureIR(
                 structure_key,
@@ -257,14 +265,6 @@ def framework_pipeline_facts(
                 None,
                 evidence,
             )
-        )
-        scope_key = local_record_key(
-            "framework",
-            locator.source_location.path,
-            "exception_scope_fact",
-            "ast" if type(locator) is AstLocatorIR else "config",
-            structural,
-            ordinal,
         )
         scopes.append(
             ExceptionScope(
@@ -292,6 +292,7 @@ def _validate_pipeline_fact_references(
 ) -> None:
     terminals = {item.local_key: item for item in facts.terminals}
     structures = {item.local_key: item for item in facts.structures}
+    scopes = {item.local_key: item for item in facts.exception_scopes}
     arms = {
         (item.branch_local_key, item.arm_ordinal): item for item in facts.branch_arms
     }
@@ -309,8 +310,13 @@ def _validate_pipeline_fact_references(
                     )
                 referenced_terminals.add(terminal.local_key)
             elif type(successor) is ExceptionSuccessor:
-                structure = structures.get(successor.exception_scope_key)
+                scope = scopes.get(successor.exception_scope_key)
+                structure = (
+                    None if scope is None else structures.get(scope.structure_key)
+                )
                 if (
+                    scope is None
+                    or
                     structure is None
                     or structure.kind is not StructureKind.EXCEPTION_SCOPE
                     or structure.owner_declaration_key != candidate.handler_local_key
@@ -319,7 +325,7 @@ def _validate_pipeline_fact_references(
                         "framework exception successor lacks its exact typed scope"
                     )
                 referenced_structures.add(structure.local_key)
-                referenced_exception_arms.setdefault(structure.local_key, set()).add((
+                referenced_exception_arms.setdefault(scope.local_key, set()).add((
                     successor.caught_type_name,
                     successor.target_block_key,
                     successor.order,
@@ -347,12 +353,11 @@ def _validate_pipeline_fact_references(
         raise FrameworkAdapterError("framework pipeline emitted orphan structures")
     if referenced_arms != set(arms):
         raise FrameworkAdapterError("framework pipeline emitted orphan branch arms")
-    scopes_by_structure = {item.structure_key: item for item in facts.exception_scopes}
-    if set(scopes_by_structure) != set(referenced_exception_arms):
+    if set(scopes) != set(referenced_exception_arms):
         raise FrameworkAdapterError("framework pipeline emitted orphan exception scope")
-    for structure_key, expected_arms in referenced_exception_arms.items():
-        scope = scopes_by_structure[structure_key]
-        structure = structures[structure_key]
+    for scope_key, expected_arms in referenced_exception_arms.items():
+        scope = scopes[scope_key]
+        structure = structures[scope.structure_key]
         structural = (
             scope.locator.structural_path
             if type(scope.locator) is AstLocatorIR
@@ -376,7 +381,7 @@ def _validate_pipeline_fact_references(
             )
     if any(
         item.kind is StructureKind.EXCEPTION_SCOPE
-        and item.local_key not in scopes_by_structure
+        and item.local_key not in {scope.structure_key for scope in scopes.values()}
         for item in facts.structures
     ):
         raise FrameworkAdapterError(

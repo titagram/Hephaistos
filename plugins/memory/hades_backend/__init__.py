@@ -17,7 +17,7 @@ from hermes_cli import hades_backend_runtime as runtime
 from hermes_cli.gnothi.contract import ORGANISM_SCHEMA
 from hermes_cli.gnothi.store import OrganismRevisionStore
 from hermes_cli.hades_backend_client import redact_secret
-from hermes_cli.hades_backend_sync import run_backend_sync
+from hermes_cli.hades_backend_sync import _graph_v2_active_cache_key, run_backend_sync
 from tools.registry import tool_error, tool_result
 
 
@@ -84,7 +84,7 @@ DOMAIN_ALIASES = {
 }
 SEARCH_DOMAINS = ("all", "project_memory", "logbook", "wiki", "agent_notes", "source_chunks", "artifacts")
 GRAPH_SCOPES = ("project", "organism")
-GRAPH_ARTIFACT_SCHEMAS = {"hades.php_graph.v1", "hades.code_graph.v1", ORGANISM_SCHEMA}
+GRAPH_ARTIFACT_SCHEMAS = {"hades.code_graph.v2", ORGANISM_SCHEMA}
 BUG_EVIDENCE_KINDS = (
     "all",
     "stack_trace",
@@ -1386,8 +1386,30 @@ class HadesBackendMemoryProvider(MemoryProvider):
             include_raw_chunks=False,
         )
         if backend_result is not None:
-            result = _tool_result_from_backend_search(backend_result)
-            result["tool_domain"] = "graph"
+            handles = _vector_graph_handles(backend_result)
+            topology = None
+            topology_error = None
+            if handles:
+                topology, topology_error = self._backend_graph_traverse(
+                    start=handles[0],
+                    direction="any",
+                    max_depth=1,
+                    limit=limit,
+                    scope=scope,
+                )
+            if topology is not None:
+                result = _tool_result_from_backend_graph_traverse(topology)
+                result["tool_domain"] = "graph"
+                result["topology_resolved"] = True
+                result["vector_candidate_handles"] = handles
+            else:
+                result = _tool_result_from_backend_search(backend_result)
+                result["tool_domain"] = "graph"
+                result["topology_resolved"] = False
+                if handles:
+                    result["vector_candidate_handles"] = handles
+                if topology_error:
+                    result["backend_topology_error"] = topology_error
             if scope == "organism":
                 result["scope"] = scope
             return tool_result(result)
@@ -1537,7 +1559,12 @@ class HadesBackendMemoryProvider(MemoryProvider):
         return self._local_graph_sources()
 
     def _local_graph_search(self, *, query: str, scope: str, limit: int) -> dict[str, Any] | None:
-        return _local_graph_search_response(self._graph_sources_for_scope(scope), query=query, limit=limit)
+        return _local_graph_search_response(
+            self._graph_sources_for_scope(scope),
+            query=query,
+            limit=limit,
+            active_graph_identity=self._active_graph_identity(scope),
+        )
 
     def _local_graph_traverse(
         self,
@@ -1554,7 +1581,16 @@ class HadesBackendMemoryProvider(MemoryProvider):
             direction=direction,
             max_depth=max_depth,
             limit=limit,
+            active_graph_identity=self._active_graph_identity(scope),
         )
+
+    def _active_graph_identity(self, scope: str) -> dict[str, Any] | None:
+        if scope == "organism" or self._binding is None:
+            return None
+        with db.connect_closing() as conn:
+            return db.get_sync_state(
+                conn, _graph_v2_active_cache_key(self._binding)
+            )
 
     def _handle_bug_evidence_search(self, args: Dict[str, Any]) -> str:
         query = str(args.get("query") or "").strip()
@@ -2631,7 +2667,57 @@ def _iter_graph_candidates(value: Any, *, depth: int = 0) -> list[dict[str, Any]
     return candidates
 
 
-def _graph_artifact_from_source(source: dict[str, Any]) -> dict[str, Any] | None:
+def _vector_graph_handles(response: dict[str, Any]) -> list[str]:
+    handles: list[str] = []
+    for item in _backend_items(response):
+        candidates: list[Any] = [item.get("graph_handle")]
+        graph_ref = item.get("graph_ref")
+        if isinstance(graph_ref, dict):
+            candidates.extend(
+                graph_ref.get(key) for key in ("handle", "public_id", "id")
+            )
+        graph_refs = item.get("graph_refs")
+        if isinstance(graph_refs, list):
+            for ref in graph_refs:
+                if isinstance(ref, dict):
+                    candidates.extend(
+                        ref.get(key) for key in ("handle", "public_id", "id")
+                    )
+        for candidate in candidates:
+            clean = _compact_text(candidate, max_chars=500)
+            if clean and clean not in handles:
+                handles.append(clean)
+    return handles[:200]
+
+
+def _active_v2_identity_matches(
+    graph: dict[str, Any],
+    envelope: dict[str, Any],
+    active: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(active, dict) or active.get("schema") != "hades.code_graph.v2":
+        return False
+    project = graph.get("project")
+    source = graph.get("source")
+    contract = graph.get("graph_contract")
+    if not all(isinstance(value, dict) for value in (project, source, contract)):
+        return False
+    projection_version = graph.get("projection_version") or envelope.get("projection_version")
+    return (
+        project.get("project_id") == active.get("project_id")
+        and project.get("workspace_binding_id") == active.get("workspace_binding_id")
+        and source == active.get("source_identity")
+        and contract.get("artifact_graph_version") == active.get("artifact_graph_version")
+        and projection_version == active.get("projection_version")
+        and active.get("publication_status") == "ready"
+    )
+
+
+def _graph_artifact_from_source(
+    source: dict[str, Any],
+    *,
+    active_graph_identity: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     item = source.get("item")
     if not isinstance(item, dict):
         return None
@@ -2641,25 +2727,43 @@ def _graph_artifact_from_source(source: dict[str, Any]) -> dict[str, Any] | None
         schema = str(graph.get("schema") or item_schema or "").strip()
         if schema not in GRAPH_ARTIFACT_SCHEMAS:
             continue
-        graph_keys = ("nodes", "edges") if schema == ORGANISM_SCHEMA else ("routes", "symbols", "edges")
+        graph_keys = ("nodes", "edges")
         if not any(isinstance(graph.get(key), list) for key in graph_keys):
             continue
+        if schema == "hades.code_graph.v2":
+            from hermes_cli.hades_graph_v2.model import artifact_from_payload
+            from hermes_cli.hades_graph_v2.validation import validate_artifact
+
+            try:
+                validate_artifact(artifact_from_payload(graph))
+            except (TypeError, ValueError):
+                continue
+            if not _active_v2_identity_matches(
+                graph, item, active_graph_identity
+            ):
+                continue
         graph["schema"] = schema
         return graph
     return None
 
 
-def _local_graph_artifacts(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _local_graph_artifacts(
+    sources: list[dict[str, Any]],
+    *,
+    active_graph_identity: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
-    seen_schemas: set[str] = set()
+    selected_v2 = False
     for source in sources:
-        graph = _graph_artifact_from_source(source)
+        graph = _graph_artifact_from_source(
+            source, active_graph_identity=active_graph_identity
+        )
         if graph is None:
             continue
         schema = str(graph.get("schema") or "")
-        if schema in seen_schemas:
+        if schema == "hades.code_graph.v2" and selected_v2:
             continue
-        seen_schemas.add(schema)
+        selected_v2 = selected_v2 or schema == "hades.code_graph.v2"
         artifact_id = _item_id(source.get("item") if isinstance(source.get("item"), dict) else {})
         if not artifact_id:
             artifact_id = str(source.get("job_id") or schema)
@@ -2667,6 +2771,14 @@ def _local_graph_artifacts(sources: list[dict[str, Any]]) -> list[dict[str, Any]
             {
                 "artifact": graph,
                 "artifact_id": artifact_id,
+                "projection_version": (
+                    graph.get("projection_version")
+                    or (
+                        source.get("item", {}).get("projection_version")
+                        if isinstance(source.get("item"), dict)
+                        else None
+                    )
+                ),
                 "origin": source.get("origin"),
                 "cache_version": source.get("cache_version"),
                 "cache_updated_at": source.get("cache_updated_at"),
@@ -2737,6 +2849,80 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
         graph = artifact_source["artifact"]
         schema = str(graph.get("schema") or "")
         artifact_id = str(artifact_source.get("artifact_id") or schema)
+
+        if schema == "hades.code_graph.v2":
+            for graph_node in graph.get("nodes") or []:
+                if not isinstance(graph_node, dict):
+                    continue
+                location = graph_node.get("location") if isinstance(graph_node.get("location"), dict) else {}
+                properties = graph_node.get("properties") if isinstance(graph_node.get("properties"), dict) else {}
+                _local_graph_add_node(
+                    nodes,
+                    graph_node.get("id"),
+                    kind=str(graph_node.get("kind") or "graph_node"),
+                    label=graph_node.get("qualified_name") or graph_node.get("name"),
+                    path=location.get("path"),
+                    attributes={
+                        "language": graph_node.get("language"),
+                        "framework": graph_node.get("framework"),
+                        "uncertainty_id": graph_node.get("uncertainty_id"),
+                        "location": location,
+                        "properties": properties,
+                        "schema": schema,
+                        "artifact_id": artifact_id,
+                        "projection_version": artifact_source.get("projection_version") or graph.get("projection_version"),
+                    },
+                )
+            for entrypoint in graph.get("entrypoints") or []:
+                if not isinstance(entrypoint, dict):
+                    continue
+                _local_graph_add_node(
+                    nodes,
+                    entrypoint.get("id"),
+                    kind="entrypoint",
+                    label=entrypoint.get("label"),
+                    path=(entrypoint.get("registration_occurrence") or {}).get("path")
+                    if isinstance(entrypoint.get("registration_occurrence"), dict)
+                    else "",
+                    attributes={
+                        key: value
+                        for key, value in entrypoint.items()
+                        if key not in {"id", "label"}
+                    } | {"schema": schema, "artifact_id": artifact_id},
+                )
+            for index, edge in enumerate(graph.get("edges") or []):
+                if not isinstance(edge, dict):
+                    continue
+                edge_from = _compact_text(edge.get("source_id"), max_chars=500)
+                edge_to = _compact_text(edge.get("target_id"), max_chars=500)
+                relation = _compact_text(edge.get("relation"), max_chars=100)
+                if not edge_from or not edge_to or not relation:
+                    continue
+                key = (
+                    relation,
+                    edge_from,
+                    edge_to,
+                    str((edge.get("location") or {}).get("path") if isinstance(edge.get("location"), dict) else ""),
+                    str((edge.get("location") or {}).get("line") if isinstance(edge.get("location"), dict) else ""),
+                )
+                if key in seen_edges:
+                    continue
+                seen_edges.add(key)
+                edges.append({
+                    "id": _compact_text(edge.get("id") or f"{artifact_id}:edge:{index}", max_chars=500),
+                    "kind": relation,
+                    "from": edge_from,
+                    "to": edge_to,
+                    "provenance": _bounded_payload({
+                        "flow": edge.get("flow"),
+                        "condition": edge.get("condition"),
+                        "uncertainty_id": edge.get("uncertainty_id"),
+                        "location": edge.get("location"),
+                        "schema": schema,
+                        "artifact_id": artifact_id,
+                    }),
+                })
+            continue
 
         if schema == ORGANISM_SCHEMA:
             for graph_node in graph.get("nodes") or []:
@@ -3371,8 +3557,11 @@ def _local_graph_search_response(
     *,
     query: str,
     limit: int,
+    active_graph_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    artifacts = _local_graph_artifacts(sources)
+    artifacts = _local_graph_artifacts(
+        sources, active_graph_identity=active_graph_identity
+    )
     if not artifacts:
         return None
     nodes, edges = _local_graph_build(artifacts)
@@ -3457,8 +3646,11 @@ def _local_graph_traverse_response(
     direction: str,
     max_depth: int,
     limit: int,
+    active_graph_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    artifacts = _local_graph_artifacts(sources)
+    artifacts = _local_graph_artifacts(
+        sources, active_graph_identity=active_graph_identity
+    )
     if not artifacts:
         return None
     nodes, edges = _local_graph_build(artifacts)

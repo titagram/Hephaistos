@@ -1357,11 +1357,23 @@ def count_memory_proposals_by_status(conn: sqlite3.Connection) -> dict[str, int]
 
 
 def record_sync_state(conn: sqlite3.Connection, key: str, value: dict[str, Any]) -> None:
+    record_sync_states(conn, {key: value})
+
+
+def record_sync_states(
+    conn: sqlite3.Connection, values: dict[str, dict[str, Any]]
+) -> None:
+    """Persist a related set of sync identities in one SQLite transaction."""
+
+    updated_at = _now()
     with write_txn(conn):
-        conn.execute(
+        conn.executemany(
             "INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (key, _json_dumps(value), _now()),
+            [
+                (key, _json_dumps(value), updated_at)
+                for key, value in sorted(values.items())
+            ],
         )
 
 

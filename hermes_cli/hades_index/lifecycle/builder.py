@@ -105,7 +105,9 @@ from hermes_cli.hades_graph_v2.model import (
     StructureKind,
     StructureSubtype,
     TerminalProperties,
+    TestProperties,
     Trigger,
+    TypeProperties,
     Uncertainty,
 )
 from hermes_cli.hades_index.lifecycle.model import (
@@ -126,6 +128,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
+    DataNodeIR,
     DeclarationIdentityKind,
     EdgeFactIR,
     EdgeSubjectIR,
@@ -150,6 +153,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     StructureIR,
     ExceptionSuccessor,
     ReturnSuccessor,
+    SourceNodeIR,
     Terminal,
     TerminalKind,
     UnresolvedFact,
@@ -626,6 +630,10 @@ def _all_locators(
 ) -> tuple[FileLocatorIR | AstLocatorIR | ConfigLocatorIR, ...]:
     values: list[FileLocatorIR | AstLocatorIR | ConfigLocatorIR] = []
     for result in results:
+        for source_node in result.source_nodes:
+            values.append(source_node.locator)
+        for data_node in result.data_nodes:
+            values.append(data_node.locator)
         for declaration in result.declarations:
             values.append(declaration.locator)
         for block in result.blocks:
@@ -681,6 +689,14 @@ class GraphBuilder:
 
         declarations = _deduplicate(
             (item for result in collected for item in result.declarations),
+            key=lambda item: item.local_key,
+        )
+        source_nodes_ir = _deduplicate(
+            (item for result in collected for item in result.source_nodes),
+            key=lambda item: item.local_key,
+        )
+        data_nodes_ir = _deduplicate(
+            (item for result in collected for item in result.data_nodes),
             key=lambda item: item.local_key,
         )
         blocks = _deduplicate(
@@ -751,6 +767,9 @@ class GraphBuilder:
         declaration_by_key = {item.local_key: item for item in declarations}
         block_by_key = {item.local_key: item for item in blocks}
         structure_ir_by_key = {item.local_key: item for item in structures_ir}
+        exception_scope_ir_by_key = {
+            item.local_key: item for item in exception_scopes
+        }
         call_site_by_key = {item.local_key: item for item in call_sites}
         edge_fact_by_key = {item.local_key: item for item in edge_facts}
 
@@ -801,6 +820,7 @@ class GraphBuilder:
             if event.path is not None:
                 coverage_by_path[event.path].append(event)
         for path in sorted(digest_by_path):
+            inventory_file = inventory_by_path[path]
             languages = path_languages.get(path, set())
             language = next(iter(languages)) if len(languages) == 1 else None
             identity = FileIdentity(
@@ -815,7 +835,11 @@ class GraphBuilder:
             })
             file_node_ids[path] = public_id
             try:
-                byte_size = len(context.file_accessor(Path(path)))
+                byte_size = (
+                    inventory_file.byte_size
+                    if inventory_file.byte_size is not None
+                    else len(context.file_accessor(Path(path)))
+                )
                 analysis_status = AnalysisStatus.ANALYZED
                 omission_reason = None
             except OSError:
@@ -895,8 +919,8 @@ class GraphBuilder:
                         byte_size,
                         analysis_status,
                         omission_reason,
-                        False,
-                        False,
+                        inventory_file.is_test,
+                        inventory_file.is_generated,
                     ),
                     EvidenceEnvelope(
                         EvidenceItem(
@@ -909,6 +933,116 @@ class GraphBuilder:
                         (),
                         0,
                     ),
+                )
+            )
+
+        for source_node in source_nodes_ir:
+            path = source_node.locator.source_location.path
+            identity = SourceDeclarationIdentity(
+                "source_declaration",
+                context.workspace_binding_id,
+                source_node.language,
+                source_node.kind,
+                source_node.namespace,
+                source_node.qualified_name,
+                path,
+            )
+            public_id = node_id({
+                "variant": "source_declaration",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": source_node.language,
+                "kind": source_node.kind.value,
+                "namespace": source_node.namespace,
+                "qualified_name": source_node.qualified_name,
+                "path": path,
+            })
+            local_node_ids[source_node.local_key] = public_id
+            properties = (
+                TestProperties(case_count=1)
+                if source_node.kind is NodeKind.TEST
+                else TypeProperties()
+            )
+            nodes.append(
+                Node(
+                    public_id,
+                    identity,
+                    source_node.kind,
+                    source_node.language,
+                    None,
+                    source_node.name,
+                    source_node.qualified_name,
+                    source_node.namespace,
+                    None,
+                    _source_location(source_node.locator),
+                    properties,
+                    _evidence(source_node.evidence),
+                )
+            )
+
+        for data_node in data_nodes_ir:
+            if data_node.kind is NodeKind.MODEL:
+                path = data_node.locator.source_location.path
+                qualified_name = data_node.qualified_name or data_node.name
+                identity = SourceDeclarationIdentity(
+                    "source_declaration",
+                    context.workspace_binding_id,
+                    data_node.language,
+                    data_node.kind,
+                    None,
+                    qualified_name,
+                    path,
+                )
+                public_id = node_id({
+                    "variant": "source_declaration",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": data_node.language,
+                    "kind": data_node.kind.value,
+                    "namespace": None,
+                    "qualified_name": qualified_name,
+                    "path": path,
+                })
+            else:
+                identity = SemanticResourceIdentity(
+                    "semantic_resource",
+                    context.workspace_binding_id,
+                    data_node.language,
+                    data_node.kind,
+                    None,
+                    None,
+                    data_node.qualified_name,
+                    data_node.public_resource_name,
+                    None,
+                    None,
+                )
+                public_id = node_id({
+                    "variant": "semantic_resource",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": data_node.language,
+                    "kind": data_node.kind.value,
+                    "framework": None,
+                    "namespace": None,
+                    "qualified_name": data_node.qualified_name,
+                    "public_resource_name": data_node.public_resource_name,
+                    "protocol": None,
+                    "operation": None,
+                })
+            local_node_ids[data_node.local_key] = public_id
+            nodes.append(
+                Node(
+                    public_id,
+                    identity,
+                    data_node.kind,
+                    data_node.language,
+                    None,
+                    data_node.name,
+                    data_node.qualified_name,
+                    None,
+                    None,
+                    _source_location(data_node.locator),
+                    DataProperties(
+                        public_resource_name=data_node.public_resource_name
+                    ),
+                    _evidence(data_node.evidence),
                 )
             )
 
@@ -1404,13 +1538,16 @@ class GraphBuilder:
             ):
                 if type(successor) is not ExceptionSuccessor:
                     continue
-                if successor.exception_scope_key not in structure_ids:
+                scope = exception_scope_ir_by_key.get(
+                    successor.exception_scope_key
+                )
+                if scope is None or scope.structure_key not in structure_ids:
                     raise IRValidationError(
                         "unresolved_reference",
                         "framework exception successor lacks exact typed scope facts",
                     )
                 framework_exception_scope_ids[successor.exception_scope_key] = (
-                    structure_ids[successor.exception_scope_key]
+                    structure_ids[scope.structure_key]
                 )
 
         # Loop successors do not carry a structure key in the frozen IR, so
@@ -1974,7 +2111,7 @@ class GraphBuilder:
             source_id: str,
             target_id: str,
             relation: Relation,
-            flow: EdgeFlow,
+            flow: EdgeFlow | None,
             locator: AstLocatorIR | ConfigLocatorIR,
             owner_id: str,
             evidence: EvidenceEnvelope,
@@ -2020,7 +2157,7 @@ class GraphBuilder:
                 "source_id": source_id,
                 "target_id": target_id,
                 "relation": relation.value,
-                "flow": flow.value,
+                "flow": None if flow is None else flow.value,
                 "condition_hash": None if condition is None else condition.hash,
                 "branch_group_id": branch_id,
                 "call_site_id": call_id,
@@ -2078,7 +2215,11 @@ class GraphBuilder:
                         structure_ir_by_key[edge_ir.call_site_key].owner_declaration_key
                     ]
                     if edge_ir.call_site_key is not None
-                    else edge_owner_local[edge_ir.source_node_local_key]
+                    else (
+                        edge_owner_local[edge_ir.source_node_local_key]
+                        if edge_ir.source_node_local_key in edge_owner_local
+                        else local_node_ids[edge_ir.target.local_key]
+                    )
                 )
             )
             candidate_fact = candidate_fact_by_edge_key.get(edge_ir.local_key)
@@ -2494,7 +2635,9 @@ class GraphBuilder:
                             successor.exception_scope_key
                         ]
                         exception_structure = structure_ir_by_key[
-                            successor.exception_scope_key
+                            exception_scope_ir_by_key[
+                                successor.exception_scope_key
+                            ].structure_key
                         ]
                         successor_owner_id = local_node_ids[
                             exception_structure.owner_declaration_key
@@ -2718,7 +2861,11 @@ class GraphBuilder:
                             fromlist=["ConditionPolarity"],
                         ).ConditionPolarity.EXCEPTION,
                     )
-                    exception_id = structure_ids[successor.exception_scope_key]
+                    exception_id = structure_ids[
+                        exception_scope_ir_by_key[
+                            successor.exception_scope_key
+                        ].structure_key
+                    ]
                 elif type(successor) is LoopSuccessor:
                     target_id = local_node_ids[successor.target_block_key]
                     relation = Relation.BRANCHES_TO
@@ -3198,6 +3345,8 @@ class GraphBuilder:
                 }
             )
         )
+        if not language_names and context.inventory_files:
+            language_names = ("unknown",)
         capabilities, language_completeness = self._completeness(
             language_names,
             effective_coverage_events,
@@ -3503,6 +3652,8 @@ class GraphBuilder:
                     count = sum(
                         reason_counts[(item, name, reason)] for item in scoped_languages
                     )
+                    if reason is ReasonCode.INVALID_SOURCE_FACT and missing_languages:
+                        count += len(missing_languages)
                     if not count:
                         continue
                     paths = sorted(
@@ -3516,15 +3667,6 @@ class GraphBuilder:
                             count,
                             language,
                             tuple(paths),
-                        )
-                    )
-                if missing_languages:
-                    reasons.append(
-                        CapabilityReason(
-                            ReasonCode.INVALID_SOURCE_FACT,
-                            max(1, len(missing_languages)),
-                            language,
-                            (),
                         )
                     )
                 values[name] = Capability(

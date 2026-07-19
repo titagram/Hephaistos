@@ -13,12 +13,24 @@ from hermes_cli.hades_backend_jobs import (
     _line_number,
     _ts_graph_summary,
 )
+from hermes_cli.hades_graph_v2.model import EvidenceOrigin, NodeKind
 from hermes_cli.hades_index.lifecycle.entrypoints import (
     EntrypointExtraction,
     sql_entrypoint_extraction,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.lifecycle.model import (
+    AdapterResult,
+    AstLocatorIR,
+    CoverageCapability,
+    CoverageEvent,
+    CoverageOutcome,
+    DataNodeIR,
+    ExtractionContext,
+    IREvidence,
+    SourceLocationIR,
+    local_record_key,
+)
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
@@ -53,6 +65,139 @@ SQL_TABLE_FOREIGN_KEY_RE = re.compile(
 
 def _sql_identifier(raw: str) -> str:
     return str(raw or "").strip().strip("`\"")
+
+
+def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
+    """Extract verified SQL table resources into the canonical graph-v2 IR."""
+
+    nodes: list[DataNodeIR] = []
+    coverage: list[CoverageEvent] = []
+    executable_capabilities = (
+        CoverageCapability.ENTRYPOINT_DISCOVERY,
+        CoverageCapability.CALL_GRAPH,
+        CoverageCapability.CONTROL_FLOW,
+        CoverageCapability.FRAMEWORK_LIFECYCLE,
+        CoverageCapability.EXCEPTIONS,
+        CoverageCapability.ASYNC,
+    )
+    for item in context.inventory_files:
+        if item.language != "sql":
+            continue
+        try:
+            source = context.file_accessor(Path(item.path)).decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            coverage.append(
+                CoverageEvent(
+                    "sql",
+                    CoverageCapability.DATA_ACCESS,
+                    CoverageOutcome.PARTIAL,
+                    "file_read_failed",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
+            continue
+        represented = 0
+        for ordinal, match in enumerate(SQL_CREATE_TABLE_RE.finditer(source)):
+            table_name = _sql_identifier(match.group("table").split(".")[-1])
+            line = _line_number(source, match.start())
+            structural_path = f"sql/create_table/{ordinal}"
+            locator = AstLocatorIR(
+                SourceLocationIR(item.path, line, line, item.file_sha256),
+                structural_path,
+                ordinal,
+            )
+            evidence = IREvidence(
+                EvidenceOrigin.VERIFIED_FROM_CODE,
+                "sql.schema-v2",
+                locator,
+                None,
+            )
+            nodes.append(
+                DataNodeIR(
+                    local_record_key(
+                        "sql",
+                        item.path,
+                        "data_node",
+                        "ast",
+                        structural_path,
+                        ordinal,
+                    ),
+                    "sql",
+                    NodeKind.TABLE,
+                    table_name,
+                    f"{item.path}::{table_name}",
+                    table_name,
+                    locator,
+                    evidence,
+                )
+            )
+            represented += 1
+        coverage.extend(
+            CoverageEvent(
+                "sql",
+                capability,
+                CoverageOutcome.NOT_APPLICABLE,
+                None,
+                item.path,
+                0,
+                0,
+            )
+            for capability in executable_capabilities
+        )
+        coverage.extend((
+            CoverageEvent(
+                "sql",
+                CoverageCapability.SYMBOL_RESOLUTION,
+                CoverageOutcome.FULL,
+                None,
+                item.path,
+                represented,
+                0,
+            ),
+            CoverageEvent(
+                "sql",
+                CoverageCapability.DATA_ACCESS,
+                CoverageOutcome.FULL,
+                None,
+                item.path,
+                represented,
+                0,
+            ),
+        ))
+    result = AdapterResult(
+        declarations=(),
+        blocks=(),
+        branch_arms=(),
+        structures=(),
+        call_sites=(),
+        edge_facts=(),
+        exception_scopes=(),
+        terminals=(),
+        effects=(),
+        framework_segments=(),
+        entrypoints=(),
+        unresolved_facts=(),
+        coverage_events=tuple(
+            sorted(
+                coverage,
+                key=lambda event: (
+                    event.language,
+                    event.capability.value,
+                    event.outcome.value,
+                    event.reason_code or "",
+                    event.path or "",
+                ),
+            )
+        ),
+        diagnostics=(),
+        data_nodes=tuple(sorted(nodes, key=lambda node: node.local_key)),
+    )
+    result.validate()
+    return result
 
 
 def _sql_split_items(body: str) -> list[tuple[str, int]]:
@@ -254,4 +399,3 @@ def build_graph(
     }
     graph["summary"] = _ts_graph_summary([], symbols, edges, framework="sql", database=graph_database)
     return graph
-

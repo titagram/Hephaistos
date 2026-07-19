@@ -48,7 +48,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     TerminalKind,
     local_record_key,
 )
-from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
+from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR, declaration_local_key
 
 
 _LANGUAGES = frozenset({"javascript", "typescript"})
@@ -902,14 +902,11 @@ def _candidate(
     public_path: str | None,
     public_name: str | None,
     methods: tuple[str, ...],
-    resolved: bool,
+    handler_local_key: str | None,
 ) -> EntrypointCandidate:
     locator = _locator(path, source, line, pointer, ordinal)
-    handler = (
-        local_record_key(language, path, "framework_handler", "ast", pointer, ordinal)
-        if resolved
-        else None
-    )
+    handler = handler_local_key
+    resolved = handler is not None
     unresolved = (
         None
         if resolved
@@ -939,6 +936,34 @@ def _candidate(
         (),
         evidence,
     )
+
+
+def _syntax_handler_key(
+    item: SyntaxIR,
+    public_name: str | None,
+    *,
+    line: int | None = None,
+) -> str | None:
+    if public_name is None:
+        return None
+    matches = [
+        (ordinal, symbol)
+        for ordinal, symbol in enumerate(item.symbols)
+        if symbol.kind in {"function", "method"}
+        and symbol.name.rsplit(".", 1)[-1] == public_name
+        and (line is None or symbol.line == line)
+    ]
+    if len(matches) != 1 and line is not None:
+        matches = [
+            (ordinal, symbol)
+            for ordinal, symbol in enumerate(item.symbols)
+            if symbol.kind in {"function", "method"}
+            and symbol.name.rsplit(".", 1)[-1] == public_name
+        ]
+    if len(matches) != 1:
+        return None
+    ordinal, symbol = matches[0]
+    return declaration_local_key(item.language, item.path, symbol, ordinal)
 
 
 def _pipeline(
@@ -1095,7 +1120,11 @@ def _build_snapshot(
                     role.public_path,
                     export.name,
                     (export.method,) if export.method else (),
-                    export.resolved,
+                    (
+                        _syntax_handler_key(item, export.name, line=export.line)
+                        if export.resolved
+                        else None
+                    ),
                 )
                 candidates.append(candidate)
                 candidate_rules[_candidate_key(candidate)] = ()
@@ -1120,7 +1149,7 @@ def _build_snapshot(
                 role.public_path,
                 None,
                 methods or (),
-                True,
+                _syntax_handler_key(item, "default"),
             )
             candidates.append(candidate)
             candidate_rules[_candidate_key(candidate)] = ()
@@ -1145,7 +1174,11 @@ def _build_snapshot(
                 role.public_path,
                 "middleware",
                 (),
-                _has_exported_middleware(source),
+                (
+                    _syntax_handler_key(item, "middleware")
+                    if _has_exported_middleware(source)
+                    else None
+                ),
             )
             candidates.append(candidate)
             candidate_rules[_candidate_key(candidate)] = rules
@@ -1174,7 +1207,7 @@ def _build_snapshot(
                     rule.source,
                     rule.destination,
                     (),
-                    True,
+                    None,
                 )
                 candidates.append(candidate)
                 candidate_rules[_candidate_key(candidate)] = (rule,)

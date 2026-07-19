@@ -16,6 +16,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
+    local_record_key,
 )
 
 
@@ -110,8 +111,10 @@ _LANGUAGE_VARIANTS = {
 
 SyntaxControlKind: TypeAlias = Literal[
     "branch",
+    "branch_arm",
     "merge",
     "loop",
+    "loop_body",
     "return",
     "throw",
     "try",
@@ -128,8 +131,10 @@ ParseFailureCode: TypeAlias = Literal[
 ]
 _SYNTAX_CONTROL_KINDS = frozenset({
     "branch",
+    "branch_arm",
     "merge",
     "loop",
+    "loop_body",
     "return",
     "throw",
     "try",
@@ -167,6 +172,7 @@ class StructuralCall:
     caller: str
     target: str
     line: int
+    argument_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +195,8 @@ class SyntaxControl:
     owner_structural_path: str = "root"
     start_byte: int = 0
     end_byte: int = 0
+    parent_control_path: str | None = None
+    arm_polarity: Literal["true", "false"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _SYNTAX_CONTROL_KINDS:
@@ -201,6 +209,14 @@ class SyntaxControl:
             raise ValueError("syntax control must have positive ordered lines")
         if self.start_byte < 0 or self.end_byte < self.start_byte:
             raise ValueError("syntax control must have non-negative ordered bytes")
+        if self.kind == "branch_arm":
+            if self.parent_control_path is None or self.arm_polarity is None:
+                raise ValueError("branch arm requires its exact parent and polarity")
+        elif self.kind == "loop_body":
+            if self.parent_control_path is None or self.arm_polarity is not None:
+                raise ValueError("loop body requires only its exact parent")
+        elif self.parent_control_path is not None or self.arm_polarity is not None:
+            raise ValueError("only branch arms may carry parent and polarity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +250,29 @@ class SyntaxIR:
     @property
     def calls(self) -> tuple[StructuralCall, ...]:
         return self.parsed_file.calls
+
+
+def declaration_local_key(
+    language: str,
+    path: str,
+    symbol: StructuralSymbol,
+    ordinal: int,
+) -> str:
+    """Return the single local identity shared by every v2 language adapter."""
+
+    structural_path = (
+        f"symbol/{symbol.name}"
+        if symbol.structural_path == "root"
+        else symbol.structural_path
+    )
+    return local_record_key(
+        language,
+        path,
+        "executable_declaration",
+        "ast",
+        structural_path,
+        ordinal,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +481,9 @@ class TreeSitterAdapter:
                 structural_path: str,
                 owner_structural_path: str,
                 node: Any,
+                *,
+                parent_control_path: str | None = None,
+                arm_polarity: Literal["true", "false"] | None = None,
             ) -> None:
                 controls.append(
                     SyntaxControl(
@@ -452,8 +494,20 @@ class TreeSitterAdapter:
                         owner_structural_path=owner_structural_path,
                         start_byte=max(0, int(getattr(node, "start_byte", 0))),
                         end_byte=max(0, int(getattr(node, "end_byte", 0))),
+                        parent_control_path=parent_control_path,
+                        arm_polarity=arm_polarity,
                     )
                 )
+
+            def child_path(parent: Any, parent_path: str, target: Any) -> str:
+                counts: dict[str, int] = {}
+                for child in getattr(parent, "children", ()):
+                    child_type = str(getattr(child, "type", "node"))
+                    ordinal = counts.get(child_type, 0)
+                    counts[child_type] = ordinal + 1
+                    if child == target:
+                        return f"{parent_path}/{child_type}/{ordinal}"
+                raise ValueError("Tree-sitter field node is not a direct child")
 
             def visit(
                 node: Any,
@@ -492,6 +546,26 @@ class TreeSitterAdapter:
                         next_context = qualified
                         if symbol_kind in {"class", "interface", "trait", "enum"}:
                             next_container = name
+                if (
+                    language in {"javascript", "typescript"}
+                    and node_type == "variable_declarator"
+                ):
+                    value = _field(node, "value")
+                    value_type = str(getattr(value, "type", ""))
+                    name = _bounded_node_text(source, _field(node, "name"))
+                    if value_type in _CALLABLE_TYPES[language] and name:
+                        value_path = child_path(node, structural_path, value)
+                        symbols.append(
+                            StructuralSymbol(
+                                name=name,
+                                kind="function",
+                                line=_point_row(value.start_point) + 1,
+                                end_line=_point_row(value.end_point) + 1,
+                                container=container,
+                                structural_path=value_path,
+                            )
+                        )
+                        next_context = name
                 if node_type in _IMPORT_TYPES:
                     target = _bounded_node_text(source, _field(node, "source", "name"))
                     if target:
@@ -510,12 +584,51 @@ class TreeSitterAdapter:
                                 caller=context,
                                 target=target,
                                 line=_point_row(node.start_point) + 1,
+                                argument_count=len(
+                                    tuple(
+                                        child
+                                        for child in getattr(
+                                            _field(node, "arguments"), "named_children", ()
+                                        )
+                                    )
+                                ),
                             )
                         )
                 node_is_named = bool(getattr(node, "is_named", True))
                 control_kind = _control_kind(node_type) if node_is_named else None
                 if control_kind is not None:
                     add_control(control_kind, structural_path, next_owner, node)
+                    if control_kind == "branch":
+                        consequence = _field(node, "consequence", "body")
+                        alternative = _field(node, "alternative")
+                        if consequence is not None:
+                            add_control(
+                                "branch_arm",
+                                child_path(node, structural_path, consequence),
+                                next_owner,
+                                consequence,
+                                parent_control_path=structural_path,
+                                arm_polarity="true",
+                            )
+                        if alternative is not None:
+                            add_control(
+                                "branch_arm",
+                                child_path(node, structural_path, alternative),
+                                next_owner,
+                                alternative,
+                                parent_control_path=structural_path,
+                                arm_polarity="false",
+                            )
+                    if control_kind == "loop":
+                        body = _field(node, "body")
+                        if body is not None:
+                            add_control(
+                                "loop_body",
+                                child_path(node, structural_path, body),
+                                next_owner,
+                                body,
+                                parent_control_path=structural_path,
+                            )
                     if control_kind in {"branch", "loop", "try"}:
                         # This is a structural convergence marker, not an
                         # inferred runtime path.  CFG construction later owns

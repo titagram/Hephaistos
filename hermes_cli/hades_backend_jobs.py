@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 import tomllib
 from typing import Any
 
@@ -1257,13 +1259,22 @@ def _wiki_page(
 def _wiki_route_rows(routes: list[dict[str, Any]]) -> list[list[Any]]:
     rows: list[list[Any]] = []
     for route in routes:
+        registration = route.get("registration_occurrence")
+        source_locator = (
+            registration.get("source_locator")
+            if isinstance(registration, dict)
+            else None
+        )
+        source_path = (
+            source_locator.get("path") if isinstance(source_locator, dict) else None
+        )
         rows.append(
             [
-                route.get("method") or "",
-                route.get("uri") or route.get("path") or "",
-                route.get("name") or "",
-                route.get("handler") or "",
-                route.get("source_path") or route.get("path") or "",
+                route.get("method") or ", ".join(route.get("methods") or []),
+                route.get("uri") or route.get("path") or route.get("public_path") or "",
+                route.get("name") or route.get("public_name") or route.get("label") or "",
+                route.get("handler") or route.get("handler_node_id") or "",
+                route.get("source_path") or source_path or route.get("path") or "",
                 route.get("line") or "",
             ]
         )
@@ -1288,12 +1299,15 @@ def _wiki_symbol_rows(symbols: list[dict[str, Any]]) -> list[list[Any]]:
 
     rows: list[list[Any]] = []
     for symbol in sorted(symbols, key=sort_key):
+        location = symbol.get("location")
+        if not isinstance(location, dict):
+            location = {}
         rows.append(
             [
                 symbol.get("name") or symbol.get("class") or "",
                 symbol.get("role") or symbol.get("kind") or "",
-                symbol.get("path") or "",
-                symbol.get("line") or "",
+                symbol.get("path") or location.get("path") or "",
+                symbol.get("line") or location.get("start_line") or "",
             ]
         )
     return rows
@@ -1326,6 +1340,41 @@ def _wiki_test_rows(tests: dict[str, Any]) -> list[list[Any]]:
     return rows
 
 
+def _materialize_local_graph_v2(descriptor: dict[str, Any]) -> dict[str, Any]:
+    """Load a descriptor's exact private bundle for an in-process consumer."""
+
+    from hermes_constants import get_hermes_home
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
+
+    manifest = descriptor.get("bundle")
+    if not isinstance(manifest, dict):
+        raise ValueError("graph v2 descriptor is missing its bundle manifest")
+    project = manifest.get("project")
+    version = manifest.get("artifact_graph_version")
+    if not isinstance(project, dict) or not isinstance(version, str):
+        raise ValueError("graph v2 descriptor has incomplete bundle identity")
+    project_id = str(project.get("project_id") or "")
+    binding_id = str(project.get("workspace_binding_id") or "")
+    spool = (
+        get_hermes_home()
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / project_id
+        / binding_id
+        / version
+    )
+    graph = GraphBundleWriter().materialize_artifact(spool)
+    if (
+        graph.get("schema") != "hades.code_graph.v2"
+        or graph.get("source") != manifest.get("source")
+        or graph.get("project") != project
+        or graph.get("graph_contract") != manifest.get("graph_contract")
+    ):
+        raise ValueError("materialized graph does not match its v2 descriptor")
+    return graph
+
+
 def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     payload = job.get("payload") or {}
     max_files = int(payload.get("max_files") or 10_000)
@@ -1348,7 +1397,15 @@ def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) ->
         workspace_root,
     )
     tree = tree_result.get("artifact") if isinstance(tree_result, dict) else {}
-    graph = graph_result.get("artifact") if isinstance(graph_result, dict) else {}
+    graph_descriptor = (
+        graph_result.get("artifact") if isinstance(graph_result, dict) else {}
+    )
+    graph = graph_descriptor
+    if (
+        isinstance(graph_descriptor, dict)
+        and graph_descriptor.get("schema") == "hades.code_graph.v2"
+    ):
+        graph = _materialize_local_graph_v2(graph_descriptor)
     if not isinstance(tree, dict) or not isinstance(graph, dict):
         return {
             "status": "failed",
@@ -1363,14 +1420,67 @@ def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) ->
     files_by_path = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
     project_index = tree.get("project_index") if isinstance(tree.get("project_index"), dict) else {}
     language_counts = project_index.get("language_counts") if isinstance(project_index.get("language_counts"), dict) else {}
+    if not language_counts and isinstance(graph.get("languages"), list):
+        language_counts = {
+            str(item.get("name") or "unknown"): {
+                "files": item.get("analyzed_file_count") or 0,
+                "bytes": 0,
+            }
+            for item in graph["languages"]
+            if isinstance(item, dict)
+        }
     dependency_manifests = project_index.get("dependency_manifests")
     if not isinstance(dependency_manifests, list):
         dependency_manifests = graph.get("dependency_manifests") if isinstance(graph.get("dependency_manifests"), list) else []
-    routes = graph.get("routes") if isinstance(graph.get("routes"), list) else project_index.get("routes") or []
-    symbols = graph.get("symbols") if isinstance(graph.get("symbols"), list) else []
+    routes = (
+        graph.get("entrypoints")
+        if isinstance(graph.get("entrypoints"), list)
+        else graph.get("routes")
+        if isinstance(graph.get("routes"), list)
+        else project_index.get("routes") or []
+    )
+    symbols = (
+        [
+            node
+            for node in graph.get("nodes") or []
+            if isinstance(node, dict) and node.get("kind") != "file"
+        ]
+        if isinstance(graph.get("nodes"), list)
+        else graph.get("symbols")
+        if isinstance(graph.get("symbols"), list)
+        else []
+    )
     edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
     database = graph.get("database") if isinstance(graph.get("database"), dict) else project_index.get("database") or {}
+    if isinstance(graph.get("nodes"), list):
+        database = {
+            "tables": [
+                {
+                    "table": node.get("name"),
+                    "source": "graph_v2",
+                    "path": (node.get("location") or {}).get("path"),
+                    "line": (node.get("location") or {}).get("start_line"),
+                    "columns": [],
+                    "foreign_keys": [],
+                }
+                for node in graph["nodes"]
+                if isinstance(node, dict) and node.get("kind") == "table"
+            ]
+        }
     tests = graph.get("tests") if isinstance(graph.get("tests"), dict) else {}
+    if isinstance(graph.get("nodes"), list):
+        tests = {
+            "files": [
+                {
+                    "path": (node.get("location") or {}).get("path"),
+                    "framework": node.get("language"),
+                    "cases": [node.get("name")],
+                    "symbol_refs": [],
+                }
+                for node in graph["nodes"]
+                if isinstance(node, dict) and node.get("kind") == "test"
+            ]
+        }
     logs = graph.get("logs") if isinstance(graph.get("logs"), dict) else {}
 
     artifact_refs = [_artifact_evidence(tree), _artifact_evidence(graph)]
@@ -1634,52 +1744,481 @@ def _split_top_level_items(body: str) -> list[tuple[str, int]]:
     return items
 
 
+def _graph_v2_framework_context(
+    inventory: tuple[Any, ...],
+    file_accessor,
+) -> tuple[
+    tuple[Any, ...],
+    tuple[Any, ...],
+    tuple[Any, ...],
+    tuple[Any, ...],
+    tuple[Any, ...],
+    tuple[Any, ...],
+]:
+    """Derive closed framework/config facts from authoritative inventory files."""
+
+    from hermes_cli.hades_graph_v2.model import FrameworkKnowledge, FrameworkRecord
+    from hermes_cli.hades_index.lifecycle.model import (
+        ConfigLocatorIR,
+        SourceLocationIR,
+    )
+
+    by_path = {item.path: item for item in inventory}
+
+    def locator(path: str, ordinal: int) -> ConfigLocatorIR:
+        raw = file_accessor(Path(path))
+        return ConfigLocatorIR(
+            SourceLocationIR(
+                path,
+                1,
+                max(1, raw.count(b"\n") + 1),
+                by_path[path].file_sha256,
+            ),
+            "document",
+            ordinal,
+        )
+
+    composer_paths = tuple(
+        path for path in ("composer.json", "composer.lock") if path in by_path
+    )
+    python_paths = tuple(
+        path
+        for path in ("pyproject.toml", "requirements.txt", "requirements-dev.txt")
+        if path in by_path
+    )
+    package_paths = tuple(path for path in ("package.json",) if path in by_path)
+    tsconfig_paths = tuple(
+        sorted(path for path in by_path if Path(path).name.startswith("tsconfig") and path.endswith(".json"))
+    )
+    def metadata(paths: tuple[str, ...], _language: str) -> tuple[ConfigLocatorIR, ...]:
+        values: list[ConfigLocatorIR] = []
+        for index, path in enumerate(paths):
+            try:
+                values.append(locator(path, index))
+            except OSError:
+                continue
+        return tuple(values)
+
+    composer_metadata = metadata(composer_paths, "php")
+    python_metadata = metadata(python_paths, "python")
+    package_languages = tuple(sorted({
+        item.language
+        for item in inventory
+        if item.language in {"javascript", "typescript"}
+    })) or ("typescript",)
+    package_metadata = metadata(package_paths, package_languages[0])
+    tsconfig_metadata = metadata(tsconfig_paths, "typescript")
+
+    detected: dict[tuple[str, str], FrameworkRecord] = {}
+
+    def normalized_version(value: object) -> str | None:
+        match = re.search(r"\d+(?:\.\d+){1,2}", str(value or ""))
+        return None if match is None else match.group(0)
+
+    def remember(language: str, name: str, version: object, detector: str, path: str) -> None:
+        normalized = normalized_version(version)
+        detected[(language, name)] = FrameworkRecord(
+            language,
+            name,
+            normalized,
+            detector,
+            (path,),
+            FrameworkKnowledge.VERIFIED if normalized else FrameworkKnowledge.UNRESOLVED,
+        )
+
+    if "package.json" in by_path:
+        try:
+            document = json.loads(file_accessor(Path("package.json")))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            document = {}
+        dependencies: dict[str, object] = {}
+        if isinstance(document, dict):
+            for section in ("dependencies", "devDependencies", "peerDependencies"):
+                values = document.get(section)
+                if isinstance(values, dict):
+                    dependencies.update(values)
+        if "next" in dependencies:
+            languages = sorted({
+                item.language
+                for item in inventory
+                if item.language in {"javascript", "typescript"}
+            })
+            for language in languages:
+                remember(language, "nextjs", dependencies["next"], "package_json", "package.json")
+
+    for path in python_paths:
+        try:
+            text_value = file_accessor(Path(path)).decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        for name in ("fastapi", "starlette", "django"):
+            match = re.search(
+                rf"(?im)\b{re.escape(name)}\b\s*(?:\[[^\]]+\])?\s*([<>=!~^ ]*\d+(?:\.\d+){{1,2}})?",
+                text_value,
+            )
+            if match is not None:
+                remember("python", name, match.group(1), Path(path).name.replace(".", "_"), path)
+
+    if "composer.json" in by_path:
+        try:
+            document = json.loads(file_accessor(Path("composer.json")))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            document = {}
+        dependencies = {}
+        if isinstance(document, dict):
+            for section in ("require", "require-dev"):
+                values = document.get(section)
+                if isinstance(values, dict):
+                    dependencies.update(values)
+        if "laravel/framework" in dependencies:
+            remember("php", "laravel", dependencies["laravel/framework"], "composer_json", "composer.json")
+        symfony_versions = [
+            value
+            for package, value in dependencies.items()
+            if str(package).startswith("symfony/")
+        ]
+        if symfony_versions:
+            remember("php", "symfony", symfony_versions[0], "composer_json", "composer.json")
+
+    return (
+        tuple(sorted(detected.values(), key=lambda row: (row.language, row.name, row.version or ""))),
+        composer_metadata,
+        python_metadata,
+        package_metadata,
+        tsconfig_metadata,
+        (),
+    )
+
+
 def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     from hermes_cli.config import load_config_readonly
+    from hermes_constants import get_hermes_home
     from hermes_cli.hades_graph_config import (
-        build_source_identity,
         load_hades_graph_index_config,
         verify_source_unchanged,
     )
-    from hermes_cli.hades_index import build_graph_for_workspace
+    from hermes_cli.hades_graph_v2.bundle import BundleLimits, GraphBundleWriter
+    from hermes_cli.hades_graph_v2.model import SourceIdentity, artifact_to_payload
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+    from hermes_cli.hades_index import build_canonical_graph
+    from hermes_cli.hades_index.inventory import (
+        build_source_snapshot,
+        is_test_source_path,
+    )
+    from hermes_cli.hades_index.lifecycle.assembler import assemble_graph_v2_adapter_result
+    from hermes_cli.hades_index.sql import extract_lifecycle_data
+    from hermes_cli.hades_index.lifecycle.model import (
+        CoverageCapability,
+        CoverageEvent,
+        CoverageOutcome,
+        ExtractionContext,
+        InventoryFile,
+    )
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
 
     payload = job.get("payload") or {}
     graph_index_config = load_hades_graph_index_config(load_config_readonly())
-    source_before = build_source_identity(workspace_root, graph_index_config)
-    max_files = min(int(payload.get("max_files") or 10_000), 10_000)
-    max_total_bytes = min(
-        int(payload.get("max_total_bytes") or 134_217_728),
-        134_217_728,
-    )
-    candidates, omitted, truncated = _iter_workspace_files(
+    snapshot = build_source_snapshot(
         workspace_root,
-        max_files=max_files,
-        max_total_bytes=max_total_bytes,
+        user_excluded_paths=graph_index_config.excluded_paths,
+    )
+    source_before = SourceIdentity(
+        head_commit=snapshot.head_commit,
+        tree_sha256=snapshot.tree_sha256,
+        dirty=snapshot.dirty,
+        branch=snapshot.branch,
+    )
+    project_id = str(payload.get("project_id") or "").strip()
+    workspace_binding_id = str(payload.get("workspace_binding_id") or "").strip()
+    if not project_id or not workspace_binding_id:
+        raise ValueError(
+            "graph v2 requires project_id and workspace_binding_id from the backend binding"
+        )
+    cache_component = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
+    if not cache_component.fullmatch(project_id) or not cache_component.fullmatch(
+        workspace_binding_id
+    ):
+        raise ValueError("graph v2 project and workspace binding ids must be safe cache keys")
+
+    inventory: list[InventoryFile] = []
+    detected_languages: set[str] = set()
+    supported_parsers = {"javascript", "php", "python", "typescript"}
+    for relative, digest in snapshot.records:
+        # ``snapshot.records`` is already the authoritative, workspace-bounded
+        # inventory.  Inspect the lexical entry before resolving it so a
+        # recorded symlink is classified as such instead of following an
+        # escape target.
+        candidate = workspace_root / relative
+        source_language = LANGUAGE_SUFFIXES.get(candidate.suffix.lower())
+        metadata_language = None
+        if source_language is None:
+            metadata_language = {
+                "composer.json": "php",
+                "composer.lock": "php",
+                "package.json": "typescript",
+                "pyproject.toml": "python",
+                "requirements.txt": "python",
+                "requirements-dev.txt": "python",
+            }.get(candidate.name)
+            if candidate.name.startswith("tsconfig") and candidate.suffix == ".json":
+                metadata_language = "typescript"
+        language = source_language or metadata_language
+        parser_candidate = (
+            source_language in supported_parsers
+            and candidate.is_file()
+            and not candidate.is_symlink()
+        )
+        if parser_candidate and source_language is not None:
+            detected_languages.add(source_language)
+        try:
+            byte_size = candidate.lstat().st_size
+        except OSError:
+            byte_size = None
+        inventory.append(
+            InventoryFile(
+                relative,
+                digest,
+                language,
+                parser_candidate,
+                byte_size,
+                is_test_source_path(relative),
+                False,
+            )
+        )
+    inventory.sort(key=lambda item: item.path)
+    inventory_paths = {item.path for item in inventory}
+    inventory_tuple = tuple(inventory)
+    parse_coverage: list[CoverageEvent] = []
+    selected_parser_paths: set[str] = set()
+    total_source_bytes = 0
+    for item in inventory_tuple:
+        size = (
+            item.byte_size
+            if item.byte_size is not None
+            else graph_index_config.max_file_bytes + 1
+        )
+        coverage_language = item.language or (
+            next(iter(sorted(detected_languages)))
+            if len(detected_languages) == 1
+            else "unknown"
+        )
+        if size > graph_index_config.max_file_bytes:
+            parse_coverage.append(
+                CoverageEvent(
+                    coverage_language,
+                    CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                    "file_too_large",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
+            continue
+        if not item.parser_candidate or item.language is None:
+            continue
+        if total_source_bytes + size > graph_index_config.max_total_source_bytes:
+            parse_coverage.append(
+                CoverageEvent(
+                        item.language,
+                        CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                        "resource_budget_reached",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
+            continue
+        total_source_bytes += size
+        selected_parser_paths.add(item.path)
+    selected_data_paths: set[str] = set()
+    for item in inventory_tuple:
+        if item.language != "sql" or item.path in selected_parser_paths:
+            continue
+        size = (
+            item.byte_size
+            if item.byte_size is not None
+            else graph_index_config.max_file_bytes + 1
+        )
+        if (
+            size > graph_index_config.max_file_bytes
+            or total_source_bytes + size > graph_index_config.max_total_source_bytes
+        ):
+            parse_coverage.append(
+                CoverageEvent(
+                    "sql",
+                    CoverageCapability.DATA_ACCESS,
+                    CoverageOutcome.PARTIAL,
+                    "resource_budget_reached",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
+            continue
+        total_source_bytes += size
+        selected_data_paths.add(item.path)
+    metadata_paths = {
+        item.path
+        for item in inventory_tuple
+        if Path(item.path).name
+        in {
+            "composer.json",
+            "composer.lock",
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+        }
+        or (
+            Path(item.path).name.startswith("tsconfig")
+            and item.path.endswith(".json")
+        )
+    }
+    accessible_paths = selected_parser_paths | selected_data_paths | metadata_paths
+
+    def read_inventory_file(relative: Path) -> bytes:
+        normalized = relative.as_posix()
+        if normalized not in inventory_paths or normalized not in accessible_paths:
+            raise OSError("path is outside the bounded graph inventory")
+        lexical_candidate = workspace_root / normalized
+        if lexical_candidate.is_symlink():
+            raise OSError("graph inventory entry is no longer a regular file")
+        candidate = _resolve_inside(workspace_root, normalized)
+        if not candidate.is_file():
+            raise OSError("graph inventory entry is no longer a regular file")
+        with candidate.open("rb") as handle:
+            raw = handle.read(graph_index_config.max_file_bytes + 1)
+        if len(raw) > graph_index_config.max_file_bytes:
+            raise OSError("graph inventory file exceeds max_file_bytes")
+        return raw
+
+    (
+        detected_frameworks,
+        composer_metadata,
+        python_metadata,
+        package_metadata,
+        tsconfig_metadata,
+        metadata_coverage,
+    ) = _graph_v2_framework_context(
+        inventory_tuple, read_inventory_file
+    )
+    parse_coverage.extend(metadata_coverage)
+    context = ExtractionContext(
+        workspace_root=workspace_root,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+        source_identity=source_before,
+        graph_config=graph_index_config,
+        detected_languages=tuple(sorted(detected_languages)),
+        detected_frameworks=detected_frameworks,
+        composer_metadata=composer_metadata,
+        python_metadata=python_metadata,
+        package_metadata=package_metadata,
+        tsconfig_metadata=tsconfig_metadata,
+        file_accessor=read_inventory_file,
+        inventory_files=inventory_tuple,
+        excluded_path_count=snapshot.excluded_count,
     )
 
-    # Dispatch to pluggable indexer (currently a seam over existing functions)
-    artifact = build_graph_for_workspace(workspace_root, candidates, omitted, payload)
-    artifact["truncated"] = bool(artifact.get("truncated")) or truncated
-    verify_source_unchanged(workspace_root, graph_index_config, source_before)
+    parser = TreeSitterAdapter()
+    parser.require_languages(detected_languages)
+    syntax = []
+    for item in inventory_tuple:
+        if (
+            not item.parser_candidate
+            or item.language is None
+            or item.path not in selected_parser_paths
+        ):
+            continue
+        candidate = _resolve_inside(workspace_root, item.path)
+        parsed = parser.parse_file(
+            candidate,
+            relative_path=item.path,
+            language=item.language,
+            max_bytes=graph_index_config.max_file_bytes,
+        )
+        if parsed.syntax is not None:
+            syntax.append(parsed.syntax)
+        elif parsed.coverage_event is not None:
+            parse_coverage.append(parsed.coverage_event)
+
+    assembled = assemble_graph_v2_adapter_result(
+        context,
+        tuple(syntax),
+        parse_coverage=tuple(parse_coverage),
+    )
+    adapter_results = [assembled]
+    if any(item.language == "sql" for item in inventory_tuple):
+        adapter_results.append(extract_lifecycle_data(context))
+    complete = build_canonical_graph(context, tuple(adapter_results))
+    limits = BundleLimits(
+        max_chunk_uncompressed_bytes=graph_index_config.max_chunk_uncompressed_bytes,
+        max_bundle_uncompressed_bytes=graph_index_config.max_bundle_uncompressed_bytes,
+        backend_max_artifact_bytes=(
+            int(payload["backend_max_artifact_bytes"])
+            if payload.get("backend_max_artifact_bytes") is not None
+            else None
+        ),
+        backend_max_body_bytes=(
+            int(payload["backend_max_body_bytes"])
+            if payload.get("backend_max_body_bytes") is not None
+            else None
+        ),
+    )
+    selected = GraphBudgetPruner().select(complete, limits)
+    source_slice_candidates = plan_source_slice_candidates(
+        workspace_root,
+        artifact_to_payload(selected),
+        head_commit=selected.source.head_commit or "",
+        max_candidates=max(
+            0,
+            min(200, int(payload.get("max_source_slice_candidates") or 200)),
+        ),
+    )
+    version = selected.graph_contract.artifact_graph_version
+    final_spool = (
+        get_hermes_home()
+        / "cache"
+        / "hades"
+        / "graph-imports"
+        / project_id
+        / workspace_binding_id
+        / version
+    )
+    final_spool.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staging_spool = Path(
+        tempfile.mkdtemp(prefix=f".{version}.staging-", dir=final_spool.parent)
+    )
+    writer = GraphBundleWriter()
+    try:
+        staged = writer.write(selected, staging_spool, limits)
+        verify_source_unchanged(workspace_root, graph_index_config, source_before)
+        promoted = writer.promote_staged(staging_spool, final_spool)
+        published_manifest = promoted.manifest
+        published_chunk_count = len(promoted.chunk_paths)
+    except Exception:
+        shutil.rmtree(staging_spool, ignore_errors=True)
+        raise
+    shutil.rmtree(staging_spool, ignore_errors=True)
 
     return {
         "status": "completed",
-        "summary": artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).",
-        "artifact": artifact,
+        "summary": (
+            "Built graph lifecycle v2 bundle; "
+            f"nodes:{published_manifest['counts']['nodes']}; "
+            f"edges:{published_manifest['counts']['edges']}; "
+            f"chunks:{published_chunk_count}"
+        ),
+        "source_slice_candidates": source_slice_candidates,
+        "artifact": {
+            "schema": "hades.code_graph.v2",
+            "artifact_graph_version": version,
+            "source_identity": dict(published_manifest["source"]),
+            "bundle": published_manifest,
+        },
     }
-
-
-def _attach_source_slice_candidates(workspace_root: Path, artifact: dict[str, Any], payload: dict[str, Any]) -> None:
-    head_commit = str(payload.get("head_commit") or payload.get("workspace_head_commit") or "")
-    source_slice_candidates = plan_source_slice_candidates(
-        workspace_root,
-        artifact,
-        head_commit=head_commit,
-        max_candidates=int(payload.get("max_source_slice_candidates") or 200),
-    )
-    artifact["source_slice_candidates"] = source_slice_candidates
-    summary = str(artifact.get("summary") or f"Collected {len(artifact.get('symbols') or [])} symbol(s).")
-    artifact["summary"] = f"{summary}; source_slice_candidates:{len(source_slice_candidates)}"
 
 
 def execute_job(job: dict[str, Any], *, workspace_root: str | Path) -> dict[str, Any]:
