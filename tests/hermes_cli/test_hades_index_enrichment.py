@@ -125,23 +125,41 @@ def test_required_canary_has_no_payload_bypass_or_partial_graph_mutation(
 def test_required_canary_failure_escapes_the_real_graph_publication_boundary(
     tmp_path: Path, monkeypatch
 ):
-    from hermes_cli.hades_index import build_graph_for_workspace, resolution
+    from hermes_cli import hades_backend_jobs
+    from hermes_cli.hades_graph_v2.bundle import GraphBundleWriter
     from hermes_cli.hades_index.tree_sitter_adapter import RequiredParserUnavailable
 
     source = tmp_path / "app.py"
     source.write_text("def app():\n    return 1\n", encoding="utf-8")
+    published = []
 
-    def fail_before_enrichment(*_args, **_kwargs):
+    def fail_required_canary(*_args, **_kwargs):
         raise RequiredParserUnavailable(("python",))
 
     monkeypatch.setattr(
-        resolution, "enrich_graph_for_workspace", fail_before_enrichment
+        "hermes_cli.hades_index.tree_sitter_adapter.TreeSitterAdapter.require_languages",
+        fail_required_canary,
+    )
+    monkeypatch.setattr(
+        GraphBundleWriter,
+        "write",
+        lambda *_args, **_kwargs: published.append("bundle"),
     )
 
     with pytest.raises(RequiredParserUnavailable) as raised:
-        build_graph_for_workspace(tmp_path, [source], [], {})
+        hades_backend_jobs._execute_populate_backend_ast(
+            {
+                "capability": "populate_backend_ast",
+                "payload": {
+                    "project_id": "proj_1",
+                    "workspace_binding_id": "wb_1",
+                },
+            },
+            tmp_path,
+        )
 
     assert raised.value.languages == ("python",)
+    assert published == []
 
 
 def test_source_parse_failure_after_successful_canary_remains_partial():

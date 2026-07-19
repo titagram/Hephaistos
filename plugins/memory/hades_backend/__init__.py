@@ -131,7 +131,7 @@ SEARCH_TOOL_SCHEMA: Dict[str, Any] = {
             },
             "schema": {
                 "type": "string",
-                "description": "Optional structured schema filter, for example hades.resolved_bug.v1 or hades.php_graph.v1.",
+                "description": "Optional structured schema filter, for example hades.resolved_bug.v1 or hades.code_graph.v2.",
             },
             "source": {
                 "type": "string",
@@ -1381,11 +1381,17 @@ class HadesBackendMemoryProvider(MemoryProvider):
         backend_result, backend_error = self._backend_memory_search(
             query=query,
             domain="artifacts",
-            filters={"schema": ORGANISM_SCHEMA} if scope == "organism" else {},
+            filters={
+                "schema": ORGANISM_SCHEMA
+                if scope == "organism"
+                else "hades.code_graph.v2"
+            },
             limit=limit,
             include_raw_chunks=False,
         )
         if backend_result is not None:
+            if scope == "project":
+                backend_result = _v2_graph_search_response(backend_result)
             handles = _vector_graph_handles(backend_result)
             topologies: list[tuple[str, dict[str, Any]]] = []
             topology_errors: dict[str, str] = {}
@@ -1514,6 +1520,29 @@ class HadesBackendMemoryProvider(MemoryProvider):
             scope=scope,
         )
         if backend_result is not None:
+            if scope == "project":
+                try:
+                    active_identity = self._active_graph_identity(scope)
+                except Exception:
+                    active_identity = None
+                validation_error = _authoritative_v2_traversal_error(
+                    backend_result,
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    active_identity=active_identity,
+                )
+                if validation_error:
+                    return tool_result(
+                        {
+                            "status": "backend_invalid_graph",
+                            "project_id": self._binding.project_id,
+                            "workspace_binding_id": self._binding.backend_workspace_binding_id,
+                            "message": "Hades backend returned a graph outside the active v2 projection.",
+                            "backend_topology_error": validation_error,
+                            "nodes": [],
+                            "edges": [],
+                        }
+                    )
             result = _tool_result_from_backend_graph_traverse(backend_result)
             if scope == "organism":
                 result["scope"] = scope
@@ -2699,15 +2728,14 @@ def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[s
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 
-def _authoritative_v2_topology_error(
+def _authoritative_v2_graph_error(
     response: dict[str, Any],
     *,
-    handle: str,
     project_id: str,
     workspace_binding_id: str,
     active_identity: dict[str, Any] | None,
 ) -> str | None:
-    """Reject vector topology unless it belongs to the active v2 projection."""
+    """Reject a project graph response outside the active v2 projection."""
 
     if response.get("schema") != "hades.code_graph.v2":
         return "graph topology schema is not hades.code_graph.v2"
@@ -2731,6 +2759,27 @@ def _authoritative_v2_topology_error(
     coverage = response.get("coverage")
     if not isinstance(coverage, dict) or not coverage:
         return "graph topology coverage is unavailable"
+    return None
+
+
+def _authoritative_v2_topology_error(
+    response: dict[str, Any],
+    *,
+    handle: str,
+    project_id: str,
+    workspace_binding_id: str,
+    active_identity: dict[str, Any] | None,
+) -> str | None:
+    """Reject vector topology unless it resolves its requested handle."""
+
+    validation_error = _authoritative_v2_graph_error(
+        response,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+        active_identity=active_identity,
+    )
+    if validation_error:
+        return validation_error
     if response.get("start") != handle:
         return "graph topology start does not match the vector handle"
     nodes = response.get("nodes")
@@ -2745,6 +2794,43 @@ def _authoritative_v2_topology_error(
     if not any(node.get("id") == handle for node in nodes):
         return "graph topology does not resolve the vector handle"
     return None
+
+
+def _authoritative_v2_traversal_error(
+    response: dict[str, Any],
+    *,
+    project_id: str,
+    workspace_binding_id: str,
+    active_identity: dict[str, Any] | None,
+) -> str | None:
+    """Validate direct traversal without requiring an exact (non-fuzzy) start."""
+
+    return _authoritative_v2_graph_error(
+        response,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+        active_identity=active_identity,
+    )
+
+
+def _v2_graph_search_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Drop raw artifact hits that do not explicitly identify as graph v2."""
+
+    filtered = []
+    for item in _backend_items(response):
+        schema = _item_schema(item)
+        # A handle is only a query hint, not raw topology.  It has no schema
+        # until the authoritative traversal resolves it, so preserve schema-
+        # less handles but never surface an explicitly legacy raw artifact.
+        if schema == "hades.code_graph.v2" or (
+            not schema and _vector_graph_handles({"items": [item]})
+        ):
+            filtered.append(item)
+    result = dict(response)
+    result["items"] = filtered
+    result["count"] = len(filtered)
+    result["candidate_count"] = len(filtered)
+    return result
 
 
 def _tool_result_from_backend_graph_traversals(

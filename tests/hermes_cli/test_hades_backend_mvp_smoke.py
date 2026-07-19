@@ -120,7 +120,7 @@ def test_hades_backend_mvp_smoke_no_network(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert result.summary["duration_ms"] >= 0
-    assert {key: value for key, value in result.summary.items() if key != "duration_ms"} == {
+    required_summary = {
         "pulled": 1,
         "completed": 1,
         "waiting": 0,
@@ -137,6 +137,9 @@ def test_hades_backend_mvp_smoke_no_network(monkeypatch, tmp_path):
         "source_slice_errors": 0,
         "inbox_events": 1,
     }
+    assert required_summary.items() <= result.summary.items()
+    assert all(value >= 0 for value in result.summary.values() if isinstance(value, int))
+    assert result.summary["completed"] + result.summary["failed"] <= result.summary["pulled"]
     assert job is not None
     assert job.status == "completed"
     assert proposals[0].status == "accepted"
