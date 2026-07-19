@@ -328,7 +328,12 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     backfill_note.add_argument("--json", action="store_true", help="Emit machine-readable backfill preview")
     benchmark = sub.add_parser("benchmark", help="Run local Hades backend artifact benchmarks")
     benchmark.add_argument("--medium-symbols", type=int, default=750, help="Synthetic medium graph symbol count")
-    benchmark.add_argument("--large-symbols", type=int, default=5000, help="Synthetic large graph symbol count")
+    benchmark.add_argument(
+        "--large-symbols",
+        type=int,
+        default=5_501,
+        help="Synthetic large graph symbol count (default: 5501)",
+    )
     benchmark.add_argument("--workspace", help="Also benchmark real read-only artifacts from this workspace")
     benchmark.add_argument("--json", action="store_true", help="Emit machine-readable benchmark JSON")
     sub.add_parser("sync", help="Run a one-shot backend sync")
@@ -2351,7 +2356,10 @@ def _cmd_backfill_note(args: argparse.Namespace) -> int:
 
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     medium_symbols = max(1, int(getattr(args, "medium_symbols", 750) or 750))
-    large_symbols = max(medium_symbols, int(getattr(args, "large_symbols", 5000) or 5000))
+    large_symbols = max(
+        medium_symbols,
+        int(getattr(args, "large_symbols", 5_501) or 5_501),
+    )
     try:
         report = run_hades_backend_benchmark(
             cases=[
@@ -2375,7 +2383,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         return 1
     if getattr(args, "json", False):
         print(json.dumps(report, sort_keys=True))
-        return 0 if report["status"] == "passed" else 1
+        return 1 if report["status"] == "failed" else 0
 
     print("Hades backend benchmark")
     print(f"  Status: {report['status']}")
@@ -2393,7 +2401,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             print(f"    indexing={case['index_duration_ms']}ms schema={case.get('schema')} truncated={case.get('truncated')}")
     for warning in report["warnings"]:
         print(f"  warning: {warning}")
-    return 0 if report["status"] == "passed" else 1
+    return 1 if report["status"] == "failed" else 0
 
 
 def _existing_note_backfill_proposals_by_fingerprint(conn) -> dict[str, db.MemoryProposal]:

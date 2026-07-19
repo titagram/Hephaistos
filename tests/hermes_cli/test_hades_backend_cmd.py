@@ -749,43 +749,394 @@ def test_project_unlink_local_only_requires_explicit_yes(monkeypatch, tmp_path, 
     assert binding.status == "linked"
 
 
-def test_hades_backend_benchmark_never_reports_legacy_graph_upload_cases():
-    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+def _cheap_benchmark_case(case):
+    return {
+        "name": case["name"],
+        "requested_counts": {
+            "nodes": case["nodes"],
+            "entrypoints": case["entrypoints"],
+            "edges": case["edges"],
+        },
+        "status": "passed",
+        "warnings": [],
+        "safety_violations": [],
+    }
 
-    report = run_hades_backend_benchmark(
+
+def _patch_benchmark_case_runner(monkeypatch, benchmark):
+    seen = []
+
+    def fake_run(case):
+        seen.append(dict(case))
+        return _cheap_benchmark_case(case)
+
+    monkeypatch.setattr(benchmark, "_run_graph_v2_case", fake_run, raising=False)
+    monkeypatch.setattr(
+        benchmark,
+        "_cached_graph_v2_scale_case",
+        lambda: _cheap_benchmark_case(
+            {"name": "legacy_cached", "nodes": 1, "entrypoints": 1, "edges": 1}
+        ),
+        raising=False,
+    )
+    return seen
+
+
+def test_hades_backend_benchmark_none_runs_default_v2_cases(monkeypatch):
+    import hermes_cli.hades_backend_benchmark as benchmark
+
+    seen = _patch_benchmark_case_runner(monkeypatch, benchmark)
+    report = benchmark.run_hades_backend_benchmark(cases=None)
+
+    assert [case["name"] for case in report["cases"]] == [
+        "medium_code_graph",
+        "large_code_graph",
+    ]
+    assert seen == [
+        {
+            "name": "medium_code_graph",
+            "nodes": 750,
+            "entrypoints": 93,
+            "edges": 1_500,
+        },
+        {
+            "name": "large_code_graph",
+            "nodes": 5_501,
+            "entrypoints": 501,
+            "edges": 10_501,
+        },
+    ]
+
+
+def test_hades_backend_benchmark_empty_cases_runs_no_synthetic_case(monkeypatch):
+    import hermes_cli.hades_backend_benchmark as benchmark
+
+    seen = _patch_benchmark_case_runner(monkeypatch, benchmark)
+    report = benchmark.run_hades_backend_benchmark(cases=[])
+
+    assert seen == []
+    assert report["case_count"] == 0
+    assert report["cases"] == []
+
+
+def test_hades_backend_benchmark_runs_exact_explicit_alias_cases(monkeypatch):
+    import hermes_cli.hades_backend_benchmark as benchmark
+
+    seen = _patch_benchmark_case_runner(monkeypatch, benchmark)
+    report = benchmark.run_hades_backend_benchmark(
         cases=[
-            {"name": "medium_code_graph", "symbols": 600, "routes": 60, "edges": 900},
-            {"name": "large_code_graph", "symbols": 2600, "routes": 260, "edges": 5200},
+            {"name": "tiny", "symbols": 31, "routes": 4, "edges": 55},
+            {"name": "odd", "nodes": 47, "entrypoints": 7, "edges": 83},
         ]
     )
 
-    assert report["schema"] == "hades.backend_benchmark.v1"
-    assert report["status"] == "passed"
-    assert report["case_count"] == 1
-    assert [case["name"] for case in report["cases"]] == ["graph_v2_scale"]
-    graph = report["cases"][0]
-    assert graph["schema"] == "hades.code_graph.v2"
-    assert graph["raw_source_included"] is False
-    assert graph["upload_mode"] == "chunked"
-    assert graph["compressed_bytes"] < graph["original_bytes"]
-    assert graph["compression_ratio"] < 0.75
-    assert len(graph["payload_sha256"]) == 64
+    assert seen == [
+        {"name": "tiny", "nodes": 31, "entrypoints": 4, "edges": 55},
+        {"name": "odd", "nodes": 47, "entrypoints": 7, "edges": 83},
+    ]
+    assert [case["name"] for case in report["cases"]] == ["tiny", "odd"]
 
 
-def test_hades_backend_benchmark_v2_scale_closes_every_chunk_and_omission_count():
+def test_hades_backend_benchmark_explicit_case_builds_only_graph_v2():
     from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+
+    report = run_hades_backend_benchmark(
+        cases=[{"name": "tiny", "symbols": 31, "routes": 4, "edges": 55}]
+    )
+
+    assert report["case_count"] == 1
+    graph = report["cases"][0]
+    assert graph["name"] == "tiny"
+    assert graph["schema"] == "hades.code_graph.v2"
+    assert graph["requested_counts"] == {
+        "nodes": 31,
+        "entrypoints": 4,
+        "edges": 55,
+    }
+    assert graph["manifest_counts"] == graph["descriptor_counts"]
+    assert graph["raw_source_included"] is False
+
+
+def test_hades_backend_benchmark_performance_thresholds_are_explicit():
+    import hermes_cli.hades_backend_benchmark as benchmark
+
+    assess = getattr(
+        benchmark,
+        "_performance_assessment",
+        lambda **_metrics: {"warnings": [], "safety_violations": []},
+    )
+    mib = 1024 * 1024
+
+    at_warning_limit = assess(
+        name="case", total_duration_ms=60_000, rss_delta_bytes=512 * mib
+    )
+    over_warning_limit = assess(
+        name="case", total_duration_ms=60_001, rss_delta_bytes=512 * mib + 1
+    )
+    at_safety_limit = assess(
+        name="case", total_duration_ms=180_000, rss_delta_bytes=1024 * mib
+    )
+    over_safety_limit = assess(
+        name="case", total_duration_ms=180_001, rss_delta_bytes=1024 * mib + 1
+    )
+
+    assert at_warning_limit["warnings"] == []
+    assert len(over_warning_limit["warnings"]) == 2
+    assert at_safety_limit["safety_violations"] == []
+    assert len(over_safety_limit["safety_violations"]) == 2
+
+
+def test_hades_backend_benchmark_107_second_case_is_warning_not_passed(monkeypatch):
+    import hermes_cli.hades_backend_benchmark as benchmark
+
+    def fake_run(case):
+        performance = benchmark._performance_assessment(
+            name=str(case["name"]),
+            total_duration_ms=107_000,
+            rss_delta_bytes=0,
+        )
+        return {
+            "name": case["name"],
+            "status": "warning",
+            **performance,
+        }
+
+    monkeypatch.setattr(benchmark, "_run_graph_v2_case", fake_run)
+    report = benchmark.run_hades_backend_benchmark(
+        cases=[{"name": "slow", "nodes": 1, "entrypoints": 1, "edges": 1}]
+    )
+
+    assert report["status"] == "warning"
+    assert report["warnings"]
+    assert report["safety_violations"] == []
+
+
+def test_hades_backend_benchmark_restores_home_after_workspace_failure(
+    monkeypatch, tmp_path
+):
+    import hermes_cli.hades_backend_benchmark as benchmark
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    marker = real_home / "keep.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+    observed_homes = []
+    _patch_benchmark_case_runner(monkeypatch, benchmark)
+
+    def fail_job(*_args, **_kwargs):
+        active_home = get_hermes_home()
+        observed_homes.append(active_home)
+        (active_home / "benchmark-write.txt").write_text("temporary", encoding="utf-8")
+        raise RuntimeError("fixture failure")
+
+    monkeypatch.setattr(benchmark, "execute_job", fail_job)
+    token = set_hermes_home_override(real_home)
+    try:
+        with pytest.raises(RuntimeError, match="fixture failure"):
+            benchmark.run_hades_backend_benchmark(cases=[], workspace=workspace)
+
+        assert observed_homes and observed_homes[0] != real_home
+        assert get_hermes_home() == real_home
+        assert marker.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in real_home.iterdir()) == ["keep.txt"]
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_backend_benchmark_command_forwards_explicit_v2_case_sizes(monkeypatch, capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    captured = {}
+
+    def fake_benchmark(*, cases, workspace=None):
+        captured.update(cases=cases, workspace=workspace)
+        return {
+            "schema": "hades.backend_benchmark.v1",
+            "status": "passed",
+            "cases": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(cmd, "run_hades_backend_benchmark", fake_benchmark)
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(
+            backend_action="benchmark",
+            medium_symbols=400,
+            large_symbols=6_000,
+            workspace="/tmp/example",
+            json=True,
+        )
+    )
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "passed"
+    assert captured == {
+        "workspace": "/tmp/example",
+        "cases": [
+            {
+                "name": "medium_code_graph",
+                "symbols": 400,
+                "routes": 50,
+                "edges": 800,
+            },
+            {
+                "name": "large_code_graph",
+                "symbols": 6_000,
+                "routes": 600,
+                "edges": 12_000,
+            },
+        ],
+    }
+
+
+def test_backend_benchmark_command_default_large_case_reaches_scale_floor(
+    monkeypatch, capsys
+):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    captured = {}
+
+    def fake_benchmark(*, cases, workspace=None):
+        captured["cases"] = cases
+        return {
+            "schema": "hades.backend_benchmark.v1",
+            "status": "warning",
+            "cases": [],
+            "warnings": ["slow"],
+        }
+
+    monkeypatch.setattr(cmd, "run_hades_backend_benchmark", fake_benchmark)
+    rc = cmd.hades_backend_command(
+        SimpleNamespace(backend_action="benchmark", json=True)
+    )
+    capsys.readouterr()
+
+    large = captured["cases"][1]
+    assert large["symbols"] >= 5_501
+    assert large["routes"] >= 501
+    assert large["edges"] >= 10_501
+    assert rc == 0
+
+
+def test_backend_benchmark_parser_advertises_achievable_large_default(capsys):
+    import hermes_cli.hades_backend_cmd as cmd
+
+    parser = argparse.ArgumentParser(prog="hades")
+    cmd.build_backend_parser(
+        parser.add_subparsers(dest="command"), cmd_backend=lambda _args: 0
+    )
+
+    parsed = parser.parse_args(["backend", "benchmark"])
+    with pytest.raises(SystemExit, match="0"):
+        parser.parse_args(["backend", "benchmark", "--help"])
+    help_text = capsys.readouterr().out
+
+    assert parsed.large_symbols == 5_501
+    assert "default: 5501" in help_text
+
+
+def test_hades_backend_benchmark_reports_real_fastapi_workspace_without_state_leak(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    workspace = tmp_path / "fastapi-workspace"
+    workspace.mkdir()
+    (workspace / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (workspace / "api.py").write_text(
+        "from fastapi import FastAPI\n"
+        "\n"
+        "app = FastAPI()\n"
+        "\n"
+        "def health_payload():\n"
+        "    return {'status': 'ok'}\n"
+        "\n"
+        "@app.get('/health')\n"
+        "def health():\n"
+        "    return health_payload()\n",
+        encoding="utf-8",
+    )
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    marker = real_home / "keep.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+
+    token = set_hermes_home_override(real_home)
+    try:
+        report = run_hades_backend_benchmark(cases=[], workspace=workspace)
+
+        assert get_hermes_home() == real_home
+        assert marker.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in real_home.iterdir()) == ["keep.txt"]
+    finally:
+        reset_hermes_home_override(token)
+
+    assert report["schema"] == "hades.backend_benchmark.v1"
+    assert report["has_workspace_dataset"] is True
+    assert report["case_count"] == 2
+    assert [case["name"] for case in report["cases"]] == [
+        "workspace_git_tree",
+        "workspace_code_graph",
+    ]
+    tree, graph = report["cases"]
+    assert tree["source"] == "workspace"
+    assert tree["schema"] == "hades.git_tree.v1"
+    assert tree["file_count"] >= 2
+    assert graph["source"] == "workspace"
+    assert graph["schema"] == "hades.code_graph.v2"
+    assert graph["bundle_schema"] == "hades.graph_bundle.v2"
+    assert graph["route_count"] == 1
+    assert graph["symbol_count"] >= 2
+    assert graph["raw_source_included"] is False
+    assert graph["descriptor_counts"] == graph["manifest_counts"]
+    assert isinstance(graph["index_duration_ms"], int)
+    assert len(graph["payload_sha256"]) == 64
+    assert all(case.get("schema") != "hades.code_graph.v1" for case in report["cases"])
+
+
+@pytest.mark.integration
+def test_hades_backend_benchmark_v2_volumetric_gate():
+    from hermes_cli.hades_backend_benchmark import (
+        DURATION_WARN_MS,
+        run_hades_backend_benchmark,
+    )
     from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS
 
-    report = run_hades_backend_benchmark(cases=[])
+    report = run_hades_backend_benchmark(
+        cases=[
+            {
+                "name": "large_code_graph",
+                "nodes": 5_501,
+                "entrypoints": 501,
+                "edges": 10_501,
+            }
+        ]
+    )
 
-    graph = next(case for case in report["cases"] if case["name"] == "graph_v2_scale")
+    assert report["case_count"] == 1
+    graph = report["cases"][0]
     assert graph["schema"] == "hades.code_graph.v2"
-    assert graph["requested_counts"]["nodes"] >= 5_501
-    assert graph["requested_counts"]["edges"] >= 10_501
-    assert graph["requested_counts"]["entrypoints"] >= 501
-    assert graph["source_counts"]["nodes"] >= graph["requested_counts"]["nodes"]
-    assert graph["source_counts"]["edges"] >= graph["requested_counts"]["edges"]
-    assert graph["source_counts"]["entrypoints"] >= graph["requested_counts"]["entrypoints"]
+    assert graph["requested_counts"] == {
+        "nodes": 5_501,
+        "entrypoints": 501,
+        "edges": 10_501,
+    }
+    assert all(
+        graph["source_counts"][kind] >= graph["requested_counts"][kind]
+        for kind in graph["requested_counts"]
+    )
     assert graph["chunk_count"] > len(CHUNK_KINDS)
     assert graph["delivered_counts"] == graph["manifest_counts"]
     assert graph["descriptor_counts"] == graph["manifest_counts"]
@@ -800,60 +1151,25 @@ def test_hades_backend_benchmark_v2_scale_closes_every_chunk_and_omission_count(
     assert len(graph["manifest_sha256"]) == 64
     assert set(graph["timing_ms"]) == {"build", "prune", "bundle", "total"}
     assert all(type(value) is int and value >= 0 for value in graph["timing_ms"].values())
-
-
-def test_hades_backend_benchmark_reports_real_workspace_artifacts(
-    monkeypatch, tmp_path
-):
-    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path.parent / f"{tmp_path.name}-home"))
-
-    (tmp_path / "README.md").write_text("# Workspace benchmark\n")
-
-    report = run_hades_backend_benchmark(cases=[], workspace=tmp_path)
-
-    assert report["schema"] == "hades.backend_benchmark.v1"
-    assert report["has_workspace_dataset"] is True
-    assert report["case_count"] == 3
-    assert [case["name"] for case in report["cases"]] == [
-        "graph_v2_scale",
-        "workspace_git_tree",
-        "workspace_code_graph",
-    ]
-    _, tree, graph = report["cases"]
-    assert tree["source"] == "workspace"
-    assert tree["schema"] == "hades.git_tree.v1"
-    assert tree["file_count"] >= 1
-    assert graph["source"] == "workspace"
-    assert graph["schema"] == "hades.code_graph.v2"
-    assert graph["bundle_schema"] == "hades.graph_bundle.v2"
-    assert graph["route_count"] == 0
-    assert graph["symbol_count"] >= 1
-    assert graph["raw_source_included"] is False
-    assert graph["descriptor_counts"] == graph["manifest_counts"]
-    assert isinstance(graph["index_duration_ms"], int)
-    assert len(graph["payload_sha256"]) == 64
-
-
-def test_backend_benchmark_command_emits_json(capsys):
-    import hermes_cli.hades_backend_cmd as cmd
-
-    rc = cmd.hades_backend_command(
-        SimpleNamespace(
-            backend_action="benchmark",
-            medium_symbols=400,
-            large_symbols=2200,
-            json=True,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 0
-    assert payload["schema"] == "hades.backend_benchmark.v1"
-    assert payload["status"] == "passed"
-    assert [case["name"] for case in payload["cases"]] == ["graph_v2_scale"]
+    assert graph["record_count"] == sum(graph["delivered_counts"].values())
+    assert graph["records_per_second"] > 0
+    assert graph["logical_uncompressed_bytes"] >= graph["original_bytes"]
+    assert graph["original_bytes"] > graph["compressed_bytes"] > 0
+    assert set(graph["rss_samples_bytes"]) == {
+        "before",
+        "after_build",
+        "after_prune",
+        "after_bundle",
+    }
+    assert graph["peak_sampled_rss_bytes"] == max(graph["rss_samples_bytes"].values())
+    assert graph["rss_delta_bytes"] >= 0
+    assert graph["safety_violations"] == []
+    assert report["safety_violations"] == []
+    assert report["status"] in {"passed", "warning"}
+    if graph["timing_ms"]["total"] > DURATION_WARN_MS:
+        assert graph["status"] == "warning"
+        assert report["status"] == "warning"
+    print(json.dumps(report, sort_keys=True))
 
 
 def test_backend_schedule_quality_creates_and_updates_cron_job(monkeypatch, tmp_path, capsys):

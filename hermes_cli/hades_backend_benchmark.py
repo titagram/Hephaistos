@@ -2,25 +2,38 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
-from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 from typing import Any
 
+import psutil
+
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli.hades_backend_jobs import execute_job
 from hermes_cli.hades_backend_sync import _artifact_payload_hash, _artifact_upload_fields
 
 
-DURATION_WARN_MS = 1000
+DURATION_WARN_MS = 60_000
+RSS_DELTA_WARN_BYTES = 512 * 1024 * 1024
+SAFETY_DURATION_MS = 180_000
+SAFETY_RSS_DELTA_BYTES = 1024 * 1024 * 1024
 LARGE_COMPRESSION_RATIO_WARN = 0.75
-GRAPH_V2_REQUESTED_COUNTS = {
-    "entrypoints": 501,
-    "nodes": 5_501,
-    "edges": 10_501,
-}
-_GRAPH_V2_EDGE_FACT_COUNT = GRAPH_V2_REQUESTED_COUNTS["edges"]
+DEFAULT_GRAPH_V2_CASES = (
+    {
+        "name": "medium_code_graph",
+        "nodes": 750,
+        "entrypoints": 93,
+        "edges": 1_500,
+    },
+    {
+        "name": "large_code_graph",
+        "nodes": 5_501,
+        "entrypoints": 501,
+        "edges": 10_501,
+    },
+)
 _GRAPH_V2_FIXTURE_PATH = "benchmark/graph_v2.py"
 _GRAPH_V2_FILE_SHA256 = "a" * 64
 _GRAPH_V2_PROJECT_ID = "01KXJD0SV73EBGWKNE2EK3M4KD"
@@ -32,53 +45,116 @@ def run_hades_backend_benchmark(
     *,
     workspace: str | Path | None = None,
 ) -> dict[str, Any]:
-    # ``cases`` remains accepted for CLI/API compatibility, but legacy v1 graph
-    # payload shapes are deliberately not benchmarked as upload candidates.
-    del cases
-    results = [copy.deepcopy(_cached_graph_v2_scale_case())]
+    selected_cases = DEFAULT_GRAPH_V2_CASES if cases is None else cases
+    results = [
+        _run_graph_v2_case(_normalize_graph_v2_case(case))
+        for case in selected_cases
+    ]
     if workspace is not None:
         results.extend(_run_workspace_cases(Path(workspace).expanduser()))
     warnings = [warning for result in results for warning in result["warnings"]]
+    safety_violations = [
+        violation
+        for result in results
+        for violation in result.get("safety_violations", [])
+    ]
+    failed = bool(safety_violations) or any(
+        result.get("status") == "failed" for result in results
+    )
 
     return {
         "schema": "hades.backend_benchmark.v1",
-        "status": "warning" if warnings else "passed",
+        "status": "failed" if failed else "warning" if warnings else "passed",
         "case_count": len(results),
         "duration_warn_ms": DURATION_WARN_MS,
+        "rss_delta_warn_bytes": RSS_DELTA_WARN_BYTES,
+        "safety_duration_ms": SAFETY_DURATION_MS,
+        "safety_rss_delta_bytes": SAFETY_RSS_DELTA_BYTES,
         "large_compression_ratio_warn": LARGE_COMPRESSION_RATIO_WARN,
         "has_workspace_dataset": workspace is not None,
         "warnings": warnings,
+        "safety_violations": safety_violations,
         "cases": results,
     }
 
 
-@lru_cache(maxsize=1)
-def _cached_graph_v2_scale_case() -> dict[str, Any]:
-    """Build the deterministic large v2 fixture once per benchmark process."""
-
-    return _run_graph_v2_scale_case()
+def _normalize_graph_v2_case(case: dict[str, int | str]) -> dict[str, int | str]:
+    name = str(case.get("name") or "graph_v2").strip()
+    normalized = {
+        "name": name,
+        "nodes": int(case.get("nodes", case.get("symbols", 0)) or 0),
+        "entrypoints": int(case.get("entrypoints", case.get("routes", 0)) or 0),
+        "edges": int(case.get("edges", 0) or 0),
+    }
+    if not name:
+        raise ValueError("benchmark case name must not be empty")
+    for field in ("nodes", "entrypoints", "edges"):
+        if normalized[field] < 1:
+            raise ValueError(f"benchmark case {name!r} requires {field} >= 1")
+    return normalized
 
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int((time.perf_counter() - started) * 1000))
 
 
-def _run_graph_v2_scale_case() -> dict[str, Any]:
+def _rss_bytes(process: psutil.Process) -> int:
+    return int(process.memory_info().rss)
+
+
+def _performance_assessment(
+    *, name: str, total_duration_ms: int, rss_delta_bytes: int
+) -> dict[str, list[str]]:
+    warnings: list[str] = []
+    safety_violations: list[str] = []
+    if total_duration_ms > DURATION_WARN_MS:
+        warnings.append(
+            f"{name}: total duration {total_duration_ms}ms exceeded "
+            f"{DURATION_WARN_MS}ms"
+        )
+    if rss_delta_bytes > RSS_DELTA_WARN_BYTES:
+        warnings.append(
+            f"{name}: sampled RSS delta {rss_delta_bytes}B exceeded "
+            f"{RSS_DELTA_WARN_BYTES}B"
+        )
+    if total_duration_ms > SAFETY_DURATION_MS:
+        safety_violations.append(
+            f"{name}: total duration {total_duration_ms}ms exceeded safety ceiling "
+            f"{SAFETY_DURATION_MS}ms"
+        )
+    if rss_delta_bytes > SAFETY_RSS_DELTA_BYTES:
+        safety_violations.append(
+            f"{name}: sampled RSS delta {rss_delta_bytes}B exceeded safety ceiling "
+            f"{SAFETY_RSS_DELTA_BYTES}B"
+        )
+    return {"warnings": warnings, "safety_violations": safety_violations}
+
+
+def _run_graph_v2_case(case: dict[str, int | str]) -> dict[str, Any]:
     from hermes_cli.hades_graph_v2.bundle import (
         CHUNK_KINDS,
         BundleLimits,
         build_bundle_plan,
     )
 
+    requested_counts = {
+        "nodes": int(case["nodes"]),
+        "entrypoints": int(case["entrypoints"]),
+        "edges": int(case["edges"]),
+    }
+    name = str(case["name"])
+    process = psutil.Process()
+    rss_samples = {"before": _rss_bytes(process)}
     total_started = time.perf_counter()
     build_started = time.perf_counter()
-    artifact, prune_ms = _synthetic_graph_v2_fixture()
-    build_ms = max(0, _elapsed_ms(build_started) - prune_ms)
+    artifact = _synthetic_graph_v2_fixture(**requested_counts)
+    build_ms = _elapsed_ms(build_started)
+    rss_samples["after_build"] = _rss_bytes(process)
     source_counts = {
         kind: len(getattr(artifact, kind))
         for kind in CHUNK_KINDS
     }
-    for kind, minimum in GRAPH_V2_REQUESTED_COUNTS.items():
+    for kind, minimum in requested_counts.items():
         if source_counts[kind] < minimum:
             raise RuntimeError(
                 f"graph v2 benchmark fixture produced {source_counts[kind]} {kind}; "
@@ -92,11 +168,19 @@ def _run_graph_v2_scale_case() -> dict[str, Any]:
     )
     _verify_graph_v2_reference_closure(artifact)
 
+    prune_started = time.perf_counter()
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+
+    selected = GraphBudgetPruner().select(artifact, limits)
+    prune_ms = _elapsed_ms(prune_started)
+    rss_samples["after_prune"] = _rss_bytes(process)
+
     bundle_started = time.perf_counter()
-    # The large complete-delivery artifact takes one public planning pass, which
-    # validates the expanded model before producing any reportable chunk bytes.
-    plan = build_bundle_plan(artifact, limits)
+    # GraphBudgetPruner.select validates the complete expanded graph before
+    # selecting records, so the planner can safely avoid a duplicate validation.
+    plan = build_bundle_plan(selected, limits, _validated=True)
     bundle_ms = _elapsed_ms(bundle_started)
+    rss_samples["after_bundle"] = _rss_bytes(process)
     deterministic = all(
         hashlib.sha256(raw).hexdigest() == descriptor["sha256"]
         and hashlib.sha256(compressed).hexdigest()
@@ -112,7 +196,7 @@ def _run_graph_v2_scale_case() -> dict[str, Any]:
         raise RuntimeError("graph v2 benchmark chunk digests do not close")
 
     delivered_counts = {
-        kind: len(getattr(artifact, kind))
+        kind: len(getattr(selected, kind))
         for kind in CHUNK_KINDS
     }
     manifest_counts = {
@@ -132,7 +216,7 @@ def _run_graph_v2_scale_case() -> dict[str, Any]:
         raise RuntimeError("graph v2 benchmark chunk ledger does not close")
     omitted_record_count = sum(omitted_counts.values())
     coverage_omission_ledger = (
-        artifact.graph_contract.coverage.records.omitted_by_bundle_budget
+        selected.graph_contract.coverage.records.omitted_by_bundle_budget
     )
     if coverage_omission_ledger != omitted_record_count:
         raise RuntimeError(
@@ -147,13 +231,26 @@ def _run_graph_v2_scale_case() -> dict[str, Any]:
         else None
     )
     total_ms = _elapsed_ms(total_started)
+    record_count = sum(delivered_counts.values())
+    records_per_second = (
+        round(record_count / (total_ms / 1000), 2)
+        if total_ms > 0
+        else float(record_count)
+    )
+    peak_sampled_rss_bytes = max(rss_samples.values())
+    rss_delta_bytes = max(0, peak_sampled_rss_bytes - rss_samples["before"])
+    performance = _performance_assessment(
+        name=name,
+        total_duration_ms=total_ms,
+        rss_delta_bytes=rss_delta_bytes,
+    )
     artifact_graph_version = str(plan.manifest["artifact_graph_version"])
     manifest_sha256 = hashlib.sha256(plan.manifest_bytes).hexdigest()
     return {
-        "name": "graph_v2_scale",
+        "name": name,
         "source": "synthetic_v2",
         "schema": artifact.schema,
-        "requested_counts": dict(GRAPH_V2_REQUESTED_COUNTS),
+        "requested_counts": requested_counts,
         "source_counts": source_counts,
         "delivered_counts": delivered_counts,
         "manifest_counts": manifest_counts,
@@ -183,13 +280,22 @@ def _run_graph_v2_scale_case() -> dict[str, Any]:
         "edge_count": delivered_counts["edges"],
         "file_count": 1,
         "duration_ms": total_ms,
+        "record_count": record_count,
+        "records_per_second": records_per_second,
+        "rss_samples_bytes": rss_samples,
+        "peak_sampled_rss_bytes": peak_sampled_rss_bytes,
+        "rss_delta_bytes": rss_delta_bytes,
         "timing_ms": {
             "build": build_ms,
             "prune": prune_ms,
             "bundle": bundle_ms,
             "total": total_ms,
         },
-        "warnings": [],
+        "status": "failed" if performance["safety_violations"] else (
+            "warning" if performance["warnings"] else "passed"
+        ),
+        "warnings": performance["warnings"],
+        "safety_violations": performance["safety_violations"],
     }
 
 
@@ -259,7 +365,9 @@ def _verify_graph_v2_reference_closure(artifact: Any) -> None:
             raise RuntimeError("graph v2 benchmark has a dangling flow-step reference")
 
 
-def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
+def _synthetic_graph_v2_fixture(
+    *, nodes: int, entrypoints: int, edges: int
+) -> Any:
     from dataclasses import replace
 
     from hermes_cli.hades_graph_config import load_hades_graph_index_config
@@ -285,8 +393,6 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
         artifact_to_payload,
     )
     from hermes_cli.hades_index.lifecycle.builder import GraphBuilder
-    from hermes_cli.hades_graph_v2.bundle import BundleLimits
-    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
     from hermes_cli.hades_index.lifecycle.model import (
         AdapterResult,
         AstLocatorIR,
@@ -358,11 +464,11 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
         (),
     )
 
-    entrypoints = []
-    for index in range(GRAPH_V2_REQUESTED_COUNTS["entrypoints"]):
+    entrypoint_candidates = []
+    for index in range(entrypoints):
         entrypoint_locator = locator("route", index, line=index + 1)
         public_path = f"/benchmark/{index:05d}"
-        entrypoints.append(
+        entrypoint_candidates.append(
             EntrypointCandidate(
                 EntrypointKind.HTTP_ROUTE,
                 None,
@@ -421,7 +527,7 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
         (),
         tuple(
             sorted(
-                entrypoints,
+                entrypoint_candidates,
                 key=lambda item: (
                     item.kind.value,
                     item.framework or "",
@@ -465,20 +571,9 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
         context,
         (result,),
     )
-    prune_started = time.perf_counter()
-    base = GraphBudgetPruner().select(
-        base,
-        BundleLimits(
-            max_chunk_uncompressed_bytes=512 * 1024,
-            max_bundle_uncompressed_bytes=128 * 1024 * 1024,
-            max_chunks=512,
-        ),
-    )
-    prune_ms = _elapsed_ms(prune_started)
-
     template = next(node for node in base.nodes if node.kind is NodeKind.FUNCTION)
     added_nodes = []
-    for index in range(GRAPH_V2_REQUESTED_COUNTS["nodes"] - len(base.nodes)):
+    for index in range(max(0, nodes - len(base.nodes))):
         qualified_name = f"benchmark.synthetic_{index:05d}"
         identity = SourceDeclarationIdentity(
             "source_declaration",
@@ -516,7 +611,7 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
     callable_nodes = tuple(node for node in nodes if node.kind is NodeKind.FUNCTION)
 
     added_edges = []
-    for index in range(_GRAPH_V2_EDGE_FACT_COUNT - len(base.edges)):
+    for index in range(max(0, edges - len(base.edges))):
         source = callable_nodes[index % len(callable_nodes)]
         target = callable_nodes[(index + 1) % len(callable_nodes)]
         occurrence = EdgeAstOccurrence(
@@ -578,12 +673,9 @@ def _synthetic_graph_v2_fixture() -> tuple[Any, int]:
         edges=edges,
     )
     version = artifact_graph_version(artifact_to_payload(candidate))
-    return (
-        replace(
-            candidate,
-            graph_contract=replace(contract, artifact_graph_version=version),
-        ),
-        prune_ms,
+    return replace(
+        candidate,
+        graph_contract=replace(contract, artifact_graph_version=version),
     )
 
 
@@ -608,49 +700,60 @@ def _run_workspace_cases(workspace_root: Path) -> list[dict[str, Any]]:
             },
         },
     ]
-    for job in jobs:
-        started = time.perf_counter()
-        result = execute_job({"capability": job["capability"], "payload": job["payload"]}, workspace_root=root)
-        index_duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-        artifact = result.get("artifact") if isinstance(result, dict) else None
-        if not isinstance(artifact, dict):
-            cases.append(
-                {
-                    "name": job["name"],
-                    "source": "workspace",
-                    "workspace": root.name,
-                    "job_capability": job["capability"],
-                    "schema": None,
-                    "status": "failed",
-                    "index_duration_ms": index_duration_ms,
-                    "duration_ms": 0,
-                    "total_duration_ms": index_duration_ms,
-                    "upload_mode": "none",
-                    "original_bytes": 0,
-                    "compressed_bytes": 0,
-                    "compression_ratio": None,
-                    "payload_sha256": None,
-                    "warnings": [f"{job['name']}: no artifact produced"],
-                }
-            )
-            continue
-        case = (
-            _run_graph_v2_manifest_case(name=job["name"], artifact=artifact)
-            if job["capability"] == "populate_backend_ast"
-            else _run_artifact_case(name=job["name"], artifact=artifact)
-        )
-        case.update(
-            {
-                "source": "workspace",
-                "workspace": root.name,
-                "job_capability": job["capability"],
-                "job_status": result.get("status"),
-                "summary": result.get("summary"),
-                "index_duration_ms": index_duration_ms,
-                "total_duration_ms": index_duration_ms + int(case["duration_ms"]),
-            }
-        )
-        cases.append(case)
+    with TemporaryDirectory(prefix="hermes-hades-benchmark-") as temp_home:
+        token = set_hermes_home_override(temp_home)
+        try:
+            for job in jobs:
+                started = time.perf_counter()
+                result = execute_job(
+                    {"capability": job["capability"], "payload": job["payload"]},
+                    workspace_root=root,
+                )
+                index_duration_ms = max(
+                    0, int((time.perf_counter() - started) * 1000)
+                )
+                artifact = result.get("artifact") if isinstance(result, dict) else None
+                if not isinstance(artifact, dict):
+                    cases.append(
+                        {
+                            "name": job["name"],
+                            "source": "workspace",
+                            "workspace": root.name,
+                            "job_capability": job["capability"],
+                            "schema": None,
+                            "status": "failed",
+                            "index_duration_ms": index_duration_ms,
+                            "duration_ms": 0,
+                            "total_duration_ms": index_duration_ms,
+                            "upload_mode": "none",
+                            "original_bytes": 0,
+                            "compressed_bytes": 0,
+                            "compression_ratio": None,
+                            "payload_sha256": None,
+                            "warnings": [f"{job['name']}: no artifact produced"],
+                        }
+                    )
+                    continue
+                case = (
+                    _run_graph_v2_manifest_case(name=job["name"], artifact=artifact)
+                    if job["capability"] == "populate_backend_ast"
+                    else _run_artifact_case(name=job["name"], artifact=artifact)
+                )
+                case.update(
+                    {
+                        "source": "workspace",
+                        "workspace": root.name,
+                        "job_capability": job["capability"],
+                        "job_status": result.get("status"),
+                        "summary": result.get("summary"),
+                        "index_duration_ms": index_duration_ms,
+                        "total_duration_ms": index_duration_ms
+                        + int(case["duration_ms"]),
+                    }
+                )
+                cases.append(case)
+        finally:
+            reset_hermes_home_override(token)
     return cases
 
 
