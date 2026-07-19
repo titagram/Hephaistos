@@ -41,7 +41,7 @@ GATES = (
     ("G11", "tests/hermes_cli/test_hades_backend_indexer_golden.py::test_polyglot"),
     (
         "G12",
-        "tests/hermes_cli/test_hades_lifecycle_control_flow.py::test_missing_parser_partial",
+        "tests/hermes_cli/test_hades_index_enrichment.py::test_required_canary_failure_escapes_the_real_graph_publication_boundary",
     ),
     (
         "G13",

@@ -80,8 +80,7 @@ from .model import (
 )
 from .schema import GraphContractError, JsonValue, validate_schema
 from hermes_cli.hades_resource_privacy import (
-    is_platform_absolute_semantic_resource_path,
-    is_sensitive_semantic_resource_component,
+    has_unsafe_semantic_resource_location,
 )
 
 
@@ -294,44 +293,29 @@ def validate_scalar_and_privacy_rules(artifact: GraphArtifactV2) -> None:
             "artifact contains a secret-like literal instead of a redacted value",
         )
     for node in artifact.nodes:
-        resource = (
-            node.properties.public_resource_name
-            if isinstance(node.properties, DataProperties)
-            else node.name
-            if isinstance(node.properties, IntegrationProperties)
-            else None
-        )
-        if resource is None:
-            continue
-        parsed_resource = None
-        if resource.startswith(("http://", "https://")):
-            from urllib.parse import urlsplit
-
-            parsed_resource = urlsplit(resource)
-        if (
-            _PRIVATE_RESOURCE_RE.search(resource)
-            or _CONTROL_CHARACTER_RE.search(resource)
-            or is_platform_absolute_semantic_resource_path(resource)
-            or any(
-                part in {".", ".."}
-                or is_sensitive_semantic_resource_component(part)
-                for part in re.split(r"[/:]", resource)
+        resources: list[str] = []
+        if isinstance(node.identity, SemanticResourceIdentity):
+            if node.identity.public_resource_name is not None:
+                resources.append(node.identity.public_resource_name)
+        if isinstance(node.properties, DataProperties):
+            properties = cast(
+                Mapping[str, JsonValue], artifact_to_payload_value(node.properties)
             )
-            or (
-                parsed_resource is not None
-                and (
-                    not parsed_resource.hostname
-                    or parsed_resource.username is not None
-                    or parsed_resource.password is not None
-                    or bool(parsed_resource.query)
-                    or bool(parsed_resource.fragment)
+            public_resource = properties.get("public_resource_name")
+            if isinstance(public_resource, str):
+                resources.append(public_resource)
+        elif isinstance(node.properties, IntegrationProperties):
+            resources.append(node.name)
+        for resource in resources:
+            if (
+                _PRIVATE_RESOURCE_RE.search(resource)
+                or _CONTROL_CHARACTER_RE.search(resource)
+                or has_unsafe_semantic_resource_location(resource)
+            ):
+                _fail(
+                    "private_resource_name",
+                    "artifact contains a private resource name instead of a public identifier",
                 )
-            )
-        ):
-            _fail(
-                "private_resource_name",
-                "artifact contains a private resource name instead of a public identifier",
-            )
     for envelope in _iter_evidence(artifact):
         for evidence in (envelope.primary, *envelope.supporting):
             if evidence.origin not in {
@@ -745,8 +729,56 @@ def _validate_node(node: Node, artifact: GraphArtifactV2, index: _RecordIndex) -
         if (
             node.qualified_name != identity.qualified_name
             or node.namespace != identity.namespace
+            or node.framework != identity.framework
         ):
             _fail("node_display_mismatch", "semantic resource display fields disagree")
+        qualified_tail = (
+            re.split(r"[:.\\]", identity.qualified_name)[-1]
+            if identity.qualified_name is not None
+            else None
+        )
+        expected_name = qualified_tail or identity.public_resource_name
+        if expected_name is None or node.name != expected_name:
+            _fail("node_display_mismatch", "semantic resource display fields disagree")
+        if isinstance(node.properties, DataProperties):
+            property_resource = (
+                node.properties.public_resource_name
+                if isinstance(node.properties.public_resource_name, str)
+                else None
+            )
+            property_operation = (
+                node.properties.operation
+                if isinstance(node.properties.operation, str)
+                else None
+            )
+            if (
+                property_resource != identity.public_resource_name
+                or property_operation != identity.operation
+                or identity.protocol is not None
+            ):
+                _fail(
+                    "node_display_mismatch",
+                    "semantic resource data properties disagree with its identity",
+                )
+        elif isinstance(node.properties, IntegrationProperties):
+            property_protocol = (
+                node.properties.protocol
+                if isinstance(node.properties.protocol, str)
+                else None
+            )
+            property_operation = (
+                node.properties.operation
+                if isinstance(node.properties.operation, str)
+                else None
+            )
+            if (
+                property_protocol != identity.protocol
+                or property_operation != identity.operation
+            ):
+                _fail(
+                    "node_display_mismatch",
+                    "semantic resource integration properties disagree with its identity",
+                )
     if node.location is not None:
         _require_file_path(node.location.path, index)
         if node.location.end_line < node.location.start_line:
@@ -1135,14 +1167,12 @@ _RESOLUTION_MATRIX = {
             Relation.READS,
             Relation.WRITES,
             Relation.QUERIES,
-            Relation.REFERENCES,
         }),
         frozenset({
             EdgeFlow.ALWAYS,
             EdgeFlow.CONDITIONAL,
             EdgeFlow.ALTERNATIVE,
             EdgeFlow.ASYNC,
-            None,
         }),
         frozenset({
             NodeKind.INTEGRATION,
@@ -1269,13 +1299,7 @@ def validate_uncertainty_ownership(
             and node.uncertainty_id not in index.uncertainties
         ):
             _fail("uncertainty_ownership", "node uncertainty ownership is not local")
-        if node.kind is NodeKind.UNKNOWN_BOUNDARY or (
-            node.kind is NodeKind.EXTERNAL_BOUNDARY
-            and (
-                node.evidence.primary.origin is EvidenceOrigin.UNRESOLVED
-                or node.uncertainty_id is not None
-            )
-        ):
+        if node.kind is NodeKind.UNKNOWN_BOUNDARY:
             if (
                 node.evidence.primary.origin is not EvidenceOrigin.UNRESOLVED
                 or node.uncertainty_id is None
@@ -1460,12 +1484,10 @@ def validate_uncertainty_ownership(
                     "one-target candidate set cannot create dynamic dispatch",
                 )
         else:
-            expected_boundary_kind = (
-                NodeKind.EXTERNAL_BOUNDARY
-                if uncertainty.resolution_kind is ResolutionKind.EXTERNAL_TARGET
-                else NodeKind.UNKNOWN_BOUNDARY
-            )
-            if len(boundaries) != 1 or boundaries[0].kind is not expected_boundary_kind:
+            if (
+                len(boundaries) != 1
+                or boundaries[0].kind is not NodeKind.UNKNOWN_BOUNDARY
+            ):
                 _fail(
                     "uncertainty_ownership",
                     "uncertainty ownership requires one placeholder",

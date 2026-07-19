@@ -1697,6 +1697,7 @@ class ExtractionContext:
     file_accessor: ReadOnlyFileAccessor
     inventory_files: tuple[InventoryFile, ...]
     excluded_path_count: int
+    work_budget_exhausted: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_root, Path):
@@ -1708,6 +1709,10 @@ class ExtractionContext:
                 "invalid_context",
                 "graph_config must be an exact HadesGraphIndexConfig",
             )
+        if self.work_budget_exhausted is not None and not callable(
+            self.work_budget_exhausted
+        ):
+            _fail("invalid_context", "work_budget_exhausted must be callable or null")
         for field_name, value in (
             ("project_id", self.project_id),
             ("workspace_binding_id", self.workspace_binding_id),
@@ -1769,6 +1774,14 @@ class ExtractionContext:
         _nonnegative(
             self.excluded_path_count,
             field_name="excluded_path_count",
+        )
+
+    def budget_exhausted(self) -> bool:
+        """Return whether adapters must stop accepting new extraction units."""
+
+        return bool(
+            self.work_budget_exhausted is not None
+            and self.work_budget_exhausted()
         )
 
 

@@ -72,6 +72,97 @@ def test_tree_sitter_adapter_extracts_bounded_metadata_only():
     assert not hasattr(parsed, "source")
 
 
+@pytest.mark.parametrize(
+    ("language", "path", "source", "expected_names"),
+    (
+        (
+            "python",
+            "app/models.py",
+            b"class Customer:\n"
+            b"    class Meta:\n"
+            b"        def configure(self):\n"
+            b"            class Options:\n"
+            b"                pass\n"
+            b"class Order:\n"
+            b"    class Meta:\n"
+            b"        pass\n",
+            {
+                "Customer",
+                "Customer.Meta",
+                "Customer.Meta.configure",
+                "Customer.Meta.configure.Options",
+                "Order",
+                "Order.Meta",
+            },
+        ),
+        (
+            "javascript",
+            "src/models.js",
+            b"class Customer {\n"
+            b"  static { class Meta { configure() { class Options {} } } }\n"
+            b"}\n"
+            b"class Order { static { class Meta {} } }\n",
+            {
+                "Customer",
+                "Customer.Meta",
+                "Customer.Meta.configure",
+                "Customer.Meta.configure.Options",
+                "Order",
+                "Order.Meta",
+            },
+        ),
+        (
+            "typescript",
+            "src/models.ts",
+            b"class Customer {\n"
+            b"  static { class Meta { configure(): void { class Options {} } } }\n"
+            b"}\n"
+            b"class Order { static { class Meta {} } }\n",
+            {
+                "Customer",
+                "Customer.Meta",
+                "Customer.Meta.configure",
+                "Customer.Meta.configure.Options",
+                "Order",
+                "Order.Meta",
+            },
+        ),
+        (
+            "php",
+            "src/models.php",
+            b"<?php\n"
+            b"function customer_scope() {\n"
+            b"    class Meta {\n"
+            b"        public function configure() { class Options {} }\n"
+            b"    }\n"
+            b"}\n"
+            b"function order_scope() { class Meta {} }\n",
+            {
+                "customer_scope",
+                "customer_scope.Meta",
+                "customer_scope.Meta.configure",
+                "customer_scope.Meta.configure.Options",
+                "order_scope",
+                "order_scope.Meta",
+            },
+        ),
+    ),
+)
+def test_tree_sitter_adapter_qualifies_every_nested_declaration_with_lexical_owner_chain(
+    language: str,
+    path: str,
+    source: bytes,
+    expected_names: set[str],
+) -> None:
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+
+    parsed = TreeSitterAdapter().parse_bytes(source, path=path, language=language)
+
+    assert parsed.status == "parsed"
+    assert parsed.syntax is not None
+    assert {symbol.name for symbol in parsed.syntax.symbols} == expected_names
+
+
 def test_required_parser_canary_fails_before_graph_enrichment():
     from hermes_cli.hades_index.tree_sitter_adapter import (
         RequiredParserUnavailable,
@@ -310,3 +401,36 @@ def test_typescript_analyzer_timeout_is_non_fatal(tmp_path: Path):
     assert result.omitted == (
         {"analyzer": "typescript_compiler", "reason": "analyzer_timeout"},
     )
+
+
+def test_builder_reuses_canonical_evidence_for_the_same_locator(monkeypatch):
+    """Repeated node/edge evidence must not re-hash an identical source locator."""
+
+    from hermes_cli.hades_graph_v2 import ast_source_fingerprint
+    from hermes_cli.hades_index.lifecycle import builder
+    from hermes_cli.hades_index.lifecycle.model import AstLocatorIR, SourceLocationIR
+
+    digest = "a" * 64
+    locator = AstLocatorIR(
+        SourceLocationIR("src/app.py", 7, 7, digest),
+        "root/function_definition/0/block/0",
+        0,
+    )
+    calls = 0
+
+    def counted_fingerprint(file_sha256, path, structural_path):
+        nonlocal calls
+        calls += 1
+        return ast_source_fingerprint(file_sha256, path, structural_path)
+
+    monkeypatch.setattr(builder, "ast_source_fingerprint", counted_fingerprint)
+    builder._fingerprint.cache_clear()
+
+    first = builder._synthetic_evidence(locator)
+    second = builder._synthetic_evidence(locator)
+
+    assert first == second
+    assert first.primary.source_fingerprint == ast_source_fingerprint(
+        digest, "src/app.py", locator.structural_path
+    )
+    assert calls == 1

@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -376,6 +377,7 @@ def _source_location(locator: AstLocatorIR | ConfigLocatorIR) -> SourceLocation:
     return SourceLocation(location.path, location.start_line, location.end_line)
 
 
+@lru_cache(maxsize=32_768)
 def _source_locator(locator: AstLocatorIR | ConfigLocatorIR):
     if type(locator) is AstLocatorIR:
         from hermes_cli.hades_graph_v2.model import AstSourceLocator
@@ -390,6 +392,7 @@ def _source_locator(locator: AstLocatorIR | ConfigLocatorIR):
     )
 
 
+@lru_cache(maxsize=32_768)
 def _fingerprint(locator: AstLocatorIR | ConfigLocatorIR) -> str:
     location = locator.source_location
     if type(locator) is AstLocatorIR:
@@ -2027,78 +2030,34 @@ class GraphBuilder:
             language = owner_node.language or next(
                 node.language for node in nodes if node.id == source_id
             )
-            boundary_qualified_name: str | None = None
-            boundary_public_resource_name: str | None = None
-            boundary_kind = (
-                NodeKind.EXTERNAL_BOUNDARY
-                if fact.resolution_kind is ResolutionKind.EXTERNAL_TARGET
-                else NodeKind.UNKNOWN_BOUNDARY
+            boundary_kind = NodeKind.UNKNOWN_BOUNDARY
+            boundary_properties = BoundaryProperties(reason_code=fact.reason_code)
+            if owner_node.kind not in _CALLABLE_OWNER_KINDS:
+                raise IRValidationError(
+                    "invalid_unresolved_owner",
+                    "unresolved placeholders require a callable owner",
+                )
+            semantic_role = boundary_kind.value
+            boundary_identity = SourceOccurrenceIdentity(
+                "source_occurrence",
+                context.workspace_binding_id,
+                language,
+                boundary_kind,
+                owner_id,
+                f"{structural}/{semantic_role}",
+                locator.ordinal,
+                semantic_role,
             )
-            boundary_properties: BoundaryProperties | IntegrationProperties = (
-                IntegrationProperties()
-                if boundary_kind is NodeKind.EXTERNAL_BOUNDARY
-                else BoundaryProperties(reason_code=fact.reason_code)
-            )
-            if owner_node.kind in _CALLABLE_OWNER_KINDS:
-                semantic_role = boundary_kind.value
-                boundary_identity = SourceOccurrenceIdentity(
-                    "source_occurrence",
-                    context.workspace_binding_id,
-                    language,
-                    boundary_kind,
-                    owner_id,
-                    f"{structural}/{semantic_role}",
-                    locator.ordinal,
-                    semantic_role,
-                )
-                boundary_identity_payload = {
-                    "variant": "source_occurrence",
-                    "workspace_binding_id": context.workspace_binding_id,
-                    "language": language,
-                    "kind": boundary_kind.value,
-                    "owner_node_id": owner_id,
-                    "structural_path": boundary_identity.structural_path,
-                    "ordinal": locator.ordinal,
-                    "semantic_role": semantic_role,
-                }
-            else:
-                if boundary_kind is not NodeKind.EXTERNAL_BOUNDARY:
-                    raise IRValidationError(
-                        "invalid_unresolved_owner",
-                        "non-callable unresolved targets must be external boundaries",
-                    )
-                boundary_qualified_name = (
-                    f"{locator.source_location.path}::{structural}::external_boundary"
-                )
-                boundary_public_resource_name = (
-                    subject_ir.target.descriptor.public_name
-                    if type(subject_ir.target) is BoundaryTarget
-                    else None
-                )
-                boundary_identity = SemanticResourceIdentity(
-                    "semantic_resource",
-                    context.workspace_binding_id,
-                    language,
-                    boundary_kind,
-                    None,
-                    None,
-                    boundary_qualified_name,
-                    boundary_public_resource_name,
-                    None,
-                    None,
-                )
-                boundary_identity_payload = {
-                    "variant": "semantic_resource",
-                    "workspace_binding_id": context.workspace_binding_id,
-                    "language": language,
-                    "kind": boundary_kind.value,
-                    "framework": None,
-                    "namespace": None,
-                    "qualified_name": boundary_qualified_name,
-                    "public_resource_name": boundary_public_resource_name,
-                    "protocol": None,
-                    "operation": None,
-                }
+            boundary_identity_payload = {
+                "variant": "source_occurrence",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": language,
+                "kind": boundary_kind.value,
+                "owner_node_id": owner_id,
+                "structural_path": boundary_identity.structural_path,
+                "ordinal": locator.ordinal,
+                "semantic_role": semantic_role,
+            }
             boundary_id = node_id(boundary_identity_payload)
             condition = (
                 None
@@ -2222,12 +2181,8 @@ class GraphBuilder:
                     boundary_kind,
                     language,
                     None,
-                    (
-                        "unknown boundary"
-                        if boundary_kind is NodeKind.UNKNOWN_BOUNDARY
-                        else boundary_public_resource_name or "external boundary"
-                    ),
-                    boundary_qualified_name,
+                    "unknown boundary",
+                    None,
                     None,
                     uncertainty_id_value,
                     _source_location(locator),

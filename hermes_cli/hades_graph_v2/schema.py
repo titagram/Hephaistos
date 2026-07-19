@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import hashlib
 import json
+from threading import RLock
 import unicodedata
 from functools import lru_cache
 from importlib.resources import files
@@ -49,11 +52,29 @@ def _linear_unique_items(validator, unique_items, instance, schema):
     del validator, schema
     if not unique_items or not isinstance(instance, list):
         return
-    seen: set[tuple[object, ...]] = set()
+    # Application scalar validation runs before jsonschema and closes graph
+    # payloads to NFC, float-free JSON.  Large artifact record arrays can
+    # therefore use CPython's C JSON encoder as an exact equality key instead
+    # of recursively allocating a Python tuple for every nested scalar.
+    use_json_key = len(instance) > 64 and all(
+        isinstance(item, dict) and isinstance(item.get("id"), str)
+        for item in instance
+    )
+    seen: set[object] = set()
     for item in instance:
-        frozen_item = _freeze_unique_item(item)
+        frozen_item = (
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            if use_json_key
+            else _freeze_unique_item(item)
+        )
         if frozen_item in seen:
-            yield ValidationError(f"{instance!r} has non-unique elements")
+            yield ValidationError("array has non-unique elements")
             return
         seen.add(frozen_item)
 
@@ -62,6 +83,10 @@ _LinearDraft202012Validator = validators.extend(
     Draft202012Validator,
     {"uniqueItems": _linear_unique_items},
 )
+
+_SCHEMA_SUCCESS_CACHE_MAX_SIZE = 32
+_SCHEMA_SUCCESS_CACHE: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+_SCHEMA_SUCCESS_CACHE_LOCK = RLock()
 
 GRAPH_SCHEMA = "hades.code_graph.v2"
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v2"
@@ -122,7 +147,9 @@ class GraphIdentityCollision(GraphContractError):
 
 
 def _has_isolated_surrogate(value: str) -> bool:
-    return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    return not value.isascii() and any(
+        0xD800 <= ord(character) <= 0xDFFF for character in value
+    )
 
 
 def _is_graph_v1_payload(payload: object) -> bool:
@@ -239,6 +266,24 @@ def _validator(document_name: str) -> Draft202012Validator:
     )
 
 
+def _schema_validator_identity(validator: object) -> str:
+    schema = getattr(validator, "schema", {})
+    schema_id = schema.get("$id", "") if isinstance(schema, dict) else ""
+    schema_version = schema.get("$schema", "") if isinstance(schema, dict) else ""
+    validator_type = type(validator)
+    return (
+        f"{validator_type.__module__}.{validator_type.__qualname__}:"
+        f"{id(validator)}:{schema_id}:{schema_version}"
+    )
+
+
+def _clear_schema_success_cache() -> None:
+    """Clear the bounded success cache for deterministic tests and reloads."""
+
+    with _SCHEMA_SUCCESS_CACHE_LOCK:
+        _SCHEMA_SUCCESS_CACHE.clear()
+
+
 def _validate_application_scalars(value: object, *, key: str | None = None) -> None:
     if value is None or isinstance(value, bool):
         return
@@ -337,13 +382,35 @@ def validate_schema(document_name: str, payload: JsonValue) -> None:
             "the requested graph v2 schema is not registered",
         )
     _validate_application_scalars(payload)
+    validator = _validator(document_name)
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    cache_key = (
+        document_name,
+        _schema_validator_identity(validator),
+        hashlib.sha256(canonical_payload).hexdigest(),
+    )
+    with _SCHEMA_SUCCESS_CACHE_LOCK:
+        if cache_key in _SCHEMA_SUCCESS_CACHE:
+            _SCHEMA_SUCCESS_CACHE.move_to_end(cache_key)
+            return
     try:
-        _validator(document_name).validate(payload)
+        validator.validate(payload)
     except ValidationError as exc:
         raise GraphContractError(
             "schema_validation_failed",
             "payload does not satisfy the selected graph v2 schema",
         ) from exc
+    with _SCHEMA_SUCCESS_CACHE_LOCK:
+        _SCHEMA_SUCCESS_CACHE[cache_key] = None
+        _SCHEMA_SUCCESS_CACHE.move_to_end(cache_key)
+        while len(_SCHEMA_SUCCESS_CACHE) > max(1, _SCHEMA_SUCCESS_CACHE_MAX_SIZE):
+            _SCHEMA_SUCCESS_CACHE.popitem(last=False)
 
 
 def validate_json_bytes(document_name: str, raw: bytes) -> JsonValue:

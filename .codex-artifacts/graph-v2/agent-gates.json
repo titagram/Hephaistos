@@ -4,85 +4,85 @@
       "gate": "G01",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_v2_only -q",
       "passed": true,
-      "duration_seconds": 0.518421
+      "duration_seconds": 0.917943
     },
     {
       "gate": "G02",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_v2_golden.py::test_identity_vectors -q",
       "passed": true,
-      "duration_seconds": 0.329269
+      "duration_seconds": 0.371642
     },
     {
       "gate": "G03",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_reference_resolution -q",
       "passed": true,
-      "duration_seconds": 0.683418
+      "duration_seconds": 0.61745
     },
     {
       "gate": "G04",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_privacy_rejection -q",
       "passed": true,
-      "duration_seconds": 0.543628
+      "duration_seconds": 0.559317
     },
     {
       "gate": "G05",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_evidence_flow_completeness_orthogonal -q",
       "passed": true,
-      "duration_seconds": 0.858931
+      "duration_seconds": 0.666607
     },
     {
       "gate": "G06",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_omission_ledgers -q",
       "passed": true,
-      "duration_seconds": 0.813803
+      "duration_seconds": 0.717025
     },
     {
       "gate": "G07",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_bundle.py::test_large_bundle -q",
       "passed": true,
-      "duration_seconds": 105.536821
+      "duration_seconds": 228.969093
     },
     {
       "gate": "G08",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_control_flow.py::test_cfg_matrix -q",
       "passed": true,
-      "duration_seconds": 1.350061
+      "duration_seconds": 0.929307
     },
     {
       "gate": "G09",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_framework_adapter.py::test_all_required_framework_golden_suites_are_registered -q",
       "passed": true,
-      "duration_seconds": 0.539607
+      "duration_seconds": 0.73727
     },
     {
       "gate": "G10",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_traversal.py::test_async_terminal_semantics -q",
       "passed": true,
-      "duration_seconds": 0.736541
+      "duration_seconds": 0.626405
     },
     {
       "gate": "G11",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_backend_indexer_golden.py::test_polyglot -q",
       "passed": true,
-      "duration_seconds": 3.810563
+      "duration_seconds": 1.724752
     },
     {
       "gate": "G12",
-      "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_control_flow.py::test_missing_parser_partial -q",
+      "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_index_enrichment.py::test_required_canary_failure_escapes_the_real_graph_publication_boundary -q",
       "passed": true,
-      "duration_seconds": 0.353056
+      "duration_seconds": 0.455731
     },
     {
       "gate": "G13",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_v2_golden.py::test_python_vectors_match_locked_contract -q",
       "passed": true,
-      "duration_seconds": 0.339259
+      "duration_seconds": 0.317471
     },
     {
       "gate": "G14",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_base_provenance_and_candidate_ownership -q",
       "passed": true,
-      "duration_seconds": 0.575299
+      "duration_seconds": 0.543419
     }
   ]
 }

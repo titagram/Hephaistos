@@ -267,21 +267,28 @@ def build_callable_summaries(
         and nodes[_node_owner(node)].kind
         in {NodeKind.ENTRYPOINT, *EXECUTABLE_SOURCE_DECLARATION_KINDS}
     })
-    direct_edges: dict[str, tuple[Edge, ...]] = {
-        callable_id: tuple(
-            edge
-            for edge in graph.edges
-            if edge.occurrence.owner_node_id == callable_id
-            and edge.relation not in _STRUCTURAL_RELATIONS
-        )
-        for callable_id in callables
+    direct_edge_lists: dict[str, list[Edge]] = {
+        callable_id: [] for callable_id in callables
     }
     summary_outgoing: dict[str, list[Edge]] = defaultdict(list)
     summary_returns_by_call_site: dict[str, list[Edge]] = defaultdict(list)
     summary_exceptions_by_call_site: dict[str, list[Edge]] = defaultdict(list)
+    normal_exits_from_edges: dict[str, set[str]] = defaultdict(set)
+    exception_exits_from_edges: dict[str, set[str]] = defaultdict(set)
     for edge in graph.edges:
         if edge.relation in _STRUCTURAL_RELATIONS:
             continue
+        owner_edges = direct_edge_lists.get(edge.occurrence.owner_node_id)
+        if owner_edges is not None:
+            owner_edges.append(edge)
+        if edge.relation is Relation.RETURNS_TO:
+            normal_exits_from_edges[_node_owner(nodes[edge.source_id])].add(
+                edge.source_id
+            )
+        elif edge.relation is Relation.THROWS_TO:
+            exception_exits_from_edges[_node_owner(nodes[edge.source_id])].add(
+                edge.source_id
+            )
         if edge.relation is Relation.RETURNS_TO and edge.call_site_id is not None:
             summary_returns_by_call_site[edge.call_site_id].append(edge)
         elif edge.relation is Relation.THROWS_TO and edge.call_site_id is not None:
@@ -290,6 +297,10 @@ def build_callable_summaries(
             summary_outgoing[edge.source_id].append(edge)
     for values in summary_outgoing.values():
         values.sort(key=lambda item: item.id)
+    direct_edges = {
+        callable_id: tuple(sorted(values, key=lambda item: item.id))
+        for callable_id, values in direct_edge_lists.items()
+    }
     call_graph: dict[str, set[str]] = {item: set() for item in callables}
     for callable_id, edges in direct_edges.items():
         call_graph[callable_id].update(
@@ -358,19 +369,9 @@ def build_callable_summaries(
     def direct_summary(callable_id: str, stage: Stage) -> CallableSummary:
         invocation_stages: dict[str, Stage] = {}
         states: set[EdgeStageState] = set()
-        normal: set[str] = {
-            edge.source_id
-            for edge in graph.edges
-            if edge.relation is Relation.RETURNS_TO
-            and _node_owner(nodes[edge.source_id]) == callable_id
-        }
+        normal = set(normal_exits_from_edges.get(callable_id, ()))
         normal.update(declared_normal_exits.get(callable_id, ()))
-        exceptional: set[str] = {
-            edge.source_id
-            for edge in graph.edges
-            if edge.relation is Relation.THROWS_TO
-            and _node_owner(nodes[edge.source_id]) == callable_id
-        }
+        exceptional = set(exception_exits_from_edges.get(callable_id, ()))
         exceptional.update(declared_exception_exits.get(callable_id, ()))
         terminals: set[str] = set()
         effects: set[str] = set()

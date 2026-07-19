@@ -14,13 +14,7 @@ from hermes_cli.hades_backend_jobs import (
     _line_number,
     _ts_graph_summary,
 )
-from hermes_cli.hades_graph_v2.model import (
-    CandidateSetKnowledge,
-    EvidenceOrigin,
-    NodeKind,
-    Priority,
-    ResolutionKind,
-)
+from hermes_cli.hades_graph_v2.model import EvidenceOrigin, NodeKind
 from hermes_cli.hades_index.lifecycle.entrypoints import (
     EntrypointExtraction,
     sql_entrypoint_extraction,
@@ -29,20 +23,16 @@ from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
 from hermes_cli.hades_index.lifecycle.model import (
     AdapterResult,
     AstLocatorIR,
-    BoundaryTarget,
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
     DataNodeIR,
     EdgeFactIR,
-    EdgeSubjectIR,
     ExtractionContext,
     IREvidence,
     LocalNodeTarget,
-    FrameworkBoundaryDescriptor,
     Relation,
     SourceLocationIR,
-    UnresolvedFact,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
@@ -91,7 +81,6 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     table_specs: list[tuple[object, int, object, str, str, str]] = []
     represented_by_path: Counter[str] = Counter()
     unresolved_by_path: Counter[str] = Counter()
-    unresolved: list[UnresolvedFact] = []
     executable_capabilities = (
         CoverageCapability.ENTRYPOINT_DISCOVERY,
         CoverageCapability.CALL_GRAPH,
@@ -102,6 +91,19 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     )
     for item in context.inventory_files:
         if item.language != "sql":
+            continue
+        if context.budget_exhausted():
+            coverage.append(
+                CoverageEvent(
+                    "sql",
+                    CoverageCapability.DATA_ACCESS,
+                    CoverageOutcome.PARTIAL,
+                    "resource_budget_reached",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
             continue
         try:
             source = context.file_accessor(Path(item.path)).decode(
@@ -210,64 +212,6 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                 "sql", item.path, "foreign_key", "ast", structural_path, item_ordinal
             )
             if len(target_keys) != 1:
-                unresolved_evidence = IREvidence(
-                    EvidenceOrigin.UNRESOLVED,
-                    "sql.schema-v2",
-                    locator,
-                    None,
-                )
-                edges.append(
-                    EdgeFactIR(
-                        edge_key,
-                        source_key,
-                        BoundaryTarget(
-                            FrameworkBoundaryDescriptor(
-                                "sql",
-                                "table_reference",
-                                target_name,
-                                locator,
-                                unresolved_evidence,
-                            )
-                        ),
-                        Relation.REFERENCES,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        locator,
-                        unresolved_evidence,
-                    )
-                )
-                unresolved_key = local_record_key(
-                    "sql",
-                    item.path,
-                    "foreign_key_uncertainty",
-                    "ast",
-                    structural_path,
-                    item_ordinal,
-                )
-                unresolved.append(
-                    UnresolvedFact(
-                        unresolved_key,
-                        EdgeSubjectIR(edge_key),
-                        ResolutionKind.EXTERNAL_TARGET,
-                        (
-                            CandidateSetKnowledge.INCOMPLETE
-                            if target_keys
-                            else CandidateSetKnowledge.NOT_APPLICABLE
-                        ),
-                        "external_boundary_unresolved",
-                        "Which unique table is referenced by this foreign key?",
-                        ("inspect_schema_declarations",),
-                        (locator,),
-                        target_keys,
-                        (),
-                        Priority.HIGH,
-                        "The foreign-key target cannot be selected authoritatively.",
-                    )
-                )
                 unresolved_by_path[item.path] += 1
                 continue
             target_key = target_keys[0]
@@ -297,10 +241,14 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     if unresolved_by_path[path]
                     else CoverageOutcome.FULL
                 ),
-                None,
+                (
+                    "external_boundary_unresolved"
+                    if unresolved_by_path[path]
+                    else None
+                ),
                 path,
                 represented,
-                0,
+                unresolved_by_path[path],
             )
         )
     result = AdapterResult(
@@ -315,7 +263,7 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
         effects=(),
         framework_segments=(),
         entrypoints=(),
-        unresolved_facts=tuple(sorted(unresolved, key=lambda row: row.local_key)),
+        unresolved_facts=(),
         coverage_events=tuple(
             sorted(
                 coverage,

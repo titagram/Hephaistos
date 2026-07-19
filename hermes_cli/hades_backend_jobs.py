@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import tomllib
 from typing import Any
 
@@ -1939,14 +1940,13 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     payload = job.get("payload") or {}
     graph_index_config = load_hades_graph_index_config(load_config_readonly())
 
-    def payload_cap(name: str, default: int, *, hard_max: int | None = None) -> int:
+    def payload_cap(name: str, default: int) -> int:
         raw = payload.get(name)
         value = default if raw is None else int(raw)
         if value < 1:
             raise ValueError(f"{name} must be a positive integer")
-        return min(value, hard_max) if hard_max is not None else value
+        return value
 
-    max_selected_parser_files = payload_cap("max_files", 10_000, hard_max=10_000)
     max_file_bytes = min(
         graph_index_config.max_file_bytes,
         payload_cap("max_file_bytes", graph_index_config.max_file_bytes),
@@ -1958,8 +1958,6 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             graph_index_config.max_total_source_bytes,
         ),
     )
-    max_symbols = payload_cap("max_symbols", 5_000, hard_max=5_000)
-    max_edges = payload_cap("max_edges", 10_000, hard_max=10_000)
     snapshot = build_source_snapshot(
         workspace_root,
         user_excluded_paths=graph_index_config.excluded_paths,
@@ -2049,6 +2047,14 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     inventory.sort(key=lambda item: item.path)
     inventory_paths = {item.path for item in inventory}
     inventory_tuple = tuple(inventory)
+    # Inventory hashing is the source-identity precondition and is explicitly
+    # outside extraction budgets. Start the cooperative wall deadline only
+    # after the complete, deterministic inventory has been established.
+    wall_deadline = time.monotonic() + graph_index_config.max_wall_seconds
+
+    def work_budget_exhausted() -> bool:
+        return time.monotonic() >= wall_deadline
+
     parse_coverage: list[CoverageEvent] = []
     for item in inventory_tuple:
         if item.path in unavailable_submodule_paths:
@@ -2103,19 +2109,6 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             continue
         if not item.parser_candidate or item.language is None:
             continue
-        if len(selected_parser_paths) >= max_selected_parser_files:
-            parse_coverage.append(
-                CoverageEvent(
-                    coverage_language,
-                    CoverageCapability.INVENTORY,
-                    CoverageOutcome.PARTIAL,
-                    "resource_budget_reached",
-                    item.path,
-                    0,
-                    1,
-                )
-            )
-            continue
         if total_source_bytes + size > max_total_source_bytes:
             parse_coverage.append(
                 CoverageEvent(
@@ -2142,8 +2135,6 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         )
         if (
             size > max_file_bytes
-            or len(selected_parser_paths) + len(selected_data_paths)
-            >= max_selected_parser_files
             or total_source_bytes + size > max_total_source_bytes
         ):
             parse_coverage.append(
@@ -2221,18 +2212,34 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         file_accessor=read_inventory_file,
         inventory_files=inventory_tuple,
         excluded_path_count=snapshot.excluded_count,
+        work_budget_exhausted=work_budget_exhausted,
     )
 
     parser = TreeSitterAdapter()
     parser.require_languages(detected_languages)
     syntax = []
-    selected_symbol_count = 0
+    wall_budget_omitted_paths: set[str] = set()
     for item in inventory_tuple:
         if (
             not item.parser_candidate
             or item.language is None
             or item.path not in selected_parser_paths
         ):
+            continue
+        if work_budget_exhausted():
+            wall_budget_omitted_paths.add(item.path)
+            accessible_paths.discard(item.path)
+            parse_coverage.append(
+                CoverageEvent(
+                    item.language,
+                    CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                    "resource_budget_reached",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
             continue
         candidate = _resolve_inside(workspace_root, item.path)
         parsed = parser.parse_file(
@@ -2242,32 +2249,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             max_bytes=max_file_bytes,
         )
         if parsed.syntax is not None:
-            remaining_symbols = max(0, max_symbols - selected_symbol_count)
-            retained_symbols = parsed.syntax.symbols[:remaining_symbols]
-            if len(parsed.syntax.symbols) != len(retained_symbols):
-                parse_coverage.append(
-                    CoverageEvent(
-                        item.language,
-                        CoverageCapability.SYMBOL_RESOLUTION,
-                        CoverageOutcome.PARTIAL,
-                        "resource_budget_reached",
-                        item.path,
-                        len(retained_symbols),
-                        len(parsed.syntax.symbols) - len(retained_symbols),
-                    )
-                )
-                syntax.append(
-                    replace(
-                        parsed.syntax,
-                        parsed_file=replace(
-                            parsed.syntax.parsed_file,
-                            symbols=retained_symbols,
-                        ),
-                    )
-                )
-            else:
-                syntax.append(parsed.syntax)
-            selected_symbol_count += len(retained_symbols)
+            syntax.append(parsed.syntax)
         elif parsed.coverage_event is not None:
             parse_coverage.append(parsed.coverage_event)
 
@@ -2276,67 +2258,33 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         tuple(syntax),
         parse_coverage=tuple(parse_coverage),
     )
-    if len(assembled.edge_facts) > max_edges:
-        retained_edges = assembled.edge_facts[:max_edges]
-        omitted_by_path: dict[tuple[str, str], int] = {}
-        for edge in assembled.edge_facts[max_edges:]:
-            path = edge.locator.source_location.path
-            language = next(
-                (
-                    item.language
-                    for item in inventory_tuple
-                    if item.path == path and item.language is not None
-                ),
-                "unknown",
-            )
-            omitted_by_path[(language, path)] = (
-                omitted_by_path.get((language, path), 0) + 1
-            )
-        edge_coverage = list(assembled.coverage_events)
-        for (language, path), omitted_count in sorted(omitted_by_path.items()):
-            edge_coverage.append(
-                CoverageEvent(
-                    language,
-                    CoverageCapability.CALL_GRAPH,
-                    CoverageOutcome.PARTIAL,
-                    "resource_budget_reached",
-                    path,
-                    sum(
-                        edge.locator.source_location.path == path
-                        for edge in retained_edges
-                    ),
-                    omitted_count,
-                )
-            )
-        assembled = replace(
-            assembled,
-            edge_facts=retained_edges,
-            coverage_events=tuple(
-                sorted(
-                    edge_coverage,
-                    key=lambda event: (
-                        event.language,
-                        event.capability.value,
-                        event.outcome.value,
-                        event.reason_code or "",
-                        event.path or "",
-                    ),
-                )
-            ),
-        )
-        assembled.validate()
     adapter_results = [assembled]
-    if any(item.language == "python" for item in inventory_tuple):
+    active_paths = accessible_paths - wall_budget_omitted_paths
+    if any(
+        item.language == "python" and item.path in active_paths
+        for item in inventory_tuple
+    ):
         adapter_results.append(extract_python_data(context))
-    if any(item.language == "php" for item in inventory_tuple):
+    if any(
+        item.language == "php" and item.path in active_paths
+        for item in inventory_tuple
+    ):
         adapter_results.append(extract_php_data(context))
     if any(
         item.language in {"javascript", "typescript", "prisma"}
+        and item.path in active_paths
         for item in inventory_tuple
     ):
         adapter_results.append(extract_typescript_data(context))
-    if any(item.language == "sql" for item in inventory_tuple):
+    if any(
+        item.language == "sql" and item.path in active_paths
+        for item in inventory_tuple
+    ):
         adapter_results.append(extract_sql_data(context))
+    # The wall budget is cooperative: it stops admission of new parser/data
+    # units. Canonicalization, validation, pruning, and atomic bundle writing
+    # must still finish so every stopped unit has a durable typed omission
+    # ledger instead of leaving a corrupt or resumable half-artifact.
     complete = build_canonical_graph(context, tuple(adapter_results))
     limits = BundleLimits(
         max_chunk_uncompressed_bytes=graph_index_config.max_chunk_uncompressed_bytes,
@@ -2351,7 +2299,6 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             if payload.get("backend_max_body_bytes") is not None
             else None
         ),
-        max_edges=max_edges,
     )
     selected = GraphBudgetPruner().select(complete, limits)
     source_slice_candidates = plan_source_slice_candidates(

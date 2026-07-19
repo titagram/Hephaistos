@@ -73,6 +73,7 @@ _SYMBOL_TYPES = {
         "method_declaration": "method",
     },
 }
+_TYPE_SYMBOL_KINDS = frozenset({"class", "interface", "trait", "enum"})
 _CALL_TYPES = {
     "call_expression",
     "function_call_expression",
@@ -783,14 +784,16 @@ class TreeSitterAdapter:
             def visit(
                 node: Any,
                 context: str = "",
-                container: str = "",
+                lexical_owner: str = "",
+                lexical_owner_kind: str = "",
                 structural_path: str = "root",
                 owner_structural_path: str = "root",
                 namespace: str | None = None,
             ) -> None:
                 node_type = str(getattr(node, "type", ""))
                 next_context = context
-                next_container = container
+                next_lexical_owner = lexical_owner
+                next_lexical_owner_kind = lexical_owner_kind
                 next_namespace = namespace
                 if language == "php" and node_type == "namespace_definition":
                     next_namespace = _safe_reference(source, _field(node, "name"))
@@ -803,10 +806,11 @@ class TreeSitterAdapter:
                 if symbol_kind:
                     name = _bounded_node_text(source, _field(node, "name"))
                     if name:
-                        qualified = (
-                            f"{container}.{name}"
-                            if symbol_kind == "method" and container
-                            else name
+                        qualified = f"{lexical_owner}.{name}" if lexical_owner else name
+                        container = (
+                            lexical_owner
+                            if lexical_owner_kind in _TYPE_SYMBOL_KINDS
+                            else ""
                         )
                         symbols.append(
                             StructuralSymbol(
@@ -820,8 +824,8 @@ class TreeSitterAdapter:
                             )
                         )
                         next_context = qualified
-                        if symbol_kind in {"class", "interface", "trait", "enum"}:
-                            next_container = name
+                        next_lexical_owner = qualified
+                        next_lexical_owner_kind = symbol_kind
                 if (
                     language in {"javascript", "typescript"}
                     and node_type == "variable_declarator"
@@ -831,17 +835,24 @@ class TreeSitterAdapter:
                     name = _bounded_node_text(source, _field(node, "name"))
                     if value_type in _CALLABLE_TYPES[language] and name:
                         value_path = child_path(node, structural_path, value)
+                        qualified = f"{lexical_owner}.{name}" if lexical_owner else name
                         symbols.append(
                             StructuralSymbol(
-                                name=name,
+                                name=qualified,
                                 kind="function",
                                 line=_point_row(value.start_point) + 1,
                                 end_line=_point_row(value.end_point) + 1,
-                                container=container,
+                                container=(
+                                    lexical_owner
+                                    if lexical_owner_kind in _TYPE_SYMBOL_KINDS
+                                    else ""
+                                ),
                                 structural_path=value_path,
                             )
                         )
-                        next_context = name
+                        next_context = qualified
+                        next_lexical_owner = qualified
+                        next_lexical_owner_kind = "function"
                 if node_type in _IMPORT_TYPES:
                     if language == "php" and node_type == "namespace_use_declaration":
                         for clause in getattr(node, "named_children", ()):
@@ -955,7 +966,8 @@ class TreeSitterAdapter:
                     visit(
                         child,
                         next_context,
-                        next_container,
+                        next_lexical_owner,
+                        next_lexical_owner_kind,
                         f"{structural_path}/{child_type}/{child_ordinal}",
                         next_owner,
                         next_namespace,

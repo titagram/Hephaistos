@@ -5,31 +5,21 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
-from hermes_cli.hades_graph_v2.model import (
-    CandidateSetKnowledge,
-    EvidenceOrigin,
-    NodeKind,
-    Priority,
-    ResolutionKind,
-)
+from hermes_cli.hades_graph_v2.model import EvidenceOrigin, NodeKind
 
 from .model import (
     AdapterResult,
     AstLocatorIR,
-    BoundaryTarget,
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
     DataNodeIR,
     EdgeFactIR,
-    EdgeSubjectIR,
     ExtractionContext,
-    FrameworkBoundaryDescriptor,
     IREvidence,
     LocalNodeTarget,
     Relation,
     SourceLocationIR,
-    UnresolvedFact,
     local_record_key,
 )
 
@@ -43,6 +33,60 @@ class TableSpec:
     table: str
     model: str | None = None
     foreign_keys: tuple[tuple[str, str, int], ...] = ()
+
+
+def data_budget_omission(language: str, path: str) -> CoverageEvent:
+    """Create the exact per-file ledger entry for a stopped data adapter."""
+
+    return CoverageEvent(
+        language,
+        CoverageCapability.DATA_ACCESS,
+        CoverageOutcome.PARTIAL,
+        "resource_budget_reached",
+        path,
+        0,
+        1,
+    )
+
+
+def append_coverage_events(
+    result: AdapterResult, events: tuple[CoverageEvent, ...]
+) -> AdapterResult:
+    """Merge deterministic adapter coverage and revalidate the closed IR."""
+
+    if not events:
+        return result
+    merged = AdapterResult(
+        declarations=result.declarations,
+        blocks=result.blocks,
+        branch_arms=result.branch_arms,
+        structures=result.structures,
+        call_sites=result.call_sites,
+        edge_facts=result.edge_facts,
+        exception_scopes=result.exception_scopes,
+        terminals=result.terminals,
+        effects=result.effects,
+        framework_segments=result.framework_segments,
+        entrypoints=result.entrypoints,
+        unresolved_facts=result.unresolved_facts,
+        coverage_events=tuple(
+            sorted(
+                (*result.coverage_events, *events),
+                key=lambda row: (
+                    row.language,
+                    row.capability.value,
+                    row.outcome.value,
+                    row.reason_code or "",
+                    row.path or "",
+                ),
+            )
+        ),
+        diagnostics=result.diagnostics,
+        source_nodes=result.source_nodes,
+        data_nodes=result.data_nodes,
+    )
+    merged.validate()
+    return merged
 
 
 def table_adapter_result(
@@ -60,7 +104,6 @@ def table_adapter_result(
     )
     nodes: list[DataNodeIR] = []
     edges: list[EdgeFactIR] = []
-    unresolved: list[UnresolvedFact] = []
     coverage: list[CoverageEvent] = []
     table_keys: dict[str, list[str]] = defaultdict(list)
     table_key_by_spec: dict[TableSpec, str] = {}
@@ -125,63 +168,6 @@ def table_adapter_result(
                 fk_ordinal,
             )
             if len(targets) != 1:
-                evidence = IREvidence(
-                    EvidenceOrigin.UNRESOLVED,
-                    f"{spec.orm}.data-v2",
-                    locator,
-                    None,
-                )
-                edges.append(
-                    EdgeFactIR(
-                        edge_key,
-                        source_key,
-                        BoundaryTarget(
-                            FrameworkBoundaryDescriptor(
-                                spec.orm,
-                                "table_reference",
-                                target_table,
-                                locator,
-                                evidence,
-                            )
-                        ),
-                        Relation.REFERENCES,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        locator,
-                        evidence,
-                    )
-                )
-                unresolved.append(
-                    UnresolvedFact(
-                        local_record_key(
-                            spec.language,
-                            spec.path,
-                            "data_foreign_key_uncertainty",
-                            "ast",
-                            structural_path,
-                            fk_ordinal,
-                        ),
-                        EdgeSubjectIR(edge_key),
-                        ResolutionKind.EXTERNAL_TARGET,
-                        (
-                            CandidateSetKnowledge.INCOMPLETE
-                            if targets
-                            else CandidateSetKnowledge.NOT_APPLICABLE
-                        ),
-                        "external_boundary_unresolved",
-                        "Which unique table is referenced by this foreign key?",
-                        ("inspect_schema_declarations",),
-                        (locator,),
-                        targets,
-                        (),
-                        Priority.HIGH,
-                        "The foreign-key target cannot be selected authoritatively.",
-                    )
-                )
                 partial_by_path[(spec.language, spec.path)] += 1
                 continue
             evidence = IREvidence(
@@ -214,10 +200,10 @@ def table_adapter_result(
                 language,
                 CoverageCapability.DATA_ACCESS,
                 CoverageOutcome.PARTIAL if omitted else CoverageOutcome.FULL,
-                None,
+                "external_boundary_unresolved" if omitted else None,
                 path,
                 represented_by_path[(language, path)],
-                0,
+                omitted,
             )
         )
 
@@ -233,7 +219,7 @@ def table_adapter_result(
         effects=(),
         framework_segments=(),
         entrypoints=(),
-        unresolved_facts=tuple(sorted(unresolved, key=lambda row: row.local_key)),
+        unresolved_facts=(),
         coverage_events=tuple(
             sorted(
                 coverage,
@@ -253,4 +239,9 @@ def table_adapter_result(
     return result
 
 
-__all__ = ["TableSpec", "table_adapter_result"]
+__all__ = [
+    "TableSpec",
+    "append_coverage_events",
+    "data_budget_omission",
+    "table_adapter_result",
+]

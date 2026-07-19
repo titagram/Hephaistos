@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -318,48 +319,117 @@ def test_chunk_bytes_are_permutation_invariant_at_the_canonical_boundary(tmp_pat
     ]
 
 
-def test_large_bundle(tmp_path):
-    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
-    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS
+def test_large_bundle(tmp_path, monkeypatch):
+    from hermes_constants import get_hermes_home
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS, GraphBundleWriter
+    from tests.hermes_cli.test_hades_backend_jobs import _materialize_graph_v2
 
-    del tmp_path
-    report = run_hades_backend_benchmark(
-        cases=[
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["fastapi==0.115.0", "starlette==0.37.2"]\n',
+        encoding="utf-8",
+    )
+    class_count = 5_501
+    route_count = 501
+    # Two real producer runs establish, for this fixture, 3,012 baseline edges
+    # plus four edges per source call.  Two thousand calls yield 11,012 (>10,500).
+    call_count = 2_000
+    source = [
+        "from fastapi import FastAPI\n",
+        "app = FastAPI()\n",
+        "def sink():\n    return 1\n",
+    ]
+    source.extend(f"class Marker{index}:\n    pass\n" for index in range(class_count))
+    source.extend(f"@app.get('/route/{index}')\n" for index in range(route_count))
+    source.extend((
+        "def route_handler():\n",
+        "    return 0\n",
+        "def edge_source():\n",
+    ))
+    source.extend("    sink()\n" for _index in range(call_count))
+    source.append("    return 0\n")
+    (workspace / "app.py").write_text("".join(source), encoding="utf-8")
+
+    def run(home: Path) -> tuple[dict, dict, tuple[str, ...]]:
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        result = execute_job(
             {
-                "name": "large_code_graph",
-                "nodes": 5_501,
-                "entrypoints": 501,
-                "edges": 10_501,
-            }
-        ]
-    )
-    assert report["case_count"] == 1
-    graph = report["cases"][0]
-    assert graph["requested_counts"] == {
-        "nodes": 5_501,
-        "entrypoints": 501,
-        "edges": 10_501,
+                "job_id": "g07-real-producer",
+                "capability": "populate_backend_ast",
+                "payload": {
+                    "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+                    "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+                },
+            },
+            workspace_root=workspace,
+        )
+        artifact = _materialize_graph_v2(result)
+        manifest = result["artifact"]["bundle"]
+        project = manifest["project"]
+        spool = (
+            get_hermes_home()
+            / "cache"
+            / "hades"
+            / "graph-imports"
+            / project["project_id"]
+            / project["workspace_binding_id"]
+            / result["artifact"]["artifact_graph_version"]
+        )
+        state = GraphBundleWriter().resume_state(spool)
+        chunk_digests = tuple(
+            hashlib.sha256(path.read_bytes()).hexdigest() for path in state.chunk_paths
+        )
+        return result, artifact, chunk_digests
+
+    first, first_artifact, first_chunk_digests = run(tmp_path / "home-first")
+    first_counts = {kind: len(first_artifact[kind]) for kind in CHUNK_KINDS}
+    assert first["status"] == "completed"
+    assert first_counts["nodes"] > 5_500
+    assert first_counts["entrypoints"] > 500
+    assert first_counts["edges"] > 10_500
+    assert first["artifact"]["bundle"]["counts"] == {
+        **first_counts,
+        "frameworks": len(first_artifact["frameworks"]),
+        "languages": len(first_artifact["languages"]),
     }
-    assert all(
-        graph["source_counts"][kind] >= graph["requested_counts"][kind]
-        for kind in graph["requested_counts"]
+    records_ledger = first_artifact["graph_contract"]["coverage"]["records"]
+    for kind in (
+        "nodes",
+        "structures",
+        "edges",
+        "flows",
+        "flow_steps",
+        "uncertainties",
+    ):
+        assert records_ledger[kind] == first_counts[kind]
+    entrypoint_ledger = first_artifact["graph_contract"]["coverage"]["entrypoints"]
+    assert entrypoint_ledger["detected"] == first_counts["entrypoints"]
+    assert entrypoint_ledger["analyzed"] == first_counts["entrypoints"]
+    assert entrypoint_ledger["partial"] == sum(
+        flow["kind"] != "async_flow" and flow["completeness"]["status"] == "partial"
+        for flow in first_artifact["flows"]
     )
-    assert graph["chunk_count"] > len(CHUNK_KINDS)
-    assert graph["delivered_counts"] == graph["manifest_counts"]
-    assert graph["descriptor_counts"] == graph["manifest_counts"]
-    assert graph["reassembled_counts"] == graph["manifest_counts"]
-    assert {
-        kind: graph["delivered_counts"][kind] + graph["omitted_counts"][kind]
-        for kind in CHUNK_KINDS
-    } == graph["source_counts"]
-    assert graph["coverage_omission_ledger"] == sum(graph["omitted_counts"].values())
-    assert graph["deterministic"] is True
-    assert graph["reassembly_valid"] is True
+    assert first_artifact["graph_contract"]["coverage"]["files"]["budget_omitted"] == 0
     assert (
-        graph["reassembled_artifact_graph_version"] == graph["artifact_graph_version"]
+        first_artifact["graph_contract"]["coverage"]["records"][
+            "omitted_by_bundle_budget"
+        ]
+        == 0
     )
-    assert len(graph["artifact_graph_version"]) == 64
-    assert len(graph["manifest_sha256"]) == 64
+
+    second, second_artifact, second_chunk_digests = run(tmp_path / "home-second")
+    assert (
+        second["artifact"]["artifact_graph_version"]
+        == first["artifact"]["artifact_graph_version"]
+    )
+    assert {kind: len(second_artifact[kind]) for kind in CHUNK_KINDS} == first_counts
+    assert (
+        second["artifact"]["bundle"]["chunks"] == first["artifact"]["bundle"]["chunks"]
+    )
+    assert second_chunk_digests == first_chunk_digests
 
 
 def test_gate_report_generator_rejects_nonpassing_pytest_summaries() -> None:
@@ -373,8 +443,12 @@ def test_gate_report_generator_rejects_nonpassing_pytest_summaries() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    expected_python = Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"
-    assert module._resolved_python(Path(".venv/bin/python")) == expected_python
+    assert dict(module.GATES)["G12"] == (
+        "tests/hermes_cli/test_hades_index_enrichment.py::"
+        "test_required_canary_failure_escapes_the_real_graph_publication_boundary"
+    )
+
+    expected_python = Path(os.path.abspath(sys.executable))
     assert module._resolved_python(expected_python) == expected_python
     assert module._passed_count(". 1 passed in 0.10s") == 1
     for output in (

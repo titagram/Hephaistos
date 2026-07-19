@@ -760,30 +760,12 @@ def test_more_than_10000_edges_has_no_entity_count_truncation():
     assert selected.graph_contract.coverage.records.omitted_by_bundle_budget == 0
 
 
-def test_edge_only_ceiling_finalizes_one_candidate(monkeypatch):
-    import hermes_cli.hades_graph_v2.pruning as pruning
+def test_bundle_limits_exposes_only_byte_and_chunk_safety_budgets():
+    from dataclasses import fields
 
-    payload = _many_edge_artifact(101)
-    real_finalize = pruning._finalize_candidate
-    finalize_calls = 0
+    from hermes_cli.hades_graph_v2.bundle import BundleLimits
 
-    def tracked_finalize(*args, **kwargs):
-        nonlocal finalize_calls
-        finalize_calls += 1
-        return real_finalize(*args, **kwargs)
-
-    monkeypatch.setattr(pruning, "_finalize_candidate", tracked_finalize)
-    selected = pruning.GraphBudgetPruner().select(
-        artifact_from_payload(payload),
-        replace(
-            _limits(chunk=8 * 1024 * 1024, total=128 * 1024 * 1024),
-            max_edges=100,
-        ),
-    )
-
-    assert len(selected.edges) == 100
-    assert selected.graph_contract.coverage.records.omitted_by_bundle_budget == 1
-    assert finalize_calls == 1
+    assert "max_edges" not in {field.name for field in fields(BundleLimits)}
 
 
 def test_more_than_500_routes_has_no_entity_count_truncation():

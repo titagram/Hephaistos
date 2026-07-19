@@ -67,6 +67,83 @@ def _verification_golden() -> dict[str, Any]:
     return json.loads(VERIFICATION_GOLDEN.read_text(encoding="utf-8"))
 
 
+def test_sha256_jcs_uses_the_canonical_encoder_as_its_normalization_boundary(
+    monkeypatch,
+) -> None:
+    """Do not traverse large payloads once before canonical encoding traverses them."""
+
+    from hermes_cli.hades_graph_v2 import identity
+
+    value = {"path": "src/app.py", "records": [{"id": "node-1"}]}
+    seen: list[object] = []
+
+    def canonical_bytes(candidate):
+        seen.append(candidate)
+        return b"{}"
+
+    def unexpected_pre_normalization(*_args, **_kwargs):
+        raise AssertionError("sha256_jcs must not pre-normalize the full payload")
+
+    monkeypatch.setattr(identity, "canonical_json_bytes", canonical_bytes)
+    monkeypatch.setattr(
+        identity, "normalize_contract_value", unexpected_pre_normalization
+    )
+
+    assert identity.sha256_jcs(value) == hashlib.sha256(b"{}").hexdigest()
+    assert seen == [value]
+
+
+def test_canonical_encoder_normalizes_one_complete_nested_payload_once(
+    monkeypatch,
+) -> None:
+    from hermes_cli.hades_graph_v2 import identity
+
+    original = identity.normalize_contract_value
+    calls = 0
+
+    def counted(value, *, _key=None):
+        nonlocal calls
+        calls += 1
+        monkeypatch.setattr(identity, "normalize_contract_value", original)
+        try:
+            return original(value, _key=_key)
+        finally:
+            monkeypatch.setattr(identity, "normalize_contract_value", counted)
+
+    monkeypatch.setattr(identity, "normalize_contract_value", counted)
+    payload = {
+        "z": [
+            {
+                "path": "src/app.py",
+                "nested": {"structural_path": "root/function/0", "label": "caffè"},
+            }
+        ],
+        "a": {"id": "hades:node:v2:" + ("a" * 64)},
+    }
+
+    encoded = identity.canonical_json_bytes(payload)
+
+    assert json.loads(encoded) == payload
+    assert calls == 1
+
+
+@pytest.mark.parametrize("module_name", ("identity", "schema"))
+def test_surrogate_guard_uses_ascii_fast_path_without_character_iteration(
+    module_name: str,
+) -> None:
+    from hermes_cli.hades_graph_v2 import identity, schema
+
+    class AsciiWithoutIteration(str):
+        def __iter__(self):
+            raise AssertionError("ASCII surrogate guard must not iterate characters")
+
+    module = {"identity": identity, "schema": schema}[module_name]
+
+    assert module._has_isolated_surrogate(AsciiWithoutIteration("src/app.py")) is False
+    assert module._has_isolated_surrogate("\ud800") is True
+    assert module._has_isolated_surrogate("caffè") is False
+
+
 def _direct_verification_preimage(work: dict[str, Any]) -> dict[str, Any]:
     direct = {
         "kind": work["kind"],
@@ -158,8 +235,9 @@ def test_v2_only() -> None:
             {}, {}, {"schema": legacy_schema}
         )
         assert (
-            memory_provider._authoritative_v2_topology_error(
+            memory_provider._authoritative_scope_topology_error(
                 {"schema": legacy_schema},
+                scope="project",
                 handle="hades:node:v2:" + "a" * 64,
                 project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
                 workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
@@ -849,7 +927,7 @@ def _with_external_uncertainty() -> dict[str, Any]:
         "variant": "source_occurrence",
         "workspace_binding_id": binding_id,
         "language": "php",
-        "kind": "external_boundary",
+        "kind": "unknown_boundary",
         "owner_node_id": declaration_id,
         "structural_path": "body/call/0/unknown_target",
         "ordinal": 0,
@@ -921,15 +999,15 @@ def _with_external_uncertainty() -> dict[str, Any]:
         {
             "id": boundary_id,
             "identity": boundary_identity,
-            "kind": "external_boundary",
+            "kind": "unknown_boundary",
             "language": "php",
             "framework": None,
-            "name": "Unresolved external target",
+            "name": "Unresolved target",
             "qualified_name": None,
             "namespace": None,
             "uncertainty_id": unresolved_id,
             "location": {"path": path, "start_line": 2, "end_line": 2},
-            "properties": {},
+            "properties": {"reason_code": "external_boundary_unresolved"},
             "evidence": evidence("unresolved"),
         },
     ])
@@ -1075,6 +1153,44 @@ def _producer_evidence(
         "supporting": [],
         "supporting_omitted_count": 0,
     }
+
+
+def _with_semantic_integration_resource() -> dict[str, Any]:
+    artifact = _valid_semantic_artifact()
+    identity = {
+        "variant": "semantic_resource",
+        "workspace_binding_id": artifact["project"]["workspace_binding_id"],
+        "language": "php",
+        "kind": "integration",
+        "framework": None,
+        "namespace": None,
+        "qualified_name": None,
+        "public_resource_name": "orders-api",
+        "protocol": "https",
+        "operation": "request",
+    }
+    artifact["nodes"].append({
+        "id": node_id(identity),
+        "identity": identity,
+        "kind": "integration",
+        "language": "php",
+        "framework": None,
+        "name": "orders-api",
+        "qualified_name": None,
+        "namespace": None,
+        "uncertainty_id": None,
+        "location": None,
+        "properties": {
+            "protocol": "https",
+            "operation": "request",
+            "destination_kind": "service",
+        },
+        "evidence": _producer_evidence(artifact, "body/call/0"),
+    })
+    artifact["nodes"].sort(key=lambda record: record["id"])
+    artifact["graph_contract"]["coverage"]["records"]["nodes"] = 2
+    _rehash_artifact(artifact)
+    return artifact
 
 
 def test_partial_family_never_returns_verified_zero() -> None:
@@ -1468,6 +1584,97 @@ def test_privacy_rejection() -> None:
         validation.validate_artifact(dangling)
     assert dangling_error.value.code == "dangling_file_locator"
     assert private_path not in str(dangling_error.value)
+
+    for unsafe_resource in (
+        "HTTPS://api.example.test/path?query=1",
+        "hTtPs://api.example.test/path#fragment",
+        r"..\x",
+        r"safe\.env",
+        r"safe\.ENV.LOCAL",
+    ):
+        resource_payload = _with_semantic_integration_resource()
+        resource = next(
+            node
+            for node in resource_payload["nodes"]
+            if node["identity"]["variant"] == "semantic_resource"
+        )
+        resource["identity"]["public_resource_name"] = unsafe_resource
+        resource["name"] = unsafe_resource
+        resource["id"] = node_id(resource["identity"])
+        resource_payload["nodes"].sort(key=lambda record: record["id"])
+        _rehash_artifact(resource_payload)
+        with pytest.raises(validation.GraphValidationError) as resource_error:
+            validation.validate_artifact(resource_payload)
+        assert resource_error.value.code == "private_resource_name"
+
+    identity_only = _with_semantic_integration_resource()
+    identity_node = next(
+        node
+        for node in identity_only["nodes"]
+        if node["identity"]["variant"] == "semantic_resource"
+    )
+    identity_node["identity"]["public_resource_name"] = r"safe\.env"
+    identity_node["id"] = node_id(identity_node["identity"])
+    identity_only["nodes"].sort(key=lambda record: record["id"])
+    _rehash_artifact(identity_only)
+    with pytest.raises(validation.GraphValidationError) as identity_error:
+        validation.validate_artifact(identity_only)
+    assert identity_error.value.code == "private_resource_name"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "orders-api-copy"),
+        ("protocol", "http"),
+        ("operation", "publish"),
+    ],
+)
+def test_semantic_resource_identity_display_and_properties_must_agree(
+    field: str, value: str
+) -> None:
+    _, _, validation = _task3_api()
+    payload = _with_semantic_integration_resource()
+    resource = next(
+        node
+        for node in payload["nodes"]
+        if node["identity"]["variant"] == "semantic_resource"
+    )
+    if field == "name":
+        resource["name"] = value
+    else:
+        resource["properties"][field] = value
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "node_display_mismatch"
+
+
+@pytest.mark.parametrize("changed_side", ["identity", "node"])
+def test_semantic_resource_identity_and_node_framework_must_agree(
+    changed_side: str,
+) -> None:
+    _, _, validation = _task3_api()
+    payload = _with_semantic_integration_resource()
+    resource = next(
+        node
+        for node in payload["nodes"]
+        if node["identity"]["variant"] == "semantic_resource"
+    )
+    if changed_side == "identity":
+        resource["identity"]["framework"] = "laravel"
+        resource["id"] = node_id(resource["identity"])
+        payload["nodes"].sort(key=lambda record: record["id"])
+    else:
+        resource["framework"] = "laravel"
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "node_display_mismatch"
 
 
 def test_serialized_ids_are_recomputed_not_trusted() -> None:
@@ -2341,6 +2548,232 @@ def test_schema_unique_items_uses_linear_handler_without_relaxing_duplicates() -
         assert exc_info.value.code == "schema_validation_failed"
 
 
+def test_schema_large_record_uniqueness_keeps_booleans_distinct_from_integers() -> None:
+    """The C-backed key must retain JSON's boolean/number type distinction."""
+
+    from hermes_cli.hades_graph_v2 import schema
+
+    records = [
+        {"id": f"node-{index}", "nested": {"value": index}}
+        for index in range(65)
+    ]
+
+    boolean_is_distinct = records + [
+        {"id": "node-1", "nested": {"value": True}}
+    ]
+    assert list(schema._linear_unique_items(None, True, boolean_is_distinct, {})) == []
+
+
+def test_schema_large_record_uniqueness_detects_deep_duplicate_across_key_order() -> None:
+    from hermes_cli.hades_graph_v2 import schema
+
+    records = [
+        {
+            "id": f"node-{index}",
+            "nested": {"left": index, "right": [index, {"value": index}]},
+        }
+        for index in range(65)
+    ]
+    duplicate = {
+        "nested": {"right": [1, {"value": 1}], "left": 1},
+        "id": "node-1",
+    }
+
+    errors = list(schema._linear_unique_items(None, True, records + [duplicate], {}))
+
+    assert len(errors) == 1
+
+
+def test_schema_duplicate_message_is_bounded_and_does_not_echo_the_payload() -> None:
+    from hermes_cli.hades_graph_v2 import schema
+
+    private_marker = "private-source-value-" + ("x" * 1_024)
+    record = {"id": "node-1", "nested": {"value": private_marker}}
+
+    errors = list(schema._linear_unique_items(None, True, [record, record], {}))
+
+    assert len(errors) == 1
+    assert private_marker not in errors[0].message
+    assert len(errors[0].message) <= 128
+
+
+def test_schema_success_cache_validates_identical_payload_once(monkeypatch) -> None:
+    from hermes_cli.hades_graph_v2 import schema
+
+    class CountingValidator:
+        schema = {"$id": "test://artifact", "$schema": "draft-2020-12"}
+
+        def __init__(self):
+            self.calls = 0
+
+        def validate(self, _payload):
+            self.calls += 1
+
+    validator = CountingValidator()
+    schema._clear_schema_success_cache()
+    monkeypatch.setattr(schema, "_validator", lambda _name: validator)
+    payload = _valid_semantic_artifact()
+
+    schema.validate_schema("artifact.schema.json", payload)
+    schema.validate_schema("artifact.schema.json", copy.deepcopy(payload))
+
+    assert validator.calls == 1
+
+
+def test_schema_success_cache_does_not_hide_mutation_or_cache_failure(
+    monkeypatch,
+) -> None:
+    from jsonschema import ValidationError
+
+    from hermes_cli.hades_graph_v2 import schema
+
+    class RejectingValidator:
+        schema = {"$id": "test://artifact", "$schema": "draft-2020-12"}
+
+        def __init__(self):
+            self.calls = 0
+
+        def validate(self, payload):
+            self.calls += 1
+            if payload["generated_at"] == "2026-07-19T12:00:01Z":
+                raise ValidationError("changed payload rejected")
+
+    validator = RejectingValidator()
+    schema._clear_schema_success_cache()
+    monkeypatch.setattr(schema, "_validator", lambda _name: validator)
+    original = _valid_semantic_artifact()
+    mutated = copy.deepcopy(original)
+    mutated["generated_at"] = "2026-07-19T12:00:01Z"
+
+    schema.validate_schema("artifact.schema.json", original)
+    with pytest.raises(GraphContractError) as first_failure:
+        schema.validate_schema("artifact.schema.json", mutated)
+    with pytest.raises(GraphContractError) as second_failure:
+        schema.validate_schema("artifact.schema.json", mutated)
+
+    assert first_failure.value.code == "schema_validation_failed"
+    assert second_failure.value.code == "schema_validation_failed"
+    assert validator.calls == 3
+
+
+def test_schema_success_cache_isolates_schema_and_validator_identity(monkeypatch) -> None:
+    from hermes_cli.hades_graph_v2 import schema
+
+    class CountingValidator:
+        def __init__(self, schema_id):
+            self.schema = {"$id": schema_id, "$schema": "draft-2020-12"}
+            self.calls = 0
+
+        def validate(self, _payload):
+            self.calls += 1
+
+    artifact_validator = CountingValidator("test://artifact-v1")
+    bundle_validator = CountingValidator("test://bundle-v1")
+    active = {"artifact.schema.json": artifact_validator}
+    schema._clear_schema_success_cache()
+    monkeypatch.setattr(schema, "_validator", lambda name: active.get(name, bundle_validator))
+    payload = _valid_semantic_artifact()
+
+    schema.validate_schema("artifact.schema.json", payload)
+    active["artifact.schema.json"] = bundle_validator
+    schema.validate_schema("artifact.schema.json", payload)
+    schema.validate_schema("bundle.schema.json", payload)
+
+    assert artifact_validator.calls == 1
+    assert bundle_validator.calls == 2
+
+
+def test_schema_success_cache_has_bounded_lru_eviction(monkeypatch) -> None:
+    from hermes_cli.hades_graph_v2 import schema
+
+    class CountingValidator:
+        schema = {"$id": "test://artifact", "$schema": "draft-2020-12"}
+
+        def __init__(self):
+            self.calls = 0
+
+        def validate(self, _payload):
+            self.calls += 1
+
+    validator = CountingValidator()
+    schema._clear_schema_success_cache()
+    monkeypatch.setattr(schema, "_SCHEMA_SUCCESS_CACHE_MAX_SIZE", 2)
+    monkeypatch.setattr(schema, "_validator", lambda _name: validator)
+    payloads = []
+    for second in range(3):
+        payload = _valid_semantic_artifact()
+        payload["generated_at"] = f"2026-07-19T12:00:0{second}Z"
+        payloads.append(payload)
+
+    for payload in payloads:
+        schema.validate_schema("artifact.schema.json", payload)
+    schema.validate_schema("artifact.schema.json", payloads[0])
+
+    assert validator.calls == 4
+    assert len(schema._SCHEMA_SUCCESS_CACHE) == 2
+
+
+def test_schema_success_cache_does_not_serialize_distinct_validations(
+    monkeypatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from hermes_cli.hades_graph_v2 import schema
+
+    rendezvous = Barrier(2, timeout=2)
+
+    class ConcurrentValidator:
+        def __init__(self, schema_id):
+            self.schema = {"$id": schema_id, "$schema": "draft-2020-12"}
+
+        def validate(self, _payload):
+            rendezvous.wait()
+
+    validators = {
+        "artifact.schema.json": ConcurrentValidator("test://artifact"),
+        "bundle.schema.json": ConcurrentValidator("test://bundle"),
+    }
+    schema._clear_schema_success_cache()
+    monkeypatch.setattr(schema, "_validator", validators.__getitem__)
+    payload = _valid_semantic_artifact()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(schema.validate_schema, document_name, payload)
+            for document_name in validators
+        ]
+        for future in futures:
+            future.result(timeout=3)
+
+
+@pytest.mark.parametrize(
+    ("value", "error_code"),
+    (
+        (1.0, "float_not_allowed"),
+        (float("nan"), "float_not_allowed"),
+        ("e\u0301", "non_nfc_string"),
+    ),
+)
+def test_schema_large_records_reach_unique_items_only_after_the_scalar_gate(
+    value: object,
+    error_code: str,
+) -> None:
+    """Fast uniqueness only receives NFC, float-free registered-schema payloads."""
+
+    payload = _valid_semantic_artifact()
+    payload["nodes"] = [
+        {"id": f"node-{index}", "nested": {"value": index}}
+        for index in range(65)
+    ]
+    payload["nodes"][-1]["nested"]["value"] = value
+
+    with pytest.raises(GraphContractError) as exc_info:
+        validate_schema("artifact.schema.json", payload)
+
+    assert exc_info.value.code == error_code
+
+
 def test_evidence_flow_completeness_orthogonal(tmp_path: Path) -> None:
     _, _, validation = _task3_api()
 
@@ -3120,7 +3553,7 @@ def test_entrypoint_node_display_closes_over_its_record() -> None:
 def _with_framework_uncertainty() -> dict[str, Any]:
     payload = json.loads(json.dumps(_with_external_uncertainty()))
     boundary = next(
-        node for node in payload["nodes"] if node["kind"] == "external_boundary"
+        node for node in payload["nodes"] if node["kind"] == "unknown_boundary"
     )
     source = next(node for node in payload["nodes"] if node["kind"] == "method")
     edge = payload["edges"][0]
@@ -3255,7 +3688,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
         "variant": "source_occurrence",
         "workspace_binding_id": binding_id,
         "language": "php",
-        "kind": "external_boundary",
+        "kind": "unknown_boundary",
         "owner_node_id": handler_id,
         "structural_path": "body/response/0/unknown_target",
         "ordinal": 0,
@@ -3296,7 +3729,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
     payload["nodes"].append({
         "id": boundary_id,
         "identity": boundary_identity,
-        "kind": "external_boundary",
+        "kind": "unknown_boundary",
         "language": "php",
         "framework": None,
         "name": "Unresolved external target",
@@ -3304,7 +3737,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
         "namespace": None,
         "uncertainty_id": public_uncertainty_id,
         "location": {"path": path, "start_line": 1, "end_line": 1},
-        "properties": {},
+        "properties": {"reason_code": "external_boundary_unresolved"},
         "evidence": copy.deepcopy(response_edge["evidence"]),
     })
     payload["uncertainties"] = [
@@ -3330,7 +3763,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
     )
     step.update(
         edge_id=response_edge["id"],
-        stage_to="integration",
+        stage_to=step["stage_from"],
         min_depth=1,
         async_child_flow_id=None,
         async_cycle=False,
@@ -3361,9 +3794,8 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
         "status": "partial",
         "reasons": [reason],
     }
-    sync_flow["terminal_count"] = _exact_count(1)
+    sync_flow["terminal_count"] = _exact_count(0)
     sync_flow["uncertainty_count"] = _unknown_count(1, "external_boundary_unresolved")
-    sync_flow["stage_counts"]["integration"] = _exact_count(1)
     sync_flow["stage_counts"].pop("response")
     completeness = payload["graph_contract"]["completeness"]
     completeness["status"] = "partial"

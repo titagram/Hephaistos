@@ -33,7 +33,12 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_language_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.data_access import (
+    TableSpec,
+    append_coverage_events,
+    data_budget_omission,
+    table_adapter_result,
+)
 from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
@@ -61,8 +66,12 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     """Emit Laravel migration and Doctrine resources directly into graph-v2 IR."""
 
     sources: list[tuple[str, str]] = []
+    budget_coverage = []
     for item in context.inventory_files:
         if item.language != "php" or not item.parser_candidate or item.is_test:
+            continue
+        if context.budget_exhausted():
+            budget_coverage.append(data_budget_omission("php", item.path))
             continue
         try:
             source = context.file_accessor(Path(item.path)).decode(
@@ -190,7 +199,9 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     tuple(table["foreign_keys"]),
                 )
             )
-    return table_adapter_result(context, tuple(specs))
+    return append_coverage_events(
+        table_adapter_result(context, tuple(specs)), tuple(budget_coverage)
+    )
 PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
 PHP_CLASS_RE = re.compile(
     r"\b(?P<kind>class|interface|trait|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"

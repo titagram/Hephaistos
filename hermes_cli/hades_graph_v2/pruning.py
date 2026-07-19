@@ -397,81 +397,6 @@ def _structural_units(
     return tuple(sorted(units, key=lambda unit: unit.sort_key))
 
 
-def _edge_bounded_structural_units(
-    index: _GraphIndex,
-    accepted: set[Token],
-    excluded_entrypoint_ids: set[str],
-) -> tuple[_Unit, ...]:
-    """Return smallest valid topology units for an explicit edge ceiling.
-
-    Byte pruning intentionally keeps connected structural components atomic.
-    An explicit edge-record ceiling is different: retaining one independently
-    valid edge plus its dependency closure is better than dropping an entire
-    connected source file.  Non-edge records are then considered individually,
-    so declarations/nodes that remain valid without a discarded relation are
-    preserved.
-    """
-
-    residual: set[Token] = {
-        (kind, public_id)
-        for kind in _TOPOLOGY_KINDS
-        for public_id, record in index.records[kind].items()
-        if (kind, public_id) not in accepted
-        and not (kind == "nodes" and record["kind"] in {"file", "entrypoint"})
-    }
-    invalid: set[Token] = set()
-    changed = True
-    while changed:
-        changed = False
-        for token in residual - invalid:
-            dependencies = index.direct_dependencies(token)
-            if (
-                any(
-                    dependency[0] in {"nodes", "entrypoints"}
-                    and dependency[1] in excluded_entrypoint_ids
-                    for dependency in dependencies
-                )
-                or dependencies & invalid
-            ):
-                invalid.add(token)
-                changed = True
-    residual -= invalid
-
-    ordered = sorted(
-        residual,
-        key=lambda token: (
-            0 if token[0] == "edges" else 1,
-            _record_sort_path(index, token),
-            token[0],
-        ),
-    )
-    units: list[_Unit] = []
-    seen: set[frozenset[Token]] = set()
-    for token in ordered:
-        closure = index.closure({token})
-        if any(
-            dependency[0] in {"entrypoints", "flows", "flow_steps"}
-            or (
-                dependency[0] == "nodes"
-                and cast(dict, index.record(dependency)).get("kind") == "entrypoint"
-            )
-            for dependency in closure
-        ):
-            continue
-        if closure in seen:
-            continue
-        seen.add(closure)
-        units.append(
-            _Unit(
-                "structural",
-                (*_record_sort_path(index, token), token[0]),
-                closure,
-                _reason_impacts(index, token),
-            )
-        )
-    return tuple(units)
-
-
 def _inventory_units(index: _GraphIndex, accepted: set[Token]) -> tuple[_Unit, ...]:
     units = []
     for public_id, record in index.records["nodes"].items():
@@ -713,19 +638,8 @@ class GraphBudgetPruner:
         if (
             complete_plan is not None
             and complete_plan.logical_uncompressed_bytes <= limits.bundle_ceiling
-            and (
-                limits.max_edges is None
-                or len(artifact.edges) <= limits.max_edges
-            )
         ):
             return artifact
-
-        edge_ceiling_only = (
-            complete_plan is not None
-            and complete_plan.logical_uncompressed_bytes <= limits.bundle_ceiling
-            and limits.max_edges is not None
-            and len(artifact.edges) > limits.max_edges
-        )
 
         accepted: set[Token] = set()
         for framework in cast(list[dict[str, Any]], original["frameworks"]):
@@ -741,10 +655,7 @@ class GraphBudgetPruner:
                 )
 
         rejections: list[_Rejection] = []
-        accepted_edge_count = sum(kind == "edges" for kind, _ in accepted)
-
         def consider(unit: _Unit) -> None:
-            nonlocal accepted_edge_count
             added = unit.tokens - accepted
             if any(
                 not record_fits_chunk(
@@ -754,36 +665,11 @@ class GraphBudgetPruner:
             ):
                 rejections.append(_Rejection(unit, ReasonCode.RECORD_TOO_LARGE))
                 return
-            if edge_ceiling_only:
-                # The complete graph already passed every byte, chunk, and wire
-                # constraint, leaving only the explicit edge count to enforce.
-                # Count the precomputed atomic closure incrementally instead of
-                # rebuilding and validating the whole candidate for every edge.
-                added_edge_count = sum(kind == "edges" for kind, _ in added)
-                if (
-                    accepted_edge_count + added_edge_count
-                    > cast(int, limits.max_edges)
-                ):
-                    rejections.append(
-                        _Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED)
-                    )
-                    return
-                accepted.update(unit.tokens)
-                accepted_edge_count += added_edge_count
-                return
             candidate_tokens = accepted | set(unit.tokens)
             try:
                 candidate = _finalize_candidate(
                     original, index, candidate_tokens, tuple(rejections)
                 )
-                if (
-                    limits.max_edges is not None
-                    and len(candidate.edges) > limits.max_edges
-                ):
-                    rejections.append(
-                        _Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED)
-                    )
-                    return
                 plan = build_bundle_plan(
                     candidate, limits, enforce_total=False, _validated=True
                 )
@@ -816,13 +702,7 @@ class GraphBudgetPruner:
             public_id for kind, public_id in accepted if kind == "entrypoints"
         }
         excluded_entrypoints = set(index.records["entrypoints"]) - accepted_entrypoints
-        structural_units = (
-            _edge_bounded_structural_units(
-                index, accepted, excluded_entrypoints
-            )
-            if limits.max_edges is not None
-            else _structural_units(index, accepted, excluded_entrypoints)
-        )
+        structural_units = _structural_units(index, accepted, excluded_entrypoints)
         for unit in structural_units:
             consider(unit)
         for unit in _inventory_units(index, accepted):

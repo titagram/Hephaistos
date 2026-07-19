@@ -29,7 +29,12 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_languages_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.data_access import (
+    TableSpec,
+    append_coverage_events,
+    data_budget_omission,
+    table_adapter_result,
+)
 from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
@@ -60,8 +65,14 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     """Emit Drizzle and Prisma resources directly into graph-v2 IR."""
 
     specs: list[TableSpec] = []
+    budget_coverage = []
     for item in context.inventory_files:
         if item.language not in {"javascript", "typescript", "prisma"}:
+            continue
+        if context.budget_exhausted():
+            budget_coverage.append(
+                data_budget_omission(item.language, item.path)
+            )
             continue
         try:
             source = context.file_accessor(Path(item.path)).decode(
@@ -71,12 +82,12 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
             continue
         if item.language == "prisma":
             tables, _symbols, _edges, _truncated = _prisma_model_graph(
-                source, item.path, max_symbols=100_000, max_edges=100_000
+                source, item.path, max_symbols=None, max_edges=None
             )
             orm = "prisma"
         else:
             tables, _symbols, _edges, _truncated = _drizzle_schema_graph(
-                source, item.path, max_symbols=100_000, max_edges=100_000
+                source, item.path, max_symbols=None, max_edges=None
             )
             orm = "drizzle"
         for table in tables:
@@ -99,7 +110,9 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     ),
                 )
             )
-    return table_adapter_result(context, tuple(specs))
+    return append_coverage_events(
+        table_adapter_result(context, tuple(specs)), tuple(budget_coverage)
+    )
 TS_FUNCTION_RE = re.compile(r"\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(", re.MULTILINE)
 TS_ARROW_COMPONENT_RE = re.compile(
     r"\b(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Z][A-Za-z0-9_$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>",
@@ -189,12 +202,24 @@ def _drizzle_table_declarations(source: str, rel: str) -> list[dict[str, Any]]:
     return declarations
 
 
+def _append_schema_edge(
+    edges: list[dict[str, Any]],
+    edge: dict[str, Any],
+    *,
+    max_edges: int | None,
+) -> bool:
+    if max_edges is None:
+        edges.append(edge)
+        return True
+    return _edge_append(edges, edge, max_edges=max_edges)
+
+
 def _drizzle_schema_graph(
     source: str,
     rel: str,
     *,
-    max_symbols: int,
-    max_edges: int,
+    max_symbols: int | None,
+    max_edges: int | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
     declarations = _drizzle_table_declarations(source, rel)
     table_by_var = {item["var"]: item["table"] for item in declarations}
@@ -210,7 +235,7 @@ def _drizzle_schema_graph(
     for declaration in declarations:
         table_name = str(declaration["table"])
         foreign_keys: list[dict[str, Any]] = []
-        if len(symbols) < max_symbols:
+        if max_symbols is None or len(symbols) < max_symbols:
             symbols.append(
                 {
                     "kind": "model",
@@ -239,6 +264,15 @@ def _drizzle_schema_graph(
                     "line": field["line"],
                 }
             )
+        columns = [
+            {
+                key: value
+                for key, value in field.items()
+                if key not in {"references_table_var", "references_field"}
+            }
+            for field in declaration.get("fields", [])
+        ]
+        unbounded = max_symbols is None and max_edges is None
         tables.append(
             {
                 "table": table_name,
@@ -247,18 +281,11 @@ def _drizzle_schema_graph(
                 "factory": str(declaration["factory"]),
                 "path": rel,
                 "line": declaration["line"],
-                "columns": [
-                    {
-                        key: value
-                        for key, value in field.items()
-                        if key not in {"references_table_var", "references_field"}
-                    }
-                    for field in declaration.get("fields", [])
-                ][:200],
-                "foreign_keys": foreign_keys[:100],
+                "columns": columns if unbounded else columns[:200],
+                "foreign_keys": foreign_keys if unbounded else foreign_keys[:100],
             }
         )
-        truncated = not _edge_append(
+        truncated = not _append_schema_edge(
             edges,
             {
                 "kind": "model_table",
@@ -271,7 +298,7 @@ def _drizzle_schema_graph(
             max_edges=max_edges,
         ) or truncated
         for foreign_key in foreign_keys:
-            truncated = not _edge_append(
+            truncated = not _append_schema_edge(
                 edges,
                 {
                     "kind": "foreign_key",
@@ -298,8 +325,8 @@ def _prisma_model_graph(
     source: str,
     rel: str,
     *,
-    max_symbols: int,
-    max_edges: int,
+    max_symbols: int | None,
+    max_edges: int | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
     model_matches = list(PRISMA_MODEL_RE.finditer(source))
     table_by_model = {match.group("name"): _prisma_table_name(match.group("name"), match.group("body")) for match in model_matches}
@@ -316,7 +343,7 @@ def _prisma_model_graph(
         foreign_keys: list[dict[str, Any]] = []
         line = _line_number(source, model_match.start())
 
-        if len(symbols) < max_symbols:
+        if max_symbols is None or len(symbols) < max_symbols:
             symbols.append(
                 {
                     "kind": "model",
@@ -379,11 +406,19 @@ def _prisma_model_graph(
                 "orm": "prisma",
                 "path": rel,
                 "line": line,
-                "columns": columns[:200],
-                "foreign_keys": foreign_keys[:100],
+                "columns": (
+                    columns
+                    if max_symbols is None and max_edges is None
+                    else columns[:200]
+                ),
+                "foreign_keys": (
+                    foreign_keys
+                    if max_symbols is None and max_edges is None
+                    else foreign_keys[:100]
+                ),
             }
         )
-        truncated = not _edge_append(
+        truncated = not _append_schema_edge(
             edges,
             {
                 "kind": "model_table",
@@ -396,7 +431,7 @@ def _prisma_model_graph(
             max_edges=max_edges,
         ) or truncated
         for foreign_key in foreign_keys:
-            truncated = not _edge_append(
+            truncated = not _append_schema_edge(
                 edges,
                 {
                     "kind": "foreign_key",

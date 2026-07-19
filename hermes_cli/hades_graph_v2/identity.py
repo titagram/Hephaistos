@@ -195,7 +195,9 @@ _VERIFICATION_WORK_KEYS = frozenset({
 
 
 def _has_isolated_surrogate(value: str) -> bool:
-    return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    return not value.isascii() and any(
+        0xD800 <= ord(character) <= 0xDFFF for character in value
+    )
 
 
 def _normalized_string(value: str) -> str:
@@ -334,7 +336,9 @@ def normalize_contract_value(value: JsonValue, *, _key: str | None = None) -> Js
     )
 
 
-def _canonical_fragment(value: JsonValue) -> str:
+def _canonical_fragment_normalized(value: JsonValue) -> str:
+    """Encode one already-normalized value without rewalking nested subtrees."""
+
     if value is None:
         return "null"
     if value is True:
@@ -352,21 +356,21 @@ def _canonical_fragment(value: JsonValue) -> str:
         raise GraphContractError("float_not_allowed", "contract JSON forbids floats")
     if isinstance(value, str):
         return json.dumps(
-            _normalized_string(value),
+            value,
             ensure_ascii=False,
             separators=(",", ":"),
         )
     if isinstance(value, list):
-        return "[" + ",".join(_canonical_fragment(item) for item in value) + "]"
+        return (
+            "[" + ",".join(_canonical_fragment_normalized(item) for item in value) + "]"
+        )
     if isinstance(value, dict):
-        normalized = normalize_contract_value(value)
-        if not isinstance(normalized, dict):
-            raise AssertionError("normalized object changed type")
-        keys = sorted(normalized, key=lambda key: key.encode("utf-16-be"))
+        keys = sorted(value, key=lambda key: key.encode("utf-16-be"))
         return (
             "{"
             + ",".join(
-                f"{_canonical_fragment(key)}:{_canonical_fragment(normalized[key])}"
+                f"{_canonical_fragment_normalized(key)}:"
+                f"{_canonical_fragment_normalized(value[key])}"
                 for key in keys
             )
             + "}"
@@ -375,6 +379,11 @@ def _canonical_fragment(value: JsonValue) -> str:
         "unsupported_json_type",
         "contract value contains a non-JSON type",
     )
+
+
+def _canonical_fragment(value: JsonValue) -> str:
+    normalized = normalize_contract_value(value)
+    return _canonical_fragment_normalized(normalized)
 
 
 def canonical_json_bytes(value: JsonValue) -> bytes:
@@ -386,9 +395,10 @@ def canonical_json_bytes(value: JsonValue) -> bytes:
 def sha256_jcs(value: JsonValue) -> str:
     """Hash a fully normalized graph-contract value as canonical JSON."""
 
-    return hashlib.sha256(
-        canonical_json_bytes(normalize_contract_value(value))
-    ).hexdigest()
+    # ``canonical_json_bytes`` is itself the normalization boundary.  Running
+    # ``normalize_contract_value`` here first made large artifacts traverse the
+    # complete object graph twice before hashing, without changing the bytes.
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
 def _require_digest(value: str) -> str:

@@ -336,6 +336,32 @@ def test_graph_builder_maps_valid_ir_to_a_closed_valid_v2_artifact(tmp_path):
     validate_artifact(artifact)
 
 
+def test_graph_builder_preserves_both_frozen_full_validation_passes(
+    tmp_path, monkeypatch
+):
+    from hermes_cli.hades_graph_v2 import validation
+    from hermes_cli.hades_index.lifecycle.builder import GraphBuilder
+
+    original = validation.validate_schema
+    validated_versions: list[str] = []
+
+    def counted_validate_schema(document_name, payload):
+        validated_versions.append(payload["graph_contract"]["artifact_graph_version"])
+        return original(document_name, payload)
+
+    monkeypatch.setattr(validation, "validate_schema", counted_validate_schema)
+
+    artifact = GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+        _context(tmp_path), (_valid_result(),)
+    )
+
+    assert validated_versions == [
+        artifact.graph_contract.artifact_graph_version,
+        artifact.graph_contract.artifact_graph_version,
+    ]
+    assert all(version != "0" * 64 for version in validated_versions)
+
+
 def test_one_finite_flow_step_per_edge_stage_state_with_shortest_depth(tmp_path):
     artifact = _build(tmp_path, _complex_result())
     sync_flow = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
@@ -939,6 +965,39 @@ def test_callable_summary_contains_declared_normal_exit(tmp_path):
     summary = build_callable_summaries(topology)[(worker.id, Stage.DOMAIN)]
 
     assert exit_node.id in summary.normal_exit_node_ids
+
+
+def test_callable_summary_indexes_lexical_throw_without_call_site(tmp_path):
+    from hermes_cli.hades_index.lifecycle.traversal import (
+        CanonicalTopology,
+        build_callable_summaries,
+    )
+
+    artifact = _build(tmp_path, _complex_result())
+    worker = next(node for node in artifact.nodes if node.name == "worker")
+    owned = next(
+        edge
+        for edge in artifact.edges
+        if edge.occurrence.owner_node_id == worker.id
+        and edge.relation not in {Relation.CONTAINS, Relation.REFERENCES}
+    )
+    lexical_throw = replace(
+        owned,
+        relation=Relation.THROWS_TO,
+        flow=EdgeFlow.EXCEPTION,
+        call_site_id=None,
+    )
+    topology = CanonicalTopology(
+        artifact.nodes,
+        artifact.structures,
+        (lexical_throw,),
+        artifact.uncertainties,
+        artifact.graph_contract.completeness.capabilities,
+    )
+
+    summary = build_callable_summaries(topology)[(worker.id, Stage.DOMAIN)]
+
+    assert lexical_throw.source_id in summary.exception_exit_node_ids
 
 
 def test_root_callable_summary_is_the_flow_membership_source(tmp_path):

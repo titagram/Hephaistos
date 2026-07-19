@@ -662,7 +662,7 @@ def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path)
     assert coverage["budget_omitted"] == 0
 
 
-def test_populate_backend_ast_honors_payload_file_budget(tmp_path):
+def test_populate_backend_ast_ignores_payload_file_budget(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     workspace = tmp_path / "workspace"
@@ -686,19 +686,12 @@ def test_populate_backend_ast_honors_payload_file_budget(tmp_path):
     contract = artifact["graph_contract"]
     coverage = contract["coverage"]["files"]
     reasons = contract["completeness"]["capabilities"]["inventory"]["reasons"]
-    assert coverage["analyzed"] == 2
-    assert coverage["budget_omitted"] == 1
-    assert reasons == [
-        {
-            "code": "resource_budget_reached",
-            "count": 1,
-            "language": None,
-            "paths_sample": ["src/module_00002.py"],
-        }
-    ]
+    assert coverage["analyzed"] == 3
+    assert coverage["budget_omitted"] == 0
+    assert all(reason["code"] != "resource_budget_reached" for reason in reasons)
 
 
-def test_populate_backend_ast_hard_clamps_file_count_at_ten_thousand(
+def test_populate_backend_ast_does_not_apply_payload_file_count_caps(
     monkeypatch, tmp_path
 ):
     from dataclasses import replace
@@ -766,14 +759,145 @@ def test_populate_backend_ast_hard_clamps_file_count_at_ten_thousand(
         {
             "job_id": "job_hard_file_ceiling",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 10_001},
+            "payload": {"max_files": 1},
         },
         workspace_root=tmp_path,
     )
 
     assert result["status"] == "completed"
-    assert captured == {"parser_candidates": 10_001, "budget_omitted": 1}
-    assert len(parser_paths) == 10_000
+    assert captured == {"parser_candidates": 10_001, "budget_omitted": 0}
+    assert len(parser_paths) == 10_001
+    assert parser_paths[0] == "src/module_00000.py"
+    assert parser_paths[-1] == "src/module_10000.py"
+
+
+def test_populate_backend_ast_enforces_wall_budget_with_typed_omission_ledger(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    import hermes_cli.hades_backend_jobs as jobs
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        ParsedFile,
+        ParseResult,
+        SyntaxIR,
+        TreeSitterAdapter,
+    )
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    home.mkdir()
+    source.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "hades:\n  graph_index:\n    max_wall_seconds: 30\n",
+        encoding="utf-8",
+    )
+    for name in ("a.py", "b.py"):
+        source.joinpath(name).write_text("pass\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    parsed_paths: list[str] = []
+
+    def parsed_empty_file(self, path, *, relative_path, language, max_bytes):
+        del self, path, max_bytes
+        parsed_paths.append(relative_path)
+        return ParseResult.parsed(
+            SyntaxIR(ParsedFile(relative_path, language, (), (), ()), ())
+        )
+
+    ticks = iter((100.0, 100.0, 131.0, 131.0, 131.0, 131.0))
+    monkeypatch.setattr(
+        jobs,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks, 131.0)),
+        raising=False,
+    )
+    monkeypatch.setattr(TreeSitterAdapter, "parse_file", parsed_empty_file)
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_wall_budget",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=workspace,
+        )
+    )
+
+    assert parsed_paths == ["src/a.py"]
+    assert artifact["graph_contract"]["coverage"]["files"]["budget_omitted"] == 1
+    assert artifact["graph_contract"]["completeness"]["capabilities"][
+        "inventory"
+    ]["reasons"] == [
+        {
+            "code": "resource_budget_reached",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["src/b.py"],
+        }
+    ]
+
+
+def test_populate_backend_ast_stops_data_adapter_at_wall_budget(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    import hermes_cli.hades_backend_jobs as jobs
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    home.mkdir()
+    source.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "hades:\n  graph_index:\n    max_wall_seconds: 30\n",
+        encoding="utf-8",
+    )
+    for name, table in (("a.py", "accounts"), ("b.py", "orders")):
+        source.joinpath(name).write_text(
+            "from sqlalchemy import Column, Integer\n"
+            f"class {table.title()}:\n"
+            f"    __tablename__ = '{table}'\n"
+            "    id = Column(Integer, primary_key=True)\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    ticks = iter((100.0, 100.0, 100.0, 100.0, 131.0))
+    monkeypatch.setattr(
+        jobs,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks, 131.0)),
+    )
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_wall_budget_data_adapter",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=workspace,
+        )
+    )
+
+    assert {
+        node["name"] for node in artifact["nodes"] if node["kind"] == "table"
+    } == {"accounts"}
+    assert artifact["graph_contract"]["completeness"]["capabilities"][
+        "data_access"
+    ]["reasons"] == [
+        {
+            "code": "resource_budget_reached",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["src/b.py"],
+        }
+    ]
 
 
 def test_populate_backend_ast_honors_payload_aggregate_byte_budget(
@@ -1119,7 +1243,7 @@ def test_populate_backend_ast_preserves_polyglot_inventory_cap_coverage(tmp_path
     assert sum(node["kind"] == "file" for node in artifact["nodes"]) == 503
 
 
-def test_populate_backend_ast_closes_exact_symbol_cap_ledger(tmp_path):
+def test_populate_backend_ast_ignores_payload_symbol_count_cap(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     workspace = tmp_path / "workspace"
@@ -1137,31 +1261,26 @@ def test_populate_backend_ast_closes_exact_symbol_cap_ledger(tmp_path):
         {
             "job_id": "job_hard_graph_caps",
             "capability": "populate_backend_ast",
-            "payload": {"max_symbols": 2, "max_edges": 10},
+            "payload": {"max_symbols": 2, "max_edges": 1},
         },
         workspace_root=workspace,
     )
 
     artifact = _materialize_graph_v2(result)
-    symbol_resolution = artifact["graph_contract"]["completeness"]["capabilities"][
-        "symbol_resolution"
-    ]
-    assert symbol_resolution["status"] == "partial"
-    assert symbol_resolution["reasons"] == [
-        {
-            "code": "resource_budget_reached",
-            "count": 2,
-            "language": None,
-            "paths_sample": ["src/graph.py"],
-        }
-    ]
+    assert len([node for node in artifact["nodes"] if node["kind"] == "method"]) == 3
+    assert not any(
+        reason["code"] == "resource_budget_reached"
+        for reason in artifact["graph_contract"]["completeness"]["capabilities"][
+            "symbol_resolution"
+        ]["reasons"]
+    )
     file_node = next(
         node for node in artifact["nodes"] if node["qualified_name"] == "src/graph.py"
     )
     assert file_node["properties"]["analysis_status"] == "analyzed"
 
 
-def test_populate_backend_ast_hard_clamps_symbols_at_five_thousand(
+def test_populate_backend_ast_keeps_more_than_five_thousand_parser_symbols(
     monkeypatch, tmp_path
 ):
     from dataclasses import replace
@@ -1226,23 +1345,21 @@ def test_populate_backend_ast_hard_clamps_symbols_at_five_thousand(
             {
                 "job_id": "job_hard_symbol_ceiling",
                 "capability": "populate_backend_ast",
-                "payload": {"max_symbols": 5_001},
+                "payload": {"max_symbols": 1},
             },
             workspace_root=tmp_path,
         )
     )
-    assert captured == {"retained_symbols": 5_000}
-    reason = next(
-        item
+    assert captured == {"retained_symbols": 5_001}
+    assert not any(
+        item["code"] == "resource_budget_reached"
         for item in artifact["graph_contract"]["completeness"]["capabilities"][
             "symbol_resolution"
         ]["reasons"]
-        if item["code"] == "resource_budget_reached"
     )
-    assert reason["count"] == 1
 
 
-def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
+def test_populate_backend_ast_ignores_payload_edge_count_cap(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     source = tmp_path / "src"
@@ -1268,21 +1385,14 @@ def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
     call_graph = artifact["graph_contract"]["completeness"]["capabilities"][
         "call_graph"
     ]
-    assert len(artifact["edges"]) == 1
-    assert call_graph["status"] == "partial"
-    budget_reason = next(
-        reason
+    assert len(artifact["edges"]) > 1
+    assert not any(
+        reason["code"] == "resource_budget_reached"
         for reason in call_graph["reasons"]
-        if reason["code"] == "resource_budget_reached"
     )
-    assert budget_reason["count"] == 8
-    assert budget_reason["paths_sample"] == ["src/graph.py"]
-    assert artifact["graph_contract"]["coverage"]["records"][
-        "omitted_by_bundle_budget"
-    ] == 6
 
 
-def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
+def test_populate_backend_ast_keeps_more_than_ten_thousand_edges(
     monkeypatch, tmp_path
 ):
     import hermes_cli.hades_index as hades_index
@@ -1314,26 +1424,18 @@ def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
             {
                 "job_id": "job_hard_edge_ceiling",
                 "capability": "populate_backend_ast",
-                "payload": {"max_edges": 10_001},
+                "payload": {"max_edges": 1},
             },
             workspace_root=tmp_path,
         )
     )
 
     validate_artifact(artifact)
-    assert finalize_calls == 1
-    assert len(artifact["edges"]) == 10_000
+    assert finalize_calls == 0
+    assert len(artifact["edges"]) == 10_001
     assert artifact["graph_contract"]["coverage"]["records"][
         "omitted_by_bundle_budget"
-    ] == 1
-    reason = next(
-        item
-        for item in artifact["graph_contract"]["completeness"]["capabilities"][
-            "call_graph"
-        ]["reasons"]
-        if item["code"] == "resource_budget_reached"
-    )
-    assert reason["count"] == 1
+    ] == 0
 
 
 def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
@@ -2707,6 +2809,86 @@ def test_populate_backend_ast_extracts_drizzle_schema_graph_without_source(tmp_p
     assert "default('draft')" not in str(artifact)
 
 
+def test_typescript_v2_data_adapter_disables_legacy_entity_caps(
+    monkeypatch, tmp_path
+):
+    import hermes_cli.hades_index.typescript as typescript_index
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "schema.ts").write_text(
+        "import { pgTable, serial } from 'drizzle-orm/pg-core';\n"
+        "export const customers = pgTable('customers', { id: serial('id') });\n",
+        encoding="utf-8",
+    )
+    original = typescript_index._drizzle_schema_graph
+    observed: list[tuple[int | None, int | None]] = []
+
+    def capture_caps(source, rel, *, max_symbols, max_edges):
+        observed.append((max_symbols, max_edges))
+        return original(
+            source,
+            rel,
+            max_symbols=max_symbols,
+            max_edges=max_edges,
+        )
+
+    monkeypatch.setattr(typescript_index, "_drizzle_schema_graph", capture_caps)
+
+    execute_job(
+        {
+            "job_id": "job_drizzle_no_entity_caps",
+            "capability": "populate_backend_ast",
+            "payload": {},
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert observed == [(None, None)]
+
+
+def test_typescript_v2_data_adapter_keeps_more_than_one_hundred_foreign_keys(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    fields = "\n".join(
+        f"  customer{index}: integer('customer_{index}').references(() => customers.id),"
+        for index in range(101)
+    )
+    (tmp_path / "schema.ts").write_text(
+        "import { integer, pgTable, serial } from 'drizzle-orm/pg-core';\n"
+        "export const customers = pgTable('customers', { id: serial('id') });\n"
+        "export const orders = pgTable('orders', {\n"
+        f"{fields}\n"
+        "});\n",
+        encoding="utf-8",
+    )
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_drizzle_many_foreign_keys",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+
+    orders_id = next(
+        node["id"]
+        for node in artifact["nodes"]
+        if node["kind"] == "table" and node["name"] == "orders"
+    )
+    assert (
+        sum(
+            edge["relation"] == "references" and edge["source_id"] == orders_id
+            for edge in artifact["edges"]
+        )
+        == 101
+    )
+
+
 def test_populate_backend_ast_extracts_sql_schema_graph_without_source(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -2792,7 +2974,7 @@ def test_populate_backend_ast_resolves_unique_cross_file_sql_foreign_key(tmp_pat
     assert artifact["uncertainties"] == []
 
 
-def test_populate_backend_ast_types_ambiguous_and_missing_sql_fk_uncertainty(tmp_path):
+def test_populate_backend_ast_omits_ambiguous_and_missing_sql_fk_topology(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     (tmp_path / "a.sql").write_text(
@@ -2819,10 +3001,18 @@ def test_populate_backend_ast_types_ambiguous_and_missing_sql_fk_uncertainty(tmp
             workspace_root=tmp_path,
         )
     )
-    assert len(artifact["uncertainties"]) == 2
-    assert {
-        item["reason_code"] for item in artifact["uncertainties"]
-    } == {"external_boundary_unresolved"}
+    assert artifact["uncertainties"] == []
+    assert not any(node["kind"] == "unknown_boundary" for node in artifact["nodes"])
+    assert not any(node["kind"] == "external_boundary" for node in artifact["nodes"])
+    orders_id = next(
+        node["id"]
+        for node in artifact["nodes"]
+        if node["kind"] == "table" and node["name"] == "orders"
+    )
+    assert not any(
+        edge["source_id"] == orders_id and edge["relation"] == "references"
+        for edge in artifact["edges"]
+    )
     data_access = artifact["graph_contract"]["completeness"]["capabilities"][
         "data_access"
     ]
@@ -2837,7 +3027,7 @@ def test_populate_backend_ast_types_ambiguous_and_missing_sql_fk_uncertainty(tmp
     ]
 
 
-def test_populate_backend_ast_preserves_ambiguous_and_missing_orm_fk_uncertainty(
+def test_populate_backend_ast_omits_ambiguous_and_missing_orm_fk_topology(
     tmp_path,
 ):
     from hermes_cli.hades_backend_jobs import execute_job
@@ -2876,19 +3066,18 @@ def test_populate_backend_ast_preserves_ambiguous_and_missing_orm_fk_uncertainty
     )
     artifact = _materialize_graph_v2(result)
 
-    assert len(artifact["uncertainties"]) == 2
-    assert {
-        item["reason_code"] for item in artifact["uncertainties"]
-    } == {"external_boundary_unresolved"}
-    assert {
-        item["identity"]["public_resource_name"]
-        for item in artifact["nodes"]
-        if item["kind"] == "external_boundary"
-    } == {"customers", "absent_owners"}
-    assert {
-        (item["path"], item["reason"])
-        for item in result["source_slice_candidates"]
-    } >= {("orders.py", "branch_unresolved")}
+    assert artifact["uncertainties"] == []
+    assert not any(node["kind"] == "unknown_boundary" for node in artifact["nodes"])
+    assert not any(node["kind"] == "external_boundary" for node in artifact["nodes"])
+    orders_id = next(
+        node["id"]
+        for node in artifact["nodes"]
+        if node["kind"] == "table" and node["name"] == "orders"
+    )
+    assert not any(
+        edge["source_id"] == orders_id and edge["relation"] == "references"
+        for edge in artifact["edges"]
+    )
     data_access = artifact["graph_contract"]["completeness"]["capabilities"][
         "data_access"
     ]

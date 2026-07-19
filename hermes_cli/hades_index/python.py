@@ -25,7 +25,12 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_language_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.data_access import (
+    TableSpec,
+    append_coverage_events,
+    data_budget_omission,
+    table_adapter_result,
+)
 from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
@@ -57,8 +62,12 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     """Emit Django and SQLAlchemy resources directly into graph-v2 IR."""
 
     parsed: list[tuple[str, ast.Module]] = []
+    budget_coverage = []
     for item in context.inventory_files:
         if item.language != "python" or not item.parser_candidate or item.is_test:
+            continue
+        if context.budget_exhausted():
+            budget_coverage.append(data_budget_omission("python", item.path))
             continue
         try:
             tree = ast.parse(
@@ -130,7 +139,9 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                         ),
                     )
                 )
-    return table_adapter_result(context, tuple(specs))
+    return append_coverage_events(
+        table_adapter_result(context, tuple(specs)), tuple(budget_coverage)
+    )
 
 
 def _py_graph_summary(

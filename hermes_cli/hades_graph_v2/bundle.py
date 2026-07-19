@@ -99,7 +99,6 @@ class BundleLimits:
     max_chunks: int = MAX_CHUNKS
     backend_max_artifact_bytes: int | None = None
     backend_max_body_bytes: int | None = None
-    max_edges: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -114,7 +113,6 @@ class BundleLimits:
         for name in (
             "backend_max_artifact_bytes",
             "backend_max_body_bytes",
-            "max_edges",
         ):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
