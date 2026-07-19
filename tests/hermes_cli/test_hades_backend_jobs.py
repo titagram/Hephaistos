@@ -1275,7 +1275,7 @@ def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
             {
                 "job_id": "job_hard_edge_ceiling",
                 "capability": "populate_backend_ast",
-                "payload": {"max_edges": 10_000},
+                "payload": {"max_edges": 10_001},
             },
             workspace_root=tmp_path,
         )
