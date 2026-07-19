@@ -2315,6 +2315,19 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
     observed, reconcilable = _observed_reason_counts(artifact)
     omitted_ledger = artifact.graph_contract.coverage.records.omitted_by_bundle_budget
     completeness = artifact.graph_contract.completeness
+    producer_fact_omissions: dict[tuple[str, str], int] = {}
+    for language in completeness.languages:
+        for name in _CAPABILITY_ORDER:
+            reason = next(
+                (
+                    item
+                    for item in getattr(language.capabilities, name).reasons
+                    if item.code is ReasonCode.RESOURCE_BUDGET_REACHED
+                ),
+                None,
+            )
+            if reason is not None:
+                producer_fact_omissions[(language.language, name)] = reason.count
     scoped_envelopes = [(None, completeness.capabilities)]
     scoped_envelopes.extend(
         (language.language, language.capabilities)
@@ -2340,12 +2353,35 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
                     reason.code is ReasonCode.RESOURCE_BUDGET_REACHED
                     and name not in {"inventory", "entrypoint_discovery"}
                 ):
-                    # Producer fact caps are capability-scoped ledgers.  They
-                    # intentionally do not consume the later bundle-pruning
-                    # ledger, which counts public records rather than omitted
-                    # parser/adapter facts.
-                    continue
-                if reason.code in _BUNDLE_BUDGET_REASON_CODES:
+                    # Language completeness is the frozen producer-fact
+                    # omission ledger.  GraphBuilder derives each row directly
+                    # from CoverageEvents; the global envelope must reconcile
+                    # exactly to those independently scoped rows.  The bundle
+                    # pruning ledger counts public records and is deliberately
+                    # not interchangeable with this producer ledger.
+                    expected = (
+                        sum(
+                            count
+                            for (scoped_language, capability), count in (
+                                producer_fact_omissions.items()
+                            )
+                            if capability == name
+                            and (
+                                language is None
+                                or scoped_language == language
+                            )
+                        )
+                        if envelope_language is None
+                        else producer_fact_omissions.get(
+                            (envelope_language, name), 0
+                        )
+                    )
+                    if reason.count != expected:
+                        _fail(
+                            "capability_reason_count_mismatch",
+                            "producer-fact budget reason does not match its language omission ledger",
+                        )
+                elif reason.code in _BUNDLE_BUDGET_REASON_CODES:
                     if not expected <= reason.count <= expected + omitted_ledger:
                         _fail(
                             "capability_reason_count_mismatch",

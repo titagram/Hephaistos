@@ -623,7 +623,7 @@ def test_populate_backend_ast_default_file_budget_exceeds_one_thousand(tmp_path)
     assert coverage["budget_omitted"] == 0
 
 
-def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
+def test_populate_backend_ast_honors_payload_file_budget(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     workspace = tmp_path / "workspace"
@@ -659,7 +659,85 @@ def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
     ]
 
 
-def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
+def test_populate_backend_ast_hard_clamps_file_count_at_ten_thousand(
+    monkeypatch, tmp_path
+):
+    from dataclasses import replace
+
+    import hermes_cli.hades_index as hades_index
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        ParsedFile,
+        ParseResult,
+        SyntaxIR,
+        TreeSitterAdapter,
+    )
+
+    source = tmp_path / "src"
+    source.mkdir()
+    for index in range(10_001):
+        source.joinpath(f"module_{index:05d}.py").touch()
+
+    parser_paths: list[str] = []
+
+    def parsed_empty_file(self, path, *, relative_path, language, max_bytes):
+        del self, path, max_bytes
+        parser_paths.append(relative_path)
+        return ParseResult.parsed(
+            SyntaxIR(ParsedFile(relative_path, language, (), (), ()), ())
+        )
+
+    monkeypatch.setattr(TreeSitterAdapter, "parse_file", parsed_empty_file)
+    real_build = hades_index.build_canonical_graph
+    captured: dict[str, int] = {}
+
+    def bounded_build(context, results):
+        captured["parser_candidates"] = sum(
+            item.parser_candidate for item in context.inventory_files
+        )
+        captured["budget_omitted"] = sum(
+            event.omitted_count
+            for result in results
+            for event in result.coverage_events
+            if event.capability.value == "inventory"
+            and event.reason_code == "resource_budget_reached"
+        )
+        retained_paths = {"src/module_00000.py", "src/module_10000.py"}
+        bounded_context = replace(
+            context,
+            inventory_files=tuple(
+                item for item in context.inventory_files if item.path in retained_paths
+            ),
+        )
+        bounded_results = tuple(
+            replace(
+                result,
+                coverage_events=tuple(
+                    event
+                    for event in result.coverage_events
+                    if event.path is None or event.path in retained_paths
+                ),
+            )
+            for result in results
+        )
+        return real_build(bounded_context, bounded_results)
+
+    monkeypatch.setattr(hades_index, "build_canonical_graph", bounded_build)
+    result = execute_job(
+        {
+            "job_id": "job_hard_file_ceiling",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 10_001},
+        },
+        workspace_root=tmp_path,
+    )
+
+    assert result["status"] == "completed"
+    assert captured == {"parser_candidates": 10_001, "budget_omitted": 1}
+    assert len(parser_paths) == 10_000
+
+
+def test_populate_backend_ast_honors_payload_aggregate_byte_budget(
     tmp_path,
 ):
     from hermes_cli.hades_backend_jobs import execute_job
@@ -698,7 +776,39 @@ def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
     ]
 
 
-def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
+def test_populate_backend_ast_uses_configured_aggregate_byte_ceiling(
+    monkeypatch, tmp_path
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    (home / "config.yaml").write_text(
+        "hades:\n  graph_index:\n    max_total_source_bytes: 1048576\n",
+        encoding="utf-8",
+    )
+    workspace.joinpath("a.py").write_text("#" * 600_000, encoding="utf-8")
+    workspace.joinpath("b.py").write_text("#" * 600_000, encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_configured_aggregate_ceiling",
+                "capability": "populate_backend_ast",
+                "payload": {"max_total_bytes": 2_000_000},
+            },
+            workspace_root=workspace,
+        )
+    )
+    coverage = artifact["graph_contract"]["coverage"]["files"]
+    assert coverage["analyzed"] == 1
+    assert coverage["budget_omitted"] == 1
+
+
+def test_populate_backend_ast_honors_payload_per_file_budget(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     workspace = tmp_path / "workspace"
@@ -736,6 +846,37 @@ def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
     ]
 
 
+def test_populate_backend_ast_uses_configured_per_file_byte_ceiling(
+    monkeypatch, tmp_path
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    home.mkdir()
+    workspace.mkdir()
+    (home / "config.yaml").write_text(
+        "hades:\n  graph_index:\n    max_file_bytes: 1024\n",
+        encoding="utf-8",
+    )
+    workspace.joinpath("oversized.py").write_text("#" * 1_025, encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_configured_per_file_ceiling",
+                "capability": "populate_backend_ast",
+                "payload": {"max_file_bytes": 2_048},
+            },
+            workspace_root=workspace,
+        )
+    )
+    file_node = next(node for node in artifact["nodes"] if node["kind"] == "file")
+    assert file_node["properties"]["analysis_status"] == "too_large"
+    assert file_node["properties"]["omission_reason"] == "file_too_large"
+
+
 def test_populate_backend_ast_closes_invalid_symlink_inventory_reason(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -771,6 +912,69 @@ def test_populate_backend_ast_closes_invalid_symlink_inventory_reason(tmp_path):
             "count": 1,
             "language": None,
             "paths_sample": ["escape.py"],
+        }
+    ]
+
+
+def test_populate_backend_ast_closes_unavailable_submodule_inventory_reason(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    commit = "a" * 40
+    try:
+        subprocess.run(
+            ["git", "init"],
+            cwd=workspace,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{commit},lib",
+            ],
+            cwd=workspace,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"git index fixture unavailable: {exc}")
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_graph_submodule_ledger",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=workspace,
+        )
+    )
+
+    submodule = next(
+        node for node in artifact["nodes"] if node["qualified_name"] == "lib"
+    )
+    assert submodule["properties"]["analysis_status"] == "failed"
+    assert submodule["properties"]["omission_reason"] == "submodule_unavailable"
+    assert artifact["graph_contract"]["coverage"]["files"]["failed"] == 1
+    inventory = artifact["graph_contract"]["completeness"]["capabilities"][
+        "inventory"
+    ]
+    assert inventory["status"] == "partial"
+    assert inventory["reasons"] == [
+        {
+            "code": "submodule_unavailable",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["lib"],
         }
     ]
 
@@ -918,6 +1122,87 @@ def test_populate_backend_ast_closes_exact_symbol_cap_ledger(tmp_path):
     assert file_node["properties"]["analysis_status"] == "analyzed"
 
 
+def test_populate_backend_ast_hard_clamps_symbols_at_five_thousand(
+    monkeypatch, tmp_path
+):
+    from dataclasses import replace
+
+    import hermes_cli.hades_index.lifecycle.assembler as assembler
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_index.tree_sitter_adapter import (
+        ParsedFile,
+        ParseResult,
+        StructuralSymbol,
+        SyntaxIR,
+        TreeSitterAdapter,
+    )
+
+    source = tmp_path / "graph.py"
+    source.write_text("pass\n", encoding="utf-8")
+    parser_symbols = tuple(
+        StructuralSymbol(
+            f"Symbol{index}",
+            "class",
+            1,
+            1,
+            structural_path=f"root/class_definition/{index}",
+        )
+        for index in range(5_001)
+    )
+
+    def parsed_symbol_ceiling(self, path, *, relative_path, language, max_bytes):
+        del self, path, max_bytes
+        return ParseResult.parsed(
+            SyntaxIR(
+                ParsedFile(relative_path, language, parser_symbols, (), ()),
+                (),
+            )
+        )
+
+    monkeypatch.setattr(TreeSitterAdapter, "parse_file", parsed_symbol_ceiling)
+    real_assemble = assembler.assemble_graph_v2_adapter_result
+    captured: dict[str, int] = {}
+
+    def bounded_assemble(context, syntax, *, parse_coverage=(), registry=None):
+        captured["retained_symbols"] = sum(len(item.symbols) for item in syntax)
+        bounded_syntax = tuple(
+            replace(
+                item,
+                parsed_file=replace(item.parsed_file, symbols=()),
+            )
+            for item in syntax
+        )
+        return real_assemble(
+            context,
+            bounded_syntax,
+            parse_coverage=parse_coverage,
+            registry=registry,
+        )
+
+    monkeypatch.setattr(
+        assembler, "assemble_graph_v2_adapter_result", bounded_assemble
+    )
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_hard_symbol_ceiling",
+                "capability": "populate_backend_ast",
+                "payload": {"max_symbols": 5_001},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+    assert captured == {"retained_symbols": 5_000}
+    reason = next(
+        item
+        for item in artifact["graph_contract"]["completeness"]["capabilities"][
+            "symbol_resolution"
+        ]["reasons"]
+        if item["code"] == "resource_budget_reached"
+    )
+    assert reason["count"] == 1
+
+
 def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
@@ -956,6 +1241,108 @@ def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
     assert artifact["graph_contract"]["coverage"]["records"][
         "omitted_by_bundle_budget"
     ] == 6
+
+
+def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
+    monkeypatch, tmp_path
+):
+    from dataclasses import replace
+
+    import hermes_cli.hades_index as hades_index
+    import hermes_cli.hades_index.lifecycle.assembler as assembler
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_index.lifecycle.model import local_record_key
+
+    source = tmp_path / "graph.py"
+    source.write_text(
+        "class Service:\n"
+        "    def first(self):\n        pass\n"
+        "    def second(self):\n        pass\n",
+        encoding="utf-8",
+    )
+
+    real_assemble = assembler.assemble_graph_v2_adapter_result
+    generated_count: dict[str, int] = {}
+
+    def oversized_assemble(context, syntax, *, parse_coverage=(), registry=None):
+        base = real_assemble(
+            context,
+            syntax,
+            parse_coverage=parse_coverage,
+            registry=registry,
+        )
+        template = base.edge_facts[0]
+        generated = []
+        for ordinal in range(10_001):
+            locator = replace(
+                template.locator,
+                structural_path=f"hard_ceiling/edge/{ordinal}",
+                ordinal=ordinal,
+            )
+            generated.append(
+                replace(
+                    template,
+                    local_key=local_record_key(
+                        "python",
+                        "graph.py",
+                        "hard_ceiling_edge",
+                        "ast",
+                        locator.structural_path,
+                        ordinal,
+                    ),
+                    locator=locator,
+                    evidence=replace(template.evidence, locator=locator),
+                )
+            )
+        generated_count["assembled"] = len(generated)
+        return replace(
+            base,
+            edge_facts=tuple(sorted(generated, key=lambda edge: edge.local_key)),
+        )
+
+    monkeypatch.setattr(
+        assembler, "assemble_graph_v2_adapter_result", oversized_assemble
+    )
+    real_build = hades_index.build_canonical_graph
+    captured: dict[str, int] = {}
+
+    def bounded_build(context, results):
+        assembled = results[0]
+        captured["retained_edges"] = len(assembled.edge_facts)
+        captured["budget_omitted"] = sum(
+            event.omitted_count
+            for event in assembled.coverage_events
+            if event.capability.value == "call_graph"
+            and event.reason_code == "resource_budget_reached"
+        )
+        bounded = real_assemble(
+            context,
+            (),
+            parse_coverage=assembled.coverage_events,
+        )
+        return real_build(context, (bounded, *results[1:]))
+
+    monkeypatch.setattr(hades_index, "build_canonical_graph", bounded_build)
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_hard_edge_ceiling",
+                "capability": "populate_backend_ast",
+                "payload": {"max_symbols": 5_000, "max_edges": 10_001},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+    assert generated_count == {"assembled": 10_001}
+    assert captured == {"retained_edges": 10_000, "budget_omitted": 1}
+    reason = next(
+        item
+        for item in artifact["graph_contract"]["completeness"]["capabilities"][
+            "call_graph"
+        ]["reasons"]
+        if item["code"] == "resource_budget_reached"
+    )
+    assert reason["count"] > 0
 
 
 def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
@@ -2445,6 +2832,72 @@ def test_populate_backend_ast_types_ambiguous_and_missing_sql_fk_uncertainty(tmp
             "count": 2,
             "language": None,
             "paths_sample": ["orders.sql"],
+        }
+    ]
+
+
+def test_populate_backend_ast_preserves_ambiguous_and_missing_orm_fk_uncertainty(
+    tmp_path,
+):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "a.py").write_text(
+        "from django.db import models\n"
+        "class CustomerDjango(models.Model):\n"
+        "    id = models.IntegerField(primary_key=True)\n"
+        "    class Meta:\n"
+        "        db_table = 'customers'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.py").write_text(
+        "from sqlalchemy import Column, Integer\n"
+        "class CustomerB:\n"
+        "    __tablename__ = 'customers'\n"
+        "    id = Column(Integer, primary_key=True)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "orders.py").write_text(
+        "from sqlalchemy import Column, ForeignKey, Integer\n"
+        "class Order:\n"
+        "    __tablename__ = 'orders'\n"
+        "    customer_id = Column(Integer, ForeignKey('customers.id'))\n"
+        "    owner_id = Column(Integer, ForeignKey('absent_owners.id'))\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_orm_uncertain_fk",
+            "capability": "populate_backend_ast",
+            "payload": {"head_commit": "abc123"},
+        },
+        workspace_root=tmp_path,
+    )
+    artifact = _materialize_graph_v2(result)
+
+    assert len(artifact["uncertainties"]) == 2
+    assert {
+        item["reason_code"] for item in artifact["uncertainties"]
+    } == {"external_boundary_unresolved"}
+    assert {
+        item["identity"]["public_resource_name"]
+        for item in artifact["nodes"]
+        if item["kind"] == "external_boundary"
+    } == {"customers", "absent_owners"}
+    assert {
+        (item["path"], item["reason"])
+        for item in result["source_slice_candidates"]
+    } >= {("orders.py", "branch_unresolved")}
+    data_access = artifact["graph_contract"]["completeness"]["capabilities"][
+        "data_access"
+    ]
+    assert data_access["status"] == "partial"
+    assert data_access["reasons"] == [
+        {
+            "code": "external_boundary_unresolved",
+            "count": 2,
+            "language": None,
+            "paths_sample": ["orders.py"],
         }
     ]
 

@@ -1950,6 +1950,13 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         workspace_root,
         user_excluded_paths=graph_index_config.excluded_paths,
     )
+    unavailable_submodule_paths = {
+        relative
+        for relative, _digest in snapshot.records
+        if "submodule_unavailable" in snapshot.partial_reasons
+        and not (workspace_root / relative).is_file()
+        and not (workspace_root / relative).is_symlink()
+    }
     source_before = SourceIdentity(
         head_commit=snapshot.head_commit,
         tree_sha256=snapshot.tree_sha256,
@@ -1999,14 +2006,26 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         if parser_candidate and source_language is not None:
             detected_languages.add(source_language)
         try:
-            byte_size = candidate.lstat().st_size
+            byte_size = (
+                0
+                if relative in unavailable_submodule_paths
+                else candidate.lstat().st_size
+            )
         except OSError:
             byte_size = None
         inventory.append(
             InventoryFile(
                 relative,
                 digest,
-                language,
+                (
+                    language
+                    if language is not None
+                    else (
+                        "unknown"
+                        if relative in unavailable_submodule_paths
+                        else None
+                    )
+                ),
                 parser_candidate,
                 byte_size,
                 is_test_source_path(relative),
@@ -2018,7 +2037,19 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     inventory_tuple = tuple(inventory)
     parse_coverage: list[CoverageEvent] = []
     for item in inventory_tuple:
-        if (workspace_root / item.path).is_symlink():
+        if item.path in unavailable_submodule_paths:
+            parse_coverage.append(
+                CoverageEvent(
+                    item.language or "unknown",
+                    CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                    "submodule_unavailable",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
+        elif (workspace_root / item.path).is_symlink():
             parse_coverage.append(
                 CoverageEvent(
                     item.language or "unknown",

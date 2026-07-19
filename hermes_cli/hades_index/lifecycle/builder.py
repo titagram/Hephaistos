@@ -1968,6 +1968,7 @@ class GraphBuilder:
                 node.language for node in nodes if node.id == source_id
             )
             boundary_qualified_name: str | None = None
+            boundary_public_resource_name: str | None = None
             boundary_kind = (
                 NodeKind.EXTERNAL_BOUNDARY
                 if fact.resolution_kind is ResolutionKind.EXTERNAL_TARGET
@@ -2009,6 +2010,11 @@ class GraphBuilder:
                 boundary_qualified_name = (
                     f"{locator.source_location.path}::{structural}::external_boundary"
                 )
+                boundary_public_resource_name = (
+                    subject_ir.target.descriptor.public_name
+                    if type(subject_ir.target) is BoundaryTarget
+                    else None
+                )
                 boundary_identity = SemanticResourceIdentity(
                     "semantic_resource",
                     context.workspace_binding_id,
@@ -2017,7 +2023,7 @@ class GraphBuilder:
                     None,
                     None,
                     boundary_qualified_name,
-                    None,
+                    boundary_public_resource_name,
                     None,
                     None,
                 )
@@ -2029,7 +2035,7 @@ class GraphBuilder:
                     "framework": None,
                     "namespace": None,
                     "qualified_name": boundary_qualified_name,
-                    "public_resource_name": None,
+                    "public_resource_name": boundary_public_resource_name,
                     "protocol": None,
                     "operation": None,
                 }
@@ -2159,7 +2165,7 @@ class GraphBuilder:
                     (
                         "unknown boundary"
                         if boundary_kind is NodeKind.UNKNOWN_BOUNDARY
-                        else "external boundary"
+                        else boundary_public_resource_name or "external boundary"
                     ),
                     boundary_qualified_name,
                     None,

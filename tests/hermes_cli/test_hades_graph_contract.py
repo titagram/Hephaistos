@@ -805,7 +805,7 @@ def _with_external_uncertainty() -> dict[str, Any]:
         "variant": "source_occurrence",
         "workspace_binding_id": binding_id,
         "language": "php",
-        "kind": "unknown_boundary",
+        "kind": "external_boundary",
         "owner_node_id": declaration_id,
         "structural_path": "body/call/0/unknown_target",
         "ordinal": 0,
@@ -877,7 +877,7 @@ def _with_external_uncertainty() -> dict[str, Any]:
         {
             "id": boundary_id,
             "identity": boundary_identity,
-            "kind": "unknown_boundary",
+            "kind": "external_boundary",
             "language": "php",
             "framework": None,
             "name": "Unresolved external target",
@@ -885,7 +885,7 @@ def _with_external_uncertainty() -> dict[str, Any]:
             "namespace": None,
             "uncertainty_id": unresolved_id,
             "location": {"path": path, "start_line": 2, "end_line": 2},
-            "properties": {"reason_code": "external_boundary_unresolved"},
+            "properties": {},
             "evidence": evidence("unresolved"),
         },
     ])
@@ -2156,7 +2156,7 @@ def _step_by_relation(
 
 def test_unknown_boundary_requires_unresolved_primary_evidence() -> None:
     _, _, validation = _task3_api()
-    payload = _with_external_uncertainty()
+    payload = _with_framework_uncertainty()
     boundary = next(
         node for node in payload["nodes"] if node["kind"] == "unknown_boundary"
     )
@@ -2512,6 +2512,31 @@ def test_global_and_language_capability_reason_counts_reconcile() -> None:
     assert exc_info.value.code == "capability_reason_scope_mismatch"
 
 
+def test_producer_fact_budget_reason_requires_language_omission_ledger() -> None:
+    _, _, validation = _task3_api()
+    payload = json.loads(json.dumps(_valid_semantic_artifact()))
+    payload["graph_contract"]["completeness"]["status"] = "partial"
+    payload["graph_contract"]["completeness"]["capabilities"][
+        "symbol_resolution"
+    ] = {
+        "status": "partial",
+        "reasons": [
+            {
+                "code": "resource_budget_reached",
+                "count": 999,
+                "language": None,
+                "paths_sample": ["src/Example.php"],
+            }
+        ],
+    }
+    _rehash_artifact(payload)
+
+    with pytest.raises(validation.GraphValidationError) as exc_info:
+        validation.validate_artifact(payload)
+
+    assert exc_info.value.code == "capability_reason_count_mismatch"
+
+
 def _unknown_count(represented: int, reason: str) -> dict[str, Any]:
     return {
         "represented": represented,
@@ -2843,12 +2868,14 @@ def test_entrypoint_node_display_closes_over_its_record() -> None:
 def _with_framework_uncertainty() -> dict[str, Any]:
     payload = json.loads(json.dumps(_with_external_uncertainty()))
     boundary = next(
-        node for node in payload["nodes"] if node["kind"] == "unknown_boundary"
+        node for node in payload["nodes"] if node["kind"] == "external_boundary"
     )
     source = next(node for node in payload["nodes"] if node["kind"] == "method")
     edge = payload["edges"][0]
+    boundary["identity"]["kind"] = "unknown_boundary"
     boundary["identity"]["semantic_role"] = "framework_target"
     boundary["id"] = node_id(boundary["identity"])
+    boundary["kind"] = "unknown_boundary"
     boundary["name"] = "Unresolved framework target"
     boundary["properties"]["reason_code"] = "framework_config_unresolved"
     edge["target_id"] = boundary["id"]
@@ -2976,7 +3003,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
         "variant": "source_occurrence",
         "workspace_binding_id": binding_id,
         "language": "php",
-        "kind": "unknown_boundary",
+        "kind": "external_boundary",
         "owner_node_id": handler_id,
         "structural_path": "body/response/0/unknown_target",
         "ordinal": 0,
@@ -3017,7 +3044,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
     payload["nodes"].append({
         "id": boundary_id,
         "identity": boundary_identity,
-        "kind": "unknown_boundary",
+        "kind": "external_boundary",
         "language": "php",
         "framework": None,
         "name": "Unresolved external target",
@@ -3025,7 +3052,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
         "namespace": None,
         "uncertainty_id": public_uncertainty_id,
         "location": {"path": path, "start_line": 1, "end_line": 1},
-        "properties": {"reason_code": "external_boundary_unresolved"},
+        "properties": {},
         "evidence": copy.deepcopy(response_edge["evidence"]),
     })
     payload["uncertainties"] = [
@@ -3051,7 +3078,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
     )
     step.update(
         edge_id=response_edge["id"],
-        stage_to="handler",
+        stage_to="integration",
         min_depth=1,
         async_child_flow_id=None,
         async_cycle=False,
@@ -3084,7 +3111,7 @@ def test_flow_capability_reason_requires_artifact_scope_counterpart() -> None:
     }
     sync_flow["terminal_count"] = _exact_count(1)
     sync_flow["uncertainty_count"] = _unknown_count(1, "external_boundary_unresolved")
-    sync_flow["stage_counts"]["handler"] = _exact_count(2)
+    sync_flow["stage_counts"]["integration"] = _exact_count(1)
     sync_flow["stage_counts"].pop("response")
     completeness = payload["graph_contract"]["completeness"]
     completeness["status"] = "partial"
