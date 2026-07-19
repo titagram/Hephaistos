@@ -351,8 +351,8 @@ function handler(req,res,next) { next(mode); } app.get('/next', handler);
     )
     assert all(
         not any(
-            segment.framework_role
-            in {"continuation_next", "continuation_next_error", "error_middleware"}
+            segment.framework_role.startswith("continuation_")
+            or segment.framework_role in {"error_transition", "error_middleware"}
             for segment in adapter.pipeline(context, entry)
         )
         for entry in entries
@@ -496,7 +496,9 @@ def test_computed_error_middleware_target_is_partial_with_explicit_arity_uncerta
     _write(
         tmp_path,
         """
-const express = require('express'); const app = express(); app.use(errorHandler);
+const express = require('express'); const app = express();
+function boom(req,res) { throw new Error('x'); }
+app.get('/x', boom); app.use(errorHandler);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
@@ -504,12 +506,10 @@ const express = require('express'); const app = express(); app.use(errorHandler)
         "error_middleware_arity_unresolved",
         "handler_target_unresolved",
     } <= _coverage(adapter, context)
-    assert all(
-        not any(
-            segment.framework_role == "error_middleware"
-            for segment in adapter.pipeline(context, entry)
-        )
-        for entry in entries
+    route = next(item for item in entries if item.public_path == "/x")
+    assert not any(
+        segment.framework_role == "error_middleware"
+        for segment in adapter.pipeline(context, route)
     )
 
 
