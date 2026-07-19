@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
@@ -1141,6 +1141,7 @@ class Effect:
     public_resource_name: str | None
     protocol: str | None
     locator: OccurrenceLocatorIR
+    target_source_node_local_key: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="effect.local_key")
@@ -1158,6 +1159,11 @@ class Effect:
                 _nfc(value, field_name=field_name, limit=1024)
         if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail("invalid_locator", "effect locator must be AST or config")
+        if self.target_source_node_local_key is not None:
+            _key(
+                self.target_source_node_local_key,
+                field_name="effect.target_source_node_local_key",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2509,6 +2515,12 @@ class AdapterResult:
                 need(call_sites, effect.source.local_key, "effect source call site")
             else:
                 _fail("invalid_discriminator", "effect source must be a closed union")
+            if effect.target_source_node_local_key is not None:
+                need(
+                    indexes["source_nodes"],
+                    effect.target_source_node_local_key,
+                    "effect target source node",
+                )
         for segment in self.framework_segments:
             if type(segment.target) is FrameworkLocalTarget:
                 need_node(segment.target.local_key, "framework segment target")

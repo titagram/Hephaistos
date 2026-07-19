@@ -25,6 +25,7 @@ from .identity import (
 )
 from .model import (
     AnalysisStatus,
+    DataProperties,
     AnonymousCallableIdentity,
     AstSourceLocator,
     AsyncContext,
@@ -46,6 +47,7 @@ from .model import (
     EvidenceEnvelope,
     EvidenceItem,
     EvidenceOrigin,
+    IntegrationProperties,
     EXECUTABLE_SOURCE_DECLARATION_KINDS,
     FileIdentity,
     FileProperties,
@@ -97,6 +99,10 @@ _SECRET_LITERAL_RE = re.compile(
     r"(?i)(?:[?&](?:api[_-]?key|password|secret|token)=|"
     r"[a-z][a-z0-9+.-]*://[^/@\s:]+:[^/@\s]+@|"
     r"(?:api[_-]?key|password|secret|token)\s*[:=]\s*[^<\s]+)"
+)
+_PRIVATE_RESOURCE_RE = re.compile(
+    r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
+    r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
 _CAPABILITY_ORDER = (
     "inventory",
@@ -282,6 +288,26 @@ def validate_scalar_and_privacy_rules(artifact: GraphArtifactV2) -> None:
             "secret_like_literal",
             "artifact contains a secret-like literal instead of a redacted value",
         )
+    for node in artifact.nodes:
+        resource = (
+            node.properties.public_resource_name
+            if isinstance(node.properties, DataProperties)
+            else node.name
+            if isinstance(node.properties, IntegrationProperties)
+            else None
+        )
+        if resource is None:
+            continue
+        path_parts = resource.split("/")
+        if (
+            _PRIVATE_RESOURCE_RE.search(resource)
+            or resource.startswith(("/", "~"))
+            or any(part in {".", ".."} or part.startswith(".") for part in path_parts)
+        ):
+            _fail(
+                "private_resource_name",
+                "artifact contains a private resource name instead of a public identifier",
+            )
     for envelope in _iter_evidence(artifact):
         for evidence in (envelope.primary, *envelope.supporting):
             if evidence.origin not in {

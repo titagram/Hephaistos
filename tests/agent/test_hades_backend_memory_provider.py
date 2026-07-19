@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +100,109 @@ def _create_v2_graph_provider(monkeypatch, tmp_path):
             conn, _graph_v2_active_cache_key(provider._binding), active
         )
     assert provider._active_graph_identity("project") == active
+    return provider, graph
+
+
+def _create_real_laravel_effect_graph_provider(monkeypatch, tmp_path):
+    """Publish a native Laravel-effect artifact through the actual local cache path."""
+
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_backend_jobs import execute_job
+    from hermes_cli.hades_backend_sync import _graph_v2_active_cache_key
+    from tests.hermes_cli.test_hades_backend_jobs import _materialize_graph_v2
+
+    project_id = "01KXJD0SV73EBGWKNE2EK3M4KD"
+    workspace_binding_id = "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+    provider = _create_linked_provider(
+        monkeypatch,
+        tmp_path,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+    )
+    workspace = Path.cwd()
+    (workspace / "app/Http/Controllers").mkdir(parents=True)
+    (workspace / "app/Events").mkdir(parents=True)
+    (workspace / "app/Jobs").mkdir(parents=True)
+    (workspace / "routes").mkdir()
+    (workspace / "composer.json").write_text(
+        '{"require":{"laravel/framework":"^11.0"}}', encoding="utf-8"
+    )
+    (workspace / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
+    (workspace / "routes/web.php").write_text(
+        "<?php\n"
+        "use App\\Http\\Controllers\\OrderController;\n"
+        "Route::get('/orders', [OrderController::class, 'show']);\n",
+        encoding="utf-8",
+    )
+    (workspace / "app/Events/OrderPlaced.php").write_text(
+        "<?php\nnamespace App\\Events; class OrderPlaced {}\n", encoding="utf-8"
+    )
+    (workspace / "app/Jobs/SyncOrder.php").write_text(
+        "<?php\nnamespace App\\Jobs; class SyncOrder {}\n", encoding="utf-8"
+    )
+    (workspace / "app/Http/Controllers/OrderController.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "use App\\Events\\OrderPlaced;\n"
+        "use App\\Jobs\\SyncOrder;\n"
+        "use Illuminate\\Support\\Facades\\Cache;\n"
+        "use Illuminate\\Support\\Facades\\DB;\n"
+        "use Illuminate\\Support\\Facades\\Http;\n"
+        "use Illuminate\\Support\\Facades\\Queue;\n"
+        "class OrderController { public function show() {\n"
+        "DB::table('orders')->get(); Cache::get('orders:recent');\n"
+        "Http::get('https://api.example.test/orders');\n"
+        "event(new OrderPlaced()); SyncOrder::dispatch(); Queue::push(new SyncOrder());\n"
+        "} }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_native_laravel_effects",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": project_id,
+                "workspace_binding_id": workspace_binding_id,
+                "max_files": 20,
+                "max_symbols": 50,
+                "max_edges": 200,
+            },
+        },
+        workspace_root=workspace,
+    )
+    assert result["status"] == "completed"
+    graph = _materialize_graph_v2(result)
+    projection_version = "e" * 64
+    with db.connect_closing() as conn:
+        db.replace_memory_cache(
+            conn,
+            project_id=project_id,
+            workspace_binding_id=workspace_binding_id,
+            version="native-effects",
+            items=[
+                {
+                    "id": "graph-v2-native-laravel-effects",
+                    "domain": "artifacts",
+                    "schema": "hades.code_graph.v2",
+                    "projection_version": projection_version,
+                    "payload": copy.deepcopy(graph),
+                }
+            ],
+        )
+        db.record_sync_state(
+            conn,
+            _graph_v2_active_cache_key(provider._binding),
+            {
+                "schema": "hades.code_graph.v2",
+                "project_id": project_id,
+                "workspace_binding_id": workspace_binding_id,
+                "source_identity": graph["source"],
+                "artifact_graph_version": graph["graph_contract"]["artifact_graph_version"],
+                "projection_version": projection_version,
+                "publication_status": "ready",
+            },
+        )
     return provider, graph
 
 
@@ -1121,6 +1225,88 @@ def test_hades_backend_graph_traverse_falls_back_to_active_v2_cache(
     assert result["backend_live_error"] == "backend offline"
     assert expected_node["id"] in {node["id"] for node in result["nodes"]}
     assert result["match_fields"]
+
+
+def test_hades_backend_provider_searches_and_traverses_real_native_laravel_effects(
+    monkeypatch, tmp_path
+):
+    """A producer-built native effect stays usable after cache publication."""
+
+    provider, graph = _create_real_laravel_effect_graph_provider(monkeypatch, tmp_path)
+
+    import plugins.memory.hades_backend as hades_memory
+
+    monkeypatch.setattr(
+        hades_memory.runtime,
+        "client_from_config",
+        lambda *, timeout=None: (_ for _ in ()).throw(RuntimeError("backend offline")),
+    )
+
+    search = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search", {"query": "orders:recent", "limit": 20}
+        )
+    )
+    assert search["status"] == "ok"
+    assert search["artifact_id"] == "graph-v2-native-laravel-effects"
+    assert any(
+        item["graph_ref"]["type"] == "node"
+        and item["graph_ref"]["kind"] == "cache"
+        for item in search["items"]
+    )
+
+    relation_search = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search", {"query": "dispatches", "limit": 20}
+        )
+    )
+    assert any(
+        item["graph_ref"]["type"] == "edge"
+        and item["graph_ref"]["kind"] == "dispatches"
+        for item in relation_search["items"]
+    )
+
+    node_kind_by_id = {node["id"]: node["kind"] for node in graph["nodes"]}
+    expected_effects = {
+        "reads": {"query", "cache"},
+        "calls_external": {"external_boundary"},
+        "emits": {"event"},
+        "dispatches": {"job", "queue"},
+    }
+    native_effects = [
+        edge for edge in graph["edges"]
+        if edge["relation"] in expected_effects
+        and node_kind_by_id.get(edge["target_id"]) in expected_effects[edge["relation"]]
+    ]
+    assert {
+        (edge["relation"], node_kind_by_id[edge["target_id"]])
+        for edge in native_effects
+    } >= {
+        (relation, target_kind)
+        for relation, target_kinds in expected_effects.items()
+        for target_kind in target_kinds
+    }
+
+    for effect in native_effects:
+        traverse = json.loads(
+            provider.handle_tool_call(
+                "hades_backend_graph_traverse",
+                {
+                    "start": effect["source_id"],
+                    "direction": "out",
+                    "max_depth": 2,
+                    "limit": 50,
+                },
+            )
+        )
+        assert traverse["status"] == "ok"
+        assert effect["source_id"] in {node["id"] for node in traverse["nodes"]}
+        assert any(
+            edge["kind"] == effect["relation"]
+            and edge["from"] == effect["source_id"]
+            and edge["to"] == effect["target_id"]
+            for edge in traverse["edges"]
+        )
 
 
 @pytest.mark.parametrize(

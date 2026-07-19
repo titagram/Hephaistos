@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.hades_graph_v2.model import EdgeFlow, NodeKind, Relation
+from hermes_cli.hades_graph_v2.validation import GraphValidationError
 from hermes_cli.hades_index.lifecycle.assembler import assemble_graph_v2_adapter_result
-from hermes_cli.hades_index.lifecycle.builder import effect_kind_mapping
+from hermes_cli.hades_index.lifecycle.builder import GraphBuilder, effect_kind_mapping
 from hermes_cli.hades_index.lifecycle.model import (
     CoverageCapability,
     CoverageOutcome,
@@ -171,12 +175,185 @@ class Orders {
     assert result.effects == ()
     assert any(
         fact.resolution_kind is ResolutionKind.EXTERNAL_TARGET
-        and fact.reason_code == "laravel_effect_resource_unresolved"
+        and fact.reason_code == "dynamic_dispatch"
         for fact in result.unresolved_facts
     )
     assert any(
         event.capability is CoverageCapability.DATA_ACCESS
         and event.outcome is CoverageOutcome.PARTIAL
-        and event.reason_code == "laravel_effect_resource_unresolved"
         for event in result.coverage_events
     )
+
+
+def test_structural_literals_are_laravel_context_only_and_private_values_are_unknown() -> None:
+    parsed = TreeSitterAdapter().parse_bytes(
+        b"""<?php
+use Illuminate\\Support\\Facades\\Cache;
+function authenticate($value) { return $value; }
+class Orders {
+    public function show() {
+        authenticate('sk_live_supersecret');
+        open('/Users/alice/.ssh/id_rsa');
+        read('../../.env');
+        Cache::get('orders:recent');
+        Cache::get('eyJhbGciOiJIUzI1NiJ9.payload.signature');
+        Cache::get('/Users/alice/.ssh/id_rsa');
+        Cache::get('../../.env');
+    }
+}
+""",
+        path="app/Http/Controllers/Orders.php",
+        language="php",
+    )
+
+    assert parsed.status == "parsed"
+    calls = parsed.syntax.calls  # type: ignore[union-attr]
+    assert all(
+        call.arguments[0].kind == "unknown"
+        for call in calls
+        if call.member in {"authenticate", "open", "read"}
+    )
+    cache_arguments = [
+        call.arguments[0]
+        for call in calls
+        if call.receiver == "Cache" and call.member == "get"
+    ]
+    assert [item.value for item in cache_arguments] == ["orders:recent", None, None, None]
+
+    non_php = TreeSitterAdapter().parse_bytes(
+        b"def show():\n    open('orders:recent')\n",
+        path="src/app.py",
+        language="python",
+    )
+    assert non_php.status == "parsed"
+    assert all(
+        argument.kind == "unknown"
+        for call in non_php.syntax.calls  # type: ignore[union-attr]
+        for argument in call.arguments
+    )
+
+
+def test_laravel_effects_keep_exact_ownership_chain_and_blocks(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    source = """<?php
+use Illuminate\\Support\\Facades\\DB;
+use Illuminate\\Support\\Facades\\Cache;
+use App\\Utils\\Cache as AppCache;
+use App\\DTO\\User;
+class Orders {
+    public function show() {
+        if (true) { Cache::get('orders'); }
+        DB::table('orders')->get(); DB::table('users')->update([]);
+        AppCache::get('not-a-cache');
+        User::create([]);
+        \\App\\Infra\\Storage::get('not-storage');
+    }
+}
+"""
+    _write(tmp_path, "app/Http/Controllers/Orders.php", source)
+    parsed = TreeSitterAdapter().parse_bytes(
+        source.encode(), path="app/Http/Controllers/Orders.php", language="php"
+    )
+
+    assert parsed.status == "parsed"
+    result = assemble_graph_v2_adapter_result(_context(tmp_path), (parsed.syntax,))  # type: ignore[arg-type]
+    effects = {(item.kind, item.operation, item.public_resource_name) for item in result.effects}
+
+    assert (EffectKind.CACHE_READ, "get", "orders") in effects
+    assert (EffectKind.DATA_READ, "get", "orders") in effects
+    assert (EffectKind.DATA_WRITE, "update", "users") in effects
+    assert all(resource not in {"not-a-cache", "User", "not-storage"} for _, _, resource in effects)
+    cache_effect = next(item for item in result.effects if item.public_resource_name == "orders")
+    assert cache_effect.source.local_key != next(
+        item.entry_block_key
+        for item in result.declarations
+        if item.locator.source_location.path == "app/Http/Controllers/Orders.php"
+    )
+    assert type(cache_effect.source).__name__ == "BlockEffectSource"
+    assert any(
+        block.local_key == cache_effect.source.local_key
+        and block.locator.structural_path == cache_effect.locator.structural_path
+        for block in result.blocks
+    )
+
+
+def test_dynamic_async_effects_are_typed_and_known_async_nodes_are_canonical(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+    event_source = "<?php namespace App\\Events; class OrderPlaced {}\n"
+    job_source = "<?php namespace App\\Jobs; class SyncOrder {}\n"
+    _write(tmp_path, "app/Events/OrderPlaced.php", event_source)
+    _write(tmp_path, "app/Jobs/SyncOrder.php", job_source)
+    controller_a = """<?php
+use Illuminate\\Support\\Facades\\Event;
+use Illuminate\\Support\\Facades\\Bus;
+use Illuminate\\Support\\Facades\\Queue;
+use App\\Events\\OrderPlaced;
+use App\\Jobs\\SyncOrder;
+class A { public function show($event, $job) {
+    Event::dispatch($event); Bus::dispatch($job); Queue::push($job);
+    Event::dispatch(new OrderPlaced()); Bus::dispatch(new SyncOrder()); Queue::push(new SyncOrder());
+} }
+"""
+    controller_b = controller_a.replace("class A", "class B").replace("$event, $job", "$event, $job")
+    _write(tmp_path, "app/Http/Controllers/A.php", controller_a)
+    _write(tmp_path, "app/Http/Controllers/B.php", controller_b)
+    syntax = tuple(
+        TreeSitterAdapter().parse_bytes(source.encode(), path=path, language="php").syntax
+        for path, source in (
+            ("app/Events/OrderPlaced.php", event_source),
+            ("app/Jobs/SyncOrder.php", job_source),
+            ("app/Http/Controllers/A.php", controller_a),
+            ("app/Http/Controllers/B.php", controller_b),
+        )
+    )
+
+    result = assemble_graph_v2_adapter_result(_context(tmp_path), syntax)  # type: ignore[arg-type]
+    assert {fact.resolution_kind for fact in result.unresolved_facts} >= {ResolutionKind.ASYNC_TARGET}
+    assert any(event.capability is CoverageCapability.ASYNC for event in result.coverage_events)
+    async_effects = [
+        effect
+        for effect in result.effects
+        if effect.kind in {EffectKind.EVENT_EMIT, EffectKind.JOB_DISPATCH, EffectKind.QUEUE_DISPATCH}
+    ]
+    assert all(effect.target_source_node_local_key is not None for effect in async_effects)
+    valid_context = replace(
+        _context(tmp_path),
+        project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+        workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+    )
+    artifact = GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+        valid_context, (result,)
+    )
+    assert len([node for node in artifact.nodes if node.kind is NodeKind.EVENT]) == 1
+    assert len([node for node in artifact.nodes if node.kind is NodeKind.JOB]) == 1
+    assert len([node for node in artifact.nodes if node.kind is NodeKind.QUEUE]) == 1
+
+
+@pytest.mark.parametrize("private_resource", ["sk_live_supersecret", "/Users/alice/.ssh/id_rsa", "../../.env"])
+def test_graph_v2_rejects_private_effect_resource_names(tmp_path: Path, private_resource: str) -> None:
+    _prepare_project(tmp_path)
+    source = """<?php
+use Illuminate\\Support\\Facades\\Cache;
+class Orders { public function show() { Cache::get('orders'); } }
+"""
+    _write(tmp_path, "app/Http/Controllers/Orders.php", source)
+    parsed = TreeSitterAdapter().parse_bytes(
+        source.encode(), path="app/Http/Controllers/Orders.php", language="php"
+    )
+    result = assemble_graph_v2_adapter_result(_context(tmp_path), (parsed.syntax,))  # type: ignore[arg-type]
+    poisoned = replace(
+        result,
+        effects=tuple(
+            replace(effect, public_resource_name=private_resource) for effect in result.effects
+        ),
+    )
+    valid_context = replace(
+        _context(tmp_path),
+        project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+        workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+    )
+
+    with pytest.raises(GraphValidationError, match="private resource name"):
+        GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+            valid_context, (poisoned,)
+        )

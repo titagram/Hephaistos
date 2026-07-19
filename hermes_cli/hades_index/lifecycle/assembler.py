@@ -702,6 +702,11 @@ def _structural_result(
                 None,
             )
             if source_kind is not None:
+                source_qualified_name = (
+                    f"{symbol.namespace}\\{symbol.name}"
+                    if symbol.namespace
+                    else symbol.name
+                )
                 source_node = SourceNodeIR(
                     local_record_key(
                         item.language,
@@ -714,8 +719,8 @@ def _structural_result(
                     item.language,
                     source_kind,
                     symbol.name.rsplit(".", 1)[-1],
-                    symbol.name,
-                    symbol.container or None,
+                    source_qualified_name,
+                    symbol.namespace,
                     locator,
                     evidence,
                 )
@@ -727,6 +732,11 @@ def _structural_result(
                 represented += 1
             data_kind = _data_node_kind(item.path, item.language, symbol.kind)
             if data_kind is not None:
+                data_qualified_name = (
+                    f"{symbol.namespace}\\{symbol.name}"
+                    if symbol.namespace
+                    else symbol.name
+                )
                 data_nodes.append(
                     DataNodeIR(
                         local_record_key(
@@ -740,7 +750,7 @@ def _structural_result(
                         item.language,
                         data_kind,
                         symbol.name.rsplit(".", 1)[-1],
-                        symbol.name,
+                        data_qualified_name,
                         symbol.name,
                         locator,
                         evidence,

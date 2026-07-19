@@ -724,6 +724,7 @@ class GraphBuilder:
             (item for result in collected for item in result.source_nodes),
             key=lambda item: item.local_key,
         )
+        source_node_by_key = {item.local_key: item for item in source_nodes_ir}
         data_nodes_ir = _deduplicate(
             (item for result in collected for item in result.data_nodes),
             key=lambda item: item.local_key,
@@ -1702,35 +1703,55 @@ class GraphBuilder:
                 source_block = block_by_key[site.source_block_key]
             declaration = declaration_by_key[source_block.declaration_key]
             kind, _relation, _flow = effect_kind_mapping(effect.kind)
+            target_source = (
+                source_node_by_key.get(effect.target_source_node_local_key)
+                if effect.target_source_node_local_key is not None
+                else None
+            )
+            target_language = (
+                target_source.language if target_source is not None else declaration.language
+            )
             if kind in {NodeKind.EVENT, NodeKind.JOB, NodeKind.QUEUE}:
                 # The frozen schema reserves semantic-resource identities for
                 # data/integration resources. Async effect targets therefore
                 # use the source declaration form anchored to the verified
                 # call occurrence, never an out-of-contract semantic kind.
-                qualified_name = f"{kind.value}:{effect.public_resource_name or effect.operation}"
+                qualified_name = (
+                    target_source.qualified_name
+                    if target_source is not None
+                    else f"{kind.value}:{effect.public_resource_name or effect.operation}"
+                )
+                target_path = (
+                    target_source.locator.source_location.path
+                    if target_source is not None
+                    else effect.locator.source_location.path
+                )
+                target_namespace = (
+                    target_source.namespace if target_source is not None else None
+                )
                 identity = SourceDeclarationIdentity(
                     "source_declaration",
                     context.workspace_binding_id,
-                    declaration.language,
+                    target_language,
                     kind,
-                    None,
+                    target_namespace,
                     qualified_name,
-                    effect.locator.source_location.path,
+                    target_path,
                 )
                 identity_payload = {
                     "variant": "source_declaration",
                     "workspace_binding_id": context.workspace_binding_id,
-                    "language": declaration.language,
+                    "language": target_language,
                     "kind": kind.value,
-                    "namespace": None,
+                    "namespace": target_namespace,
                     "qualified_name": qualified_name,
-                    "path": effect.locator.source_location.path,
+                    "path": target_path,
                 }
             else:
                 identity = SemanticResourceIdentity(
                     "semantic_resource",
                     context.workspace_binding_id,
-                    declaration.language,
+                    target_language if target_source is not None else declaration.language,
                     kind,
                     None,
                     None,
@@ -1791,15 +1812,21 @@ class GraphBuilder:
                     public_id,
                     identity,
                     kind,
-                    declaration.language,
+                    target_language if is_async_effect_target else declaration.language,
                     None,
                     node_name,
                     identity.qualified_name if is_async_effect_target else None,
+                    target_namespace if is_async_effect_target else None,
                     None,
-                    None,
-                    _source_location(effect.locator) if is_async_effect_target else None,
+                    _source_location(target_source.locator)
+                    if is_async_effect_target and target_source is not None
+                    else _source_location(effect.locator)
+                    if is_async_effect_target
+                    else None,
                     properties,
-                    _synthetic_evidence(effect.locator),
+                    _evidence(target_source.evidence)
+                    if is_async_effect_target and target_source is not None
+                    else _synthetic_evidence(effect.locator),
                 ),
                 record_name="node",
             )

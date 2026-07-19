@@ -1,14 +1,16 @@
 """Native Tree-sitter facts to conservative Laravel Graph-v2 effects.
 
-This module never reads source files.  It consumes the bounded, source-free
-``StructuralCall`` facts produced by the required parser and only recognises
-facades/classes whose ownership is statically established.
+Only bounded, source-free parser facts enter this producer.  In particular,
+receiver ownership is resolved through exact imports/namespaces and an effect
+is published only when its structural call occurrence has an emitted block.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Sequence
+from urllib.parse import urlsplit
+import re
 
 from hermes_cli.hades_graph_v2.model import (
     CandidateSetKnowledge,
@@ -26,7 +28,6 @@ from .model import (
     AstLocatorIR,
     BlockEffectSource,
     BoundaryTarget,
-    CallSiteEffectSource,
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
@@ -37,12 +38,14 @@ from .model import (
     ExtractionContext,
     FrameworkBoundaryDescriptor,
     IREvidence,
-    UnresolvedFact,
     SourceLocationIR,
+    SourceNodeIR,
+    UnresolvedFact,
     local_record_key,
 )
 
 
+_FACADE_PREFIX = "Illuminate\\Support\\Facades\\"
 _FACADE_NAMES = frozenset({
     "DB",
     "Cache",
@@ -55,64 +58,76 @@ _FACADE_NAMES = frozenset({
     "Queue",
 })
 _READ_METHODS = frozenset({
-    "select",
-    "selectOne",
-    "scalar",
-    "get",
-    "first",
-    "find",
-    "value",
-    "pluck",
-    "count",
-    "exists",
-    "all",
+    "select", "selectOne", "scalar", "get", "first", "find", "value", "pluck", "count", "exists", "all"
 })
 _WRITE_METHODS = frozenset({
-    "insert",
-    "update",
-    "delete",
-    "upsert",
-    "create",
-    "save",
-    "increment",
-    "decrement",
-    "statement",
+    "insert", "update", "delete", "upsert", "create", "save", "increment", "decrement", "statement"
 })
 _CACHE_READ = frozenset({"get", "remember", "has"})
-_CACHE_WRITE = frozenset({
-    "put",
-    "add",
-    "forever",
-    "forget",
-    "flush",
-    "increment",
-    "decrement",
-})
+_CACHE_WRITE = frozenset({"put", "add", "forever", "forget", "flush", "increment", "decrement"})
 _STORAGE_READ = frozenset({"get", "readStream", "exists", "download", "url"})
 _STORAGE_WRITE = frozenset({"put", "writeStream", "delete", "copy", "move"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "send", "request"})
 _MAIL_METHODS = frozenset({"send", "queue", "sendNow"})
 _QUEUE_METHODS = frozenset({"push", "later", "bulk"})
+_TABLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
+_PRIVATE_RE = re.compile(
+    r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
+    r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
+)
 
 
-def _facade_aliases(syntax: SyntaxIR) -> dict[str, str]:
-    aliases = {name: name for name in _FACADE_NAMES}
-    for imported in syntax.imports:
-        short_name = imported.target.rsplit("\\", 1)[-1]
-        if short_name not in _FACADE_NAMES:
-            continue
-        aliases[imported.alias or short_name] = short_name
-        aliases[imported.target] = short_name
-        aliases[f"\\{imported.target}"] = short_name
-    return aliases
+@dataclass(frozen=True, slots=True)
+class _EffectCandidate:
+    kind: EffectKind
+    operation: str
+    resource: str | None
+    protocol: str | None
+    target_source_node_local_key: str | None = None
 
 
-def _facade_for(receiver: str | None, aliases: dict[str, str]) -> str | None:
-    if receiver is None:
+def _canonical_facade(value: str) -> str | None:
+    normalized = value.lstrip("\\")
+    if not normalized.startswith(_FACADE_PREFIX):
         return None
-    return aliases.get(receiver) or aliases.get(
-        receiver.lstrip("\\").rsplit("\\", 1)[-1]
-    )
+    name = normalized[len(_FACADE_PREFIX) :]
+    return name if name in _FACADE_NAMES else None
+
+
+def _safe_cache_key(value: str | None) -> str | None:
+    if value is None or _PRIVATE_RE.search(value):
+        return None
+    if value.startswith(("/", "~")) or "/" in value:
+        return None
+    if any(part in {"", ".", ".."} or part.startswith(".") for part in value.split(":")):
+        return None
+    return value
+
+
+def _safe_storage_path(value: str | None) -> str | None:
+    if value is None or _PRIVATE_RE.search(value) or value.startswith(("/", "~")):
+        return None
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+        return None
+    return value
+
+
+def _safe_http_endpoint(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    path = parsed.path or "/"
+    if any(part in {".", ".."} or part.startswith(".") for part in path.split("/") if part):
+        return None
+    authority = parsed.hostname.lower()
+    if parsed.port is not None:
+        authority = f"{authority}:{parsed.port}"
+    return f"{parsed.scheme}://{authority}{path}"
 
 
 def _literal(call: StructuralCall, index: int = 0) -> str | None:
@@ -123,189 +138,111 @@ def _literal(call: StructuralCall, index: int = 0) -> str | None:
 
 
 def _class_reference(call: StructuralCall) -> str | None:
-    for argument in call.arguments:
-        if argument.kind == "class_reference":
-            return argument.value
-    return None
-
-
-def _short_name(value: str | None) -> str | None:
-    return value.rsplit("\\", 1)[-1] if value else None
-
-
-def _locator(
-    context: ExtractionContext,
-    syntax: SyntaxIR,
-    call: StructuralCall,
-    ordinal: int,
-) -> AstLocatorIR:
-    digest = next(
-        item.file_sha256 for item in context.inventory_files if item.path == syntax.path
-    )
-    return AstLocatorIR(
-        SourceLocationIR(syntax.path, call.line, call.line, digest),
-        call.structural_path,
-        ordinal,
+    return next(
+        (argument.value for argument in call.arguments if argument.kind == "class_reference"),
+        None,
     )
 
 
-def _known_model_names(result: AdapterResult) -> frozenset[str]:
-    return frozenset(
-        item.name for item in result.data_nodes if item.kind is NodeKind.MODEL
-    )
+def _visible_imports(item: SyntaxIR) -> dict[str, str]:
+    namespace = item.namespace
+    return {
+        imported.alias or imported.target.rsplit("\\", 1)[-1]: imported.target
+        for imported in item.imports
+        if imported.namespace == namespace
+    }
 
 
-def _known_class_names(syntax: Sequence[SyntaxIR], directory: str) -> frozenset[str]:
+def _local_type_names(item: SyntaxIR) -> frozenset[str]:
     return frozenset(
         symbol.name.rsplit(".", 1)[-1]
-        for item in syntax
         for symbol in item.symbols
-        if symbol.kind == "class" and item.path.startswith(directory)
+        if symbol.kind in {"class", "interface", "trait", "enum"}
     )
 
 
-def _effect_for_call(
-    call: StructuralCall,
-    *,
-    aliases: dict[str, str],
-    table_by_line: dict[int, str],
-    model_names: frozenset[str],
-    job_names: frozenset[str],
-    event_names: frozenset[str],
-) -> tuple[EffectKind, str, str | None, str | None] | None:
-    """Recognise only APIs whose receiver and operation are source-proven."""
-
-    member = call.member
-    receiver = _facade_for(call.receiver, aliases)
-    if member is None:
+def _facade_for(call: StructuralCall, item: SyntaxIR) -> str | None:
+    receiver = call.receiver
+    if receiver is None:
         return None
-    if receiver == "DB" and member in _READ_METHODS | _WRITE_METHODS:
-        table = table_by_line.get(call.line)
-        if table is None:
-            return None
-        kind = (
-            EffectKind.DATA_READ if member in _READ_METHODS else EffectKind.DATA_WRITE
-        )
-        return kind, member, table, None
-    if call.call_form == "scoped" and call.receiver in model_names:
-        if member in _READ_METHODS:
-            return EffectKind.DATA_READ, member, call.receiver, None
-        if member in _WRITE_METHODS:
-            return EffectKind.DATA_WRITE, member, call.receiver, None
-    if receiver == "Cache":
-        resource = _literal(call)
-        if resource is None:
-            return None
-        if member in _CACHE_READ:
-            return EffectKind.CACHE_READ, member, resource, None
-        if member in _CACHE_WRITE:
-            return EffectKind.CACHE_WRITE, member, resource, None
-    if receiver == "Storage":
-        resource = _literal(call)
-        if resource is None:
-            return None
-        if member in _STORAGE_READ:
-            return EffectKind.STORAGE_READ, member, resource, None
-        if member in _STORAGE_WRITE:
-            return EffectKind.STORAGE_WRITE, member, resource, None
-    if receiver == "Http" and member in _HTTP_METHODS:
-        endpoint = _literal(call, 1 if member in {"send", "request"} else 0)
-        if endpoint is None or not endpoint.startswith(("http://", "https://")):
-            return EffectKind.EXTERNAL_CALL, member, "http", "http"
-        return EffectKind.EXTERNAL_CALL, member, endpoint, "http"
-    if receiver in {"Mail", "Notification"} and member in _MAIL_METHODS:
-        integration = _class_reference(call)
-        if integration is not None:
-            return EffectKind.EXTERNAL_CALL, member, integration, "mail"
-    if (receiver == "Event" and member == "dispatch") or (
-        receiver is None and member == "event"
-    ):
-        event = _class_reference(call)
-        if _short_name(event) in event_names:
-            return EffectKind.EVENT_EMIT, member, _short_name(event), None
-    if receiver in {"Bus"} and member == "dispatch":
-        job = _class_reference(call)
-        if _short_name(job) in job_names:
-            return EffectKind.JOB_DISPATCH, member, _short_name(job), None
-    if receiver is None and member == "dispatch":
-        job = _class_reference(call)
-        if _short_name(job) in job_names:
-            return EffectKind.JOB_DISPATCH, member, _short_name(job), None
-    if (
-        call.call_form == "scoped"
-        and call.receiver in job_names
-        and member == "dispatch"
-    ):
-        return EffectKind.JOB_DISPATCH, member, call.receiver, None
-    if receiver == "Queue" and member in _QUEUE_METHODS:
-        job = _short_name(_class_reference(call))
-        if job in job_names:
-            return EffectKind.QUEUE_DISPATCH, member, job, None
+    imports = _visible_imports(item)
+    local_names = _local_type_names(item)
+    if receiver in _FACADE_NAMES and receiver in local_names:
+        return None
+    imported = imports.get(receiver)
+    if imported is not None:
+        return _canonical_facade(imported)
+    canonical = _canonical_facade(receiver)
+    if canonical is not None:
+        return canonical
+    if receiver in _FACADE_NAMES and receiver not in imports and receiver not in local_names:
+        return receiver
     return None
 
 
-def _potential_effect_kind(
-    call: StructuralCall,
-    *,
-    aliases: dict[str, str],
-    model_names: frozenset[str],
-    job_names: frozenset[str],
-    event_names: frozenset[str],
-) -> EffectKind | None:
-    """Classify a recognised API even when its public target is dynamic."""
-
-    member = call.member
-    receiver = _facade_for(call.receiver, aliases)
-    if member is None:
+def _resolve_class_reference(
+    value: str | None,
+    item: SyntaxIR,
+    by_fqn: dict[str, SourceNodeIR],
+) -> SourceNodeIR | None:
+    if value is None:
         return None
-    if receiver == "DB" or (
-        call.call_form == "scoped" and call.receiver in model_names
-    ):
-        if member in _READ_METHODS:
-            return EffectKind.DATA_READ
-        if member in _WRITE_METHODS:
-            return EffectKind.DATA_WRITE
-    if receiver == "Cache":
-        if member in _CACHE_READ:
-            return EffectKind.CACHE_READ
-        if member in _CACHE_WRITE:
-            return EffectKind.CACHE_WRITE
-    if receiver == "Storage":
-        if member in _STORAGE_READ:
-            return EffectKind.STORAGE_READ
-        if member in _STORAGE_WRITE:
-            return EffectKind.STORAGE_WRITE
-    if receiver == "Http" and member in _HTTP_METHODS:
-        return EffectKind.EXTERNAL_CALL
-    if receiver in {"Mail", "Notification"} and member in _MAIL_METHODS:
-        return EffectKind.EXTERNAL_CALL
-    if (receiver == "Event" and member == "dispatch") or (
-        receiver is None and member == "event"
-    ):
-        return EffectKind.EVENT_EMIT
-    if (receiver == "Bus" and member == "dispatch") or (
-        receiver is None and member == "dispatch"
-    ):
-        return EffectKind.JOB_DISPATCH
-    if (
-        call.call_form == "scoped"
-        and call.receiver in job_names
-        and member == "dispatch"
-    ):
-        return EffectKind.JOB_DISPATCH
-    if receiver == "Queue" and member in _QUEUE_METHODS:
-        return EffectKind.QUEUE_DISPATCH
-    return None
+    normalized = value.lstrip("\\")
+    imports = _visible_imports(item)
+    if "\\" in normalized:
+        first, remainder = normalized.split("\\", 1)
+        normalized = f"{imports[first]}\\{remainder}" if first in imports else normalized
+    elif normalized in imports:
+        normalized = imports[normalized]
+    elif item.namespace:
+        normalized = f"{item.namespace}\\{normalized}"
+    return by_fqn.get(normalized)
+
+
+def _known_targets(result: AdapterResult, prefix: str) -> dict[str, SourceNodeIR]:
+    return {
+        node.qualified_name: node
+        for node in result.source_nodes
+        if node.kind is NodeKind.CLASS
+        and node.locator.source_location.path.startswith(prefix)
+    }
+
+
+def _known_models(result: AdapterResult) -> frozenset[str]:
+    return frozenset(
+        node.qualified_name or node.name
+        for node in result.data_nodes
+        if node.kind is NodeKind.MODEL and node.qualified_name is not None
+    )
+
+
+def _resolve_model_receiver(call: StructuralCall, item: SyntaxIR, models: frozenset[str]) -> str | None:
+    receiver = call.receiver
+    if call.call_form != "scoped" or receiver is None:
+        return None
+    imports = _visible_imports(item)
+    if receiver.startswith("\\"):
+        candidate = receiver.lstrip("\\")
+    elif receiver in imports:
+        candidate = imports[receiver]
+    elif item.namespace:
+        candidate = f"{item.namespace}\\{receiver}"
+    else:
+        return None
+    return candidate if candidate in models else None
+
+
+def _locator(context: ExtractionContext, item: SyntaxIR, call: StructuralCall, ordinal: int) -> AstLocatorIR:
+    digest = next(row.file_sha256 for row in context.inventory_files if row.path == item.path)
+    return AstLocatorIR(
+        SourceLocationIR(item.path, call.line, call.line, digest), call.structural_path, ordinal
+    )
 
 
 def _effect_relation(kind: EffectKind) -> tuple[Relation, EdgeFlow]:
     if kind in {EffectKind.DATA_READ, EffectKind.CACHE_READ, EffectKind.STORAGE_READ}:
         return Relation.READS, EdgeFlow.ALWAYS
-    if kind in {
-        EffectKind.DATA_WRITE,
-        EffectKind.CACHE_WRITE,
-        EffectKind.STORAGE_WRITE,
-    }:
+    if kind in {EffectKind.DATA_WRITE, EffectKind.CACHE_WRITE, EffectKind.STORAGE_WRITE}:
         return Relation.WRITES, EdgeFlow.ALWAYS
     if kind is EffectKind.EXTERNAL_CALL:
         return Relation.CALLS_EXTERNAL, EdgeFlow.ALWAYS
@@ -314,205 +251,238 @@ def _effect_relation(kind: EffectKind) -> tuple[Relation, EdgeFlow]:
     return Relation.DISPATCHES, EdgeFlow.ASYNC
 
 
-def apply_laravel_effects(
-    context: ExtractionContext,
-    syntax: Sequence[SyntaxIR],
-    result: AdapterResult,
-) -> AdapterResult:
-    """Append native Laravel effects to structural IR without raw source fallback."""
+def _candidate_for_call(
+    call: StructuralCall,
+    item: SyntaxIR,
+    *,
+    tables: dict[tuple[str, str], str],
+    models: frozenset[str],
+    events: dict[str, SourceNodeIR],
+    jobs: dict[str, SourceNodeIR],
+) -> _EffectCandidate | None:
+    member = call.member
+    facade = _facade_for(call, item)
+    if member is None:
+        return None
+    if facade == "DB" and member in _READ_METHODS | _WRITE_METHODS:
+        table = tables.get((call.caller, call.receiver_chain_key))
+        if table is None:
+            return None
+        return _EffectCandidate(
+            EffectKind.DATA_READ if member in _READ_METHODS else EffectKind.DATA_WRITE,
+            member,
+            table,
+            None,
+        )
+    model = _resolve_model_receiver(call, item, models)
+    if model is not None and member in _READ_METHODS | _WRITE_METHODS:
+        return _EffectCandidate(
+            EffectKind.DATA_READ if member in _READ_METHODS else EffectKind.DATA_WRITE,
+            member,
+            model,
+            None,
+        )
+    if facade == "Cache" and member in _CACHE_READ | _CACHE_WRITE:
+        resource = _safe_cache_key(_literal(call))
+        if resource is not None:
+            return _EffectCandidate(
+                EffectKind.CACHE_READ if member in _CACHE_READ else EffectKind.CACHE_WRITE,
+                member,
+                resource,
+                None,
+            )
+    if facade == "Storage" and member in _STORAGE_READ | _STORAGE_WRITE:
+        resource = _safe_storage_path(_literal(call))
+        if resource is not None:
+            return _EffectCandidate(
+                EffectKind.STORAGE_READ if member in _STORAGE_READ else EffectKind.STORAGE_WRITE,
+                member,
+                resource,
+                None,
+            )
+    if facade == "Http" and member in _HTTP_METHODS:
+        endpoint = _safe_http_endpoint(_literal(call, 1 if member == "request" else 0))
+        return _EffectCandidate(EffectKind.EXTERNAL_CALL, member, endpoint or "http", "http")
+    if facade in {"Mail", "Notification"} and member in _MAIL_METHODS:
+        target = _class_reference(call)
+        if target is not None:
+            return _EffectCandidate(EffectKind.EXTERNAL_CALL, member, target, "mail")
+    event_call = (facade == "Event" and member == "dispatch") or (facade is None and member == "event")
+    if event_call:
+        target = _resolve_class_reference(_class_reference(call), item, events)
+        if target is not None:
+            return _EffectCandidate(EffectKind.EVENT_EMIT, member, target.qualified_name, None, target.local_key)
+    job_call = (facade == "Bus" and member == "dispatch") or (
+        facade is None and call.call_form != "scoped" and member == "dispatch"
+    )
+    if job_call or (call.call_form == "scoped" and member == "dispatch"):
+        target = _resolve_class_reference(
+            _class_reference(call) if job_call else call.receiver,
+            item,
+            jobs,
+        )
+        if target is not None:
+            return _EffectCandidate(EffectKind.JOB_DISPATCH, member, target.qualified_name, None, target.local_key)
+    if facade == "Queue" and member in _QUEUE_METHODS:
+        target = _resolve_class_reference(_class_reference(call), item, jobs)
+        if target is not None:
+            return _EffectCandidate(EffectKind.QUEUE_DISPATCH, member, target.qualified_name, None, target.local_key)
+    return None
 
-    if not any(
-        item.name == "laravel" and item.language == "php"
-        for item in context.detected_frameworks
+
+def _potential_kind(
+    call: StructuralCall,
+    item: SyntaxIR,
+    models: frozenset[str],
+    jobs: dict[str, SourceNodeIR],
+) -> EffectKind | None:
+    member = call.member
+    facade = _facade_for(call, item)
+    if member is None:
+        return None
+    if facade == "DB" or _resolve_model_receiver(call, item, models) is not None:
+        if member in _READ_METHODS:
+            return EffectKind.DATA_READ
+        if member in _WRITE_METHODS:
+            return EffectKind.DATA_WRITE
+    if facade == "Cache":
+        return EffectKind.CACHE_READ if member in _CACHE_READ else EffectKind.CACHE_WRITE if member in _CACHE_WRITE else None
+    if facade == "Storage":
+        return EffectKind.STORAGE_READ if member in _STORAGE_READ else EffectKind.STORAGE_WRITE if member in _STORAGE_WRITE else None
+    if facade == "Http" and member in _HTTP_METHODS:
+        return EffectKind.EXTERNAL_CALL
+    if facade in {"Mail", "Notification"} and member in _MAIL_METHODS:
+        return EffectKind.EXTERNAL_CALL
+    if (facade == "Event" and member == "dispatch") or (facade is None and member == "event"):
+        return EffectKind.EVENT_EMIT
+    if (facade == "Bus" and member == "dispatch") or (
+        facade is None and call.call_form != "scoped" and member == "dispatch"
     ):
+        return EffectKind.JOB_DISPATCH
+    if (
+        call.call_form == "scoped"
+        and member == "dispatch"
+        and _resolve_class_reference(call.receiver, item, jobs) is not None
+    ):
+        return EffectKind.JOB_DISPATCH
+    if facade == "Queue" and member in _QUEUE_METHODS:
+        return EffectKind.QUEUE_DISPATCH
+    return None
+
+
+def apply_laravel_effects(context: ExtractionContext, syntax: Sequence[SyntaxIR], result: AdapterResult) -> AdapterResult:
+    """Append exact Laravel effects and typed uncertainty without source fallback."""
+
+    if not any(item.name == "laravel" and item.language == "php" for item in context.detected_frameworks):
         return result
     declarations = {
-        (
-            item.language,
-            item.locator.source_location.path,
-            item.qualified_name or item.name,
-        ): item
-        for item in result.declarations
+        (row.language, row.locator.source_location.path, row.qualified_name or row.name): row
+        for row in result.declarations
     }
-    effects: list[Effect] = list(result.effects)
-    edges: list[EdgeFactIR] = list(result.edge_facts)
-    unresolved: list[UnresolvedFact] = list(result.unresolved_facts)
-    coverage: list[CoverageEvent] = list(result.coverage_events)
-    model_names = _known_model_names(result)
-    job_names = _known_class_names(syntax, "app/Jobs/")
-    event_names = _known_class_names(syntax, "app/Events/")
-    for item in sorted(
-        (row for row in syntax if row.language == "php"), key=lambda row: row.path
-    ):
-        aliases = _facade_aliases(item)
-        table_by_caller_line: dict[tuple[str, int], str] = {}
+    block_by_occurrence = {
+        (block.locator.source_location.path, block.locator.structural_path): block.local_key
+        for block in result.blocks
+    }
+    effects = list(result.effects)
+    edges = list(result.edge_facts)
+    unresolved = list(result.unresolved_facts)
+    coverage = list(result.coverage_events)
+    models = _known_models(result)
+    events = _known_targets(result, "app/Events/")
+    jobs = _known_targets(result, "app/Jobs/")
+
+    for item in sorted((row for row in syntax if row.language == "php"), key=lambda row: row.path):
+        tables: dict[tuple[str, str], str] = {}
         for call in item.calls:
-            if _facade_for(call.receiver, aliases) == "DB" and call.member == "table":
+            if _facade_for(call, item) == "DB" and call.member == "table":
                 table = _literal(call)
-                if table is not None:
-                    table_by_caller_line[(call.caller, call.line)] = table
-        emitted = 0
-        omitted = 0
-        call_sites = {
-            (
-                site.locator.source_location.path,
-                site.locator.structural_path,
-            ): site.local_key
-            for site in result.call_sites
-        }
+                if table is not None and _TABLE_RE.fullmatch(table):
+                    tables[(call.caller, call.receiver_chain_key)] = table
+        represented_data = omitted_data = represented_async = omitted_async = 0
         for ordinal, call in enumerate(item.calls):
             declaration = declarations.get(("php", item.path, call.caller))
-            if declaration is None:
-                continue
-            effect = _effect_for_call(
-                call,
-                aliases=aliases,
-                table_by_line={
-                    line: table
-                    for (caller, line), table in table_by_caller_line.items()
-                    if caller == call.caller
-                },
-                model_names=model_names,
-                job_names=job_names,
-                event_names=event_names,
+            source_block_key = block_by_occurrence.get((item.path, call.structural_path))
+            candidate = _candidate_for_call(
+                call, item, tables=tables, models=models, events=events, jobs=jobs
             )
-            if effect is None:
-                potential = _potential_effect_kind(
-                    call,
-                    aliases=aliases,
-                    model_names=model_names,
-                    job_names=job_names,
-                    event_names=event_names,
-                )
-                if potential is None:
-                    continue
-                locator = _locator(context, item, call, ordinal)
-                if potential in {
-                    EffectKind.EVENT_EMIT,
-                    EffectKind.JOB_DISPATCH,
-                    EffectKind.QUEUE_DISPATCH,
-                }:
-                    # The frozen unresolved-edge matrix intentionally has no
-                    # async effect target branch.  Keep coverage explicit
-                    # rather than inventing an incompatible target edge.
-                    omitted += 1
-                    continue
-                edge_key = local_record_key(
-                    "php",
-                    item.path,
-                    "laravel_effect_unresolved_edge",
-                    "ast",
-                    call.structural_path,
-                    ordinal,
-                )
-                relation, flow = _effect_relation(potential)
-                evidence = IREvidence(
-                    EvidenceOrigin.UNRESOLVED,
-                    "laravel.effects-v2",
-                    locator,
-                    None,
-                )
-                edges.append(
-                    EdgeFactIR(
-                        edge_key,
-                        declaration.entry_block_key,
-                        BoundaryTarget(
-                            FrameworkBoundaryDescriptor(
-                                "laravel", "effect_target", None, locator, evidence
-                            )
-                        ),
-                        relation,
-                        flow,
-                        None,
-                        None,
-                        None,
-                        None,
-                        ordinal,
-                        locator,
-                        evidence,
-                    )
-                )
-                unresolved.append(
-                    UnresolvedFact(
-                        local_record_key(
-                            "php",
-                            item.path,
-                            "laravel_effect_unresolved",
-                            "ast",
-                            call.structural_path,
-                            ordinal,
-                        ),
-                        EdgeSubjectIR(edge_key),
-                        ResolutionKind.EXTERNAL_TARGET,
-                        CandidateSetKnowledge.NOT_APPLICABLE,
-                        "laravel_effect_resource_unresolved",
-                        "Which public resource is reached by this recognised Laravel API call?",
-                        ("inspect_static_call_arguments",),
-                        (locator,),
-                        (),
-                        (),
-                        Priority.NORMAL,
-                        "The API operation is known, but its public target is not statically verified.",
-                    )
-                )
-                omitted += 1
+            potential = _potential_kind(call, item, models, jobs) if candidate is None else None
+            kind = candidate.kind if candidate is not None else potential
+            if declaration is None or source_block_key is None or kind is None:
+                if potential is not None:
+                    if potential in {EffectKind.EVENT_EMIT, EffectKind.JOB_DISPATCH, EffectKind.QUEUE_DISPATCH}:
+                        omitted_async += 1
+                    else:
+                        omitted_data += 1
                 continue
-            kind, operation, resource, protocol = effect
             locator = _locator(context, item, call, ordinal)
-            effects.append(
-                Effect(
-                    local_record_key(
-                        "php",
-                        item.path,
-                        "laravel_effect",
-                        "ast",
-                        call.structural_path,
-                        ordinal,
-                    ),
-                    (
-                        CallSiteEffectSource(
-                            call_sites[(item.path, call.structural_path)]
-                        )
-                        if (item.path, call.structural_path) in call_sites
-                        else BlockEffectSource(declaration.entry_block_key)
-                    ),
-                    kind,
-                    operation,
-                    resource,
-                    protocol,
+            if candidate is not None:
+                effects.append(
+                    Effect(
+                        local_record_key("php", item.path, "laravel_effect", "ast", call.structural_path, ordinal),
+                        BlockEffectSource(source_block_key),
+                        candidate.kind,
+                        candidate.operation,
+                        candidate.resource,
+                        candidate.protocol,
+                        locator,
+                        target_source_node_local_key=candidate.target_source_node_local_key,
+                    )
+                )
+                if candidate.kind in {EffectKind.EVENT_EMIT, EffectKind.JOB_DISPATCH, EffectKind.QUEUE_DISPATCH}:
+                    represented_async += 1
+                else:
+                    represented_data += 1
+                continue
+            relation, flow = _effect_relation(kind)
+            edge_key = local_record_key("php", item.path, "laravel_effect_unresolved_edge", "ast", call.structural_path, ordinal)
+            evidence = IREvidence(EvidenceOrigin.UNRESOLVED, "laravel.effects-v2", locator, None)
+            edges.append(
+                EdgeFactIR(
+                    edge_key,
+                    source_block_key,
+                    BoundaryTarget(FrameworkBoundaryDescriptor("laravel", "async_target" if flow is EdgeFlow.ASYNC else "effect_target", None, locator, evidence)),
+                    relation,
+                    flow,
+                    None,
+                    None,
+                    None,
+                    None,
+                    ordinal,
                     locator,
+                    evidence,
                 )
             )
-            emitted += 1
-        if emitted or omitted:
-            coverage.append(
-                CoverageEvent(
-                    "php",
-                    CoverageCapability.DATA_ACCESS,
-                    CoverageOutcome.FULL if not omitted else CoverageOutcome.PARTIAL,
-                    None if not omitted else "laravel_effect_resource_unresolved",
-                    item.path,
-                    emitted,
-                    omitted,
+            async_target = flow is EdgeFlow.ASYNC
+            unresolved.append(
+                UnresolvedFact(
+                    local_record_key("php", item.path, "laravel_effect_unresolved", "ast", call.structural_path, ordinal),
+                    EdgeSubjectIR(edge_key),
+                    ResolutionKind.ASYNC_TARGET if async_target else ResolutionKind.EXTERNAL_TARGET,
+                    CandidateSetKnowledge.NOT_APPLICABLE,
+                    "dynamic_dispatch",
+                    "Which verified target is reached by this recognised Laravel API call?",
+                    ("inspect_static_call_arguments",),
+                    (locator,),
+                    (),
+                    (),
+                    Priority.NORMAL,
+                    "The API operation is known but its target is not statically verified.",
                 )
             )
+            if async_target:
+                omitted_async += 1
+            else:
+                omitted_data += 1
+        if represented_data or omitted_data:
+            coverage.append(CoverageEvent("php", CoverageCapability.DATA_ACCESS, CoverageOutcome.FULL if not omitted_data else CoverageOutcome.PARTIAL, None, item.path, represented_data, omitted_data))
+        if represented_async or omitted_async:
+            coverage.append(CoverageEvent("php", CoverageCapability.ASYNC, CoverageOutcome.FULL if not omitted_async else CoverageOutcome.PARTIAL, None, item.path, represented_async, omitted_async))
     merged = replace(
         result,
         effects=tuple(sorted(effects, key=lambda row: row.local_key)),
         edge_facts=tuple(sorted(edges, key=lambda row: row.local_key)),
         unresolved_facts=tuple(sorted(unresolved, key=lambda row: row.local_key)),
-        coverage_events=tuple(
-            sorted(
-                coverage,
-                key=lambda row: (
-                    row.language,
-                    row.capability.value,
-                    row.outcome.value,
-                    row.reason_code or "",
-                    row.path or "",
-                ),
-            )
-        ),
+        coverage_events=tuple(sorted(coverage, key=lambda row: (row.language, row.capability.value, row.outcome.value, row.reason_code or "", row.path or ""))),
     )
     merged.validate()
     return merged

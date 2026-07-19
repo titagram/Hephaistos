@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, TypeAlias
 
@@ -23,6 +23,22 @@ from hermes_cli.hades_index.lifecycle.model import (
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_.$\\][A-Za-z0-9_.$\\/:@>~\-]*$")
 _SAFE_CALL_LITERAL_RE = re.compile(r"^[A-Za-z0-9._:/\-]{1,256}$")
 _SAFE_REFERENCE_RE = re.compile(r"^\\?[A-Za-z_][A-Za-z0-9_\\]*$")
+_PRIVATE_LITERAL_RE = re.compile(
+    r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
+    r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
+)
+_LARAVEL_FACADE_PREFIX = "Illuminate\\Support\\Facades\\"
+_LARAVEL_FACADES = frozenset({
+    "DB",
+    "Cache",
+    "Storage",
+    "Http",
+    "Mail",
+    "Notification",
+    "Event",
+    "Bus",
+    "Queue",
+})
 _SYMBOL_TYPES = {
     "typescript": {
         "function_declaration": "function",
@@ -161,6 +177,7 @@ class StructuralSymbol:
     end_line: int
     container: str = ""
     structural_path: str = "root"
+    namespace: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +185,7 @@ class StructuralImport:
     target: str
     line: int
     alias: str | None = None
+    namespace: str | None = None
 
 
 CallArgumentKind: TypeAlias = Literal["literal", "class_reference", "unknown"]
@@ -202,6 +220,7 @@ class StructuralCall:
     receiver: str | None = None
     member: str | None = None
     arguments: tuple[StructuralCallArgument, ...] = ()
+    receiver_chain_key: str = "root"
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +230,7 @@ class ParsedFile:
     symbols: tuple[StructuralSymbol, ...]
     imports: tuple[StructuralImport, ...]
     calls: tuple[StructuralCall, ...]
+    namespace: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +299,10 @@ class SyntaxIR:
     @property
     def calls(self) -> tuple[StructuralCall, ...]:
         return self.parsed_file.calls
+
+    @property
+    def namespace(self) -> str | None:
+        return self.parsed_file.namespace
 
 
 def declaration_local_key(
@@ -427,6 +451,13 @@ def _safe_literal(source: bytes, node: Any | None) -> str | None:
     value = raw[1:-1]
     if not _SAFE_CALL_LITERAL_RE.fullmatch(value):
         return None
+    if _PRIVATE_LITERAL_RE.search(value):
+        return None
+    if value.startswith(("/", "~")) or any(
+        segment in {".", ".."} or segment.startswith(".")
+        for segment in value.split("/")
+    ):
+        return None
     if value.startswith(("http://", "https://")) and any(
         marker in value for marker in ("?", "#", "@")
     ):
@@ -472,13 +503,37 @@ def _call_root_receiver(source: bytes, node: Any | None) -> str | None:
     return _safe_reference(source, node)
 
 
+def _structural_child_path(parent: Any, parent_path: str, target: Any) -> str:
+    counts: dict[str, int] = {}
+    for child in getattr(parent, "children", ()):
+        child_type = str(getattr(child, "type", "node"))
+        ordinal = counts.get(child_type, 0)
+        counts[child_type] = ordinal + 1
+        if child == target:
+            return f"{parent_path}/{child_type}/{ordinal}"
+    return parent_path
+
+
+def _receiver_chain_key(node: Any, structural_path: str) -> str:
+    """Return the root call occurrence of one fluent receiver chain."""
+
+    object_node = _field(node, "object")
+    if str(getattr(object_node, "type", "")) not in _CALL_TYPES:
+        return structural_path
+    return _receiver_chain_key(
+        object_node,
+        _structural_child_path(node, structural_path, object_node),
+    )
+
+
 def _call_fields(
-    source: bytes, node: Any
+    source: bytes, node: Any, structural_path: str
 ) -> tuple[
     Literal["function", "scoped", "member", "nullsafe_member"],
     str | None,
     str | None,
     tuple[StructuralCallArgument, ...],
+    str,
 ]:
     """Translate a native call node into closed, source-free facts."""
 
@@ -509,7 +564,72 @@ def _call_fields(
             getattr(_field(node, "arguments"), "named_children", ())
         )
     )
-    return form, receiver, member, arguments
+    return form, receiver, member, arguments, _receiver_chain_key(node, structural_path)
+
+
+def _canonical_laravel_facade(target: str) -> str | None:
+    normalized = target.lstrip("\\")
+    if not normalized.startswith(_LARAVEL_FACADE_PREFIX):
+        return None
+    facade = normalized[len(_LARAVEL_FACADE_PREFIX) :]
+    return facade if facade in _LARAVEL_FACADES else None
+
+
+def _sanitize_php_call_literals(
+    calls: tuple[StructuralCall, ...],
+    imports: tuple[StructuralImport, ...],
+    symbols: tuple[StructuralSymbol, ...],
+) -> tuple[StructuralCall, ...]:
+    """Retain literals only for unshadowed candidate Laravel resource APIs."""
+
+    aliases: dict[str, str] = {}
+    occupied: set[str] = set()
+    for imported in imports:
+        visible = imported.alias or imported.target.rsplit("\\", 1)[-1]
+        occupied.add(visible)
+        facade = _canonical_laravel_facade(imported.target)
+        if facade is not None:
+            aliases[visible] = facade
+            aliases[imported.target] = facade
+            aliases[f"\\{imported.target}"] = facade
+    local_names = {
+        symbol.name.rsplit(".", 1)[-1]
+        for symbol in symbols
+        if symbol.kind in {"class", "interface", "trait", "enum"}
+    }
+
+    def facade_for(receiver: str | None) -> str | None:
+        if receiver is None:
+            return None
+        if receiver in aliases:
+            return aliases[receiver]
+        facade = _canonical_laravel_facade(receiver)
+        if facade is not None:
+            return facade
+        if receiver in _LARAVEL_FACADES and receiver not in occupied | local_names:
+            return receiver
+        return None
+
+    sanitized: list[StructuralCall] = []
+    for call in calls:
+        facade = facade_for(call.receiver)
+        retained_indexes: frozenset[int] = frozenset()
+        if facade == "DB" and call.member == "table":
+            retained_indexes = frozenset({0})
+        elif facade in {"Cache", "Storage"}:
+            retained_indexes = frozenset({0})
+        elif facade == "Http" and call.member in {
+            "get", "post", "put", "patch", "delete", "request"
+        }:
+            retained_indexes = frozenset({1 if call.member == "request" else 0})
+        arguments = tuple(
+            argument
+            if argument.kind == "class_reference" or index in retained_indexes
+            else StructuralCallArgument("unknown")
+            for index, argument in enumerate(call.arguments)
+        )
+        sanitized.append(replace(call, arguments=arguments))
+    return tuple(sanitized)
 
 
 def _load_parser(language: str) -> Any | None:
@@ -609,6 +729,18 @@ class TreeSitterAdapter:
             calls: list[StructuralCall] = []
             controls: list[SyntaxControl] = []
             symbol_types = _SYMBOL_TYPES.get(language, {})
+            file_namespace = (
+                next(
+                    (
+                        _safe_reference(source, _field(node, "name"))
+                        for node in getattr(root, "named_children", ())
+                        if str(getattr(node, "type", "")) == "namespace_definition"
+                    ),
+                    None,
+                )
+                if language == "php"
+                else None
+            )
 
             def add_control(
                 kind: SyntaxControlKind,
@@ -649,10 +781,14 @@ class TreeSitterAdapter:
                 container: str = "",
                 structural_path: str = "root",
                 owner_structural_path: str = "root",
+                namespace: str | None = None,
             ) -> None:
                 node_type = str(getattr(node, "type", ""))
                 next_context = context
                 next_container = container
+                next_namespace = namespace
+                if language == "php" and node_type == "namespace_definition":
+                    next_namespace = _safe_reference(source, _field(node, "name"))
                 next_owner = (
                     structural_path
                     if node_type in _CALLABLE_TYPES.get(language, ())
@@ -675,6 +811,7 @@ class TreeSitterAdapter:
                                 end_line=_point_row(node.end_point) + 1,
                                 container=container,
                                 structural_path=structural_path,
+                                namespace=namespace,
                             )
                         )
                         next_context = qualified
@@ -721,6 +858,7 @@ class TreeSitterAdapter:
                                         target=target,
                                         line=_point_row(clause.start_point) + 1,
                                         alias=alias,
+                                        namespace=namespace,
                                     )
                                 )
                     else:
@@ -730,11 +868,15 @@ class TreeSitterAdapter:
                         if target:
                             imports.append(
                                 StructuralImport(
-                                    target=target, line=_point_row(node.start_point) + 1
+                                    target=target,
+                                    line=_point_row(node.start_point) + 1,
+                                    namespace=namespace,
                                 )
                             )
                 if node_type in _CALL_TYPES and context:
-                    call_form, receiver, member, arguments = _call_fields(source, node)
+                    call_form, receiver, member, arguments, receiver_chain_key = _call_fields(
+                        source, node, structural_path
+                    )
                     target = member or _bounded_node_text(
                         source, _field(node, "function", "name", "member")
                     )
@@ -750,6 +892,7 @@ class TreeSitterAdapter:
                                 receiver=receiver,
                                 member=member,
                                 arguments=arguments,
+                                receiver_chain_key=receiver_chain_key,
                             )
                         )
                 node_is_named = bool(getattr(node, "is_named", True))
@@ -810,16 +953,33 @@ class TreeSitterAdapter:
                         next_container,
                         f"{structural_path}/{child_type}/{child_ordinal}",
                         next_owner,
+                        next_namespace,
                     )
 
-            visit(root)
+            visit(root, namespace=file_namespace)
 
             parsed = ParsedFile(
                 path=path,
                 language=language,
                 symbols=tuple(symbols),
                 imports=tuple(imports),
-                calls=tuple(calls),
+                calls=(
+                    _sanitize_php_call_literals(tuple(calls), tuple(imports), tuple(symbols))
+                    if language == "php"
+                    else tuple(
+                        replace(
+                            call,
+                            arguments=tuple(
+                                StructuralCallArgument("unknown")
+                                if argument.kind == "literal"
+                                else argument
+                                for argument in call.arguments
+                            ),
+                        )
+                        for call in calls
+                    )
+                ),
+                namespace=file_namespace,
             )
             return ParseResult.parsed(SyntaxIR(parsed, tuple(controls)))
         except Exception:

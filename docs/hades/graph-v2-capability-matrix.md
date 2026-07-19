@@ -11,20 +11,28 @@ regex or raw-source fallback.
 
 | Family | Native v2 status | Evidence and safety boundary |
 | --- | --- | --- |
-| DB/query reads and writes | Supported | Laravel `DB` facade/query-builder calls and source-proven `app/Models` classes; exact static table/model only. |
-| Cache reads and writes | Supported | `Cache` facade, including imported aliases; only a bounded static key is public. |
-| Storage reads and writes | Supported | `Storage` facade, including aliases/chains; only a bounded static path is public. |
+| DB/query reads and writes | Supported | Exact Laravel `DB` facade/query-builder calls and source-proven `app/Models` classes; table identity is a strict static identifier correlated to its own fluent receiver chain. |
+| Cache reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Cache` facade (or an exact import alias); only a static, non-secret, non-path key is public. |
+| Storage reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Storage` facade (or an exact import alias); only a static, relative, sanitised path is public. |
 | Outbound HTTP | Supported | `Http` facade; endpoint is scheme/host/safe-path only, or the privacy-safe `http` boundary when dynamic or unsafe. |
 | Mail and notifications | Supported | `Mail`/`Notification` send paths with a static mailable/notification class; recipients and payloads are never emitted. |
-| Events | Supported | `event(new Type)` and `Event::dispatch` when the event class is present in `app/Events`. |
-| Jobs | Supported | `dispatch(new Job)`, source-proven `Job::dispatch`, and `Bus::dispatch` when the job class is present in `app/Jobs`. |
-| Queue dispatch | Supported | `Queue::push`, `later`, and `bulk` with a source-proven job class. |
+| Events | Supported | `event(new Type)` and `Event::dispatch` with an exact `app/Events` declaration; a dynamic target becomes an `ASYNC_TARGET` boundary uncertainty. |
+| Jobs | Supported | `dispatch(new Job)`, source-proven `Job::dispatch`, and `Bus::dispatch` with an exact `app/Jobs` declaration; a dynamic target becomes an `ASYNC_TARGET` boundary uncertainty. |
+| Queue dispatch | Supported | `Queue::push`, `later`, and `bulk` with an exact `app/Jobs` declaration; a dynamic target becomes an `ASYNC_TARGET` boundary uncertainty. |
 
 Computed receiver, method, target, class, table, key, or unsafe resource does
-not produce a verified generic resource. The producer records partial coverage
-and, where the frozen IR permits it, a typed unresolved external target. It
-never preserves source bytes, query strings, credentials, recipients, headers,
-or request/body payloads.
+not produce a verified generic resource. Receiver ownership is resolved through
+exact imports and namespaces: local symbols, unrelated aliases, and unrelated
+fully-qualified application classes are never collapsed to a Laravel facade or
+model by basename. Each published effect is attached to its exact emitted
+structural block; declaration-entry fallback is not used.
+
+The producer records partial coverage and a typed unresolved boundary when a
+recognised target is dynamic. Dynamic event/job/queue calls use
+`ASYNC_TARGET` with `EMITS`/`DISPATCHES` and `ASYNC` flow. It never preserves
+source bytes, query strings, credentials, tokens, absolute/home or traversal
+paths, recipients, headers, or request/body payloads. Artifact validation
+independently rejects private resource names should a producer regress.
 
 ## Deliberately not reconstructed in this change
 
