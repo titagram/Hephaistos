@@ -720,6 +720,13 @@ class GraphBudgetPruner:
         ):
             return artifact
 
+        edge_ceiling_only = (
+            complete_plan is not None
+            and complete_plan.logical_uncompressed_bytes <= limits.bundle_ceiling
+            and limits.max_edges is not None
+            and len(artifact.edges) > limits.max_edges
+        )
+
         accepted: set[Token] = set()
         for framework in cast(list[dict[str, Any]], original["frameworks"]):
             for path in framework["configuration_paths"]:
@@ -734,8 +741,10 @@ class GraphBudgetPruner:
                 )
 
         rejections: list[_Rejection] = []
+        accepted_edge_count = sum(kind == "edges" for kind, _ in accepted)
 
         def consider(unit: _Unit) -> None:
+            nonlocal accepted_edge_count
             added = unit.tokens - accepted
             if any(
                 not record_fits_chunk(
@@ -744,6 +753,23 @@ class GraphBudgetPruner:
                 for token in added
             ):
                 rejections.append(_Rejection(unit, ReasonCode.RECORD_TOO_LARGE))
+                return
+            if edge_ceiling_only:
+                # The complete graph already passed every byte, chunk, and wire
+                # constraint, leaving only the explicit edge count to enforce.
+                # Count the precomputed atomic closure incrementally instead of
+                # rebuilding and validating the whole candidate for every edge.
+                added_edge_count = sum(kind == "edges" for kind, _ in added)
+                if (
+                    accepted_edge_count + added_edge_count
+                    > cast(int, limits.max_edges)
+                ):
+                    rejections.append(
+                        _Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED)
+                    )
+                    return
+                accepted.update(unit.tokens)
+                accepted_edge_count += added_edge_count
                 return
             candidate_tokens = accepted | set(unit.tokens)
             try:

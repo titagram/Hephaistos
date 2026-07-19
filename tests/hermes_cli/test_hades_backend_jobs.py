@@ -1246,95 +1246,47 @@ def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
 def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
     monkeypatch, tmp_path
 ):
-    from dataclasses import replace
-
     import hermes_cli.hades_index as hades_index
-    import hermes_cli.hades_index.lifecycle.assembler as assembler
+    import hermes_cli.hades_graph_v2.pruning as graph_pruning
     from hermes_cli.hades_backend_jobs import execute_job
-    from hermes_cli.hades_index.lifecycle.model import local_record_key
+    from hermes_cli.hades_graph_v2 import artifact_from_payload
+    from hermes_cli.hades_graph_v2.validation import validate_artifact
+    from tests.hermes_cli.test_hades_graph_budget_pruner import _many_edge_artifact
 
     source = tmp_path / "graph.py"
-    source.write_text(
-        "class Service:\n"
-        "    def first(self):\n        pass\n"
-        "    def second(self):\n        pass\n",
-        encoding="utf-8",
-    )
-
-    real_assemble = assembler.assemble_graph_v2_adapter_result
-    generated_count: dict[str, int] = {}
-
-    def oversized_assemble(context, syntax, *, parse_coverage=(), registry=None):
-        base = real_assemble(
-            context,
-            syntax,
-            parse_coverage=parse_coverage,
-            registry=registry,
-        )
-        template = base.edge_facts[0]
-        generated = []
-        for ordinal in range(10_001):
-            locator = replace(
-                template.locator,
-                structural_path=f"hard_ceiling/edge/{ordinal}",
-                ordinal=ordinal,
-            )
-            generated.append(
-                replace(
-                    template,
-                    local_key=local_record_key(
-                        "python",
-                        "graph.py",
-                        "hard_ceiling_edge",
-                        "ast",
-                        locator.structural_path,
-                        ordinal,
-                    ),
-                    locator=locator,
-                    evidence=replace(template.evidence, locator=locator),
-                )
-            )
-        generated_count["assembled"] = len(generated)
-        return replace(
-            base,
-            edge_facts=tuple(sorted(generated, key=lambda edge: edge.local_key)),
-        )
-
+    source.write_text("pass\n", encoding="utf-8")
+    canonical = _many_edge_artifact(10_001)
     monkeypatch.setattr(
-        assembler, "assemble_graph_v2_adapter_result", oversized_assemble
+        hades_index,
+        "build_canonical_graph",
+        lambda _context, _results: artifact_from_payload(canonical),
     )
-    real_build = hades_index.build_canonical_graph
-    captured: dict[str, int] = {}
+    real_finalize = graph_pruning._finalize_candidate
+    finalize_calls = 0
 
-    def bounded_build(context, results):
-        assembled = results[0]
-        captured["retained_edges"] = len(assembled.edge_facts)
-        captured["budget_omitted"] = sum(
-            event.omitted_count
-            for event in assembled.coverage_events
-            if event.capability.value == "call_graph"
-            and event.reason_code == "resource_budget_reached"
-        )
-        bounded = real_assemble(
-            context,
-            (),
-            parse_coverage=assembled.coverage_events,
-        )
-        return real_build(context, (bounded, *results[1:]))
+    def tracked_finalize(*args, **kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        return real_finalize(*args, **kwargs)
 
-    monkeypatch.setattr(hades_index, "build_canonical_graph", bounded_build)
+    monkeypatch.setattr(graph_pruning, "_finalize_candidate", tracked_finalize)
     artifact = _materialize_graph_v2(
         execute_job(
             {
                 "job_id": "job_hard_edge_ceiling",
                 "capability": "populate_backend_ast",
-                "payload": {"max_symbols": 5_000, "max_edges": 10_001},
+                "payload": {"max_edges": 10_000},
             },
             workspace_root=tmp_path,
         )
     )
-    assert generated_count == {"assembled": 10_001}
-    assert captured == {"retained_edges": 10_000, "budget_omitted": 1}
+
+    validate_artifact(artifact)
+    assert finalize_calls == 1
+    assert len(artifact["edges"]) == 10_000
+    assert artifact["graph_contract"]["coverage"]["records"][
+        "omitted_by_bundle_budget"
+    ] == 1
     reason = next(
         item
         for item in artifact["graph_contract"]["completeness"]["capabilities"][
@@ -1342,7 +1294,7 @@ def test_populate_backend_ast_hard_clamps_edges_at_ten_thousand(
         ]["reasons"]
         if item["code"] == "resource_budget_reached"
     )
-    assert reason["count"] > 0
+    assert reason["count"] == 1
 
 
 def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
