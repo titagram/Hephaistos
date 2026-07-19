@@ -17,7 +17,9 @@ from hermes_cli.hades_graph_v2 import (
     canonical_json_bytes,
     validate_schema,
 )
-from hermes_cli.hades_graph_v2.bundle import MAX_MANIFEST_BYTES as _MAX_GRAPH_MANIFEST_BYTES
+from hermes_cli.hades_graph_v2.bundle import (
+    MAX_MANIFEST_BYTES as _MAX_GRAPH_MANIFEST_BYTES,
+)
 
 
 API_PREFIX = "/api/hades/v1"
@@ -53,9 +55,11 @@ _GRAPH_CREATE_ERROR_CODES = {
 _GRAPH_CHUNK_ERROR_CODES = {
     404: frozenset({"graph_import_not_found"}),
     409: frozenset({"chunk_digest_conflict"}),
-    422: frozenset(
-        {"graph_chunk_invalid", "graph_chunk_too_large", "graph_import_not_staging"}
-    ),
+    422: frozenset({
+        "graph_chunk_invalid",
+        "graph_chunk_too_large",
+        "graph_import_not_staging",
+    }),
 }
 _GRAPH_COMPLETE_ERROR_CODES = {
     404: frozenset({"graph_import_not_found"}),
@@ -77,7 +81,9 @@ def validate_graph_import_id(value: Any) -> str:
 
 def _require_rfc3339_date_time(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or _RFC3339_DATE_TIME.fullmatch(value) is None:
-        raise HadesBackendError(f"graph import response {field} must be RFC3339 date-time")
+        raise HadesBackendError(
+            f"graph import response {field} must be RFC3339 date-time"
+        )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -85,7 +91,9 @@ def _require_rfc3339_date_time(value: Any, *, field: str) -> str:
             f"graph import response {field} must be RFC3339 date-time"
         ) from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise HadesBackendError(f"graph import response {field} must be RFC3339 date-time")
+        raise HadesBackendError(
+            f"graph import response {field} must be RFC3339 date-time"
+        )
     return value
 
 
@@ -182,7 +190,9 @@ class GraphImportState:
                 "graph import response has an invalid import_id"
             ) from None
         if validation not in {"staging", "validating", "validated", "failed", "stale"}:
-            raise HadesBackendError("graph import response has an invalid validation status")
+            raise HadesBackendError(
+                "graph import response has an invalid validation status"
+            )
         if publication not in {
             "not_requested",
             "queued",
@@ -191,13 +201,14 @@ class GraphImportState:
             "failed",
             "stale",
         }:
-            raise HadesBackendError("graph import response has an invalid publication status")
+            raise HadesBackendError(
+                "graph import response has an invalid publication status"
+            )
         raw_missing = payload.get("missing_chunk_indexes", [])
         if (
             not isinstance(raw_missing, list)
             or any(
-                type(index) is not int
-                or not 0 <= index <= _MAX_GRAPH_CHUNK_INDEX
+                type(index) is not int or not 0 <= index <= _MAX_GRAPH_CHUNK_INDEX
                 for index in raw_missing
             )
             or raw_missing != sorted(set(raw_missing))
@@ -215,14 +226,14 @@ class GraphImportState:
             if value is not None and (
                 type(value) is not int or value < (1 if positive else 0)
             ):
-                raise HadesBackendError(
-                    f"graph import response has invalid {name}"
-                )
+                raise HadesBackendError(f"graph import response has invalid {name}")
         projection = payload.get("projection_version")
         if projection is not None and not (
             isinstance(projection, str) and _SHA256.fullmatch(projection)
         ):
-            raise HadesBackendError("graph import response has invalid projection_version")
+            raise HadesBackendError(
+                "graph import response has invalid projection_version"
+            )
         expires_at = payload.get("expires_at")
         if expires_at is not None:
             expires_at = _require_rfc3339_date_time(expires_at, field="expires_at")
@@ -359,9 +370,7 @@ def _parse_graph_import_response(
             and state.publication_status != "ready"
             and state.projection_version is None
         )
-        if (http_status == 200 and not ready) or (
-            http_status == 202 and not pending
-        ):
+        if (http_status == 200 and not ready) or (http_status == 202 and not pending):
             raise HadesBackendError(
                 f"graph import complete response has an illegal state for HTTP {http_status}"
             )
@@ -444,19 +453,27 @@ def token_env_key(base_url: str, project_id: str, agent_id: str) -> str:
 
 def plugin_token_env_key(base_url: str, project_id: str, agent_id: str) -> str:
     """Return the profile-secret env key for a bootstrap-derived Plugin token."""
-    return token_env_key(base_url, project_id, agent_id).replace("AGENT_TOKEN", "PLUGIN_TOKEN")
+    return token_env_key(base_url, project_id, agent_id).replace(
+        "AGENT_TOKEN", "PLUGIN_TOKEN"
+    )
 
 
 def plugin_device_secret_env_key(base_url: str, project_id: str, agent_id: str) -> str:
     """Return the profile-secret env key for the Plugin request-signing secret."""
-    return token_env_key(base_url, project_id, agent_id).replace("AGENT_TOKEN", "PLUGIN_DEVICE_SECRET")
+    return token_env_key(base_url, project_id, agent_id).replace(
+        "AGENT_TOKEN", "PLUGIN_DEVICE_SECRET"
+    )
 
 
 def redact_secret(text: Any) -> str:
     """Redact likely backend/API secrets from text before surfacing errors."""
-    value = text if isinstance(text, str) else json.dumps(text, sort_keys=True, default=str)
+    value = (
+        text if isinstance(text, str) else json.dumps(text, sort_keys=True, default=str)
+    )
     for pattern in _SECRET_PATTERNS:
-        value = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "***", value)
+        value = pattern.sub(
+            lambda m: (m.group(1) if m.lastindex else "") + "***", value
+        )
     return value
 
 
@@ -467,7 +484,9 @@ def _redact_structured(value: Any) -> Any:
         return redact_secret(value)
     if isinstance(value, dict):
         return {
-            redact_secret(key) if isinstance(key, str) else key: _redact_structured(item)
+            redact_secret(key) if isinstance(key, str) else key: _redact_structured(
+                item
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -704,7 +723,9 @@ class HadesBackendClient:
         try:
             data = response.json()
         except ValueError as exc:
-            raise HadesBackendError(f"invalid JSON response from backend: {redact_secret(response.text)}") from exc
+            raise HadesBackendError(
+                f"invalid JSON response from backend: {redact_secret(response.text)}"
+            ) from exc
         if not isinstance(data, (dict, list)):
             raise HadesBackendError("backend response must be a JSON object or array")
         return _BackendResponse(response.status_code, data)
@@ -737,7 +758,9 @@ class HadesBackendClient:
         return self._request("GET", "capabilities")
 
     def verify_token(self, *, project_id: str) -> dict[str, Any]:
-        return self._request("POST", "token/verify", json_body={"project_id": project_id})
+        return self._request(
+            "POST", "token/verify", json_body={"project_id": project_id}
+        )
 
     def register_agent(
         self,
@@ -767,7 +790,9 @@ class HadesBackendClient:
     def bind_workspace(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "workspaces/bind", json_body=payload)
 
-    def unlink_workspace(self, workspace_binding_id: str, **payload: Any) -> dict[str, Any]:
+    def unlink_workspace(
+        self, workspace_binding_id: str, **payload: Any
+    ) -> dict[str, Any]:
         clean = str(workspace_binding_id or "").strip()
         if not clean:
             raise ValueError("workspace binding id is required")
@@ -820,11 +845,15 @@ class HadesBackendClient:
     def create_diagnosis_report(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "diagnosis-reports", json_body=payload)
 
-    def promote_diagnosis_report(self, diagnosis_report_id: str, **payload: Any) -> dict[str, Any]:
+    def promote_diagnosis_report(
+        self, diagnosis_report_id: str, **payload: Any
+    ) -> dict[str, Any]:
         clean = str(diagnosis_report_id or "").strip()
         if not clean:
             raise ValueError("diagnosis report id is required")
-        return self._request("POST", f"diagnosis-reports/{clean}/promote", json_body=payload)
+        return self._request(
+            "POST", f"diagnosis-reports/{clean}/promote", json_body=payload
+        )
 
     def project_awareness_status(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "project-awareness/status", params=payload)
@@ -877,16 +906,14 @@ class HadesBackendClient:
             result,
             operation="create",
             http_status=response.status_code,
-            response_fields=frozenset(
-                {
-                    "import_id",
-                    "attempt_generation",
-                    "validation_status",
-                    "publication_status",
-                    "missing_chunk_indexes",
-                    "expires_at",
-                }
-            ),
+            response_fields=frozenset({
+                "import_id",
+                "attempt_generation",
+                "validation_status",
+                "publication_status",
+                "missing_chunk_indexes",
+                "expires_at",
+            }),
             expected_chunks=len(manifest["chunks"]),
         )
 
@@ -937,7 +964,9 @@ class HadesBackendClient:
         clean_import = validate_graph_import_id(import_id)
         version = str(artifact_graph_version or "").strip()
         if not _SHA256.fullmatch(version):
-            raise ValueError("artifact graph version must be a lower-case SHA-256 digest")
+            raise ValueError(
+                "artifact graph version must be a lower-case SHA-256 digest"
+            )
         response = self._request_with_status(
             "POST",
             f"graph-imports/{clean_import}/complete",
@@ -952,14 +981,12 @@ class HadesBackendClient:
             result,
             operation="complete",
             http_status=response.status_code,
-            response_fields=frozenset(
-                {
-                    "import_id",
-                    "validation_status",
-                    "publication_status",
-                    "projection_version",
-                }
-            ),
+            response_fields=frozenset({
+                "import_id",
+                "validation_status",
+                "publication_status",
+                "projection_version",
+            }),
             requested_import_id=clean_import,
         )
 
@@ -978,19 +1005,17 @@ class HadesBackendClient:
             result,
             operation="get",
             http_status=response.status_code,
-            response_fields=frozenset(
-                {
-                    "import_id",
-                    "validation_status",
-                    "publication_status",
-                    "received_chunks",
-                    "expected_chunks",
-                    "missing_chunk_indexes",
-                    "failure",
-                    "projection_version",
-                    "expires_at",
-                }
-            ),
+            response_fields=frozenset({
+                "import_id",
+                "validation_status",
+                "publication_status",
+                "received_chunks",
+                "expected_chunks",
+                "missing_chunk_indexes",
+                "failure",
+                "projection_version",
+                "expires_at",
+            }),
             requested_import_id=clean_import,
         )
 
@@ -1246,7 +1271,9 @@ class HadesBackendClient:
         clean = str(claim_id or "").strip()
         if not clean:
             raise ValueError("claim id is required")
-        result = self._request("POST", f"code-claims/{clean}/release", json_body=payload)
+        result = self._request(
+            "POST", f"code-claims/{clean}/release", json_body=payload
+        )
         if not isinstance(result, dict):
             raise HadesBackendError("code claim release response must be a JSON object")
         return result
@@ -1254,5 +1281,7 @@ class HadesBackendClient:
     def code_claim_detect_conflicts(self, **payload: Any) -> list[Any]:
         result = self._request("GET", "code-claims/conflicts", params=payload)
         if not isinstance(result, list):
-            raise HadesBackendError("code claim detect conflicts response must be a JSON array")
+            raise HadesBackendError(
+                "code claim detect conflicts response must be a JSON array"
+            )
         return result

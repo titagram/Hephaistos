@@ -2428,14 +2428,623 @@
           }
         },
         "$defs": {
-          "digest": {"$ref": "artifact.schema.json#/$defs/digest"},
-          "utcTimestamp": {"$ref": "artifact.schema.json#/$defs/utcTimestamp"},
-          "safeInteger": {"$ref": "artifact.schema.json#/$defs/safeInteger"},
-          "source": {"$ref": "artifact.schema.json#/$defs/source"},
-          "project": {"$ref": "artifact.schema.json#/$defs/project"},
-          "graphContract": {"$ref": "artifact.schema.json#/$defs/graphContract"},
-          "framework": {"$ref": "artifact.schema.json#/$defs/framework"},
-          "language": {"$ref": "artifact.schema.json#/$defs/language"},
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "maxLength": 64
+          },
+          "gitCommit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "maxLength": 40
+          },
+          "ulid": {
+            "type": "string",
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "maxLength": 26
+          },
+          "utcTimestamp": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+            "format": "date-time",
+            "maxLength": 20
+          },
+          "safeInteger": {
+            "$comment": "JSON Schema's mathematical integer model accepts a parsed lexical 1.0. Contract decoders MUST reject every lexical float with float_not_allowed before schema validation; see golden/raw_wire_negative_vectors.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "positiveLine": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "safePath": {
+            "$comment": "JSON Schema enforces normalized POSIX path shape. UTF-8 byte length and Unicode NFC are mandatory application-boundary checks because maxLength counts code points and JSON Schema cannot assert NFC.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?!.*//)(?!.*/$)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "identifier": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+            "maxLength": 128
+          },
+          "languageName": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "maxLength": 32
+          },
+          "frameworkName": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+            "maxLength": 128
+          },
+          "project": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "project_id",
+              "workspace_binding_id"
+            ],
+            "properties": {
+              "project_id": {
+                "$ref": "#/$defs/ulid"
+              },
+              "workspace_binding_id": {
+                "$ref": "#/$defs/ulid"
+              }
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "head_commit",
+              "tree_sha256",
+              "dirty",
+              "branch"
+            ],
+            "properties": {
+              "head_commit": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/gitCommit"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tree_sha256": {
+                "$ref": "#/$defs/digest"
+              },
+              "dirty": {
+                "type": "boolean"
+              },
+              "branch": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "language": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "extractor",
+              "extractor_version",
+              "detected_file_count",
+              "analyzed_file_count"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/languageName"
+              },
+              "extractor": {
+                "$ref": "#/$defs/identifier"
+              },
+              "extractor_version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "detected_file_count": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "analyzed_file_count": {
+                "$ref": "#/$defs/safeInteger"
+              }
+            }
+          },
+          "framework": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "language",
+              "name",
+              "version",
+              "detector",
+              "configuration_paths",
+              "knowledge"
+            ],
+            "properties": {
+              "language": {
+                "$ref": "#/$defs/languageName"
+              },
+              "name": {
+                "$ref": "#/$defs/frameworkName"
+              },
+              "version": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "detector": {
+                "$ref": "#/$defs/identifier"
+              },
+              "configuration_paths": {
+                "type": "array",
+                "maxItems": 20,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/safePath"
+                }
+              },
+              "knowledge": {
+                "enum": [
+                  "verified",
+                  "unresolved"
+                ]
+              }
+            }
+          },
+          "reasonCode": {
+            "enum": [
+              "parser_unavailable",
+              "parser_failed",
+              "unsupported_language",
+              "file_read_failed",
+              "file_too_large",
+              "record_too_large",
+              "resource_budget_reached",
+              "entrypoint_unresolved",
+              "call_target_unresolved",
+              "dynamic_dispatch",
+              "reflection_or_generated_code",
+              "framework_config_unresolved",
+              "exception_target_unresolved",
+              "async_target_unresolved",
+              "external_boundary_unresolved",
+              "symlink_unavailable",
+              "submodule_unavailable",
+              "graphify_candidate",
+              "invalid_source_fact",
+              "verified_target_not_materialized"
+            ]
+          },
+          "capabilityReason": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "count",
+              "language",
+              "paths_sample"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/$defs/reasonCode"
+              },
+              "count": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "language": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/languageName"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "paths_sample": {
+                "type": "array",
+                "maxItems": 10,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/safePath"
+                }
+              }
+            }
+          },
+          "capabilityFull": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "full",
+                  "not_applicable"
+                ]
+              },
+              "reasons": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          },
+          "capabilityIncomplete": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "partial",
+                  "unsupported"
+                ]
+              },
+              "reasons": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 9007199254740991,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/capabilityReason"
+                }
+              }
+            }
+          },
+          "capability": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/capabilityFull"
+              },
+              {
+                "$ref": "#/$defs/capabilityIncomplete"
+              }
+            ]
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "inventory",
+              "entrypoint_discovery",
+              "symbol_resolution",
+              "call_graph",
+              "control_flow",
+              "framework_lifecycle",
+              "exceptions",
+              "async",
+              "data_access"
+            ],
+            "properties": {
+              "inventory": {
+                "$ref": "#/$defs/capability"
+              },
+              "entrypoint_discovery": {
+                "$ref": "#/$defs/capability"
+              },
+              "symbol_resolution": {
+                "$ref": "#/$defs/capability"
+              },
+              "call_graph": {
+                "$ref": "#/$defs/capability"
+              },
+              "control_flow": {
+                "$ref": "#/$defs/capability"
+              },
+              "framework_lifecycle": {
+                "$ref": "#/$defs/capability"
+              },
+              "exceptions": {
+                "$ref": "#/$defs/capability"
+              },
+              "async": {
+                "$ref": "#/$defs/capability"
+              },
+              "data_access": {
+                "$ref": "#/$defs/capability"
+              }
+            }
+          },
+          "languageCompleteness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "language",
+              "status",
+              "capabilities"
+            ],
+            "properties": {
+              "language": {
+                "$ref": "#/$defs/languageName"
+              },
+              "status": {
+                "enum": [
+                  "full",
+                  "partial"
+                ]
+              },
+              "capabilities": {
+                "$ref": "#/$defs/capabilities"
+              }
+            }
+          },
+          "completeness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "capabilities",
+              "languages"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "full",
+                  "partial"
+                ]
+              },
+              "capabilities": {
+                "$ref": "#/$defs/capabilities"
+              },
+              "languages": {
+                "type": "array",
+                "maxItems": 9007199254740991,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/languageCompleteness"
+                }
+              }
+            }
+          },
+          "coverageScope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "included_roots",
+              "excluded_config_sha256",
+              "excluded_path_count"
+            ],
+            "properties": {
+              "included_roots": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 9007199254740991,
+                "uniqueItems": true,
+                "items": {
+                  "oneOf": [
+                    {
+                      "const": "."
+                    },
+                    {
+                      "$ref": "#/$defs/safePath"
+                    }
+                  ]
+                }
+              },
+              "excluded_config_sha256": {
+                "$ref": "#/$defs/digest"
+              },
+              "excluded_path_count": {
+                "$ref": "#/$defs/safeInteger"
+              }
+            }
+          },
+          "fileCoverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "discovered",
+              "hashed",
+              "parser_candidates",
+              "analyzed",
+              "unsupported",
+              "failed",
+              "too_large",
+              "budget_omitted"
+            ],
+            "properties": {
+              "discovered": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "hashed": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "parser_candidates": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "analyzed": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "unsupported": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "failed": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "too_large": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "budget_omitted": {
+                "$ref": "#/$defs/safeInteger"
+              }
+            }
+          },
+          "entrypointKindCounts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "http_route": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "process_main": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "cli_command": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "scheduled_job": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "queue_consumer": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "event_listener": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "rpc_method": {
+                "$ref": "#/$defs/positiveLine"
+              },
+              "public_api": {
+                "$ref": "#/$defs/positiveLine"
+              }
+            }
+          },
+          "entrypointCoverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "detected",
+              "analyzed",
+              "partial",
+              "by_kind"
+            ],
+            "properties": {
+              "detected": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "analyzed": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "partial": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "by_kind": {
+                "$ref": "#/$defs/entrypointKindCounts"
+              }
+            }
+          },
+          "recordCoverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "nodes",
+              "structures",
+              "edges",
+              "flows",
+              "flow_steps",
+              "uncertainties",
+              "omitted_by_bundle_budget"
+            ],
+            "properties": {
+              "nodes": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "structures": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "edges": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "flows": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "flow_steps": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "uncertainties": {
+                "$ref": "#/$defs/safeInteger"
+              },
+              "omitted_by_bundle_budget": {
+                "$ref": "#/$defs/safeInteger"
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "files",
+              "entrypoints",
+              "records"
+            ],
+            "properties": {
+              "scope": {
+                "$ref": "#/$defs/coverageScope"
+              },
+              "files": {
+                "$ref": "#/$defs/fileCoverage"
+              },
+              "entrypoints": {
+                "$ref": "#/$defs/entrypointCoverage"
+              },
+              "records": {
+                "$ref": "#/$defs/recordCoverage"
+              }
+            }
+          },
+          "graphContract": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "artifact_graph_version",
+              "projection_state",
+              "completeness",
+              "coverage"
+            ],
+            "properties": {
+              "version": {
+                "const": "hades.graph_artifact.v2"
+              },
+              "artifact_graph_version": {
+                "$ref": "#/$defs/digest"
+              },
+              "projection_state": {
+                "const": "queued"
+              },
+              "completeness": {
+                "$ref": "#/$defs/completeness"
+              },
+              "coverage": {
+                "$ref": "#/$defs/coverage"
+              }
+            }
+          },
           "chunkKind": {
             "enum": ["entrypoints", "nodes", "structures", "edges", "flows", "flow_steps", "uncertainties"]
           },

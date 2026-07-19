@@ -17,6 +17,9 @@ VALID_WIKI_PAGE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 CANONICAL_BUNDLE_SCHEMA = (
     REPO_ROOT / "hermes_cli" / "hades_graph_v2" / "contracts" / "bundle.schema.json"
 )
+CANONICAL_ARTIFACT_SCHEMA = (
+    REPO_ROOT / "hermes_cli" / "hades_graph_v2" / "contracts" / "artifact.schema.json"
+)
 
 
 def _canonical_graph_bundle_manifest() -> dict:
@@ -35,6 +38,56 @@ def _canonical_graph_bundle_manifest() -> dict:
 
 
 VALID_GRAPH_BUNDLE_MANIFEST = _canonical_graph_bundle_manifest()
+
+
+def _expected_self_contained_bundle_schema() -> dict:
+    bundle_schema = json.loads(CANONICAL_BUNDLE_SCHEMA.read_text(encoding="utf-8"))
+    artifact_schema = json.loads(CANONICAL_ARTIFACT_SCHEMA.read_text(encoding="utf-8"))
+    bridge_names = {
+        "digest",
+        "utcTimestamp",
+        "safeInteger",
+        "source",
+        "project",
+        "graphContract",
+        "framework",
+        "language",
+    }
+    bundle_defs = bundle_schema["$defs"]
+    assert bridge_names == set(bundle_defs) & set(artifact_schema["$defs"])
+    for name in bridge_names:
+        assert bundle_defs.pop(name) == {"$ref": f"artifact.schema.json#/$defs/{name}"}
+
+    required_artifact_defs = set(bridge_names)
+    pending = list(bridge_names)
+    while pending:
+        value_stack = [artifact_schema["$defs"][pending.pop()]]
+        while value_stack:
+            value = value_stack.pop()
+            if isinstance(value, dict):
+                ref = value.get("$ref")
+                prefix = "#/$defs/"
+                if isinstance(ref, str) and ref.startswith(prefix):
+                    name = ref.removeprefix(prefix)
+                    if name not in required_artifact_defs:
+                        required_artifact_defs.add(name)
+                        pending.append(name)
+                value_stack.extend(value.values())
+            elif isinstance(value, list):
+                value_stack.extend(value)
+
+    artifact_defs = {
+        name: copy.deepcopy(value)
+        for name, value in artifact_schema["$defs"].items()
+        if name in required_artifact_defs
+    }
+    assert not set(artifact_defs) & set(bundle_defs)
+    bundle_schema["$defs"] = {
+        **artifact_defs,
+        **bundle_defs,
+    }
+    return bundle_schema
+
 
 CLIENT_ROUTE_CASES = [
     {
@@ -217,8 +270,16 @@ CLIENT_ROUTE_CASES = [
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/memory/proposals",
         "wire_path": "/api/hades/v1/memory/proposals",
-        "kwargs": {"project_id": "proj_1", "action": "create", "summary": "Remember this"},
-        "json_body": {"project_id": "proj_1", "action": "create", "summary": "Remember this"},
+        "kwargs": {
+            "project_id": "proj_1",
+            "action": "create",
+            "summary": "Remember this",
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "action": "create",
+            "summary": "Remember this",
+        },
     },
     {
         "method_name": "import_memory_bundle",
@@ -530,9 +591,17 @@ CLIENT_ROUTE_CASES = [
             "title": "Order route 500 evidence pack",
             "summary": "Stack trace, graph edge, and source slice point to OrderController.",
             "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
-            "graph_refs": [{"type": "route_handler", "from": "route:orders.show", "to": "OrderController@show"}],
+            "graph_refs": [
+                {
+                    "type": "route_handler",
+                    "from": "route:orders.show",
+                    "to": "OrderController@show",
+                }
+            ],
             "source_slice_ids": ["slice_1"],
-            "payload": {"next_verification": "Run OrderControllerTest::test_archived_order_show"},
+            "payload": {
+                "next_verification": "Run OrderControllerTest::test_archived_order_show"
+            },
             "redactions": 1,
         },
         "json_body": {
@@ -542,9 +611,17 @@ CLIENT_ROUTE_CASES = [
             "title": "Order route 500 evidence pack",
             "summary": "Stack trace, graph edge, and source slice point to OrderController.",
             "evidence_refs": [{"type": "bug_evidence", "id": "evidence_1"}],
-            "graph_refs": [{"type": "route_handler", "from": "route:orders.show", "to": "OrderController@show"}],
+            "graph_refs": [
+                {
+                    "type": "route_handler",
+                    "from": "route:orders.show",
+                    "to": "OrderController@show",
+                }
+            ],
             "source_slice_ids": ["slice_1"],
-            "payload": {"next_verification": "Run OrderControllerTest::test_archived_order_show"},
+            "payload": {
+                "next_verification": "Run OrderControllerTest::test_archived_order_show"
+            },
             "redactions": 1,
         },
     },
@@ -699,8 +776,16 @@ CLIENT_ROUTE_CASES = [
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/doctor/reports",
         "wire_path": "/api/hades/v1/doctor/reports",
-        "kwargs": {"project_id": "proj_1", "status": "warning", "payload": {"checks": []}},
-        "json_body": {"project_id": "proj_1", "status": "warning", "payload": {"checks": []}},
+        "kwargs": {
+            "project_id": "proj_1",
+            "status": "warning",
+            "payload": {"checks": []},
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "status": "warning",
+            "payload": {"checks": []},
+        },
     },
     {
         "method_name": "list_inbox",
@@ -715,8 +800,16 @@ CLIENT_ROUTE_CASES = [
         "http_method": "POST",
         "openapi_path": "/api/hades/v1/persephone/messages",
         "wire_path": "/api/hades/v1/persephone/messages",
-        "kwargs": {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
-        "json_body": {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
+        "kwargs": {
+            "project_id": "proj_1",
+            "event_type": "proposal.reviewed",
+            "payload": {"message": "done"},
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "event_type": "proposal.reviewed",
+            "payload": {"message": "done"},
+        },
     },
     {
         "method_name": "iter_persephone_events",
@@ -863,19 +956,25 @@ def test_graph_import_create_is_idempotent_for_200_and_201():
     first = client.create_graph_import(manifest)
     replay = client.create_graph_import(manifest)
 
-    assert first == replay == GraphImportState(
-        import_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        attempt_generation=1,
-        validation_status="staging",
-        publication_status="not_requested",
-        missing_chunk_indexes=(0,),
-        expires_at="2026-07-19T12:00:00Z",
-        received_chunks=None,
-        expected_chunks=None,
-        failure=None,
-        projection_version=None,
+    assert (
+        first
+        == replay
+        == GraphImportState(
+            import_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            attempt_generation=1,
+            validation_status="staging",
+            publication_status="not_requested",
+            missing_chunk_indexes=(0,),
+            expires_at="2026-07-19T12:00:00Z",
+            received_chunks=None,
+            expected_chunks=None,
+            failure=None,
+            projection_version=None,
+        )
     )
-    assert all(request.url.path == "/api/hades/v1/graph-imports" for request in requests)
+    assert all(
+        request.url.path == "/api/hades/v1/graph-imports" for request in requests
+    )
     assert all(_json_request_body(request) == manifest for request in requests)
 
 
@@ -893,7 +992,9 @@ def test_graph_import_chunk_uses_exact_raw_body_and_digest_headers():
         assert request.method == "PUT"
         assert request.url.path.endswith("/graph-imports/import-1/chunks/2")
         assert request.content == body
-        assert request.headers["content-type"] == "application/vnd.hades.graph-chunk+gzip"
+        assert (
+            request.headers["content-type"] == "application/vnd.hades.graph-chunk+gzip"
+        )
         assert request.headers["x-hades-chunk-sha256"] == "a" * 64
         assert request.headers["x-hades-chunk-uncompressed-bytes"] == "42"
         assert request.headers["x-hades-chunk-compressed-sha256"] == compressed_sha256
@@ -905,6 +1006,7 @@ def test_graph_import_chunk_uses_exact_raw_body_and_digest_headers():
         "agent-token",
         transport=httpx.MockTransport(handler),
     )
+
     class TrackingBody(BytesIO):
         read_sizes: list[int]
 
@@ -1165,14 +1267,14 @@ def test_graph_import_create_rejects_unsafe_response_import_id():
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
                 201,
-                    json={
-                        "import_id": "../other",
-                        "attempt_generation": 1,
-                        "validation_status": "staging",
-                        "publication_status": "not_requested",
-                        "missing_chunk_indexes": [],
-                        "expires_at": "2026-07-19T12:00:00Z",
-                    },
+                json={
+                    "import_id": "../other",
+                    "attempt_generation": 1,
+                    "validation_status": "staging",
+                    "publication_status": "not_requested",
+                    "missing_chunk_indexes": [],
+                    "expires_at": "2026-07-19T12:00:00Z",
+                },
             )
         ),
     )
@@ -1420,15 +1522,13 @@ def test_graph_import_methods_reject_response_for_a_different_import(method_name
         "projection_version": "a" * 64,
     }
     if method_name == "graph_import":
-        response.update(
-            {
-                "received_chunks": 1,
-                "expected_chunks": 1,
-                "missing_chunk_indexes": [],
-                "failure": None,
-                "expires_at": None,
-            }
-        )
+        response.update({
+            "received_chunks": 1,
+            "expected_chunks": 1,
+            "missing_chunk_indexes": [],
+            "failure": None,
+            "expires_at": None,
+        })
     client = HadesBackendClient(
         "https://backend.example",
         "agent-token",
@@ -1946,38 +2046,36 @@ def test_graph_import_success_rejects_unsafe_failure_code_without_leaking_it():
 def test_graph_import_complete_and_poll_keep_validation_and_publication_separate():
     from hermes_cli.hades_backend_client import HadesBackendClient
 
-    responses = iter(
-        [
-            {
-                "import_id": "import-1",
-                "validation_status": "validating",
-                "publication_status": "not_requested",
-                "projection_version": None,
-            },
-            {
-                "import_id": "import-1",
-                "validation_status": "validated",
-                "publication_status": "queued",
-                "received_chunks": 3,
-                "expected_chunks": 3,
-                "missing_chunk_indexes": [],
-                "failure": None,
-                "projection_version": None,
-                "expires_at": None,
-            },
-            {
-                "import_id": "import-1",
-                "validation_status": "validated",
-                "publication_status": "ready",
-                "received_chunks": 3,
-                "expected_chunks": 3,
-                "missing_chunk_indexes": [],
-                "failure": None,
-                "projection_version": "c" * 64,
-                "expires_at": None,
-            },
-        ]
-    )
+    responses = iter([
+        {
+            "import_id": "import-1",
+            "validation_status": "validating",
+            "publication_status": "not_requested",
+            "projection_version": None,
+        },
+        {
+            "import_id": "import-1",
+            "validation_status": "validated",
+            "publication_status": "queued",
+            "received_chunks": 3,
+            "expected_chunks": 3,
+            "missing_chunk_indexes": [],
+            "failure": None,
+            "projection_version": None,
+            "expires_at": None,
+        },
+        {
+            "import_id": "import-1",
+            "validation_status": "validated",
+            "publication_status": "ready",
+            "received_chunks": 3,
+            "expected_chunks": 3,
+            "missing_chunk_indexes": [],
+            "failure": None,
+            "projection_version": "c" * 64,
+            "expires_at": None,
+        },
+    ])
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = next(responses)
@@ -2013,9 +2111,7 @@ def test_openapi_graph_import_wire_contract_is_exact():
     paths = spec["paths"]
     schemas = spec["components"]["schemas"]
     create = paths["/api/hades/v1/graph-imports"]["post"]
-    chunk = paths["/api/hades/v1/graph-imports/{graphImport}/chunks/{index}"][
-        "put"
-    ]
+    chunk = paths["/api/hades/v1/graph-imports/{graphImport}/chunks/{index}"]["put"]
     complete = paths["/api/hades/v1/graph-imports/{graphImport}/complete"]["post"]
     get = paths["/api/hades/v1/graph-imports/{graphImport}"]["get"]
 
@@ -2057,9 +2153,9 @@ def test_openapi_graph_import_wire_contract_is_exact():
         "minimum": 0,
         "maximum": 511,
     }
-    assert chunk["requestBody"]["content"][
-        "application/vnd.hades.graph-chunk+gzip"
-    ]["schema"] == {"type": "string", "format": "binary"}
+    assert chunk["requestBody"]["content"]["application/vnd.hades.graph-chunk+gzip"][
+        "schema"
+    ] == {"type": "string", "format": "binary"}
 
     assert schemas["GraphChunkAcceptedResponse"] == {
         "type": "object",
@@ -2104,10 +2200,7 @@ def test_openapi_graph_import_wire_contract_is_exact():
         )
     )
 
-    canonical_bundle_schema = json.loads(
-        CANONICAL_BUNDLE_SCHEMA.read_text(encoding="utf-8")
-    )
-    assert schemas["GraphBundleManifest"] == canonical_bundle_schema
+    assert schemas["GraphBundleManifest"] == _expected_self_contained_bundle_schema()
     assert schemas["GraphImportFailure"] == {
         "type": "object",
         "required": ["code", "details"],
@@ -2133,29 +2226,61 @@ def test_openapi_graph_import_wire_contract_is_exact():
         assert parameter["schema"]["maximum"] == 8 * 1024 * 1024
 
 
+def test_openapi_graph_bundle_manifest_resolves_and_validates_offline():
+    from jsonschema import Draft202012Validator
+
+    schema = _openapi_spec()["components"]["schemas"]["GraphBundleManifest"]
+    Draft202012Validator.check_schema(schema)
+
+    external_refs = []
+
+    def collect_external_refs(value):
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and not ref.startswith("#/"):
+                external_refs.append(ref)
+            for child in value.values():
+                collect_external_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_external_refs(child)
+
+    collect_external_refs(schema)
+
+    assert external_refs == []
+    Draft202012Validator(schema).validate(_canonical_graph_bundle_manifest())
+
+
 def test_openapi_graph_import_errors_are_closed_per_operation_and_status():
     spec = _openapi_spec()
     paths = spec["paths"]
     schemas = spec["components"]["schemas"]
     operations = {
         "create": paths["/api/hades/v1/graph-imports"]["post"],
-        "chunk": paths[
-            "/api/hades/v1/graph-imports/{graphImport}/chunks/{index}"
-        ]["put"],
-        "complete": paths[
-            "/api/hades/v1/graph-imports/{graphImport}/complete"
-        ]["post"],
+        "chunk": paths["/api/hades/v1/graph-imports/{graphImport}/chunks/{index}"][
+            "put"
+        ],
+        "complete": paths["/api/hades/v1/graph-imports/{graphImport}/complete"]["post"],
         "get": paths["/api/hades/v1/graph-imports/{graphImport}"]["get"],
     }
     expected = {
-        ("create", "404"): ("GraphImportNotFoundErrorResponse", {"graph_import_not_found"}),
+        ("create", "404"): (
+            "GraphImportNotFoundErrorResponse",
+            {"graph_import_not_found"},
+        ),
         ("create", "409"): (
             "GraphManifestConflictErrorResponse",
             {"graph_import_manifest_conflict"},
         ),
         ("create", "422"): ("GraphManifestErrorResponse", {"graph_manifest_invalid"}),
-        ("chunk", "404"): ("GraphImportNotFoundErrorResponse", {"graph_import_not_found"}),
-        ("chunk", "409"): ("GraphChunkConflictErrorResponse", {"chunk_digest_conflict"}),
+        ("chunk", "404"): (
+            "GraphImportNotFoundErrorResponse",
+            {"graph_import_not_found"},
+        ),
+        ("chunk", "409"): (
+            "GraphChunkConflictErrorResponse",
+            {"chunk_digest_conflict"},
+        ),
         ("chunk", "422"): (
             "GraphChunkValidationErrorResponse",
             {
@@ -2164,14 +2289,23 @@ def test_openapi_graph_import_errors_are_closed_per_operation_and_status():
                 "graph_import_not_staging",
             },
         ),
-        ("complete", "404"): ("GraphImportNotFoundErrorResponse", {"graph_import_not_found"}),
-        ("complete", "409"): ("GraphImportFailedErrorResponse", {"graph_import_failed"}),
+        ("complete", "404"): (
+            "GraphImportNotFoundErrorResponse",
+            {"graph_import_not_found"},
+        ),
+        ("complete", "409"): (
+            "GraphImportFailedErrorResponse",
+            {"graph_import_failed"},
+        ),
         ("complete", "410"): ("GraphImportStaleErrorResponse", {"graph_import_stale"}),
         ("complete", "422"): (
             "GraphCompleteValidationErrorResponse",
             {"graph_manifest_invalid", "graph_import_incomplete"},
         ),
-        ("get", "404"): ("GraphImportNotFoundErrorResponse", {"graph_import_not_found"}),
+        ("get", "404"): (
+            "GraphImportNotFoundErrorResponse",
+            {"graph_import_not_found"},
+        ),
     }
 
     for (operation_name, status), (schema_name, codes) in expected.items():
@@ -2258,9 +2392,7 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
     kwargs = dict(case.get("kwargs") or {})
     if "kwargs_factory" in case:
         kwargs.update(case["kwargs_factory"]())
-    response = getattr(client, case["method_name"])(
-        *(case.get("args") or ()), **kwargs
-    )
+    response = getattr(client, case["method_name"])(*(case.get("args") or ()), **kwargs)
     if case.get("stream"):
         response = list(response)
 
@@ -2278,18 +2410,23 @@ def test_client_route_coverage_is_explicit_against_openapi_fixture():
 
     public_client_methods = {
         name
-        for name, member in inspect.getmembers(HadesBackendClient, predicate=inspect.isfunction)
+        for name, member in inspect.getmembers(
+            HadesBackendClient, predicate=inspect.isfunction
+        )
         if not name.startswith("_") and name != "close"
     }
     covered_client_methods = {case["method_name"] for case in CLIENT_ROUTE_CASES}
-    covered_routes = {(case["http_method"], case["openapi_path"]) for case in CLIENT_ROUTE_CASES}
+    covered_routes = {
+        (case["http_method"], case["openapi_path"]) for case in CLIENT_ROUTE_CASES
+    }
     fixture_routes = {
-        route
-        for route in _openapi_routes()
-        if route[1].startswith("/api/hades/v1/")
+        route for route in _openapi_routes() if route[1].startswith("/api/hades/v1/")
     }
 
-    assert public_client_methods == covered_client_methods | INTENTIONALLY_UNMAPPED_CLIENT_METHODS
+    assert (
+        public_client_methods
+        == covered_client_methods | INTENTIONALLY_UNMAPPED_CLIENT_METHODS
+    )
     assert fixture_routes == covered_routes | set(INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES)
 
 
@@ -2305,9 +2442,10 @@ def test_openapi_capability_contract_matches_authenticated_backend_discovery():
     }
     assert "capability_names" in capability_schema["required"]
     assert capability_schema["properties"]["persephone_agent_queue_v1"]["const"] is True
-    assert "verify_project_wiki" in capability_schema["properties"]["capability_names"][
-        "description"
-    ]
+    assert (
+        "verify_project_wiki"
+        in capability_schema["properties"]["capability_names"]["description"]
+    )
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"] == {
         "$ref": "#/components/responses/Error"
     }
@@ -2323,7 +2461,14 @@ def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
     mapping = claims["items"]
 
     assert evidence["maxItems"] == 80
-    assert set(ref["properties"]) == {"kind", "schema", "sha256", "hash", "path", "claims"}
+    assert set(ref["properties"]) == {
+        "kind",
+        "schema",
+        "sha256",
+        "hash",
+        "path",
+        "claims",
+    }
     assert ref["additionalProperties"] is False
     assert claims["minItems"] == 1
     assert claims["maxItems"] == 8
@@ -2343,7 +2488,9 @@ def test_openapi_wiki_verification_contract_requires_bounded_claim_mappings():
 def test_openapi_artifact_hash_contract_matches_backend_canonical_rules():
     spec = _openapi_spec()
     schemas = spec["components"]["schemas"]
-    description = schemas["ArtifactUploadRequest"]["properties"]["sha256"]["description"]
+    description = schemas["ArtifactUploadRequest"]["properties"]["sha256"][
+        "description"
+    ]
     error_codes = schemas["ArtifactUploadErrorResponse"]["properties"]["error"][
         "properties"
     ]["code"]["enum"]
@@ -2452,7 +2599,9 @@ def test_wiki_client_page_methods_require_a_non_empty_page_id(method_name):
     client = HadesBackendClient(
         "https://backend.example",
         "agent-token",
-        transport=httpx.MockTransport(lambda _request: pytest.fail("request must not be sent")),
+        transport=httpx.MockTransport(
+            lambda _request: pytest.fail("request must not be sent")
+        ),
     )
 
     with pytest.raises(ValueError, match="canonical ULID"):
@@ -2468,7 +2617,9 @@ def test_wiki_client_page_methods_require_a_non_empty_page_id(method_name):
     "page_id",
     ["../../privacy/export", "page?admin=1", "page#fragment"],
 )
-def test_wiki_client_rejects_non_ulid_page_ids_without_sending_request(method_name, page_id):
+def test_wiki_client_rejects_non_ulid_page_ids_without_sending_request(
+    method_name, page_id
+):
     from hermes_cli.hades_backend_client import HadesBackendClient
 
     requests: list[httpx.Request] = []
@@ -2476,7 +2627,9 @@ def test_wiki_client_rejects_non_ulid_page_ids_without_sending_request(method_na
         "https://backend.example",
         "agent-token",
         transport=httpx.MockTransport(
-            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+            lambda request: (
+                requests.append(request) or httpx.Response(200, json={"ok": True})
+            )
         ),
     )
 
@@ -2502,7 +2655,9 @@ def test_client_rejects_unsafe_internal_route_paths(path):
         "https://backend.example",
         "agent-token",
         transport=httpx.MockTransport(
-            lambda request: (requests.append(request) or httpx.Response(200, json={"ok": True}))
+            lambda request: (
+                requests.append(request) or httpx.Response(200, json={"ok": True})
+            )
         ),
     )
 
@@ -2660,7 +2815,9 @@ def test_client_unlinks_workspace_with_route_parameter():
         transport=httpx.MockTransport(handler),
     )
 
-    assert client.unlink_workspace("wb_1", project_id="proj_1", agent_id="agent_1") == {"ok": True}
+    assert client.unlink_workspace("wb_1", project_id="proj_1", agent_id="agent_1") == {
+        "ok": True
+    }
     assert seen == [
         (
             "POST",
@@ -2686,8 +2843,12 @@ def test_client_posts_doctor_reports_and_persephone_messages():
         transport=httpx.MockTransport(handler),
     )
 
-    assert client.submit_doctor_report(project_id="proj_1", status="warning", payload={"checks": []}) == {"ok": True}
-    assert client.create_inbox_message(project_id="proj_1", event_type="proposal.reviewed", payload={"message": "done"}) == {"ok": True}
+    assert client.submit_doctor_report(
+        project_id="proj_1", status="warning", payload={"checks": []}
+    ) == {"ok": True}
+    assert client.create_inbox_message(
+        project_id="proj_1", event_type="proposal.reviewed", payload={"message": "done"}
+    ) == {"ok": True}
     assert seen == [
         (
             "POST",
@@ -2697,7 +2858,11 @@ def test_client_posts_doctor_reports_and_persephone_messages():
         (
             "POST",
             "/api/hades/v1/persephone/messages",
-            {"project_id": "proj_1", "event_type": "proposal.reviewed", "payload": {"message": "done"}},
+            {
+                "project_id": "proj_1",
+                "event_type": "proposal.reviewed",
+                "payload": {"message": "done"},
+            },
         ),
     ]
 
@@ -2710,7 +2875,14 @@ def test_client_presence_heartbeat():
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
         seen.append((request.method, request.url.path, payload))
-        return httpx.Response(200, json={"id": "pres_1", "agent_id": "agent_1", "observed_at": "2026-07-09T00:00:00Z"})
+        return httpx.Response(
+            200,
+            json={
+                "id": "pres_1",
+                "agent_id": "agent_1",
+                "observed_at": "2026-07-09T00:00:00Z",
+            },
+        )
 
     client = HadesBackendClient(
         "https://backend.example",
@@ -2758,16 +2930,19 @@ def test_client_presence_list():
         assert request.url.path == "/api/hades/v1/presence"
         assert request.url.params["project_id"] == "proj_1"
         assert request.url.params["workspace_binding_id"] == "wb_1"
-        return httpx.Response(200, json=[
-            {
-                "id": "pres_1",
-                "agent_id": "agent_1",
-                "current_branch": "main",
-                "dirty_status": False,
-                "observed_at": "2026-07-09T00:00:00Z",
-                "ttl_seconds": 300,
-            }
-        ])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "pres_1",
+                    "agent_id": "agent_1",
+                    "current_branch": "main",
+                    "dirty_status": False,
+                    "observed_at": "2026-07-09T00:00:00Z",
+                    "ttl_seconds": 300,
+                }
+            ],
+        )
 
     client = HadesBackendClient(
         "https://backend.example",
@@ -2863,14 +3038,17 @@ def test_client_code_claim_detect_conflicts():
         assert request.url.path == "/api/hades/v1/code-claims/conflicts"
         assert request.url.params["project_id"] == "proj_1"
         assert request.url.params["scope"] == "edit"
-        return httpx.Response(200, json=[
-            {
-                "claim_id": "claim_1",
-                "agent_id": "agent_1",
-                "ref": "app/Foo.php",
-                "reason": "Overlap on app/Foo.php (scope edit)",
-            }
-        ])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "claim_id": "claim_1",
+                    "agent_id": "agent_1",
+                    "ref": "app/Foo.php",
+                    "reason": "Overlap on app/Foo.php (scope edit)",
+                }
+            ],
+        )
 
     client = HadesBackendClient(
         "https://backend.example",
