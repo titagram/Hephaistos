@@ -863,7 +863,12 @@ def validate_references(artifact: GraphArtifactV2, index: _RecordIndex) -> None:
         source = _node(index, edge.source_id)
         target = _node(index, edge.target_id)
         owner = _node(index, edge.occurrence.owner_node_id)
-        if owner.kind not in _CALLABLE_OWNER_KINDS:
+        schema_reference_owner = (
+            edge.relation is Relation.REFERENCES
+            and owner.kind is NodeKind.TABLE
+            and edge.source_id == owner.id
+        )
+        if owner.kind not in _CALLABLE_OWNER_KINDS and not schema_reference_owner:
             _fail("edge_owner_mismatch", "edge occurrence owner is not containing code")
         if isinstance(edge.occurrence, EdgeConfigOccurrence):
             _require_file_path(edge.occurrence.path, index)

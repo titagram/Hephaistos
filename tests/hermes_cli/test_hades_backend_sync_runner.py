@@ -241,7 +241,7 @@ def test_sync_runner_expires_waiting_jobs_after_deadline(monkeypatch, tmp_path):
             base_url="https://backend.example",
             label="dev",
             token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
-            capabilities={"jobs": True},
+            capabilities={"jobs": True, "populate_backend_ast": False},
         )
         hdb.upsert_workspace_binding(
             conn,
@@ -397,6 +397,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 
     from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_backend_client import GraphImportState
     from hermes_cli.hades_backend_sync import run_backend_sync
 
     workspace = tmp_path / "repo"
@@ -415,7 +416,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
         hdb.save_agent(
             conn,
             agent_id="agent_1",
-            project_id="proj_1",
+            project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
             base_url="https://backend.example",
             label="dev",
             token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
@@ -423,7 +424,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
         )
         hdb.upsert_workspace_binding(
             conn,
-            project_id="proj_1",
+            project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
             agent_id="agent_1",
             local_project_id="p_local",
             workspace_fingerprint="wf_1",
@@ -432,7 +433,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
             git_remote_display="",
             git_remote_hash="",
             head_commit="abc123",
-            backend_workspace_binding_id="wb_1",
+            backend_workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
         )
 
     class FakeClient:
@@ -440,6 +441,7 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
             self.uploads = []
             self.pull_upload_counts = []
             self.pull_payloads = []
+            self.graph_manifests = []
 
         def memory_snapshot(self, **payload):
             return {"items": []}
@@ -454,6 +456,14 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
             self.uploads.append(payload)
             return {"artifact": {"id": f"artifact_{len(self.uploads)}"}}
 
+        def create_graph_import(self, manifest):
+            self.graph_manifests.append(manifest)
+            return GraphImportState(
+                "import-baseline", 1, "validated", "ready", (), None,
+                len(manifest["chunks"]), len(manifest["chunks"]), None,
+                manifest["artifact_graph_version"],
+            )
+
         def pull_jobs(self, **payload):
             self.pull_upload_counts.append(len(self.uploads))
             self.pull_payloads.append(payload)
@@ -462,28 +472,28 @@ def test_sync_runner_uploads_baseline_artifacts_without_remote_jobs(monkeypatch,
     fake = FakeClient()
     result = run_backend_sync(client_factory=lambda: fake)
 
-    schemas = {upload["schema"] for upload in fake.uploads}
     assert result.exit_code == 0
     assert result.summary["artifacts_uploaded"] == 2
     assert result.summary["artifact_errors"] == 0
-    assert result.summary["source_slice_candidates"] >= 1
-    assert schemas == {"hades.git_tree.v1", "hades.php_graph.v1"}
+    assert result.summary["source_slice_candidates"] == 0
+    assert {upload["schema"] for upload in fake.uploads} == {"hades.git_tree.v1"}
     assert {upload["job_id"] for upload in fake.uploads} == {None}
-    assert all(upload["workspace_binding_id"] == "wb_1" for upload in fake.uploads)
+    assert all(
+        upload["workspace_binding_id"] == "01KXJD1BDMQ2TFABMVJV6EFE8Q"
+        for upload in fake.uploads
+    )
+    assert len(fake.graph_manifests) == 1
+    graph = fake.graph_manifests[0]
+    assert graph["schema"] == "hades.graph_bundle.v2"
+    assert graph["artifact_schema"] == "hades.code_graph.v2"
+    assert graph["project"] == {
+        "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+        "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+    }
     assert fake.pull_upload_counts == [0]
     assert "read_source_slice" in fake.pull_payloads[0]["capabilities"]
     assert "populate_project_wiki" in fake.pull_payloads[0]["capabilities"]
     assert "verify_project_wiki" in fake.pull_payloads[0]["capabilities"]
-    graph_upload = next(upload for upload in fake.uploads if upload["schema"] == "hades.php_graph.v1")
-    graph = graph_upload["artifact"]
-    node_ids = {node["id"] for node in graph["nodes"]}
-    assert graph["graph_contract"]["version"] == "hades.graph_artifact.v1"
-    assert graph["symbols"] and "id" not in graph["symbols"][0]
-    assert node_ids and all(node_id.startswith("hades:node:v1:") for node_id in node_ids)
-    assert all(
-        relationship["source_id"] in node_ids and relationship["target_id"] in node_ids
-        for relationship in graph["relationships"]
-    )
 
 
 def test_sync_runner_uploads_current_organism_with_dedupe_and_safe_manifest(
@@ -1064,7 +1074,7 @@ def test_sync_runner_uploads_php_graph_artifacts(monkeypatch, tmp_path):
         "job_php_graph",
         {
             "artifact": {
-                "schema": "hades.php_graph.v1",
+                "schema": "hades.symbols.v1",
                 "routes": [],
                 "symbols": [],
                 "edges": [],
@@ -1078,7 +1088,7 @@ def test_sync_runner_uploads_php_graph_artifacts(monkeypatch, tmp_path):
     assert uploaded == 1
     assert errors == 0
     assert skipped == 0
-    assert client.uploads[0]["schema"] == "hades.php_graph.v1"
+    assert client.uploads[0]["schema"] == "hades.symbols.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
 
 
@@ -1126,7 +1136,7 @@ def test_sync_runner_uploads_code_graph_artifacts(monkeypatch, tmp_path):
         "job_code_graph",
         {
             "artifact": {
-                "schema": "hades.code_graph.v1",
+                "schema": "hades.symbols.v1",
                 "routes": [],
                 "symbols": [],
                 "edges": [],
@@ -1140,7 +1150,7 @@ def test_sync_runner_uploads_code_graph_artifacts(monkeypatch, tmp_path):
     assert uploaded == 1
     assert errors == 0
     assert skipped == 0
-    assert client.uploads[0]["schema"] == "hades.code_graph.v1"
+    assert client.uploads[0]["schema"] == "hades.symbols.v1"
     assert client.uploads[0]["artifact"]["indexed_head_commit"] == "a" * 40
 
 
@@ -1575,7 +1585,7 @@ def test_sync_runner_compresses_large_artifact_uploads(monkeypatch, tmp_path):
         "job_large_code_graph",
         {
             "artifact": {
-                "schema": "hades.code_graph.v1",
+                "schema": "hades.symbols.v1",
                 "framework": "nextjs",
                 "routes": [],
                 "symbols": symbols,
@@ -1596,7 +1606,7 @@ def test_sync_runner_compresses_large_artifact_uploads(monkeypatch, tmp_path):
     assert payload["artifact_encoding"] == "gzip+base64"
     assert payload["artifact_compressed_bytes"] < payload["artifact_uncompressed_bytes"]
     decoded = _decode_compressed_artifact_payload(payload)
-    assert decoded["schema"] == "hades.code_graph.v1"
+    assert decoded["schema"] == "hades.symbols.v1"
     assert decoded["indexed_head_commit"] == "d" * 40
     assert len(decoded["symbols"]) == 2500
 
@@ -1641,7 +1651,7 @@ def test_sync_runner_retries_raw_when_compressed_artifact_upload_is_rejected(mon
     )
     result = {
         "artifact": {
-            "schema": "hades.code_graph.v1",
+            "schema": "hades.symbols.v1",
             "framework": "nextjs",
             "routes": [],
             "symbols": [
@@ -1699,7 +1709,7 @@ def test_sync_runner_skips_unchanged_artifact_uploads(monkeypatch, tmp_path):
     )
     result = {
         "artifact": {
-            "schema": "hades.code_graph.v1",
+            "schema": "hades.symbols.v1",
             "framework": "nextjs",
             "routes": [{"method": "GET", "path": "/api/orders"}],
             "symbols": [{"kind": "component", "name": "OrdersPage"}],
@@ -1769,7 +1779,7 @@ def test_sync_runner_skips_artifacts_already_present_on_backend(monkeypatch, tmp
     )
     result = {
         "artifact": {
-            "schema": "hades.code_graph.v1",
+            "schema": "hades.symbols.v1",
             "framework": "nextjs",
             "routes": [{"method": "GET", "path": "/api/orders"}],
             "symbols": [{"kind": "component", "name": "OrdersPage"}],
@@ -1783,12 +1793,12 @@ def test_sync_runner_skips_artifacts_already_present_on_backend(monkeypatch, tmp
     assert _upload_job_artifact(client, agent, binding, "job_code_graph_1", result) == (0, 0, 1)
     assert client.lookups[0]["project_id"] == "proj_1"
     assert client.lookups[0]["workspace_binding_id"] == "wb_1"
-    assert client.lookups[0]["schema"] == "hades.code_graph.v1"
+    assert client.lookups[0]["schema"] == "hades.symbols.v1"
     assert len(client.lookups[0]["sha256"]) == 64
     assert client.uploads == []
 
     with hdb.connect_closing() as conn:
-        cache = hdb.get_sync_state(conn, _artifact_upload_cache_key(binding, "hades.code_graph.v1"))
+        cache = hdb.get_sync_state(conn, _artifact_upload_cache_key(binding, "hades.symbols.v1"))
     assert cache["backend_artifact_id"] == "artifact_backend_1"
     assert cache["backend_skip_reason"] == "unchanged_on_backend"
     assert cache["file_manifest"]["count"] == 1
@@ -3458,7 +3468,7 @@ def test_manual_sync_success_clears_background_backoff_state(monkeypatch, tmp_pa
             base_url="https://backend.example",
             label="dev",
             token_env_key="HADES_BACKEND_AGENT_TOKEN_TEST",
-            capabilities={"jobs": True},
+            capabilities={"jobs": True, "populate_backend_ast": False},
         )
         hdb.upsert_workspace_binding(
             conn,

@@ -2109,6 +2109,24 @@ def test_schema_allows_exact_call_site_id_on_interprocedural_throw() -> None:
     validate_schema("artifact.schema.json", payload)
 
 
+def test_schema_unique_items_uses_linear_handler_without_relaxing_duplicates() -> None:
+    """Keep the contract's duplicate rejection while avoiding quadratic scans."""
+
+    from hermes_cli.hades_graph_v2 import schema
+
+    assert (
+        schema._validator("artifact.schema.json").VALIDATORS["uniqueItems"]
+        is schema._linear_unique_items
+    )
+
+    for collection in ("languages", "nodes"):
+        payload = _valid_semantic_artifact()
+        payload[collection].append(copy.deepcopy(payload[collection][0]))
+        with pytest.raises(GraphContractError) as exc_info:
+            validate_schema("artifact.schema.json", payload)
+        assert exc_info.value.code == "schema_validation_failed"
+
+
 def test_valid_semantic_sync_and_async_flow_fixture() -> None:
     _, _, validation = _task3_api()
 

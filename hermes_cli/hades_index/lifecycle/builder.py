@@ -1620,6 +1620,8 @@ class GraphBuilder:
                 edge_owner_local[key] = local_node_ids[
                     block_by_key[key].declaration_key
                 ]
+            elif key in {item.local_key for item in data_nodes_ir}:
+                edge_owner_local[key] = public_id
         for terminal in terminals:
             if terminal.source_block_key in block_by_key:
                 block = block_by_key[terminal.source_block_key]

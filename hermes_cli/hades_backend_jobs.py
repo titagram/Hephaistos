@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import re
 import shutil
@@ -1464,7 +1465,7 @@ def _execute_populate_project_wiki(job: dict[str, Any], workspace_root: Path) ->
                     "foreign_keys": [],
                 }
                 for node in graph["nodes"]
-                if isinstance(node, dict) and node.get("kind") == "table"
+                if isinstance(node, dict) and node.get("kind") in {"table", "model"}
             ]
         }
     tests = graph.get("tests") if isinstance(graph.get("tests"), dict) else {}
@@ -1991,6 +1992,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     parse_coverage: list[CoverageEvent] = []
     selected_parser_paths: set[str] = set()
     total_source_bytes = 0
+    max_selected_parser_files = 10_000
     for item in inventory_tuple:
         size = (
             item.byte_size
@@ -2016,6 +2018,19 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             )
             continue
         if not item.parser_candidate or item.language is None:
+            continue
+        if len(selected_parser_paths) >= max_selected_parser_files:
+            parse_coverage.append(
+                CoverageEvent(
+                    coverage_language,
+                    CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                    "resource_budget_reached",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
             continue
         if total_source_bytes + size > graph_index_config.max_total_source_bytes:
             parse_coverage.append(
@@ -2125,6 +2140,8 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     parser = TreeSitterAdapter()
     parser.require_languages(detected_languages)
     syntax = []
+    max_symbols = min(5_000, int(payload.get("max_symbols") or 5_000))
+    selected_symbol_count = 0
     for item in inventory_tuple:
         if (
             not item.parser_candidate
@@ -2140,7 +2157,21 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             max_bytes=graph_index_config.max_file_bytes,
         )
         if parsed.syntax is not None:
-            syntax.append(parsed.syntax)
+            remaining_symbols = max(0, max_symbols - selected_symbol_count)
+            retained_symbols = parsed.syntax.symbols[:remaining_symbols]
+            if len(parsed.syntax.symbols) != len(retained_symbols):
+                syntax.append(
+                    replace(
+                        parsed.syntax,
+                        parsed_file=replace(
+                            parsed.syntax.parsed_file,
+                            symbols=retained_symbols,
+                        ),
+                    )
+                )
+            else:
+                syntax.append(parsed.syntax)
+            selected_symbol_count += len(retained_symbols)
         elif parsed.coverage_event is not None:
             parse_coverage.append(parsed.coverage_event)
 

@@ -8,12 +8,60 @@ from functools import lru_cache
 from importlib.resources import files
 from typing import Any, TypeAlias
 
-from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError, validators
 from referencing import Registry, Resource
 
 
 JsonScalar: TypeAlias = None | bool | int | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+def _freeze_unique_item(value: object) -> tuple[object, ...]:
+    """Make JSON equality hashable with jsonschema's scalar distinctions."""
+
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, (int, float)):
+        # jsonschema treats 1 and 1.0 as equal, but never equates bool with int.
+        return ("number", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, list):
+        return ("array", tuple(_freeze_unique_item(item) for item in value))
+    if isinstance(value, dict):
+        return (
+            "object",
+            tuple(
+                sorted(
+                    (key, _freeze_unique_item(item))
+                    for key, item in value.items()
+                )
+            ),
+        )
+    raise TypeError("uniqueItems values must be JSON-compatible")
+
+
+def _linear_unique_items(validator, unique_items, instance, schema):
+    """Validate JSON-array uniqueness in linear time without changing semantics."""
+
+    del validator, schema
+    if not unique_items or not isinstance(instance, list):
+        return
+    seen: set[tuple[object, ...]] = set()
+    for item in instance:
+        frozen_item = _freeze_unique_item(item)
+        if frozen_item in seen:
+            yield ValidationError(f"{instance!r} has non-unique elements")
+            return
+        seen.add(frozen_item)
+
+
+_LinearDraft202012Validator = validators.extend(
+    Draft202012Validator,
+    {"uniqueItems": _linear_unique_items},
+)
 
 GRAPH_SCHEMA = "hades.code_graph.v2"
 GRAPH_CONTRACT_VERSION = "hades.graph_artifact.v2"
@@ -184,7 +232,7 @@ def _schema_registry() -> Registry:
 @lru_cache(maxsize=None)
 def _validator(document_name: str) -> Draft202012Validator:
     document = _schema_documents()[document_name]
-    return Draft202012Validator(
+    return _LinearDraft202012Validator(
         document,
         registry=_schema_registry(),
         format_checker=FormatChecker(),

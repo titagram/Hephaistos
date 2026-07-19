@@ -26,8 +26,11 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageEvent,
     CoverageOutcome,
     DataNodeIR,
+    EdgeFactIR,
     ExtractionContext,
     IREvidence,
+    LocalNodeTarget,
+    Relation,
     SourceLocationIR,
     local_record_key,
 )
@@ -71,7 +74,10 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     """Extract verified SQL table resources into the canonical graph-v2 IR."""
 
     nodes: list[DataNodeIR] = []
+    edges: list[EdgeFactIR] = []
     coverage: list[CoverageEvent] = []
+    table_local_keys: dict[tuple[str, str], str] = {}
+    table_specs: list[tuple[object, int, object, str, str, str]] = []
     executable_capabilities = (
         CoverageCapability.ENTRYPOINT_DISCOVERY,
         CoverageCapability.CALL_GRAPH,
@@ -116,16 +122,17 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                 locator,
                 None,
             )
+            local_key = local_record_key(
+                "sql",
+                item.path,
+                "data_node",
+                "ast",
+                structural_path,
+                ordinal,
+            )
             nodes.append(
                 DataNodeIR(
-                    local_record_key(
-                        "sql",
-                        item.path,
-                        "data_node",
-                        "ast",
-                        structural_path,
-                        ordinal,
-                    ),
+                    local_key,
                     "sql",
                     NodeKind.TABLE,
                     table_name,
@@ -135,6 +142,8 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     evidence,
                 )
             )
+            table_local_keys[(item.path, table_name)] = local_key
+            table_specs.append((item, ordinal, match, table_name, local_key, source))
             represented += 1
         coverage.extend(
             CoverageEvent(
@@ -168,13 +177,56 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                 0,
             ),
         ))
+    for item, table_ordinal, match, table_name, source_key, source in table_specs:
+        body_start = match.start("body")
+        for item_ordinal, (definition, offset) in enumerate(
+            _sql_split_items(match.group("body"))
+        ):
+            reference = SQL_TABLE_FOREIGN_KEY_RE.search(definition) or SQL_INLINE_REFERENCE_RE.search(definition)
+            if reference is None:
+                continue
+            target_name = _sql_identifier(reference.group("table").split(".")[-1])
+            target_key = table_local_keys.get((item.path, target_name))
+            if target_key is None:
+                continue
+            line = _line_number(source, body_start + offset)
+            structural_path = f"sql/foreign_key/{table_ordinal}/{item_ordinal}"
+            locator = AstLocatorIR(
+                SourceLocationIR(item.path, line, line, item.file_sha256),
+                structural_path,
+                item_ordinal,
+            )
+            evidence = IREvidence(
+                EvidenceOrigin.VERIFIED_FROM_CODE,
+                "sql.schema-v2",
+                locator,
+                None,
+            )
+            edges.append(
+                EdgeFactIR(
+                    local_record_key(
+                        "sql", item.path, "foreign_key", "ast", structural_path, item_ordinal
+                    ),
+                    source_key,
+                    LocalNodeTarget(target_key),
+                    Relation.REFERENCES,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    locator,
+                    evidence,
+                )
+            )
     result = AdapterResult(
         declarations=(),
         blocks=(),
         branch_arms=(),
         structures=(),
         call_sites=(),
-        edge_facts=(),
+        edge_facts=tuple(sorted(edges, key=lambda edge: edge.local_key)),
         exception_scopes=(),
         terminals=(),
         effects=(),
