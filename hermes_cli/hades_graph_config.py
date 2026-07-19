@@ -21,6 +21,7 @@ from hermes_cli.hades_index.inventory import (
     SourceIdentityError,
     build_source_snapshot,
 )
+from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
 
 
 class GraphIndexConfigError(ValueError):
@@ -231,9 +232,7 @@ def _is_hades_sensitive_source_path(path: str) -> bool:
         return False
     return (
         cloud_config_path
-        or name == ".env"
-        or name.startswith(".env.")
-        or name == ".envrc"
+        or is_sensitive_semantic_resource_component(raw_parts[-1])
         or suffix == ".env"
         or name
         in {".netrc", ".npmrc", ".pypirc", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"}

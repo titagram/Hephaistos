@@ -280,6 +280,30 @@ def test_only_exact_lowercase_env_example_is_in_source_scope(tmp_path):
     assert secret_identity.tree_sha256 == hashlib.sha256(b"").hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("component", "sensitive"),
+    [
+        pytest.param(".well-known", False, id="public-standard"),
+        pytest.param(".env.example", False, id="exact-public-template"),
+        pytest.param(".env", True, id="env"),
+        pytest.param(".env.local", True, id="env-variant"),
+        pytest.param(".ENV", True, id="uppercase-env"),
+        pytest.param(".ENV.EXAMPLE", True, id="uppercase-template"),
+        pytest.param(".ssh", True, id="ssh"),
+        pytest.param(".GIT", True, id="uppercase-git"),
+        pytest.param(".Aws", True, id="mixed-aws"),
+    ],
+)
+def test_semantic_resource_sensitive_component_matches_source_policy(
+    component: str, sensitive: bool
+):
+    from hermes_cli.hades_graph_config import is_compiled_source_excluded
+    from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
+
+    assert is_sensitive_semantic_resource_component(component) is sensitive
+    assert is_compiled_source_excluded(component) is sensitive
+
+
 def test_compiled_scope_excludes_git_metadata_files_and_directories(tmp_path):
     from hermes_cli.hades_graph_config import (
         build_source_identity,

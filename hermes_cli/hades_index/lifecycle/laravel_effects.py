@@ -22,6 +22,7 @@ from hermes_cli.hades_graph_v2.model import (
     ResolutionKind,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import StructuralCall, SyntaxIR
+from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
 
 from .model import (
     AdapterResult,
@@ -76,12 +77,12 @@ _PRIVATE_RE = re.compile(
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
 _CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
-_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
 
 
 def _unsafe_public_components(value: str, *, separators: str) -> bool:
     return any(
-        component in {".", ".."} or component in _SENSITIVE_HIDDEN_COMPONENTS
+        component in {".", ".."}
+        or is_sensitive_semantic_resource_component(component)
         for component in re.split(separators, value)
     )
 

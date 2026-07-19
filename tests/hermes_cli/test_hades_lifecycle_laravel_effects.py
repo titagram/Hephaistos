@@ -246,14 +246,19 @@ class Orders {
     public function show() {
         Cache::get('.well-known');
         Storage::get('.well-known/acme-challenge');
+        Storage::get('.env.example');
         Http::get('https://api.example.test/.well-known/openid-configuration');
         Storage::get('../x');
         Storage::get('.env');
         Storage::get('.ssh/id_rsa');
+        Storage::get('.ENV');
+        Storage::get('.env.local');
         Cache::get('.env');
+        Cache::get('.ENV.EXAMPLE');
         Http::get('https://api.example.test/.well-known/openid-configuration?token=x');
         Http::get('https://user:pass@api.example.test/path');
         Http::get('https://api.example.test/path#fragment');
+        Http::get('https://api.example.test/.env.production');
     }
 }
 """
@@ -264,39 +269,53 @@ class Orders {
 
     assert parsed.status == "parsed"
     calls = parsed.syntax.calls  # type: ignore[union-attr]
-    literal_by_receiver = {
-        (call.receiver, call.member, index): argument.value
+    retained_literals = {
+        argument.value
         for call in calls
-        for index, argument in enumerate(call.arguments)
+        for argument in call.arguments
         if argument.kind == "literal"
     }
-    assert literal_by_receiver[("Cache", "get", 0)] == ".well-known"
-    assert literal_by_receiver[("Storage", "get", 0)] == ".well-known/acme-challenge"
-    assert (
-        literal_by_receiver[("Http", "get", 0)]
-        == "https://api.example.test/.well-known/openid-configuration"
-    )
+    assert {
+        ".well-known",
+        ".well-known/acme-challenge",
+        ".env.example",
+        "https://api.example.test/.well-known/openid-configuration",
+    } <= retained_literals
     assert not {
         "../x",
         ".env",
         ".ssh/id_rsa",
+        ".ENV",
+        ".env.local",
+        ".ENV.EXAMPLE",
         "https://api.example.test/.well-known/openid-configuration?token=x",
         "https://user:pass@api.example.test/path",
         "https://api.example.test/path#fragment",
-    } & set(literal_by_receiver.values())
+        "https://api.example.test/.env.production",
+    } & retained_literals
 
     result = assemble_graph_v2_adapter_result(_context(tmp_path), (parsed.syntax,))  # type: ignore[arg-type]
     effects = {(effect.kind, effect.public_resource_name) for effect in result.effects}
     assert {
         (EffectKind.CACHE_READ, ".well-known"),
         (EffectKind.STORAGE_READ, ".well-known/acme-challenge"),
+        (EffectKind.STORAGE_READ, ".env.example"),
         (
             EffectKind.EXTERNAL_CALL,
             "https://api.example.test/.well-known/openid-configuration",
         ),
     } <= effects
     assert not any(
-        resource in {"../x", ".env", ".ssh/id_rsa"}
+        resource
+        in {
+            "../x",
+            ".env",
+            ".ssh/id_rsa",
+            ".ENV",
+            ".env.local",
+            ".ENV.EXAMPLE",
+            "https://api.example.test/.env.production",
+        }
         for _kind, resource in effects
     )
     valid_context = replace(
@@ -418,12 +437,17 @@ class A { public function show($event, $job) {
         "..",
         "../x",
         ".env",
+        ".env.local",
+        ".ENV",
+        ".ENV.EXAMPLE",
+        ".env.production",
         ".ssh/id_rsa",
         ".git/config",
         ".aws/credentials",
         "https://api.example.test/path?query=1",
         "https://user:pass@api.example.test/path",
         "https://api.example.test/path#fragment",
+        "https://api.example.test/.env.production",
         "safe\x00resource",
     ],
 )

@@ -79,6 +79,7 @@ from .model import (
     artifact_to_payload,
 )
 from .schema import GraphContractError, JsonValue, validate_schema
+from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
 
 
 class GraphValidationError(GraphContractError):
@@ -105,7 +106,6 @@ _PRIVATE_RESOURCE_RE = re.compile(
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
 _CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
-_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
 _CAPABILITY_ORDER = (
     "inventory",
     "entrypoint_discovery",
@@ -310,7 +310,8 @@ def validate_scalar_and_privacy_rules(artifact: GraphArtifactV2) -> None:
             or _CONTROL_CHARACTER_RE.search(resource)
             or resource.startswith(("/", "~"))
             or any(
-                part in {".", ".."} or part in _SENSITIVE_HIDDEN_COMPONENTS
+                part in {".", ".."}
+                or is_sensitive_semantic_resource_component(part)
                 for part in re.split(r"[/:]", resource)
             )
             or (

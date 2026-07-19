@@ -18,6 +18,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageOutcome,
     local_record_key,
 )
+from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
 
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_.$\\][A-Za-z0-9_.$\\/:@>~\-]*$")
@@ -27,7 +28,6 @@ _PRIVATE_LITERAL_RE = re.compile(
     r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
-_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
 _LARAVEL_FACADE_PREFIX = "Illuminate\\Support\\Facades\\"
 _LARAVEL_FACADES = frozenset({
     "DB",
@@ -455,7 +455,8 @@ def _safe_literal(source: bytes, node: Any | None) -> str | None:
     if _PRIVATE_LITERAL_RE.search(value):
         return None
     if value.startswith(("/", "~")) or any(
-        segment in {".", ".."} or segment in _SENSITIVE_HIDDEN_COMPONENTS
+        segment in {".", ".."}
+        or is_sensitive_semantic_resource_component(segment)
         for segment in re.split(r"[/:]", value)
     ):
         return None
