@@ -253,6 +253,12 @@ class Orders {
         Storage::get('.ssh/id_rsa');
         Storage::get('.ENV');
         Storage::get('.env.local');
+        Storage::get('C:/Users/alice/credentials.txt');
+        Storage::get('c:/Users/alice/credentials.txt');
+        Storage::get('C:\\Users\\alice\\credentials.txt');
+        Storage::get('//server/share/secret.txt');
+        Storage::get('\\\\server\\share\\secret.txt');
+        Storage::get('file:///Users/alice/credentials.txt');
         Cache::get('.env');
         Cache::get('.ENV.EXAMPLE');
         Http::get('https://api.example.test/.well-known/openid-configuration?token=x');
@@ -288,6 +294,12 @@ class Orders {
         ".ENV",
         ".env.local",
         ".ENV.EXAMPLE",
+        "C:/Users/alice/credentials.txt",
+        "c:/Users/alice/credentials.txt",
+        "C:\\Users\\alice\\credentials.txt",
+        "//server/share/secret.txt",
+        "\\\\server\\share\\secret.txt",
+        "file:///Users/alice/credentials.txt",
         "https://api.example.test/.well-known/openid-configuration?token=x",
         "https://user:pass@api.example.test/path",
         "https://api.example.test/path#fragment",
@@ -314,6 +326,12 @@ class Orders {
             ".ENV",
             ".env.local",
             ".ENV.EXAMPLE",
+            "C:/Users/alice/credentials.txt",
+            "c:/Users/alice/credentials.txt",
+            "C:\\Users\\alice\\credentials.txt",
+            "//server/share/secret.txt",
+            "\\\\server\\share\\secret.txt",
+            "file:///Users/alice/credentials.txt",
             "https://api.example.test/.env.production",
         }
         for _kind, resource in effects
@@ -448,6 +466,13 @@ class A { public function show($event, $job) {
         "https://user:pass@api.example.test/path",
         "https://api.example.test/path#fragment",
         "https://api.example.test/.env.production",
+        "C:/Users/alice/credentials.txt",
+        "c:/Users/alice/credentials.txt",
+        r"C:\Users\alice\credentials.txt",
+        "//server/share/secret.txt",
+        r"\\server\share\secret.txt",
+        "file:///Users/alice/credentials.txt",
+        "FILE:///Users/alice/credentials.txt",
         "safe\x00resource",
     ],
 )

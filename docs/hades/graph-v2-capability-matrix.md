@@ -34,7 +34,9 @@ source bytes, query strings, credentials, tokens, absolute/home or traversal
 paths, sensitive hidden paths, recipients, headers, or request/body payloads.
 Artifact validation independently rejects private resource names should a
 producer regress, while retaining public standardized paths such as
-`.well-known/acme-challenge`.
+`.well-known/acme-challenge`. Absolute filesystem forms are platform-neutral:
+POSIX, home-relative, Windows drive, UNC, and `file:` URI resources are all
+rejected; `http`/`https` endpoints remain governed by the HTTP boundary rule.
 
 ## Deliberately not reconstructed in this change
 

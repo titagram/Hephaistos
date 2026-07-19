@@ -21,7 +21,10 @@ from hermes_cli.hades_index.inventory import (
     SourceIdentityError,
     build_source_snapshot,
 )
-from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
+from hermes_cli.hades_resource_privacy import (
+    is_platform_absolute_semantic_resource_path,
+    is_sensitive_semantic_resource_component,
+)
 
 
 class GraphIndexConfigError(ValueError):
@@ -188,7 +191,7 @@ def _safe_user_exclusion(value: object, *, index: int) -> str:
         ) from None
     if (
         not normalized
-        or normalized.startswith("/")
+        or is_platform_absolute_semantic_resource_path(normalized)
         or "\\" in normalized
         or "\x00" in normalized
         or len(encoded) > 4_096

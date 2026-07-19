@@ -304,6 +304,38 @@ def test_semantic_resource_sensitive_component_matches_source_policy(
     assert is_compiled_source_excluded(component) is sensitive
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/Users/alice/credentials.txt", id="posix"),
+        pytest.param("~/credentials.txt", id="home"),
+        pytest.param("C:/Users/alice/credentials.txt", id="windows-drive"),
+        pytest.param("c:/Users/alice/credentials.txt", id="windows-drive-lower"),
+        pytest.param(r"C:\Users\alice\credentials.txt", id="windows-backslash"),
+        pytest.param("//server/share/secret.txt", id="unc-slash"),
+        pytest.param(r"\\server\share\secret.txt", id="unc-backslash"),
+        pytest.param("file:///Users/alice/credentials.txt", id="file-uri"),
+        pytest.param("FILE:///Users/alice/credentials.txt", id="file-uri-upper"),
+        pytest.param("file:/Users/alice/credentials.txt", id="file-uri-short"),
+    ],
+)
+def test_graph_config_rejects_platform_absolute_resource_paths(path: str):
+    from hermes_cli.hades_graph_config import GraphIndexConfigError, load_hades_graph_index_config
+    from hermes_cli.hades_resource_privacy import is_platform_absolute_semantic_resource_path
+
+    assert is_platform_absolute_semantic_resource_path(path) is True
+    with pytest.raises(GraphIndexConfigError, match="safe source-relative path"):
+        load_hades_graph_index_config({
+            "hades": {"graph_index": {"excluded_paths": [path]}}
+        })
+
+
+def test_platform_absolute_resource_policy_keeps_internal_file_identifier():
+    from hermes_cli.hades_resource_privacy import is_platform_absolute_semantic_resource_path
+
+    assert is_platform_absolute_semantic_resource_path("file:app/Orders.php") is False
+
+
 def test_compiled_scope_excludes_git_metadata_files_and_directories(tmp_path):
     from hermes_cli.hades_graph_config import (
         build_source_identity,

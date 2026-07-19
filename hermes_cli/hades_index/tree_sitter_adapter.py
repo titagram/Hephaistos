@@ -18,7 +18,10 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageOutcome,
     local_record_key,
 )
-from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
+from hermes_cli.hades_resource_privacy import (
+    is_platform_absolute_semantic_resource_path,
+    is_sensitive_semantic_resource_component,
+)
 
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_.$\\][A-Za-z0-9_.$\\/:@>~\-]*$")
@@ -454,7 +457,7 @@ def _safe_literal(source: bytes, node: Any | None) -> str | None:
         return None
     if _PRIVATE_LITERAL_RE.search(value):
         return None
-    if value.startswith(("/", "~")) or any(
+    if is_platform_absolute_semantic_resource_path(value) or any(
         segment in {".", ".."}
         or is_sensitive_semantic_resource_component(segment)
         for segment in re.split(r"[/:]", value)

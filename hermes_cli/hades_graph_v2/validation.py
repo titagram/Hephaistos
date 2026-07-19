@@ -79,7 +79,10 @@ from .model import (
     artifact_to_payload,
 )
 from .schema import GraphContractError, JsonValue, validate_schema
-from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
+from hermes_cli.hades_resource_privacy import (
+    is_platform_absolute_semantic_resource_path,
+    is_sensitive_semantic_resource_component,
+)
 
 
 class GraphValidationError(GraphContractError):
@@ -308,7 +311,7 @@ def validate_scalar_and_privacy_rules(artifact: GraphArtifactV2) -> None:
         if (
             _PRIVATE_RESOURCE_RE.search(resource)
             or _CONTROL_CHARACTER_RE.search(resource)
-            or resource.startswith(("/", "~"))
+            or is_platform_absolute_semantic_resource_path(resource)
             or any(
                 part in {".", ".."}
                 or is_sensitive_semantic_resource_component(part)

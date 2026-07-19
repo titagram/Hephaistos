@@ -22,7 +22,10 @@ from hermes_cli.hades_graph_v2.model import (
     ResolutionKind,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import StructuralCall, SyntaxIR
-from hermes_cli.hades_resource_privacy import is_sensitive_semantic_resource_component
+from hermes_cli.hades_resource_privacy import (
+    is_platform_absolute_semantic_resource_path,
+    is_sensitive_semantic_resource_component,
+)
 
 from .model import (
     AdapterResult,
@@ -107,7 +110,7 @@ def _canonical_facade(value: str) -> str | None:
 def _safe_cache_key(value: str | None) -> str | None:
     if value is None or _PRIVATE_RE.search(value) or _CONTROL_CHARACTER_RE.search(value):
         return None
-    if value.startswith(("/", "~")) or "/" in value:
+    if is_platform_absolute_semantic_resource_path(value) or "/" in value:
         return None
     if _unsafe_public_components(value, separators=r":"):
         return None
@@ -119,7 +122,7 @@ def _safe_storage_path(value: str | None) -> str | None:
         value is None
         or _PRIVATE_RE.search(value)
         or _CONTROL_CHARACTER_RE.search(value)
-        or value.startswith(("/", "~"))
+        or is_platform_absolute_semantic_resource_path(value)
     ):
         return None
     parts = value.split("/")
@@ -129,7 +132,12 @@ def _safe_storage_path(value: str | None) -> str | None:
 
 
 def _safe_http_endpoint(value: str | None) -> str | None:
-    if value is None or _PRIVATE_RE.search(value) or _CONTROL_CHARACTER_RE.search(value):
+    if (
+        value is None
+        or _PRIVATE_RE.search(value)
+        or _CONTROL_CHARACTER_RE.search(value)
+        or is_platform_absolute_semantic_resource_path(value)
+    ):
         return None
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
