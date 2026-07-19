@@ -41,6 +41,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     DeclarationIdentityKind,
     EdgeFactIR,
     ExecutableDeclaration,
+    ExceptionCatchArm,
     ExceptionScope,
     ExceptionSuccessor,
     IREvidence,
@@ -379,10 +380,10 @@ def _fixture(
         exception_scopes=(
             ExceptionScope(
                 scope,
+                exception_structure,
                 handler,
                 _ast("body/try"),
-                ("Exception",),
-                (catch,),
+                (ExceptionCatchArm("Exception", catch),),
                 finally_block,
                 None,
             ),

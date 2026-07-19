@@ -518,32 +518,95 @@ def _reason_code(value: str) -> ReasonCode:
         return ReasonCode.INVALID_SOURCE_FACT
 
 
-_CATCH_ALL_EXCEPTION_TYPES = frozenset({
-    "BaseException",
-    "Exception",
-    "Throwable",
-    "Error",
-    "System.Exception",
-    "java.lang.Exception",
-})
+_EXCEPTION_BASES_BY_LANGUAGE: dict[str, dict[str, tuple[str, ...]]] = {
+    "python": {
+        "BaseException": (),
+        "Exception": ("BaseException",),
+        "ArithmeticError": ("Exception",),
+        "AssertionError": ("Exception",),
+        "AttributeError": ("Exception",),
+        "EOFError": ("Exception",),
+        "ImportError": ("Exception",),
+        "ModuleNotFoundError": ("ImportError",),
+        "LookupError": ("Exception",),
+        "IndexError": ("LookupError",),
+        "KeyError": ("LookupError",),
+        "NameError": ("Exception",),
+        "OSError": ("Exception",),
+        "FileNotFoundError": ("OSError",),
+        "PermissionError": ("OSError",),
+        "TimeoutError": ("OSError",),
+        "RuntimeError": ("Exception",),
+        "NotImplementedError": ("RuntimeError",),
+        "TypeError": ("Exception",),
+        "ValueError": ("Exception",),
+        "UnicodeError": ("ValueError",),
+    },
+    "php": {
+        "Throwable": (),
+        "Exception": ("Throwable",),
+        "Error": ("Throwable",),
+        "RuntimeException": ("Exception",),
+        "LogicException": ("Exception",),
+        "InvalidArgumentException": ("LogicException",),
+        "OutOfBoundsException": ("RuntimeException",),
+        "TypeError": ("Error",),
+        "ValueError": ("Error",),
+    },
+    "javascript": {
+        "Error": (),
+        "AggregateError": ("Error",),
+        "EvalError": ("Error",),
+        "RangeError": ("Error",),
+        "ReferenceError": ("Error",),
+        "SyntaxError": ("Error",),
+        "TypeError": ("Error",),
+        "URIError": ("Error",),
+    },
+    "typescript": {
+        "Error": (),
+        "AggregateError": ("Error",),
+        "EvalError": ("Error",),
+        "RangeError": ("Error",),
+        "ReferenceError": ("Error",),
+        "SyntaxError": ("Error",),
+        "TypeError": ("Error",),
+        "URIError": ("Error",),
+    },
+}
 
 
-def _exception_type_matches(thrown: str | None, caught: str) -> bool:
-    """Apply only explicit equality and the IR's portable catch-all roots."""
+def _exception_type_name(value: str) -> str:
+    return value.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
 
-    caught_tail = caught.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
-    if (
-        caught in _CATCH_ALL_EXCEPTION_TYPES
-        or caught_tail in _CATCH_ALL_EXCEPTION_TYPES
-    ):
-        return True
+
+def _exception_type_matches(
+    language: str, thrown: str | None, caught: str | None
+) -> bool:
+    """Match only exact or resolved built-in ancestry in the owner's language."""
+
     if thrown is None:
-        # Without a statically known thrown type, every lexical catch remains
-        # a possible match.  Preserve nearest-scope semantics instead of
-        # incorrectly skipping to a parent scope.
+        return False
+    if caught is None:
         return True
-    thrown_tail = thrown.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
-    return caught == thrown or caught_tail == thrown_tail
+    thrown_name = _exception_type_name(thrown)
+    caught_name = _exception_type_name(caught)
+    if thrown == caught or thrown_name == caught_name:
+        return True
+    ancestry = _EXCEPTION_BASES_BY_LANGUAGE.get(language)
+    if ancestry is None or thrown_name not in ancestry or caught_name not in ancestry:
+        return False
+    pending = list(ancestry[thrown_name])
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == caught_name:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(ancestry.get(current, ()))
+    return False
 
 
 def _all_locators(
@@ -1313,57 +1376,14 @@ class GraphBuilder:
             ):
                 if type(successor) is not ExceptionSuccessor:
                     continue
-                if successor.exception_scope_key in structure_ids:
-                    framework_exception_scope_ids[successor.exception_scope_key] = (
-                        structure_ids[successor.exception_scope_key]
-                    )
-                    continue
-                owner_id = framework_segment_owner_ids[segment.local_key]
-                locator = segment.evidence.locator
-                structural = (
-                    locator.structural_path
-                    if type(locator) is AstLocatorIR
-                    else locator.structural_pointer
-                )
-                structural_path = (
-                    f"{structural}/pipeline_exception/"
-                    f"{successor.exception_scope_key[:16]}"
-                )
-                identity = {
-                    "kind": StructureKind.EXCEPTION_SCOPE.value,
-                    "owner_node_id": owner_id,
-                    "structural_path": structural_path,
-                    "ordinal": successor.order,
-                    "subtype": StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER.value,
-                }
-                public_id = exception_scope_id(identity)
-                previous = framework_exception_scope_ids.setdefault(
-                    successor.exception_scope_key, public_id
-                )
-                if previous != public_id:
+                if successor.exception_scope_key not in structure_ids:
                     raise IRValidationError(
-                        "semantic_collision",
-                        "framework exception scope key has conflicting owners",
+                        "unresolved_reference",
+                        "framework exception successor lacks exact typed scope facts",
                     )
-                if not any(item.id == public_id for item in structures):
-                    target_id = (
-                        local_node_ids[successor.target_block_key]
-                        if successor.target_block_key in local_node_ids
-                        else framework_segment_node_ids[successor.target_block_key]
-                    )
-                    structures.append(
-                        Structure(
-                            public_id,
-                            StructureKind.EXCEPTION_SCOPE,
-                            owner_id,
-                            structural_path,
-                            successor.order,
-                            StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER,
-                            None,
-                            None,
-                            _evidence(segment.evidence),
-                        )
-                    )
+                framework_exception_scope_ids[successor.exception_scope_key] = (
+                    structure_ids[successor.exception_scope_key]
+                )
 
         # Loop successors do not carry a structure key in the frozen IR, so
         # the canonical producer derives their branch group from the loop
@@ -2242,21 +2262,123 @@ class GraphBuilder:
             )
 
         framework_branch_ids: dict[tuple[str, str], str] = {}
+        framework_missing_exit_boundary_ids: dict[tuple[str, str], str] = {}
+        framework_missing_exit_boundary_edges: set[tuple[str, str]] = set()
 
         def framework_target_id(key: str) -> str:
             if key in local_node_ids:
                 return local_node_ids[key]
             return framework_segment_node_ids[key]
 
+        def materialize_missing_framework_exit_boundary(
+            segment: FrameworkPipelineSegment,
+            declaration: ExecutableDeclaration,
+            exit_kind: str,
+        ) -> None:
+            """Stop a verified target at an explicit partial frontier.
+
+            A framework successor is executable only from the target callable's
+            exact typed exits.  If the adapter/control-flow union cannot provide
+            the required exit family, retain the executed entry block and stop
+            there instead of fabricating a declaration- or entry-sourced
+            continuation.
+            """
+
+            key = (segment.local_key, exit_kind)
+            role = f"unresolved_{exit_kind}_exit"
+            declaration_id = local_node_ids[declaration.local_key]
+            locator = segment.evidence.locator
+            base_path = (
+                locator.structural_path
+                if type(locator) is AstLocatorIR
+                else locator.structural_pointer
+            )
+            structural_path = (
+                f"{base_path}/pipeline/{segment.pipeline_order}/"
+                f"{segment.framework_role}/{role}"
+            )
+            identity = SourceOccurrenceIdentity(
+                "source_occurrence",
+                context.workspace_binding_id,
+                declaration.language,
+                NodeKind.FRAMEWORK_BOUNDARY,
+                declaration_id,
+                structural_path,
+                segment.pipeline_order,
+                role,
+            )
+            public_id = node_id({
+                "variant": "source_occurrence",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": declaration.language,
+                "kind": NodeKind.FRAMEWORK_BOUNDARY.value,
+                "owner_node_id": declaration_id,
+                "structural_path": structural_path,
+                "ordinal": segment.pipeline_order,
+                "semantic_role": role,
+            })
+            previous_id = framework_missing_exit_boundary_ids.setdefault(key, public_id)
+            if previous_id != public_id:
+                raise IRValidationError(
+                    "semantic_collision",
+                    "framework missing-exit boundary identity is inconsistent",
+                )
+            nodes.append(
+                Node(
+                    public_id,
+                    identity,
+                    NodeKind.FRAMEWORK_BOUNDARY,
+                    declaration.language,
+                    entrypoint_data_by_segment[segment.local_key][0].framework,
+                    role.replace("_", " "),
+                    None,
+                    None,
+                    None,
+                    _source_location(locator),
+                    FrameworkProperties(
+                        segment.framework_role,
+                        segment.pipeline_order,
+                        role,
+                    ),
+                    _evidence(segment.evidence),
+                )
+            )
+            if key not in framework_missing_exit_boundary_edges:
+                append_edge(
+                    source_id=local_node_ids[declaration.entry_block_key],
+                    target_id=public_id,
+                    relation=Relation.PASSES_THROUGH,
+                    flow=EdgeFlow.ALWAYS,
+                    locator=locator,
+                    owner_id=declaration_id,
+                    evidence=_evidence(segment.evidence),
+                    order=0,
+                    occurrence_path=structural_path,
+                )
+                framework_missing_exit_boundary_edges.add(key)
+                effective_coverage_events.append(
+                    CoverageEvent(
+                        declaration.language,
+                        CoverageCapability.FRAMEWORK_LIFECYCLE,
+                        CoverageOutcome.PARTIAL,
+                        ReasonCode.VERIFIED_TARGET_NOT_MATERIALIZED.value,
+                        _locator_path(locator),
+                        0,
+                        1,
+                    )
+                )
+
         for segment in framework_segments:
             source_id = framework_segment_node_ids[segment.local_key]
             owner_id = framework_segment_owner_ids[segment.local_key]
-            successor_source_id = source_id
+            normal_successor_source_ids = (source_id,)
+            exception_successor_source_ids = (source_id,)
             if type(segment.target) is FrameworkLocalTarget:
-                successor_source_id = local_node_ids[segment.target.local_key]
+                target_declaration = declaration_by_key[segment.target.local_key]
+                target_declaration_id = local_node_ids[segment.target.local_key]
                 append_edge(
                     source_id=source_id,
-                    target_id=successor_source_id,
+                    target_id=target_declaration_id,
                     relation=Relation.ROUTES_TO,
                     flow=EdgeFlow.ALWAYS,
                     locator=segment.evidence.locator,
@@ -2264,6 +2386,14 @@ class GraphBuilder:
                     evidence=_evidence(segment.evidence),
                     order=0,
                     occurrence_path=(f"pipeline/{segment.pipeline_order}/target"),
+                )
+                normal_successor_source_ids = tuple(
+                    local_node_ids[key]
+                    for key in target_declaration.normal_exit_block_keys
+                )
+                exception_successor_source_ids = tuple(
+                    local_node_ids[key]
+                    for key in target_declaration.exception_exit_block_keys
                 )
             for successor in (
                 segment.success_successor,
@@ -2375,44 +2505,66 @@ class GraphBuilder:
                             "kind": StructureKind.BRANCH_GROUP.value,
                             "owner_node_id": owner_id,
                             "structural_path": structural_path,
-                            "ordinal": successor.order,
+                            "ordinal": 0,
                             "subtype": StructureSubtype.FRAMEWORK_SHORT_CIRCUIT.value,
                         }
-                        branch_id = framework_branch_ids.setdefault(
-                            branch_key, branch_group_id(identity)
+                        derived_branch_id = branch_group_id(identity)
+                        previous_branch_id = framework_branch_ids.setdefault(
+                            branch_key, derived_branch_id
                         )
-                        if not any(item.id == branch_id for item in structures):
-                            structures.append(
-                                Structure(
-                                    branch_id,
-                                    StructureKind.BRANCH_GROUP,
-                                    owner_id,
-                                    structural_path,
-                                    successor.order,
-                                    StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
-                                    None,
-                                    None,
-                                    _evidence(segment.evidence),
-                                )
+                        if previous_branch_id != derived_branch_id:
+                            raise IRValidationError(
+                                "semantic_collision",
+                                "framework loop branch identity is inconsistent",
                             )
-                append_edge(
-                    source_id=successor_source_id,
-                    target_id=target_id,
-                    relation=relation,
-                    flow=flow,
-                    locator=segment.evidence.locator,
-                    owner_id=successor_owner_id,
-                    evidence=_evidence(segment.evidence),
-                    condition=condition,
-                    branch_id=branch_id,
-                    exception_id=exception_id_value,
-                    order=successor.order,
-                    occurrence_path=(
-                        f"pipeline/{segment.pipeline_order}/"
-                        f"{successor.kind}/{successor.order}"
-                    ),
-                    occurrence_ordinal=successor.order,
+                        branch_id = derived_branch_id
+                        structures.append(
+                            Structure(
+                                branch_id,
+                                StructureKind.BRANCH_GROUP,
+                                owner_id,
+                                structural_path,
+                                0,
+                                StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+                                None,
+                                None,
+                                _evidence(segment.evidence),
+                            )
+                        )
+                successor_source_ids = (
+                    exception_successor_source_ids
+                    if flow is EdgeFlow.EXCEPTION
+                    else normal_successor_source_ids
                 )
+                if (
+                    not successor_source_ids
+                    and type(segment.target) is FrameworkLocalTarget
+                ):
+                    materialize_missing_framework_exit_boundary(
+                        segment,
+                        target_declaration,
+                        "exception" if flow is EdgeFlow.EXCEPTION else "normal",
+                    )
+                    continue
+                for successor_source_id in successor_source_ids:
+                    append_edge(
+                        source_id=successor_source_id,
+                        target_id=target_id,
+                        relation=relation,
+                        flow=flow,
+                        locator=segment.evidence.locator,
+                        owner_id=successor_owner_id,
+                        evidence=_evidence(segment.evidence),
+                        condition=condition,
+                        branch_id=branch_id,
+                        exception_id=exception_id_value,
+                        order=successor.order,
+                        occurrence_path=(
+                            f"pipeline/{segment.pipeline_order}/"
+                            f"{successor.kind}/{successor.order}"
+                        ),
+                        occurrence_ordinal=successor.order,
+                    )
 
         # One explicit synchronous root edge per resolved entrypoint.
         for candidate, _, public_id, _ in entrypoint_data:
@@ -2620,7 +2772,6 @@ class GraphBuilder:
 
         # Normal returns are generated only for the invocation's exact call
         # site and continuation.  They are never shared across callers.
-        exception_continuation_call_sites: dict[str, str] = {}
         for invocation, edge_ir in invocation_ir:
             if type(edge_ir.target) is not LocalNodeTarget:
                 continue
@@ -2663,21 +2814,9 @@ class GraphBuilder:
                 for terminal in terminals
                 if terminal.kind is TerminalKind.EXCEPTION
             }
-            scope_by_structure_key: dict[str, ExceptionScope] = {}
-            for scope_ir in exception_scopes:
-                matching_structure = next(
-                    (
-                        item
-                        for item in structures_ir
-                        if item.kind is StructureKind.EXCEPTION_SCOPE
-                        and item.owner_declaration_key == scope_ir.declaration_key
-                        and item.structural_path == scope_ir.locator.structural_path
-                        and item.ordinal == scope_ir.locator.ordinal
-                    ),
-                    None,
-                )
-                if matching_structure is not None:
-                    scope_by_structure_key[matching_structure.local_key] = scope_ir
+            scope_by_structure_key = {
+                scope_ir.structure_key: scope_ir for scope_ir in exception_scopes
+            }
 
             for ordinal, exit_key in enumerate(callee.exception_exit_block_keys):
                 source_id = local_node_ids[exit_key]
@@ -2692,44 +2831,26 @@ class GraphBuilder:
                 if exception_structure_key is not None:
                     scope_ir = scope_by_structure_key.get(exception_structure_key)
                     while scope_ir is not None:
-                        matching_catch_index = next(
+                        owner_language = declaration_by_key[
+                            scope_ir.declaration_key
+                        ].language
+                        matching_catch_arm = next(
                             (
-                                index
-                                for index, caught in enumerate(
-                                    scope_ir.caught_type_names
+                                arm
+                                for arm in scope_ir.catch_arms
+                                if _exception_type_matches(
+                                    owner_language,
+                                    thrown_type,
+                                    arm.caught_type_name,
                                 )
-                                if _exception_type_matches(thrown_type, caught)
                             ),
                             None,
                         )
-                        if scope_ir.catch_block_keys and (
-                            not scope_ir.caught_type_names
-                            or matching_catch_index is not None
-                        ):
-                            catch_index = min(
-                                matching_catch_index or 0,
-                                len(scope_ir.catch_block_keys) - 1,
-                            )
+                        if matching_catch_arm is not None:
                             target_id = local_node_ids[
-                                scope_ir.catch_block_keys[catch_index]
+                                matching_catch_arm.target_block_key
                             ]
-                            matching_structure = next(
-                                (
-                                    item
-                                    for item in structures_ir
-                                    if item.kind is StructureKind.EXCEPTION_SCOPE
-                                    and item.owner_declaration_key
-                                    == scope_ir.declaration_key
-                                    and item.structural_path
-                                    == scope_ir.locator.structural_path
-                                    and item.ordinal == scope_ir.locator.ordinal
-                                ),
-                                None,
-                            )
-                            if matching_structure is not None:
-                                exception_id_value = structure_ids[
-                                    matching_structure.local_key
-                                ]
+                            exception_id_value = structure_ids[scope_ir.structure_key]
                             break
                         scope_ir = next(
                             (
@@ -2765,27 +2886,26 @@ class GraphBuilder:
                         "ordinal": ordinal,
                         "semantic_role": "unhandled_exception",
                     })
-                    if not any(node.id == target_id for node in nodes):
-                        nodes.append(
-                            Node(
-                                target_id,
-                                identity,
-                                NodeKind.EXCEPTION,
-                                caller.language,
+                    nodes.append(
+                        Node(
+                            target_id,
+                            identity,
+                            NodeKind.EXCEPTION,
+                            caller.language,
+                            None,
+                            "unhandled exception",
+                            None,
+                            None,
+                            None,
+                            _source_location(site.locator),
+                            TerminalProperties(
                                 None,
-                                "unhandled exception",
-                                None,
-                                None,
-                                None,
-                                _source_location(site.locator),
-                                TerminalProperties(
-                                    None,
-                                    thrown_type or "exception",
-                                    "exception",
-                                ),
-                                _synthetic_evidence(site.locator),
-                            )
+                                thrown_type or "exception",
+                                "exception",
+                            ),
+                            _synthetic_evidence(site.locator),
                         )
+                    )
                 normalized = thrown_type or "exception"
                 propagated = append_edge(
                     source_id=source_id,
@@ -2801,15 +2921,18 @@ class GraphBuilder:
                         condition_hash(normalized),
                         ConditionPolarity.EXCEPTION,
                     ),
+                    call_id=invocation.call_site_id,
                     exception_id=exception_id_value,
                     occurrence_path=(
                         f"{site.locator.structural_path}/exception_return/{ordinal}"
                     ),
                     occurrence_ordinal=ordinal,
                 )
-                exception_continuation_call_sites[propagated.id] = (
-                    invocation.call_site_id or ""
-                )
+                if propagated.call_site_id is None:
+                    raise IRValidationError(
+                        "invalid_call_site",
+                        "interprocedural throw requires its exact invocation call site",
+                    )
 
         edges = list(_deduplicate_edges(edges))
 
@@ -2908,7 +3031,6 @@ class GraphBuilder:
                     for item in declarations
                 )
             ),
-            tuple(sorted(exception_continuation_call_sites.items())),
         )
         # Summaries are computed before entrypoint traversal so recursive
         # callable components converge independently of public-flow order.

@@ -49,6 +49,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     EntrypointKind,
     ExtractionContext,
     ExecutableDeclaration,
+    ExceptionCatchArm,
     ExceptionScope,
     ExceptionSuccessor,
     FileLocatorIR,
@@ -276,10 +277,10 @@ def _records() -> dict[str, object]:
     )
     exception = ExceptionScope(
         local_key=exception_scope,
+        structure_key=exception_structure,
         declaration_key=decl,
         locator=_ast("body/try"),
-        caught_type_names=("RuntimeError",),
-        catch_block_keys=(catch,),
+        catch_arms=(ExceptionCatchArm("RuntimeError", catch),),
         finally_block_key=None,
         parent_scope_key=None,
     )

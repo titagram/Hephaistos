@@ -989,28 +989,53 @@ class EdgeFactIR:
 
 
 @dataclass(frozen=True, slots=True)
+class ExceptionCatchArm:
+    caught_type_name: str | None
+    target_block_key: str
+
+    def __post_init__(self) -> None:
+        if self.caught_type_name is not None:
+            _nfc(self.caught_type_name, field_name="caught_type_name", limit=256)
+        _key(self.target_block_key, field_name="catch_arm.target_block_key")
+
+
+@dataclass(frozen=True, slots=True)
 class ExceptionScope:
     local_key: str
+    structure_key: str
     declaration_key: str
     locator: OccurrenceLocatorIR
-    caught_type_names: tuple[str, ...]
-    catch_block_keys: tuple[str, ...]
+    catch_arms: tuple[ExceptionCatchArm, ...]
     finally_block_key: str | None
     parent_scope_key: str | None
 
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="exception_scope.local_key")
+        _key(self.structure_key, field_name="exception_scope.structure_key")
         _key(self.declaration_key, field_name="exception_scope.declaration_key")
         if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
             _fail("invalid_locator", "exception scope locator must be AST or config")
-        caught = _tuple(self.caught_type_names, field_name="caught_type_names")
-        if any(not isinstance(item, str) for item in caught):
-            _fail("invalid_scalar", "caught_type_names must contain strings")
-        for item in caught:
-            _nfc(item, field_name="caught_type_name", limit=256)
-        blocks = _tuple(self.catch_block_keys, field_name="catch_block_keys")
-        if any(not isinstance(item, str) for item in blocks):
-            _fail("invalid_reference", "catch_block_keys must contain local keys")
+        arms = _tuple(self.catch_arms, field_name="catch_arms")
+        if any(type(item) is not ExceptionCatchArm for item in arms):
+            _fail("invalid_discriminator", "catch_arms must contain ExceptionCatchArm")
+        identities = tuple(
+            (item.caught_type_name, item.target_block_key) for item in arms
+        )
+        _sorted_unique(
+            identities,
+            field_name="catch_arms",
+            key=lambda item: ((item[0] or ""), item[1]),
+        )
+        targets_by_type: dict[str | None, str] = {}
+        for arm in arms:
+            previous = targets_by_type.setdefault(
+                arm.caught_type_name, arm.target_block_key
+            )
+            if previous != arm.target_block_key:
+                _fail(
+                    "conflicting_catch_arm",
+                    "one caught type cannot target multiple catch blocks",
+                )
         for field_name, value in (
             ("finally_block_key", self.finally_block_key),
             ("parent_scope_key", self.parent_scope_key),
@@ -2035,7 +2060,19 @@ class AdapterResult:
         scope_structure_by_scope: dict[str, StructureIR] = {}
         for scope in self.exception_scopes:
             need(declarations, scope.declaration_key, "exception scope declaration")
-            for block_key in scope.catch_block_keys:
+            structure = need(
+                structures, scope.structure_key, "exception scope structure"
+            )
+            if (
+                structure.kind is not StructureKind.EXCEPTION_SCOPE
+                or structure.owner_declaration_key != scope.declaration_key
+            ):
+                _fail(
+                    "invalid_structure",
+                    "exception scope requires its exact owned exception StructureIR",
+                )
+            for arm in scope.catch_arms:
+                block_key = arm.target_block_key
                 if block_key in blocks:
                     need_local_block(
                         block_key, scope.declaration_key, "exception catch block"
@@ -2057,25 +2094,20 @@ class AdapterResult:
                         "cross_declaration_control_flow",
                         "exception parent scope must belong to the same declaration",
                     )
-            matching = [
-                structure
-                for structure in self.structures
-                if structure.kind is StructureKind.EXCEPTION_SCOPE
-                and structure.owner_declaration_key == scope.declaration_key
-                and structure.structural_path
-                == (
-                    scope.locator.structural_path
-                    if type(scope.locator) is AstLocatorIR
-                    else scope.locator.structural_pointer
-                )
-                and structure.ordinal == scope.locator.ordinal
-            ]
-            if len(matching) != 1:
+            structural_path = (
+                scope.locator.structural_path
+                if type(scope.locator) is AstLocatorIR
+                else scope.locator.structural_pointer
+            )
+            if (
+                structure.structural_path != structural_path
+                or structure.ordinal != scope.locator.ordinal
+            ):
                 _fail(
                     "invalid_structure",
-                    "exception scope requires one matching exception_scope StructureIR",
+                    "exception scope occurrence must equal its exact StructureIR",
                 )
-            scope_structure_by_scope[scope.local_key] = matching[0]
+            scope_structure_by_scope[scope.local_key] = structure
 
         for block in self.blocks:
             need(declarations, block.declaration_key, "block declaration")
@@ -2711,6 +2743,7 @@ __all__ = [
     "EntrypointKind",
     "EvidenceLocatorIR",
     "EvidenceOrigin",
+    "ExceptionCatchArm",
     "ExceptionScope",
     "ExceptionSuccessor",
     "FileLocatorIR",

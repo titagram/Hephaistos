@@ -8,10 +8,20 @@ from dataclasses import replace
 import pytest
 
 from hermes_cli.hades_graph_v2 import artifact_to_payload, validate_artifact
+from hermes_cli.hades_graph_v2.model import NodeKind, StructureKind
 from hermes_cli.hades_index import build_canonical_graph
 from hermes_cli.hades_index.aggregate import aggregate_adapter_results
+from hermes_cli.hades_index.lifecycle.entrypoints import (
+    EntrypointExtraction,
+    aggregate_entrypoint_extraction,
+)
+from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
 from hermes_cli.hades_index.lifecycle.model import (
     AdapterResult,
+    AlwaysSuccessor,
+    AstLocatorIR,
+    BasicBlock,
+    ControlKind,
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
@@ -19,6 +29,10 @@ from hermes_cli.hades_index.lifecycle.model import (
     InventoryFile,
     FrameworkLocalTarget,
     AsyncSuccessor,
+    DeclarationIdentityKind,
+    ExecutableDeclaration,
+    Modifier,
+    local_record_key,
 )
 from tests.hermes_cli.test_hades_lifecycle_ir import _valid_result
 from tests.hermes_cli.test_hades_lifecycle_traversal import _complex_result, _context
@@ -293,4 +307,362 @@ async def items():
     assert sorted(node.properties.pipeline_order for node in framework_nodes) == list(
         range(len(actual_segments))
     )
+    validate_artifact(artifact)
+
+
+def _framework_e2e_case(tmp_path, framework: str):
+    if framework == "fastapi":
+        from hermes_cli.hades_index.lifecycle.frameworks.fastapi import (
+            FastAPILifecycleAdapter,
+        )
+        from hermes_cli.hades_index.python import extract_lifecycle_entrypoints
+        from tests.hermes_cli import test_hades_lifecycle_fastapi as fixture
+
+        fixture._prepare(tmp_path)
+        fixture._write(
+            tmp_path,
+            "app.py",
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.get('/items')\n"
+            "async def items(): return {'ok': True}\n",
+        )
+        context = fixture._context(tmp_path)
+        syntax = (fixture._syntax(tmp_path, "app.py"),)
+        adapter = FastAPILifecycleAdapter()
+    elif framework == "django":
+        from hermes_cli.hades_index.lifecycle.frameworks.django import (
+            DjangoLifecycleAdapter,
+        )
+        from hermes_cli.hades_index.python import extract_lifecycle_entrypoints
+        from tests.hermes_cli import test_hades_lifecycle_django as fixture
+
+        fixture._prepare_project(tmp_path)
+        fixture._write(
+            tmp_path,
+            "project/urls.py",
+            "from . import views\n"
+            "urlpatterns = [path('items/', views.items, name='items')]\n",
+        )
+        fixture._write(
+            tmp_path,
+            "project/views.py",
+            "def items(request): return HttpResponse('ok')\n",
+        )
+        context = fixture._context(tmp_path)
+        syntax = (
+            fixture._syntax(
+                tmp_path, "project/views.py", fixture._function("items", 1)
+            ),
+        )
+        adapter = DjangoLifecycleAdapter()
+    elif framework == "laravel":
+        from hermes_cli.hades_index.lifecycle.frameworks.laravel import (
+            LaravelLifecycleAdapter,
+        )
+        from hermes_cli.hades_index.php import extract_lifecycle_entrypoints
+        from tests.hermes_cli import test_hades_lifecycle_laravel as fixture
+
+        fixture._prepare_project(tmp_path)
+        fixture._write(
+            tmp_path,
+            "routes/web.php",
+            "<?php Route::get('/items', [ItemController::class, 'index']);",
+        )
+        fixture._write(
+            tmp_path,
+            "app/Http/Controllers/ItemController.php",
+            "<?php class ItemController { public function index() {} }",
+        )
+        context = fixture._context(tmp_path)
+        syntax = (
+            fixture._syntax(
+                tmp_path,
+                "app/Http/Controllers/ItemController.php",
+                "ItemController.index",
+            ),
+        )
+        adapter = LaravelLifecycleAdapter()
+    elif framework == "symfony":
+        from hermes_cli.hades_index.lifecycle.frameworks.symfony import (
+            SymfonyLifecycleAdapter,
+        )
+        from hermes_cli.hades_index.php import extract_lifecycle_entrypoints
+        from tests.hermes_cli import test_hades_lifecycle_symfony as fixture
+
+        fixture._prepare_project(tmp_path)
+        fixture._write(
+            tmp_path,
+            "config/routes.yaml",
+            "items:\n"
+            "  path: /items\n"
+            "  controller: App\\Controller\\ItemController::index\n"
+            "  methods: [GET]\n",
+        )
+        fixture._write(
+            tmp_path,
+            "src/Controller/ItemController.php",
+            "<?php namespace App\\Controller; final class ItemController { "
+            "public function index() {} }",
+        )
+        context = fixture._context(tmp_path)
+        syntax = (
+            fixture._syntax(
+                tmp_path,
+                "src/Controller/ItemController.php",
+                "ItemController.index",
+            ),
+        )
+        adapter = SymfonyLifecycleAdapter()
+    else:
+        from hermes_cli.hades_index.lifecycle.frameworks.nextjs import (
+            NextJSLifecycleAdapter,
+        )
+        from hermes_cli.hades_index.typescript import extract_lifecycle_entrypoints
+        from tests.hermes_cli import test_hades_lifecycle_nextjs as fixture
+
+        fixture._write(
+            tmp_path,
+            "app/api/items/route.ts",
+            "export async function GET() { return Response.json([]) }\n",
+        )
+        context = fixture._context(tmp_path, "typescript")
+        syntax = (fixture._syntax(tmp_path, "app/api/items/route.ts", "typescript"),)
+        adapter = NextJSLifecycleAdapter("typescript")
+
+    registry = FrameworkAdapterRegistry()
+    registry.register(adapter)
+    extraction = extract_lifecycle_entrypoints(context, syntax, registry=registry)
+    canonical_context = _context(tmp_path)
+    context = replace(
+        context,
+        project_id=canonical_context.project_id,
+        workspace_binding_id=canonical_context.workspace_binding_id,
+        source_identity=canonical_context.source_identity,
+    )
+    return context, extraction
+
+
+def _companion_control_flow(context, extraction: EntrypointExtraction) -> AdapterResult:
+    segment_keys = {item.local_key for item in extraction.framework_segments}
+    references = {}
+    for candidate in extraction.candidates:
+        if candidate.handler_local_key is not None:
+            references.setdefault(
+                candidate.handler_local_key, candidate.registration_locator
+            )
+    for segment in extraction.framework_segments:
+        if isinstance(segment.target, FrameworkLocalTarget):
+            references.setdefault(segment.target.local_key, segment.evidence.locator)
+        for successor in (
+            segment.success_successor,
+            *segment.short_circuit_successors,
+        ):
+            if isinstance(successor, AsyncSuccessor):
+                references.setdefault(
+                    successor.target_local_key, segment.evidence.locator
+                )
+    for structure in extraction.structures:
+        references.setdefault(
+            structure.owner_declaration_key, structure.evidence.locator
+        )
+    for scope in extraction.exception_scopes:
+        references.setdefault(scope.declaration_key, scope.locator)
+
+    declarations = []
+    blocks = []
+    block_keys: set[str] = set()
+    for ordinal, (declaration_key, reference) in enumerate(sorted(references.items())):
+        locator = AstLocatorIR(
+            reference.source_location,
+            f"e2e/callable/{ordinal}",
+            0,
+        )
+        entry_key = local_record_key(
+            context.detected_languages[0],
+            locator.source_location.path,
+            "basic_block",
+            "ast",
+            f"{locator.structural_path}/entry",
+            0,
+        )
+        exit_key = local_record_key(
+            context.detected_languages[0],
+            locator.source_location.path,
+            "basic_block",
+            "ast",
+            f"{locator.structural_path}/exit",
+            0,
+        )
+        declarations.append(
+            ExecutableDeclaration(
+                declaration_key,
+                context.detected_languages[0],
+                NodeKind.FUNCTION,
+                DeclarationIdentityKind.NAMED,
+                None,
+                f"callable_{ordinal}",
+                f"e2e.callable_{ordinal}",
+                "e2e",
+                (Modifier.PUBLIC,),
+                (),
+                None,
+                locator,
+                entry_key,
+                (exit_key,),
+                (),
+            )
+        )
+        blocks.extend((
+            BasicBlock(
+                entry_key,
+                declaration_key,
+                ControlKind.ENTRY,
+                0,
+                replace(locator, structural_path=f"{locator.structural_path}/entry"),
+                (AlwaysSuccessor(exit_key, 0),),
+            ),
+            BasicBlock(
+                exit_key,
+                declaration_key,
+                ControlKind.RETURN,
+                1,
+                replace(locator, structural_path=f"{locator.structural_path}/exit"),
+                (),
+            ),
+        ))
+        block_keys.update((entry_key, exit_key))
+
+    handler_by_segment = {
+        key: candidate.handler_local_key
+        for candidate in extraction.candidates
+        for key in candidate.framework_segment_keys
+        if candidate.handler_local_key is not None
+    }
+    required_blocks: dict[str, tuple[str, object]] = {}
+    declaration_keys = set(references)
+    for segment in extraction.framework_segments:
+        owner_key = handler_by_segment.get(segment.local_key)
+        if owner_key is None:
+            continue
+        for successor in (
+            segment.success_successor,
+            *segment.short_circuit_successors,
+        ):
+            target_key = getattr(successor, "target_block_key", None)
+            if (
+                target_key is not None
+                and target_key not in segment_keys | declaration_keys | block_keys
+            ):
+                required_blocks.setdefault(
+                    target_key, (owner_key, segment.evidence.locator)
+                )
+    for arm in extraction.branch_arms:
+        structure = next(
+            item
+            for item in extraction.structures
+            if item.local_key == arm.branch_local_key
+        )
+        for key in (arm.source_block_key, arm.target_block_key):
+            if key not in segment_keys | declaration_keys | block_keys:
+                required_blocks.setdefault(
+                    key, (structure.owner_declaration_key, structure.evidence.locator)
+                )
+    for ordinal, (key, (owner_key, reference)) in enumerate(
+        sorted(required_blocks.items())
+    ):
+        locator = AstLocatorIR(
+            reference.source_location,
+            f"e2e/framework_block/{ordinal}",
+            0,
+        )
+        blocks.append(
+            BasicBlock(
+                key,
+                owner_key,
+                ControlKind.STRAIGHT_LINE,
+                ordinal + 2,
+                locator,
+                (),
+            )
+        )
+
+    return AdapterResult(
+        declarations=tuple(sorted(declarations, key=lambda item: item.local_key)),
+        blocks=tuple(sorted(blocks, key=lambda item: item.local_key)),
+        branch_arms=(),
+        structures=(),
+        call_sites=(),
+        edge_facts=(),
+        exception_scopes=(),
+        terminals=(),
+        effects=(),
+        framework_segments=(),
+        entrypoints=(),
+        unresolved_facts=(),
+        coverage_events=(),
+        diagnostics=(),
+    )
+
+
+@pytest.mark.parametrize(
+    "framework", ("fastapi", "django", "laravel", "symfony", "nextjs")
+)
+def test_untouched_framework_extraction_aggregates_and_executes_callable_cfg(
+    tmp_path, framework
+):
+    context, extraction = _framework_e2e_case(tmp_path, framework)
+    frozen_output = repr(extraction)
+    assembled = aggregate_entrypoint_extraction(
+        _companion_control_flow(context, extraction), extraction
+    )
+    aggregate_adapter_results((assembled,))
+    artifact = build_canonical_graph(
+        context,
+        (assembled,),
+        generated_at=lambda: "2026-07-19T12:00:00Z",
+    )
+
+    assert repr(extraction) == frozen_output
+    assert artifact.entrypoints
+    nodes = {item.id: item for item in artifact.nodes}
+    edges = artifact.edges
+    for entrypoint in artifact.entrypoints:
+        if entrypoint.handler_node_id is None:
+            continue
+        cfg_ids = {
+            item.id
+            for item in artifact.nodes
+            if getattr(item.identity, "owner_node_id", None)
+            == entrypoint.handler_node_id
+            and item.kind in {NodeKind.BASIC_BLOCK, NodeKind.MERGE}
+        }
+        assert cfg_ids
+        local_orders = {
+            segment.pipeline_order
+            for segment in extraction.framework_segments
+            if isinstance(segment.target, FrameworkLocalTarget)
+            and segment.target.local_key
+            == next(
+                candidate.handler_local_key
+                for candidate in extraction.candidates
+                if candidate.public_name == entrypoint.public_name
+            )
+        }
+        for order in local_orders:
+            continuations = [
+                edge
+                for edge in edges
+                if (
+                    getattr(edge.occurrence, "ast_path", None)
+                    or getattr(edge.occurrence, "structural_pointer", "")
+                ).startswith(f"pipeline/{order}/")
+                and not (
+                    getattr(edge.occurrence, "ast_path", None)
+                    or getattr(edge.occurrence, "structural_pointer", "")
+                ).endswith("/target")
+            ]
+            assert continuations
+            assert all(edge.source_id in cfg_ids for edge in continuations)
+    assert all(edge.source_id in nodes for edge in edges)
     validate_artifact(artifact)

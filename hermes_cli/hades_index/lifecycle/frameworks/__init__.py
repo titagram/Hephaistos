@@ -13,6 +13,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
     CoverageEvent,
     EntrypointCandidate,
+    ExceptionCatchArm,
     ExceptionScope,
     ExtractionContext,
     FrameworkPipelineSegment,
@@ -118,6 +119,45 @@ class FrameworkPipelineFacts:
                 type(item) is not expected for item in values
             ):
                 raise FrameworkAdapterError(f"framework pipeline {label} are invalid")
+        identities = (
+            ("terminal", tuple(item.local_key for item in self.terminals)),
+            ("structure", tuple(item.local_key for item in self.structures)),
+            (
+                "branch arm",
+                tuple(
+                    (item.branch_local_key, item.arm_ordinal)
+                    for item in self.branch_arms
+                ),
+            ),
+            (
+                "exception scope",
+                tuple(item.local_key for item in self.exception_scopes),
+            ),
+        )
+        for label, values in identities:
+            if len(values) != len(set(values)):
+                raise FrameworkAdapterError(
+                    f"framework pipeline emitted duplicate {label} identity"
+                )
+        structure_occurrences = tuple(
+            (
+                item.kind,
+                item.owner_declaration_key,
+                item.structural_path,
+                item.ordinal,
+                item.subtype,
+            )
+            for item in self.structures
+        )
+        if len(structure_occurrences) != len(set(structure_occurrences)):
+            raise FrameworkAdapterError(
+                "framework pipeline emitted duplicate structure occurrence"
+            )
+        scope_structures = tuple(item.structure_key for item in self.exception_scopes)
+        if len(scope_structures) != len(set(scope_structures)):
+            raise FrameworkAdapterError(
+                "framework pipeline emitted duplicate exception scope occurrence"
+            )
 
 
 def _framework_fact_locator(
@@ -191,15 +231,16 @@ def framework_pipeline_facts(
             if type(locator) is AstLocatorIR
             else locator.structural_pointer
         )
-        caught = tuple(
-            sorted({
-                successor.caught_type_name
-                for _segment, successor in values
-                if successor.caught_type_name is not None
-            })
-        )
-        catch_targets = tuple(
-            sorted({successor.target_block_key for _segment, successor in values})
+        catch_arms = tuple(
+            sorted(
+                {
+                    ExceptionCatchArm(
+                        successor.caught_type_name, successor.target_block_key
+                    )
+                    for _segment, successor in values
+                },
+                key=lambda item: (item.caught_type_name or "", item.target_block_key),
+            )
         )
         structures.append(
             StructureIR(
@@ -225,10 +266,10 @@ def framework_pipeline_facts(
         scopes.append(
             ExceptionScope(
                 scope_key,
+                structure_key,
                 candidate.handler_local_key or "",
                 locator,
-                caught,
-                catch_targets,
+                catch_arms,
                 None,
                 None,
             )
@@ -254,6 +295,8 @@ def _validate_pipeline_fact_references(
     }
     referenced_terminals: set[str] = set()
     referenced_structures: set[str] = set()
+    referenced_arms: set[tuple[str, str]] = set()
+    referenced_exception_arms: dict[str, set[tuple[str | None, str]]] = {}
     for segment in pipeline:
         for successor in (segment.success_successor, *segment.short_circuit_successors):
             if type(successor) is ReturnSuccessor:
@@ -274,6 +317,10 @@ def _validate_pipeline_fact_references(
                         "framework exception successor lacks its exact typed scope"
                     )
                 referenced_structures.add(structure.local_key)
+                referenced_exception_arms.setdefault(structure.local_key, set()).add((
+                    successor.caught_type_name,
+                    successor.target_block_key,
+                ))
             elif type(successor) is BranchSuccessor:
                 structure = structures.get(successor.branch_arm_key)
                 if (
@@ -286,27 +333,49 @@ def _validate_pipeline_fact_references(
                         "framework branch successor lacks its exact typed arm"
                     )
                 referenced_structures.add(structure.local_key)
+                referenced_arms.add((
+                    successor.branch_arm_key,
+                    successor.target_block_key,
+                ))
     if referenced_terminals != set(terminals):
         raise FrameworkAdapterError("framework pipeline emitted orphan terminals")
     if referenced_structures != set(structures):
         raise FrameworkAdapterError("framework pipeline emitted orphan structures")
-    if any(
-        not any(
-            item.owner_declaration_key == scope.declaration_key
-            and item.structural_path
-            == (
-                scope.locator.structural_path
-                if type(scope.locator) is AstLocatorIR
-                else scope.locator.structural_pointer
-            )
-            and item.ordinal == scope.locator.ordinal
-            for item in facts.structures
-            if item.kind is StructureKind.EXCEPTION_SCOPE
+    if referenced_arms != set(arms):
+        raise FrameworkAdapterError("framework pipeline emitted orphan branch arms")
+    scopes_by_structure = {item.structure_key: item for item in facts.exception_scopes}
+    if set(scopes_by_structure) != set(referenced_exception_arms):
+        raise FrameworkAdapterError("framework pipeline emitted orphan exception scope")
+    for structure_key, expected_arms in referenced_exception_arms.items():
+        scope = scopes_by_structure[structure_key]
+        structure = structures[structure_key]
+        structural = (
+            scope.locator.structural_path
+            if type(scope.locator) is AstLocatorIR
+            else scope.locator.structural_pointer
         )
-        for scope in facts.exception_scopes
+        if (
+            structure.owner_declaration_key != scope.declaration_key
+            or structure.structural_path != structural
+            or structure.ordinal != scope.locator.ordinal
+        ):
+            raise FrameworkAdapterError(
+                "framework exception scope lacks its exact StructureIR"
+            )
+        actual_arms = {
+            (item.caught_type_name, item.target_block_key) for item in scope.catch_arms
+        }
+        if actual_arms != expected_arms:
+            raise FrameworkAdapterError(
+                "framework exception scope has conflicting catch arms"
+            )
+    if any(
+        item.kind is StructureKind.EXCEPTION_SCOPE
+        and item.local_key not in scopes_by_structure
+        for item in facts.structures
     ):
         raise FrameworkAdapterError(
-            "framework exception scope lacks its exact StructureIR"
+            "framework exception StructureIR lacks its exact exception scope"
         )
 
 

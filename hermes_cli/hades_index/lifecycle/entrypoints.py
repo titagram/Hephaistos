@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +28,7 @@ from hermes_cli.hades_graph_v2.model import (
 )
 from hermes_cli.hades_index.lifecycle.model import (
     AstLocatorIR,
+    AdapterResult,
     ConfigLocatorIR,
     CoverageCapability,
     CoverageEvent,
@@ -65,6 +66,40 @@ class EntrypointExtraction:
     branch_arms: tuple[BranchArm, ...] = ()
     exception_scopes: tuple[ExceptionScope, ...] = ()
     terminals: tuple[Terminal, ...] = ()
+
+
+def aggregate_entrypoint_extraction(
+    control_flow: AdapterResult,
+    extraction: EntrypointExtraction,
+) -> AdapterResult:
+    """Attach untouched entrypoint facts to their language control-flow result."""
+
+    if type(control_flow) is not AdapterResult:
+        raise TypeError("entrypoint aggregation requires an AdapterResult")
+    if type(extraction) is not EntrypointExtraction:
+        raise TypeError("entrypoint aggregation requires EntrypointExtraction")
+    existing = EntrypointExtraction(
+        control_flow.entrypoints,
+        control_flow.framework_segments,
+        control_flow.coverage_events,
+        control_flow.structures,
+        control_flow.branch_arms,
+        control_flow.exception_scopes,
+        control_flow.terminals,
+    )
+    merged = merge_entrypoint_extractions(existing, extraction)
+    result = replace(
+        control_flow,
+        branch_arms=merged.branch_arms,
+        structures=merged.structures,
+        exception_scopes=merged.exception_scopes,
+        terminals=merged.terminals,
+        framework_segments=merged.framework_segments,
+        entrypoints=merged.candidates,
+        coverage_events=merged.coverage_events,
+    )
+    result.validate()
+    return result
 
 
 def _candidate_key(candidate: EntrypointCandidate) -> tuple[object, ...]:
@@ -552,6 +587,7 @@ def normalized_entrypoint_identity(
 
 __all__ = [
     "EntrypointExtraction",
+    "aggregate_entrypoint_extraction",
     "extract_generic_entrypoints",
     "extract_language_entrypoints",
     "extract_languages_entrypoints",

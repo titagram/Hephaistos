@@ -10,9 +10,12 @@ import pytest
 
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
+    ConditionPolarity,
     EntrypointKind,
     MethodSemantics,
     SourceIdentity,
+    StructureKind,
+    StructureSubtype,
     TriggerKind,
 )
 from hermes_cli.hades_index.lifecycle.entrypoints import (
@@ -25,19 +28,29 @@ from hermes_cli.hades_index.lifecycle.frameworks import (
     FrameworkAdapterRegistry,
     FrameworkDetection,
     FrameworkPipelineFacts,
+    _validate_pipeline_fact_references,
+    framework_pipeline_facts,
     run_framework_adapters,
 )
 from hermes_cli.hades_index.lifecycle.model import (
     AdapterResult,
     AsyncSuccessor,
     BasicBlock,
+    BranchArm,
+    BranchSuccessor,
+    ConditionIR,
     ControlKind,
     CoverageEvent,
     EntrypointCandidate,
+    ExceptionScope,
+    ExceptionCatchArm,
+    ExceptionSuccessor,
     ExtractionContext,
     InventoryFile,
     FrameworkPipelineSegment,
     FrameworkLocalTarget,
+    IRValidationError,
+    StructureIR,
     local_record_key,
 )
 from tests.hermes_cli.test_hades_lifecycle_ir import _valid_result
@@ -290,6 +303,256 @@ def test_registry_preserves_registration_order_and_rejects_duplicate_framework()
 def test_registry_requires_the_formal_coverage_events_adapter_method() -> None:
     with pytest.raises(FrameworkAdapterError, match="coverage_events"):
         FrameworkAdapterRegistry().register(_LegacyAdapterWithoutCoverage())
+
+
+def test_framework_pipeline_protocol_rejects_orphan_duplicate_exception_scope(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    target_key = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "body/catch", 0
+    )
+    structure_key = local_record_key(
+        "python", "src/app.py", "structure", "ast", "body/try", 0
+    )
+    segment = FrameworkPipelineSegment(
+        local_record_key(
+            "python", "src/app.py", "framework_segment", "ast", "pipeline/0", 0
+        ),
+        "exception_handler",
+        0,
+        FrameworkLocalTarget(candidate.handler_local_key),
+        ExceptionSuccessor(target_key, structure_key, "RuntimeError", 0),
+        (),
+        candidate.evidence,
+    )
+    locator = replace(candidate.registration_locator, structural_path="body/try")
+    structure = StructureIR(
+        structure_key,
+        StructureKind.EXCEPTION_SCOPE,
+        candidate.handler_local_key,
+        "body/try",
+        0,
+        StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER,
+        None,
+        None,
+        replace(candidate.evidence, locator=locator),
+    )
+    scope = ExceptionScope(
+        local_record_key(
+            "python", "src/app.py", "exception_scope", "ast", "body/try", 0
+        ),
+        structure_key,
+        candidate.handler_local_key,
+        locator,
+        (ExceptionCatchArm("RuntimeError", target_key),),
+        None,
+        None,
+    )
+    orphan = replace(
+        scope,
+        local_key=local_record_key(
+            "python",
+            "src/app.py",
+            "exception_scope",
+            "ast",
+            "body/try/orphan",
+            0,
+        ),
+    )
+
+    with pytest.raises(
+        FrameworkAdapterError, match="duplicate exception scope occurrence"
+    ):
+        _validate_pipeline_fact_references(
+            candidate,
+            (segment,),
+            FrameworkPipelineFacts(
+                structures=(structure,), exception_scopes=(scope, orphan)
+            ),
+        )
+
+
+def test_framework_pipeline_facts_preserve_catch_type_target_pairs(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    scope_key = local_record_key(
+        "python", "src/app.py", "structure", "ast", "pipeline/scope", 0
+    )
+    a_target = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/a", 0
+    )
+    z_target = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/z", 0
+    )
+    segment = FrameworkPipelineSegment(
+        local_record_key(
+            "python", "src/app.py", "framework_segment", "ast", "pipeline/0", 0
+        ),
+        "exception_handler",
+        0,
+        FrameworkLocalTarget(candidate.handler_local_key),
+        ExceptionSuccessor(z_target, scope_key, "AError", 0),
+        (ExceptionSuccessor(a_target, scope_key, "ZError", 1),),
+        candidate.evidence,
+    )
+
+    facts = framework_pipeline_facts(
+        candidate,
+        (segment,),
+        lambda _segment, _successor: pytest.fail("unexpected return successor"),
+    )
+    scope = facts.exception_scopes[0]
+
+    assert {
+        (item.caught_type_name, item.target_block_key) for item in scope.catch_arms
+    } == {("AError", z_target), ("ZError", a_target)}
+
+
+def test_framework_pipeline_protocol_rejects_orphan_and_duplicate_branch_arms(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    structure_key = local_record_key(
+        "python", "src/app.py", "structure", "ast", "pipeline/branch", 0
+    )
+    source_key = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/source", 0
+    )
+    target_key = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/target", 0
+    )
+    orphan_target_key = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/orphan", 0
+    )
+    segment = FrameworkPipelineSegment(
+        local_record_key(
+            "python", "src/app.py", "framework_segment", "ast", "pipeline/0", 0
+        ),
+        "guard",
+        0,
+        FrameworkLocalTarget(candidate.handler_local_key),
+        BranchSuccessor(target_key, structure_key, 0),
+        (),
+        candidate.evidence,
+    )
+    locator = replace(candidate.registration_locator, structural_path="pipeline/branch")
+    structure = StructureIR(
+        structure_key,
+        StructureKind.BRANCH_GROUP,
+        candidate.handler_local_key,
+        "pipeline/branch",
+        0,
+        StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+        None,
+        None,
+        replace(candidate.evidence, locator=locator),
+    )
+    condition = ConditionIR("predicate", "allowed", _DIGEST, ConditionPolarity.TRUE)
+    arm = BranchArm(
+        structure_key,
+        source_key,
+        target_key,
+        ConditionPolarity.TRUE,
+        condition,
+        0,
+    )
+    orphan = BranchArm(
+        structure_key,
+        source_key,
+        orphan_target_key,
+        ConditionPolarity.FALSE,
+        ConditionIR("predicate", "not_allowed", "b" * 64, ConditionPolarity.FALSE),
+        1,
+    )
+
+    with pytest.raises(FrameworkAdapterError, match="orphan branch arms"):
+        _validate_pipeline_fact_references(
+            candidate,
+            (segment,),
+            FrameworkPipelineFacts(structures=(structure,), branch_arms=(arm, orphan)),
+        )
+    with pytest.raises(FrameworkAdapterError, match="duplicate branch arm identity"):
+        FrameworkPipelineFacts(branch_arms=(arm, arm))
+
+
+def test_framework_pipeline_protocol_rejects_duplicate_structure_occurrence(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    locator = replace(candidate.registration_locator, structural_path="pipeline/branch")
+    structure = StructureIR(
+        local_record_key(
+            "python", "src/app.py", "structure", "ast", "pipeline/branch", 0
+        ),
+        StructureKind.BRANCH_GROUP,
+        candidate.handler_local_key,
+        "pipeline/branch",
+        0,
+        StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+        None,
+        None,
+        replace(candidate.evidence, locator=locator),
+    )
+    duplicate = replace(
+        structure,
+        local_key=local_record_key(
+            "python",
+            "src/app.py",
+            "structure_duplicate",
+            "ast",
+            "pipeline/branch",
+            0,
+        ),
+    )
+
+    with pytest.raises(FrameworkAdapterError, match="duplicate structure occurrence"):
+        FrameworkPipelineFacts(structures=(structure, duplicate))
+
+
+def test_exception_scope_rejects_conflicting_catch_pairs(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    structure_key = local_record_key(
+        "python", "src/app.py", "structure", "ast", "pipeline/scope", 0
+    )
+    first_target = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/catch_a", 0
+    )
+    second_target = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/catch_b", 0
+    )
+
+    with pytest.raises(IRValidationError, match="conflicting_catch_arm"):
+        ExceptionScope(
+            local_record_key(
+                "python",
+                "src/app.py",
+                "exception_scope",
+                "ast",
+                "pipeline/scope",
+                0,
+            ),
+            structure_key,
+            candidate.handler_local_key,
+            replace(candidate.registration_locator, structural_path="pipeline/scope"),
+            (
+                ExceptionCatchArm("RuntimeError", first_target),
+                ExceptionCatchArm("RuntimeError", second_target),
+            ),
+            None,
+            None,
+        )
 
 
 def test_all_detected_framework_adapters_run_in_registration_order(

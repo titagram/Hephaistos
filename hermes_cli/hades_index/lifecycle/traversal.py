@@ -144,7 +144,6 @@ class CanonicalTopology:
     capabilities: Capabilities
     normal_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
     exception_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
-    exception_call_sites_by_edge: tuple[tuple[str, str], ...] = ()
 
 
 def _node_owner(node: Node) -> str:
@@ -260,7 +259,6 @@ def build_callable_summaries(
     edges_by_id = {edge.id: edge for edge in graph.edges}
     declared_normal_exits = dict(graph.normal_exits_by_callable)
     declared_exception_exits = dict(graph.exception_exits_by_callable)
-    exception_call_sites = dict(graph.exception_call_sites_by_edge)
     callables = sorted({
         _node_owner(node)
         for node in graph.nodes
@@ -300,8 +298,8 @@ def build_callable_summaries(
             continue
         if edge.relation is Relation.RETURNS_TO and edge.call_site_id is not None:
             summary_returns_by_call_site[edge.call_site_id].append(edge)
-        elif (call_site_id := exception_call_sites.get(edge.id)) is not None:
-            summary_exceptions_by_call_site[call_site_id].append(edge)
+        elif edge.relation is Relation.THROWS_TO and edge.call_site_id is not None:
+            summary_exceptions_by_call_site[edge.call_site_id].append(edge)
         else:
             summary_outgoing[edge.source_id].append(edge)
     for values in summary_outgoing.values():
@@ -692,7 +690,6 @@ def build_lifecycle_flows(
     edges = {edge.id: edge for edge in graph.edges}
     uncertainties = {item.id: item for item in graph.uncertainties}
     callable_summaries = summaries or build_callable_summaries(graph)
-    exception_call_sites = dict(graph.exception_call_sites_by_edge)
     uncertain_call_sites = {
         edge.call_site_id
         for edge in graph.edges
@@ -767,13 +764,6 @@ def build_lifecycle_flows(
                         or edge.call_site_id not in throwable_call_sites
                     ):
                         continue
-                exception_call_site = exception_call_sites.get(edge.id)
-                if exception_call_site is not None and (
-                    exception_call_site not in invocation_stages
-                    or exception_call_site in uncertain_call_sites
-                    or exception_call_site not in throwable_call_sites
-                ):
-                    continue
                 if edge.uncertainty_id is not None:
                     uncertainty = uncertainties[edge.uncertainty_id]
                     if uncertainty.candidate_set_knowledge.value != "complete":
