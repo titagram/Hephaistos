@@ -23,6 +23,7 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_generic_entrypoints,
     normalized_entrypoint_identity,
 )
+from hermes_cli.hades_index.lifecycle.assembler import default_framework_registry
 from hermes_cli.hades_index.lifecycle.frameworks import (
     FrameworkAdapterError,
     FrameworkAdapterRegistry,
@@ -303,6 +304,23 @@ def test_registry_preserves_registration_order_and_rejects_duplicate_framework()
 def test_registry_requires_the_formal_coverage_events_adapter_method() -> None:
     with pytest.raises(FrameworkAdapterError, match="coverage_events"):
         FrameworkAdapterRegistry().register(_LegacyAdapterWithoutCoverage())
+
+
+def test_all_required_framework_golden_suites_are_registered() -> None:
+    """The production registry owns every framework backed by a golden suite."""
+
+    assert tuple(
+        (adapter.language, adapter.framework)
+        for adapter in default_framework_registry().adapters
+    ) == (
+        ("python", "django"),
+        ("python", "fastapi"),
+        ("php", "laravel"),
+        ("php", "symfony"),
+        ("javascript", "express"),
+        ("javascript", "nextjs"),
+        ("typescript", "nextjs"),
+    )
 
 
 def test_framework_pipeline_protocol_rejects_orphan_duplicate_exception_scope(

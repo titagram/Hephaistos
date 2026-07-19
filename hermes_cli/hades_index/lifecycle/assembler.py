@@ -107,6 +107,7 @@ def default_framework_registry() -> FrameworkAdapterRegistry:
     """Return the explicit built-in framework registry used by graph jobs."""
 
     from .frameworks.django import DjangoLifecycleAdapter
+    from .frameworks.express import ExpressLifecycleAdapter
     from .frameworks.fastapi import FastAPILifecycleAdapter
     from .frameworks.laravel import LaravelLifecycleAdapter
     from .frameworks.nextjs import NextJSLifecycleAdapter
@@ -118,6 +119,7 @@ def default_framework_registry() -> FrameworkAdapterRegistry:
         FastAPILifecycleAdapter(),
         LaravelLifecycleAdapter(),
         SymfonyLifecycleAdapter(),
+        ExpressLifecycleAdapter(),
         NextJSLifecycleAdapter("javascript"),
         NextJSLifecycleAdapter("typescript"),
     ):

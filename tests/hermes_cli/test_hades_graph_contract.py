@@ -119,7 +119,7 @@ def _bundle_with_path_array(array_key: str, paths: list[str]) -> dict[str, Any]:
     return bundle
 
 
-def test_facade_is_v2_only() -> None:
+def test_v2_only() -> None:
     assert GRAPH_CONTRACT_VERSION == "hades.graph_artifact.v2"
     assert not hasattr(facade, "finalize_graph_artifact")
     assert not hasattr(facade, "DEFAULT_MAX_GRAPH_NODES")
@@ -1274,7 +1274,7 @@ def test_schema_and_dataclass_public_field_inventories_match() -> None:
     )
 
 
-def test_base_artifact_rejects_agent_verified_evidence() -> None:
+def test_base_provenance_and_candidate_ownership() -> None:
     _, _, validation = _task3_api()
     payload = _valid_semantic_artifact()
     payload["nodes"][0]["evidence"]["primary"]["origin"] = "agent_verified"
@@ -1284,6 +1284,12 @@ def test_base_artifact_rejects_agent_verified_evidence() -> None:
 
     assert exc_info.value.code == "base_evidence_origin"
     assert "base artifact evidence origin" in exc_info.value.message
+
+    candidate_payload = _with_external_uncertainty()
+    candidate_payload["edges"][0]["uncertainty_id"] = None
+    with pytest.raises(validation.GraphValidationError) as candidate_error:
+        validation.validate_artifact(candidate_payload)
+    assert candidate_error.value.code == "uncertainty_ownership"
 
 
 def test_unresolved_target_requires_exact_uncertainty_subject() -> None:
@@ -1298,7 +1304,7 @@ def test_unresolved_target_requires_exact_uncertainty_subject() -> None:
     assert "uncertainty ownership" in exc_info.value.message
 
 
-def test_dangling_evidence_locator_is_rejected_without_path_disclosure() -> None:
+def test_privacy_rejection() -> None:
     _, _, validation = _task3_api()
     payload = _valid_semantic_artifact()
     private_path = "private/credentials.php"
@@ -1324,7 +1330,7 @@ def test_serialized_ids_are_recomputed_not_trusted() -> None:
     assert exc_info.value.code == "node_id_mismatch"
 
 
-def test_references_are_isolated_to_the_current_artifact() -> None:
+def test_reference_resolution() -> None:
     _, _, validation = _task3_api()
     other = _valid_semantic_artifact()
     other["nodes"][0]["identity"]["path"] = "src/Elsewhere.php"
@@ -2127,7 +2133,7 @@ def test_schema_unique_items_uses_linear_handler_without_relaxing_duplicates() -
         assert exc_info.value.code == "schema_validation_failed"
 
 
-def test_valid_semantic_sync_and_async_flow_fixture() -> None:
+def test_evidence_flow_completeness_orthogonal() -> None:
     _, _, validation = _task3_api()
 
     validation.validate_artifact(_valid_flow_artifact())
@@ -2512,7 +2518,7 @@ def test_global_and_language_capability_reason_counts_reconcile() -> None:
     assert exc_info.value.code == "capability_reason_scope_mismatch"
 
 
-def test_producer_fact_budget_reason_requires_language_omission_ledger() -> None:
+def test_omission_ledgers() -> None:
     _, _, validation = _task3_api()
     payload = json.loads(json.dumps(_valid_semantic_artifact()))
     payload["graph_contract"]["completeness"]["status"] = "partial"

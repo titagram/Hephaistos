@@ -14,7 +14,9 @@ from referencing import Registry, Resource
 
 from hermes_cli.hades_graph_contract import (
     canonical_json_bytes,
+    edge_id,
     load_json_bytes,
+    node_id,
     normalize_source_path,
 )
 
@@ -1131,3 +1133,20 @@ def test_canonicalization_vectors_have_exact_bytes_and_digests() -> None:
     )
     assert result_vector["input"] == verification["results"][0]
     assert result_vector["sha256"] == verification["result_digests"][0]
+
+
+def test_identity_vectors() -> None:
+    vectors = json.loads(
+        (CONTRACT_ROOT / "golden" / "canonicalization.json").read_text(encoding="utf-8")
+    )
+    by_kind = {vector["kind"]: vector for vector in vectors["vectors"]}
+    assert node_id(by_kind["node_id"]["input"]) == (
+        "hades:node:v2:" + by_kind["node_id"]["sha256"]
+    )
+    assert edge_id(by_kind["edge_id"]["input"]) == (
+        "hades:edge:v2:" + by_kind["edge_id"]["sha256"]
+    )
+
+
+def test_python_vectors_match_locked_contract() -> None:
+    test_canonicalization_vectors_have_exact_bytes_and_digests()

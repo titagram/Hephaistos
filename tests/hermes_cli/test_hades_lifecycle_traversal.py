@@ -655,7 +655,7 @@ def test_self_and_mutual_recursion_reach_finite_fixed_points(tmp_path):
         validate_artifact(artifact)
 
 
-def test_terminal_and_async_count_knowledge_closes_over_represented_steps(tmp_path):
+def test_async_terminal_semantics(tmp_path):
     artifact = _build(tmp_path, _complex_result())
     parent = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
 
@@ -754,6 +754,11 @@ def test_framework_pipeline_materializes_every_successor_union(tmp_path):
     exception_structure = next(
         item for item in result.structures if item.kind is StructureKind.EXCEPTION_SCOPE
     )
+    exception_scope = next(
+        item
+        for item in result.exception_scopes
+        if item.structure_key == exception_structure.local_key
+    )
     branch_key = _complex_key("structure", "framework/union")
     branch = StructureIR(
         branch_key,
@@ -827,7 +832,7 @@ def test_framework_pipeline_materializes_every_successor_union(tmp_path):
             BranchSuccessor(entry.local_key, branch_key, 0, 0),
             ExceptionSuccessor(
                 entry.local_key,
-                exception_structure.local_key,
+                exception_scope.local_key,
                 "RuntimeError",
                 1,
             ),
@@ -1552,7 +1557,7 @@ def test_framework_exception_continuation_requires_exact_exception_exit(tmp_path
         result.framework_segments[0],
         success_successor=ExceptionSuccessor(
             catch.target_block_key,
-            scope.structure_key,
+            scope.local_key,
             catch.caught_type_name,
             0,
         ),

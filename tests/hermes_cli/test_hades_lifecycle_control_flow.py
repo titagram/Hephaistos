@@ -214,7 +214,7 @@ def _fixture(
             ControlKind.STRAIGHT_LINE,
             3,
             _ast("body/false"),
-            (ExceptionSuccessor(catch, exception_structure, "Exception", 0),),
+            (ExceptionSuccessor(catch, scope, "Exception", 0),),
         ),
         BasicBlock(
             merge,
@@ -490,9 +490,7 @@ class _Parser:
         ),
     ],
 )
-def test_parser_returns_finite_typed_control_syntax_for_supported_languages(
-    language, nodes
-):
+def test_cfg_matrix(language, nodes):
     from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
 
     root = _Node(
@@ -519,7 +517,7 @@ def test_parser_returns_finite_typed_control_syntax_for_supported_languages(
     assert len(result.syntax.controls) <= len(nodes) * 2
 
 
-def test_parser_failure_is_a_typed_partial_coverage_event():
+def test_missing_parser_partial():
     from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
 
     result = TreeSitterAdapter(parser_loader=lambda _language: None).parse_bytes(

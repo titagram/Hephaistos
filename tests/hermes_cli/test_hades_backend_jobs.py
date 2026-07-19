@@ -521,18 +521,19 @@ def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Task 12/18 owns the pending Express lifecycle adapter",
-)
 def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
-    route = tmp_path / "server" / "api.ts"
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"express":"latest"}}', encoding="utf-8"
+    )
+    route = tmp_path / "server" / "api.js"
     route.parent.mkdir(parents=True)
     route.write_text(
         "import express from 'express';\n"
+        "const app = express();\n"
         "const router = express.Router();\n"
+        "app.use('/api', router);\n"
         "router.get('/health', healthHandler);\n"
         "export function healthHandler() { return { ok: true }; }\n",
         encoding="utf-8",
@@ -549,9 +550,13 @@ def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tm
 
     artifact = _materialize_graph_v2(result)
     assert any(
+        framework["name"] == "express" and framework["language"] == "javascript"
+        for framework in artifact["frameworks"]
+    )
+    assert any(
         entrypoint.get("framework") == "express"
         and entrypoint.get("methods") == ["GET"]
-        and entrypoint.get("public_path") == "/health"
+        and entrypoint.get("public_path") == "/api/health"
         for entrypoint in artifact["entrypoints"]
     )
 

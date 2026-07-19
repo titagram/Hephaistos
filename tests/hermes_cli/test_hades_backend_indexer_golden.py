@@ -120,7 +120,7 @@ def test_inventory_ledger_materializes_failure_only_file_and_counts_it(tmp_path)
     assert artifact.graph_contract.coverage.files.failed == 1
 
 
-def test_distinct_polyglot_adapter_results_are_permutation_invariant(tmp_path):
+def test_polyglot(tmp_path):
     python = _complex_result()
     typescript = _empty_result(
         CoverageEvent(

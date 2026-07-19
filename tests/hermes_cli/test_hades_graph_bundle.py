@@ -317,7 +317,7 @@ def test_chunk_bytes_are_permutation_invariant_at_the_canonical_boundary(tmp_pat
     ]
 
 
-def test_exact_logical_bundle_ceiling_passes_and_one_byte_less_fails(tmp_path):
+def test_large_bundle(tmp_path):
     from hermes_cli.hades_graph_v2.bundle import GraphBundleError, GraphBundleWriter
 
     writer = GraphBundleWriter()
