@@ -1358,25 +1358,27 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return tool_error("Missing required parameter: query")
         scope = str(args.get("scope") or "project").strip()
         if scope not in GRAPH_SCOPES:
-            return tool_error("Unsupported graph scope", allowed_scopes=list(GRAPH_SCOPES))
-        limit = _bounded_int(args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT)
+            return tool_error(
+                "Unsupported graph scope", allowed_scopes=list(GRAPH_SCOPES)
+            )
+        limit = _bounded_int(
+            args.get("limit"), default=8, minimum=1, maximum=TOOL_RESULT_LIMIT
+        )
 
         if self._binding is None:
-            return tool_result(
-                {
-                    "status": "unmapped_project",
-                    "message": (
-                        "This working directory is not linked to a Hades backend "
-                        "project, so graph search is unavailable."
-                    ),
-                    "actions": [
-                        "Run `hades backend bootstrap ...` for a new backend project binding.",
-                        "Run `hades project link <project>` from an existing local project.",
-                        "Run `hades backend sync` after linking.",
-                    ],
-                    "items": [],
-                }
-            )
+            return tool_result({
+                "status": "unmapped_project",
+                "message": (
+                    "This working directory is not linked to a Hades backend "
+                    "project, so graph search is unavailable."
+                ),
+                "actions": [
+                    "Run `hades backend bootstrap ...` for a new backend project binding.",
+                    "Run `hades project link <project>` from an existing local project.",
+                    "Run `hades backend sync` after linking.",
+                ],
+                "items": [],
+            })
 
         backend_result, backend_error = self._backend_memory_search(
             query=query,
@@ -1390,13 +1392,34 @@ class HadesBackendMemoryProvider(MemoryProvider):
             include_raw_chunks=False,
         )
         if backend_result is not None:
+            active_identity: dict[str, Any] | None = None
+            if scope == "project":
+                try:
+                    active_identity = self._active_graph_identity(scope)
+                except Exception:
+                    active_identity = None
+            boundary_error = _graph_search_boundary_error(
+                backend_result,
+                scope=scope,
+                project_id=self._binding.project_id,
+                workspace_binding_id=self._binding.backend_workspace_binding_id,
+                active_identity=active_identity,
+            )
+            if boundary_error:
+                return tool_result(
+                    _backend_invalid_graph_response(
+                        project_id=self._binding.project_id,
+                        workspace_binding_id=self._binding.backend_workspace_binding_id,
+                        error=boundary_error,
+                        scope=scope,
+                        search=True,
+                    )
+                )
             if scope == "project":
                 backend_result = _v2_graph_search_response(backend_result)
             handles = _vector_graph_handles(backend_result)
             topologies: list[tuple[str, dict[str, Any]]] = []
             topology_errors: dict[str, str] = {}
-            active_identity: dict[str, Any] | None = None
-            active_identity_loaded = False
             for handle in handles:
                 topology, topology_error = self._backend_graph_traverse(
                     start=handle,
@@ -1410,14 +1433,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
                         topology_error or "graph query returned no topology"
                     )
                     continue
-                if not active_identity_loaded:
-                    try:
-                        active_identity = self._active_graph_identity(scope)
-                    except Exception:
-                        active_identity = None
-                    active_identity_loaded = True
-                validation_error = _authoritative_v2_topology_error(
+                validation_error = _authoritative_scope_topology_error(
                     topology,
+                    scope=scope,
                     handle=handle,
                     project_id=self._binding.project_id,
                     workspace_binding_id=self._binding.backend_workspace_binding_id,
@@ -1429,9 +1447,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 topologies.append((handle, topology))
             if topologies:
                 resolved_handles = [handle for handle, _topology in topologies]
-                result = _tool_result_from_backend_graph_traversals(
-                    [topology for _handle, topology in topologies]
-                )
+                result = _tool_result_from_backend_graph_traversals([
+                    topology for _handle, topology in topologies
+                ])
                 result["tool_domain"] = "graph"
                 result["topology_resolved"] = len(resolved_handles) == len(handles)
                 result["topology_partial"] = bool(topology_errors)
@@ -1462,7 +1480,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
         local_result = self._local_graph_search(query=query, scope=scope, limit=limit)
         if local_result is not None:
             local_result["project_id"] = self._binding.project_id
-            local_result["workspace_binding_id"] = self._binding.backend_workspace_binding_id
+            local_result["workspace_binding_id"] = (
+                self._binding.backend_workspace_binding_id
+            )
             if scope == "organism":
                 local_result["scope"] = scope
             if backend_error:
@@ -1474,7 +1494,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "project_id": self._binding.project_id,
             "workspace_binding_id": self._binding.backend_workspace_binding_id,
             "message": "Hades backend graph live search is unavailable.",
-            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "actions": [
+                "Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."
+            ],
             "items": [],
         }
         if backend_error:
@@ -1487,30 +1509,33 @@ class HadesBackendMemoryProvider(MemoryProvider):
             return tool_error("Missing required parameter: start")
         scope = str(args.get("scope") or "project").strip()
         if scope not in GRAPH_SCOPES:
-            return tool_error("Unsupported graph scope", allowed_scopes=list(GRAPH_SCOPES))
+            return tool_error(
+                "Unsupported graph scope", allowed_scopes=list(GRAPH_SCOPES)
+            )
         direction = str(args.get("direction") or "any").strip()
         if direction not in ("any", "out", "in"):
-            return tool_error("Unsupported graph traversal direction", allowed_directions=["any", "out", "in"])
+            return tool_error(
+                "Unsupported graph traversal direction",
+                allowed_directions=["any", "out", "in"],
+            )
         max_depth = _bounded_int(args.get("max_depth"), default=2, minimum=1, maximum=3)
         limit = _bounded_int(args.get("limit"), default=20, minimum=1, maximum=50)
 
         if self._binding is None:
-            return tool_result(
-                {
-                    "status": "unmapped_project",
-                    "message": (
-                        "This working directory is not linked to a Hades backend "
-                        "project, so graph traversal is unavailable."
-                    ),
-                    "actions": [
-                        "Run `hades backend bootstrap ...` for a new backend project binding.",
-                        "Run `hades project link <project>` from an existing local project.",
-                        "Run `hades backend sync` after linking.",
-                    ],
-                    "nodes": [],
-                    "edges": [],
-                }
-            )
+            return tool_result({
+                "status": "unmapped_project",
+                "message": (
+                    "This working directory is not linked to a Hades backend "
+                    "project, so graph traversal is unavailable."
+                ),
+                "actions": [
+                    "Run `hades backend bootstrap ...` for a new backend project binding.",
+                    "Run `hades project link <project>` from an existing local project.",
+                    "Run `hades backend sync` after linking.",
+                ],
+                "nodes": [],
+                "edges": [],
+            })
 
         backend_result, backend_error = self._backend_graph_traverse(
             start=start,
@@ -1520,29 +1545,30 @@ class HadesBackendMemoryProvider(MemoryProvider):
             scope=scope,
         )
         if backend_result is not None:
+            active_identity: dict[str, Any] | None = None
             if scope == "project":
                 try:
                     active_identity = self._active_graph_identity(scope)
                 except Exception:
                     active_identity = None
-                validation_error = _authoritative_v2_traversal_error(
-                    backend_result,
-                    project_id=self._binding.project_id,
-                    workspace_binding_id=self._binding.backend_workspace_binding_id,
-                    active_identity=active_identity,
-                )
-                if validation_error:
-                    return tool_result(
-                        {
-                            "status": "backend_invalid_graph",
-                            "project_id": self._binding.project_id,
-                            "workspace_binding_id": self._binding.backend_workspace_binding_id,
-                            "message": "Hades backend returned a graph outside the active v2 projection.",
-                            "backend_topology_error": validation_error,
-                            "nodes": [],
-                            "edges": [],
-                        }
+            validation_error = _authoritative_scope_topology_error(
+                backend_result,
+                scope=scope,
+                handle=None,
+                project_id=self._binding.project_id,
+                workspace_binding_id=self._binding.backend_workspace_binding_id,
+                active_identity=active_identity,
+            )
+            if validation_error:
+                return tool_result(
+                    _backend_invalid_graph_response(
+                        project_id=self._binding.project_id,
+                        workspace_binding_id=self._binding.backend_workspace_binding_id,
+                        error=validation_error,
+                        scope=scope,
+                        search=False,
                     )
+                )
             result = _tool_result_from_backend_graph_traverse(backend_result)
             if scope == "organism":
                 result["scope"] = scope
@@ -1557,7 +1583,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
         )
         if local_result is not None:
             local_result["project_id"] = self._binding.project_id
-            local_result["workspace_binding_id"] = self._binding.backend_workspace_binding_id
+            local_result["workspace_binding_id"] = (
+                self._binding.backend_workspace_binding_id
+            )
             if scope == "organism":
                 local_result["scope"] = scope
             if backend_error:
@@ -1569,7 +1597,9 @@ class HadesBackendMemoryProvider(MemoryProvider):
             "project_id": self._binding.project_id,
             "workspace_binding_id": self._binding.backend_workspace_binding_id,
             "message": "Hades backend graph traversal is unavailable.",
-            "actions": ["Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."],
+            "actions": [
+                "Run `hades backend status` and `hades backend sync` to diagnose backend connectivity."
+            ],
             "nodes": [],
             "edges": [],
         }
@@ -2728,6 +2758,158 @@ def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[s
     return {key: value for key, value in result.items() if value not in ("", None)}
 
 
+def _backend_invalid_graph_response(
+    *,
+    project_id: str,
+    workspace_binding_id: str,
+    error: str,
+    scope: str,
+    search: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "backend_invalid_graph",
+        "project_id": project_id,
+        "workspace_binding_id": workspace_binding_id,
+        "message": "Hades backend returned an invalid graph response.",
+        "backend_topology_error": error,
+    }
+    if scope == "organism":
+        result["scope"] = scope
+    if search:
+        result["items"] = []
+        result["count"] = 0
+        result["candidate_count"] = 0
+    else:
+        result["nodes"] = []
+        result["edges"] = []
+    return result
+
+
+def _linked_graph_envelope_error(
+    response: dict[str, Any],
+    *,
+    project_id: str,
+    workspace_binding_id: str,
+    context: str,
+) -> str | None:
+    if response.get("project_id") != project_id:
+        return f"{context} project does not match the linked project"
+    if response.get("workspace_binding_id") != workspace_binding_id:
+        return f"{context} workspace_binding does not match the linked workspace"
+    return None
+
+
+def _ready_v2_identity_error(
+    active_identity: dict[str, Any] | None,
+    *,
+    project_id: str,
+    workspace_binding_id: str,
+) -> str | None:
+    if (
+        not isinstance(active_identity, dict)
+        or active_identity.get("schema") != "hades.code_graph.v2"
+        or active_identity.get("project_id") != project_id
+        or active_identity.get("workspace_binding_id") != workspace_binding_id
+        or active_identity.get("publication_status") != "ready"
+    ):
+        return "active graph v2 identity is unavailable"
+    return None
+
+
+def _graph_search_boundary_error(
+    response: dict[str, Any],
+    *,
+    scope: str,
+    project_id: str,
+    workspace_binding_id: str,
+    active_identity: dict[str, Any] | None,
+) -> str | None:
+    items = _backend_items(response)
+    contains_raw_graph_item = any(bool(_item_schema(item)) for item in items)
+    carries_envelope = response.get("project_id") not in (None, "") or response.get(
+        "workspace_binding_id"
+    ) not in (None, "")
+    if contains_raw_graph_item or carries_envelope:
+        envelope_error = _linked_graph_envelope_error(
+            response,
+            project_id=project_id,
+            workspace_binding_id=workspace_binding_id,
+            context="graph search",
+        )
+        if envelope_error:
+            return envelope_error
+    if scope != "project":
+        return None
+
+    for item in items:
+        if _item_schema(item) != "hades.code_graph.v2":
+            continue
+        for candidate in _iter_graph_candidates(item):
+            schema = str(candidate.get("schema") or _item_schema(item) or "").strip()
+            if schema != "hades.code_graph.v2":
+                continue
+            candidate_project = candidate.get("project")
+            if isinstance(candidate_project, dict):
+                if candidate_project.get("project_id") != project_id:
+                    return "raw graph v2 artifact project does not match the linked project"
+                if (
+                    candidate_project.get("workspace_binding_id")
+                    != workspace_binding_id
+                ):
+                    return "raw graph v2 artifact workspace_binding does not match the linked workspace"
+            item_project_id = candidate.get("project_id")
+            if item_project_id not in (None, "", project_id):
+                return "raw graph v2 item project does not match the linked project"
+            item_binding_id = candidate.get("workspace_binding_id")
+            if item_binding_id not in (None, "", workspace_binding_id):
+                return "raw graph v2 item workspace_binding does not match the linked workspace"
+
+            projection_version = str(
+                candidate.get("projection_version")
+                or item.get("projection_version")
+                or ""
+            ).strip()
+            if projection_version:
+                identity_error = _ready_v2_identity_error(
+                    active_identity,
+                    project_id=project_id,
+                    workspace_binding_id=workspace_binding_id,
+                )
+                if identity_error:
+                    return identity_error
+                if projection_version != active_identity.get("projection_version"):
+                    return (
+                        "raw graph v2 projection does not match the active projection"
+                    )
+
+            artifact_graph_version = str(
+                candidate.get("artifact_graph_version")
+                or item.get("artifact_graph_version")
+                or ""
+            ).strip()
+            if artifact_graph_version:
+                identity_error = _ready_v2_identity_error(
+                    active_identity,
+                    project_id=project_id,
+                    workspace_binding_id=workspace_binding_id,
+                )
+                if identity_error:
+                    return identity_error
+                if artifact_graph_version != active_identity.get(
+                    "artifact_graph_version"
+                ):
+                    return "raw graph v2 artifact version does not match the active identity"
+
+            is_raw_artifact = isinstance(candidate.get("nodes"), list) or isinstance(
+                candidate.get("edges"), list
+            )
+            if is_raw_artifact and not _active_v2_identity_matches(
+                candidate, item, active_identity
+            ):
+                return "raw graph v2 artifact does not match the active projection identity"
+    return None
+
+
 def _authoritative_v2_graph_error(
     response: dict[str, Any],
     *,
@@ -2739,77 +2921,121 @@ def _authoritative_v2_graph_error(
 
     if response.get("schema") != "hades.code_graph.v2":
         return "graph topology schema is not hades.code_graph.v2"
-    if response.get("project_id") != project_id:
-        return "graph topology project does not match the linked project"
-    if response.get("workspace_binding_id") != workspace_binding_id:
-        return "graph topology binding does not match the linked workspace"
-    if (
-        not isinstance(active_identity, dict)
-        or active_identity.get("schema") != "hades.code_graph.v2"
-        or active_identity.get("project_id") != project_id
-        or active_identity.get("workspace_binding_id") != workspace_binding_id
-        or active_identity.get("publication_status") != "ready"
-    ):
-        return "active graph v2 identity is unavailable"
+    envelope_error = _linked_graph_envelope_error(
+        response,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+        context="graph topology",
+    )
+    if envelope_error:
+        return envelope_error
+    identity_error = _ready_v2_identity_error(
+        active_identity,
+        project_id=project_id,
+        workspace_binding_id=workspace_binding_id,
+    )
+    if identity_error:
+        return identity_error
     projection_version = str(response.get("projection_version") or "").strip()
     if not projection_version or projection_version != active_identity.get(
         "projection_version"
     ):
         return "graph topology projection does not match the active projection"
-    coverage = response.get("coverage")
-    if not isinstance(coverage, dict) or not coverage:
-        return "graph topology coverage is unavailable"
     return None
 
 
-def _authoritative_v2_topology_error(
+def _topology_records_error(
     response: dict[str, Any],
     *,
-    handle: str,
-    project_id: str,
-    workspace_binding_id: str,
-    active_identity: dict[str, Any] | None,
+    handle: str | None,
+    require_coverage: bool,
 ) -> str | None:
-    """Reject vector topology unless it resolves its requested handle."""
-
-    validation_error = _authoritative_v2_graph_error(
-        response,
-        project_id=project_id,
-        workspace_binding_id=workspace_binding_id,
-        active_identity=active_identity,
-    )
-    if validation_error:
-        return validation_error
-    if response.get("start") != handle:
-        return "graph topology start does not match the vector handle"
     nodes = response.get("nodes")
     edges = response.get("edges")
-    if (
-        not isinstance(nodes, list)
-        or not isinstance(edges, list)
-        or any(not isinstance(node, dict) for node in nodes)
-        or any(not isinstance(edge, dict) for edge in edges)
-    ):
-        return "graph topology records are malformed"
-    if not any(node.get("id") == handle for node in nodes):
-        return "graph topology does not resolve the vector handle"
+    if not isinstance(nodes, list):
+        return "graph topology nodes must be a list"
+    if any(not isinstance(node, dict) for node in nodes):
+        return "graph topology node records are malformed"
+    node_ids: list[str] = []
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            return "graph topology node id is missing"
+        node_ids.append(node_id)
+    if len(set(node_ids)) != len(node_ids):
+        return "graph topology node ids must be unique"
+
+    if not isinstance(edges, list):
+        return "graph topology edges must be a list"
+    if any(not isinstance(edge, dict) for edge in edges):
+        return "graph topology edge records are malformed"
+    node_id_set = set(node_ids)
+    for edge in edges:
+        edge_kind = str(edge.get("kind") or "").strip()
+        if not edge_kind:
+            return "graph topology edge kind is missing"
+        edge_from = str(edge.get("from") or "").strip()
+        edge_to = str(edge.get("to") or "").strip()
+        if not edge_from or not edge_to:
+            return "graph topology edge endpoints are missing"
+        if edge_from not in node_id_set or edge_to not in node_id_set:
+            return "graph topology edge endpoints must reference returned nodes"
+
+    canonical_start = str(response.get("start") or "").strip()
+    if not canonical_start:
+        return "graph topology canonical start is missing"
+    if canonical_start not in node_id_set:
+        return "graph topology canonical start does not resolve to a returned node"
+    if handle is not None and canonical_start != handle:
+        return "graph topology start does not match the vector handle"
+
+    if require_coverage:
+        coverage = response.get("coverage")
+        records = coverage.get("records") if isinstance(coverage, dict) else None
+        if not isinstance(records, dict):
+            return "graph topology coverage records are unavailable"
+        coverage_nodes = records.get("nodes")
+        coverage_edges = records.get("edges")
+        if type(coverage_nodes) is not int or coverage_nodes != len(nodes):
+            return "graph topology coverage node count does not match returned nodes"
+        if type(coverage_edges) is not int or coverage_edges != len(edges):
+            return "graph topology coverage edge count does not match returned edges"
     return None
 
 
-def _authoritative_v2_traversal_error(
+def _authoritative_scope_topology_error(
     response: dict[str, Any],
     *,
+    scope: str,
+    handle: str | None,
     project_id: str,
     workspace_binding_id: str,
     active_identity: dict[str, Any] | None,
 ) -> str | None:
-    """Validate direct traversal without requiring an exact (non-fuzzy) start."""
-
-    return _authoritative_v2_graph_error(
+    if scope == "project":
+        validation_error = _authoritative_v2_graph_error(
+            response,
+            project_id=project_id,
+            workspace_binding_id=workspace_binding_id,
+            active_identity=active_identity,
+        )
+        require_coverage = True
+    else:
+        if response.get("schema") != ORGANISM_SCHEMA:
+            return f"graph topology schema is not {ORGANISM_SCHEMA}"
+        validation_error = _linked_graph_envelope_error(
+            response,
+            project_id=project_id,
+            workspace_binding_id=workspace_binding_id,
+            context="organism graph topology",
+        )
+        require_coverage = False
+    if validation_error:
+        return validation_error
+    return _topology_records_error(
         response,
-        project_id=project_id,
-        workspace_binding_id=workspace_binding_id,
-        active_identity=active_identity,
+        handle=handle,
+        require_coverage=require_coverage,
     )
 
 
@@ -3047,7 +3273,9 @@ def _local_graph_route_id(route: dict[str, Any]) -> str:
     return f"route:{method_uri}" if method_uri else ""
 
 
-def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+def _local_graph_build(
+    artifacts: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     seen_edges: set[tuple[str, str, str, str, str]] = set()
@@ -3061,8 +3289,16 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
             for graph_node in graph.get("nodes") or []:
                 if not isinstance(graph_node, dict):
                     continue
-                location = graph_node.get("location") if isinstance(graph_node.get("location"), dict) else {}
-                properties = graph_node.get("properties") if isinstance(graph_node.get("properties"), dict) else {}
+                location = (
+                    graph_node.get("location")
+                    if isinstance(graph_node.get("location"), dict)
+                    else {}
+                )
+                properties = (
+                    graph_node.get("properties")
+                    if isinstance(graph_node.get("properties"), dict)
+                    else {}
+                )
                 _local_graph_add_node(
                     nodes,
                     graph_node.get("id"),
@@ -3077,25 +3313,49 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                         "properties": properties,
                         "schema": schema,
                         "artifact_id": artifact_id,
-                        "projection_version": artifact_source.get("projection_version") or graph.get("projection_version"),
+                        "projection_version": artifact_source.get("projection_version")
+                        or graph.get("projection_version"),
                     },
                 )
             for entrypoint in graph.get("entrypoints") or []:
                 if not isinstance(entrypoint, dict):
                     continue
+                entrypoint_id = _compact_text(entrypoint.get("id"), max_chars=500)
+                registration = (
+                    entrypoint.get("registration_occurrence")
+                    if isinstance(entrypoint.get("registration_occurrence"), dict)
+                    else {}
+                )
+                entrypoint_attributes = {
+                    key: value
+                    for key, value in entrypoint.items()
+                    if key not in {"id", "label"}
+                } | {"schema": schema, "artifact_id": artifact_id}
+                if entrypoint_id in nodes:
+                    existing = nodes[entrypoint_id]
+                    existing["label"] = _compact_text(
+                        entrypoint.get("label") or existing.get("label"), max_chars=500
+                    )
+                    if registration.get("path"):
+                        existing["path"] = _compact_text(
+                            registration["path"], max_chars=500
+                        )
+                    attributes = (
+                        existing.get("attributes")
+                        if isinstance(existing.get("attributes"), dict)
+                        else {}
+                    )
+                    existing["attributes"] = _bounded_payload(
+                        attributes | entrypoint_attributes
+                    )
+                    continue
                 _local_graph_add_node(
                     nodes,
-                    entrypoint.get("id"),
+                    entrypoint_id,
                     kind="entrypoint",
                     label=entrypoint.get("label"),
-                    path=(entrypoint.get("registration_occurrence") or {}).get("path")
-                    if isinstance(entrypoint.get("registration_occurrence"), dict)
-                    else "",
-                    attributes={
-                        key: value
-                        for key, value in entrypoint.items()
-                        if key not in {"id", "label"}
-                    } | {"schema": schema, "artifact_id": artifact_id},
+                    path=registration.get("path"),
+                    attributes=entrypoint_attributes,
                 )
             for index, edge in enumerate(graph.get("edges") or []):
                 if not isinstance(edge, dict):
@@ -3109,14 +3369,24 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                     relation,
                     edge_from,
                     edge_to,
-                    str((edge.get("location") or {}).get("path") if isinstance(edge.get("location"), dict) else ""),
-                    str((edge.get("location") or {}).get("line") if isinstance(edge.get("location"), dict) else ""),
+                    str(
+                        (edge.get("location") or {}).get("path")
+                        if isinstance(edge.get("location"), dict)
+                        else ""
+                    ),
+                    str(
+                        (edge.get("location") or {}).get("line")
+                        if isinstance(edge.get("location"), dict)
+                        else ""
+                    ),
                 )
                 if key in seen_edges:
                     continue
                 seen_edges.add(key)
                 edges.append({
-                    "id": _compact_text(edge.get("id") or f"{artifact_id}:edge:{index}", max_chars=500),
+                    "id": _compact_text(
+                        edge.get("id") or f"{artifact_id}:edge:{index}", max_chars=500
+                    ),
                     "kind": relation,
                     "from": edge_from,
                     "to": edge_to,
@@ -3135,7 +3405,11 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
             for graph_node in graph.get("nodes") or []:
                 if not isinstance(graph_node, dict):
                     continue
-                properties = graph_node.get("properties") if isinstance(graph_node.get("properties"), dict) else {}
+                properties = (
+                    graph_node.get("properties")
+                    if isinstance(graph_node.get("properties"), dict)
+                    else {}
+                )
                 _local_graph_add_node(
                     nodes,
                     graph_node.get("id"),
@@ -3162,7 +3436,10 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                 nodes,
                 node_id,
                 kind="route",
-                label=str(route.get("name") or f"{route.get('method', '')} {route.get('uri', '')}").strip(),
+                label=str(
+                    route.get("name")
+                    or f"{route.get('method', '')} {route.get('uri', '')}"
+                ).strip(),
                 path=route.get("path"),
                 attributes={
                     "method": route.get("method"),
@@ -3249,7 +3526,9 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                 },
             )
 
-        database = graph.get("database") if isinstance(graph.get("database"), dict) else {}
+        database = (
+            graph.get("database") if isinstance(graph.get("database"), dict) else {}
+        )
         for table in database.get("tables") or []:
             if not isinstance(table, dict):
                 continue
@@ -3283,7 +3562,8 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
             provenance = {
                 key: value
                 for key, value in edge.items()
-                if key not in {"id", "kind", "from", "to"} and value not in ("", None, [], {})
+                if key not in {"id", "kind", "from", "to"}
+                and value not in ("", None, [], {})
             }
             provenance.update({"schema": schema, "artifact_id": artifact_id})
             key = (
@@ -3310,15 +3590,15 @@ def _local_graph_build(artifacts: list[dict[str, Any]]) -> tuple[dict[str, dict[
                 label=edge_to,
                 attributes={"schema": schema, "artifact_id": artifact_id},
             )
-            edges.append(
-                {
-                    "id": _compact_text(edge.get("id") or f"{artifact_id}:edge:{idx}", max_chars=500),
-                    "kind": edge_kind,
-                    "from": edge_from,
-                    "to": edge_to,
-                    "provenance": _bounded_payload(provenance),
-                }
-            )
+            edges.append({
+                "id": _compact_text(
+                    edge.get("id") or f"{artifact_id}:edge:{idx}", max_chars=500
+                ),
+                "kind": edge_kind,
+                "from": edge_from,
+                "to": edge_to,
+                "provenance": _bounded_payload(provenance),
+            })
 
     return nodes, edges
 

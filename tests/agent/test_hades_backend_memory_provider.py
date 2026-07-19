@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 
+import pytest
+
 
 def _create_linked_provider(
     monkeypatch,
@@ -93,11 +95,83 @@ def _create_v2_graph_provider(monkeypatch, tmp_path):
         "publication_status": "ready",
     }
     with db.connect_closing() as conn:
-        db.record_sync_state(conn, _graph_v2_active_cache_key(provider._binding), active)
+        db.record_sync_state(
+            conn, _graph_v2_active_cache_key(provider._binding), active
+        )
     assert provider._active_graph_identity("project") == active
     return provider, graph
 
 
+def _ready_v2_identity(
+    *,
+    project_id="proj_1",
+    workspace_binding_id="wb_1",
+    projection_version=None,
+):
+    return {
+        "schema": "hades.code_graph.v2",
+        "project_id": project_id,
+        "workspace_binding_id": workspace_binding_id,
+        "artifact_graph_version": "a" * 64,
+        "projection_version": projection_version or "c" * 64,
+        "publication_status": "ready",
+    }
+
+
+def _live_project_topology(*, canonical_start="route:orders.show"):
+    return {
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "schema": "hades.code_graph.v2",
+        "projection_version": "c" * 64,
+        "coverage": {"records": {"nodes": 2, "edges": 1}},
+        "start": canonical_start,
+        "nodes": [
+            {"id": canonical_start, "kind": "route", "label": "orders.show"},
+            {
+                "id": "OrderController@show",
+                "kind": "method",
+                "label": "OrderController@show",
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge_1",
+                "kind": "route_handler",
+                "from": canonical_start,
+                "to": "OrderController@show",
+            }
+        ],
+    }
+
+
+def _live_organism_topology(*, schema="hades.organism_graph.v1"):
+    return {
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "schema": schema,
+        "start": "capability:graph-search",
+        "nodes": [
+            {
+                "id": "capability:graph-search",
+                "kind": "capability",
+                "label": "Graph search",
+            },
+            {
+                "id": "runtime:local-cli",
+                "kind": "runtime",
+                "label": "Local CLI",
+            },
+        ],
+        "edges": [
+            {
+                "id": "edge:graph-search-requires-cli",
+                "kind": "requires",
+                "from": "capability:graph-search",
+                "to": "runtime:local-cli",
+            }
+        ],
+    }
 
 
 def _organism_graph_artifact():
@@ -656,6 +730,7 @@ def test_hades_backend_memory_search_tool_filters_cache_by_structured_fields(mon
 
 def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp_path):
     provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._active_graph_identity = lambda _scope: _ready_v2_identity()
 
     class FakeClient:
         def __init__(self):
@@ -682,6 +757,8 @@ def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp
                         "id": "artifact_1",
                         "domain": "artifacts",
                         "schema": "hades.code_graph.v2",
+                        "artifact_graph_version": "a" * 64,
+                        "projection_version": "c" * 64,
                         "source": "hades.code_graph.v2",
                         "summary": "GET /orders/{order} -> OrderController@show",
                         "score": 21,
@@ -696,7 +773,9 @@ def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp
     fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+    monkeypatch.setattr(
+        hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake
+    )
 
     result = json.loads(
         provider.handle_tool_call(
@@ -723,7 +802,113 @@ def test_hades_backend_graph_search_tool_queries_artifacts_live(monkeypatch, tmp
     assert fake.closed == 1
 
 
-def test_hades_backend_graph_search_rejects_unhandled_live_v1_items(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        pytest.param("project_id", "proj_other", id="wrong-project"),
+        pytest.param("workspace_binding_id", "wb_other", id="wrong-workspace-binding"),
+    ],
+)
+def test_hades_backend_graph_search_rejects_wrong_live_envelope(
+    monkeypatch, tmp_path, field, wrong_value
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._active_graph_identity = lambda _scope: _ready_v2_identity()
+    response = {
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "domain": "artifacts",
+        "count": 1,
+        "candidate_count": 1,
+        "items": [
+            {
+                "id": "raw-v2",
+                "schema": "hades.code_graph.v2",
+                "summary": "GET /orders -> OrderController@show",
+            }
+        ],
+    }
+    response[field] = wrong_value
+    provider._backend_memory_search = lambda **_payload: (response, None)
+
+    result = json.loads(
+        provider.handle_tool_call("hades_backend_graph_search", {"query": "orders"})
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert result["items"] == []
+    assert field.replace("_id", "") in result["backend_topology_error"]
+
+
+def test_hades_backend_graph_search_rejects_wrong_live_projection(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._active_graph_identity = lambda _scope: _ready_v2_identity()
+    provider._backend_memory_search = lambda **_payload: (
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "domain": "artifacts",
+            "count": 1,
+            "candidate_count": 1,
+            "items": [
+                {
+                    "id": "raw-v2-wrong-projection",
+                    "schema": "hades.code_graph.v2",
+                    "projection_version": "d" * 64,
+                    "summary": "stale graph projection",
+                }
+            ],
+        },
+        None,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call("hades_backend_graph_search", {"query": "stale"})
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert result["items"] == []
+    assert "projection" in result["backend_topology_error"]
+
+
+def test_hades_backend_graph_search_rejects_wrong_live_artifact_version(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._active_graph_identity = lambda _scope: _ready_v2_identity()
+    provider._backend_memory_search = lambda **_payload: (
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "domain": "artifacts",
+            "count": 1,
+            "candidate_count": 1,
+            "items": [
+                {
+                    "id": "raw-v2-wrong-artifact-version",
+                    "schema": "hades.code_graph.v2",
+                    "artifact_graph_version": "b" * 64,
+                    "summary": "wrong graph artifact version",
+                }
+            ],
+        },
+        None,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call("hades_backend_graph_search", {"query": "wrong"})
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert result["items"] == []
+    assert "artifact" in result["backend_topology_error"]
+
+
+def test_hades_backend_graph_search_rejects_unhandled_live_v1_items(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
     class FakeClient:
@@ -761,7 +946,9 @@ def test_hades_backend_graph_search_rejects_unhandled_live_v1_items(monkeypatch,
     assert result["count"] == 0
 
 
-def test_hades_backend_graph_tools_expose_project_and_organism_scopes(monkeypatch, tmp_path):
+def test_hades_backend_graph_tools_expose_project_and_organism_scopes(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
 
@@ -774,7 +961,9 @@ def test_hades_backend_graph_tools_expose_project_and_organism_scopes(monkeypatc
         assert scope["default"] == "project"
 
 
-def test_hades_backend_graph_search_organism_scope_filters_live_backend(monkeypatch, tmp_path):
+def test_hades_backend_graph_search_organism_scope_filters_live_backend(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
     class FakeClient:
@@ -798,7 +987,9 @@ def test_hades_backend_graph_search_organism_scope_filters_live_backend(monkeypa
     fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+    monkeypatch.setattr(
+        hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake
+    )
 
     result = json.loads(
         provider.handle_tool_call(
@@ -822,7 +1013,9 @@ def test_hades_backend_graph_search_organism_scope_filters_live_backend(monkeypa
     ]
 
 
-def test_hades_backend_graph_scope_rejects_unknown_value_before_backend_call(monkeypatch, tmp_path):
+def test_hades_backend_graph_scope_rejects_unknown_value_before_backend_call(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
     import plugins.memory.hades_backend as hades_memory
@@ -851,7 +1044,16 @@ def test_hades_backend_graph_scope_rejects_unknown_value_before_backend_call(mon
     assert traverse["allowed_scopes"] == ["project", "organism"]
 
 
-def test_hades_backend_graph_search_falls_back_to_active_v2_cache(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("query", "expected_type", "expected_kind"),
+    [
+        pytest.param("Example.php", "node", "file", id="node-fields"),
+        pytest.param("responds_with", "edge", "responds_with", id="edge-relation-only"),
+    ],
+)
+def test_hades_backend_graph_search_falls_back_to_active_v2_cache(
+    monkeypatch, tmp_path, query, expected_type, expected_kind
+):
     provider, graph = _create_v2_graph_provider(monkeypatch, tmp_path)
 
     import plugins.memory.hades_backend as hades_memory
@@ -863,7 +1065,9 @@ def test_hades_backend_graph_search_falls_back_to_active_v2_cache(monkeypatch, t
     )
 
     result = json.loads(
-        provider.handle_tool_call("hades_backend_graph_search", {"query": "jobs", "limit": 20})
+        provider.handle_tool_call(
+            "hades_backend_graph_search", {"query": query, "limit": 20}
+        )
     )
 
     assert result["status"] == "ok"
@@ -873,13 +1077,28 @@ def test_hades_backend_graph_search_falls_back_to_active_v2_cache(monkeypatch, t
     assert result["backend_live_error"] == "backend offline"
     assert any("bm25" in item["match_fields"] for item in result["items"])
     graph_refs = [item["graph_ref"] for item in result["items"]]
-    assert any(ref["type"] == "node" for ref in graph_refs)
+    assert any(
+        ref["type"] == expected_type and ref["kind"] == expected_kind
+        for ref in graph_refs
+    )
     assert result.get("head_commit") == graph["source"]["head_commit"]
 
 
-def test_hades_backend_graph_traverse_falls_back_to_active_v2_cache(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("query", "expected_kind"),
+    [
+        pytest.param("method", "method", id="fuzzy-name"),
+        pytest.param("/jobs", "entrypoint", id="public-path"),
+        pytest.param("App\\Example::job", "job", id="qualified-symbol-name"),
+    ],
+)
+def test_hades_backend_graph_traverse_falls_back_to_active_v2_cache(
+    monkeypatch, tmp_path, query, expected_kind
+):
     provider, graph = _create_v2_graph_provider(monkeypatch, tmp_path)
-    entrypoint = graph["entrypoints"][0]
+    expected_node = next(
+        node for node in graph["nodes"] if node["kind"] == expected_kind
+    )
 
     import plugins.memory.hades_backend as hades_memory
 
@@ -892,7 +1111,7 @@ def test_hades_backend_graph_traverse_falls_back_to_active_v2_cache(monkeypatch,
     result = json.loads(
         provider.handle_tool_call(
             "hades_backend_graph_traverse",
-            {"start": entrypoint["id"], "direction": "out", "max_depth": 3, "limit": 20},
+            {"start": query, "direction": "any", "max_depth": 3, "limit": 20},
         )
     )
 
@@ -900,116 +1119,200 @@ def test_hades_backend_graph_traverse_falls_back_to_active_v2_cache(monkeypatch,
     assert result["schema"] == "hades.code_graph.v2"
     assert result["searched_cache_only"] is True
     assert result["backend_live_error"] == "backend offline"
-    assert entrypoint["id"] in {node["id"] for node in result["nodes"]}
-    assert {"routes_to", "dispatches", "responds_with"} <= {
-        edge["kind"] for edge in result["edges"]
+    assert expected_node["id"] in {node["id"] for node in result["nodes"]}
+    assert result["match_fields"]
+
+
+@pytest.mark.parametrize(
+    ("case", "error_fragment"),
+    [
+        pytest.param("nodes-not-list", "nodes must be a list", id="nodes-list"),
+        pytest.param("node-not-record", "node records", id="node-record"),
+        pytest.param("node-id-missing", "node id", id="node-id"),
+        pytest.param("node-id-duplicate", "unique", id="node-id-unique"),
+        pytest.param("edges-not-list", "edges must be a list", id="edges-list"),
+        pytest.param("edge-not-record", "edge records", id="edge-record"),
+        pytest.param("edge-kind-missing", "edge kind", id="edge-kind"),
+        pytest.param("edge-from-missing", "edge endpoints", id="edge-from"),
+        pytest.param("edge-to-missing", "edge endpoints", id="edge-to"),
+        pytest.param("edge-dangling", "returned nodes", id="edge-endpoint"),
+        pytest.param("coverage-nodes", "coverage node count", id="coverage-nodes"),
+        pytest.param("coverage-edges", "coverage edge count", id="coverage-edges"),
+        pytest.param("start-missing", "canonical start", id="start-present"),
+        pytest.param(
+            "start-not-returned", "canonical start", id="start-resolves-to-node"
+        ),
+    ],
+)
+def test_hades_backend_graph_traverse_rejects_malformed_live_v2_topology(
+    monkeypatch, tmp_path, case, error_fragment
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._active_graph_identity = lambda _scope: _ready_v2_identity()
+    topology = _live_project_topology()
+
+    if case == "nodes-not-list":
+        topology["nodes"] = "malformed"
+    elif case == "node-not-record":
+        topology["nodes"] = ["malformed"]
+    elif case == "node-id-missing":
+        topology["nodes"][0].pop("id")
+    elif case == "node-id-duplicate":
+        topology["nodes"].append(copy.deepcopy(topology["nodes"][0]))
+        topology["coverage"]["records"]["nodes"] = 3
+    elif case == "edges-not-list":
+        topology["edges"] = "malformed"
+    elif case == "edge-not-record":
+        topology["edges"] = ["malformed"]
+    elif case == "edge-kind-missing":
+        topology["edges"][0].pop("kind")
+    elif case == "edge-from-missing":
+        topology["edges"][0].pop("from")
+    elif case == "edge-to-missing":
+        topology["edges"][0].pop("to")
+    elif case == "edge-dangling":
+        topology["edges"][0]["to"] = "MissingController@show"
+    elif case == "coverage-nodes":
+        topology["coverage"]["records"]["nodes"] = 99
+    elif case == "coverage-edges":
+        topology["coverage"]["records"]["edges"] = 99
+    elif case == "start-missing":
+        topology.pop("start")
+    elif case == "start-not-returned":
+        topology["start"] = "route:missing"
+
+    provider._backend_graph_traverse = lambda **_payload: (topology, None)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse", {"start": "orders.show"}
+        )
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert result["nodes"] == []
+    assert result["edges"] == []
+    assert error_fragment in result["backend_topology_error"]
+
+
+def test_hades_backend_graph_search_resolves_organism_vector_topology(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._backend_memory_search = lambda **_payload: (
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "domain": "artifacts",
+            "count": 1,
+            "items": [
+                {
+                    "id": "organism-vector-hit",
+                    "graph_handle": "capability:graph-search",
+                    "summary": "Graph search capability",
+                }
+            ],
+        },
+        None,
+    )
+    provider._backend_graph_traverse = lambda **payload: (
+        _live_organism_topology(),
+        None,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "Graph search", "scope": "organism"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["scope"] == "organism"
+    assert result["topology_resolved"] is True
+    assert result["topology_resolved_handles"] == ["capability:graph-search"]
+    assert {node["id"] for node in result["nodes"]} == {
+        "capability:graph-search",
+        "runtime:local-cli",
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def test_hades_backend_graph_search_rejects_wrong_schema_for_organism_vector(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._backend_memory_search = lambda **_payload: (
+        {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "domain": "artifacts",
+            "count": 1,
+            "items": [{"graph_handle": "capability:graph-search"}],
+        },
+        None,
+    )
+    provider._backend_graph_traverse = lambda **_payload: (
+        _live_organism_topology(schema="hades.code_graph.v2"),
+        None,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_search",
+            {"query": "Graph search", "scope": "organism"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["topology_resolved"] is False
+    assert "hades.organism_graph.v1" in result["backend_topology_error"]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        pytest.param("project_id", "proj_other", id="wrong-project"),
+        pytest.param("workspace_binding_id", "wb_other", id="wrong-workspace-binding"),
+    ],
+)
+def test_hades_backend_graph_traverse_rejects_wrong_organism_envelope(
+    monkeypatch, tmp_path, field, wrong_value
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    topology = _live_organism_topology()
+    topology[field] = wrong_value
+    provider._backend_graph_traverse = lambda **_payload: (topology, None)
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "capability:graph-search", "scope": "organism"},
+        )
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert result["nodes"] == []
+    assert result["edges"] == []
+
+
+def test_hades_backend_graph_traverse_rejects_project_schema_for_organism(
+    monkeypatch, tmp_path
+):
+    provider = _create_linked_provider(monkeypatch, tmp_path)
+    provider._backend_graph_traverse = lambda **_payload: (
+        _live_organism_topology(schema="hades.code_graph.v2"),
+        None,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "hades_backend_graph_traverse",
+            {"start": "capability:graph-search", "scope": "organism"},
+        )
+    )
+
+    assert result["status"] == "backend_invalid_graph"
+    assert "hades.organism_graph.v1" in result["backend_topology_error"]
 
 
 def test_hades_backend_graph_traverse_rejects_live_v1_topology(monkeypatch, tmp_path):
@@ -1045,7 +1348,9 @@ def test_hades_backend_graph_traverse_rejects_live_v1_topology(monkeypatch, tmp_
     assert "hades.code_graph.v2" in result["backend_topology_error"]
 
 
-def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_path):
+def test_hades_backend_graph_traverse_accepts_canonical_start_for_fuzzy_query(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
     provider._active_graph_identity = lambda _scope: {
         "schema": "hades.code_graph.v2",
@@ -1073,7 +1378,7 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
                 "projection_version": "c" * 64,
                 "coverage": {"records": {"nodes": 2, "edges": 1}},
                 "head_commit": "abc123",
-                "start": payload["start"],
+                "start": "route:orders.show",
                 "direction": payload["direction"],
                 "max_depth": payload["max_depth"],
                 "limit": payload["limit"],
@@ -1082,10 +1387,21 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
                 "truncated": False,
                 "match_fields": ["id", "attributes.name"],
                 "freshness": {"status": "current", "workspace_head_commit": "abc123"},
-                "provenance": {"artifact_id": "artifact_1", "schema": "hades.code_graph.v2"},
+                "provenance": {
+                    "artifact_id": "artifact_1",
+                    "schema": "hades.code_graph.v2",
+                },
                 "nodes": [
-                    {"id": "route:orders.show", "kind": "route", "label": "orders.show"},
-                    {"id": "OrderController@show", "kind": "method", "label": "OrderController@show"},
+                    {
+                        "id": "route:orders.show",
+                        "kind": "route",
+                        "label": "orders.show",
+                    },
+                    {
+                        "id": "OrderController@show",
+                        "kind": "method",
+                        "label": "OrderController@show",
+                    },
                 ],
                 "edges": [
                     {
@@ -1119,6 +1435,7 @@ def test_hades_backend_graph_traverse_tool_reads_live_backend(monkeypatch, tmp_p
 
     assert result["status"] == "ok"
     assert result["artifact_id"] == "artifact_1"
+    assert result["start"] == "route:orders.show"
     assert result["freshness"]["status"] == "current"
     assert result["nodes"][0]["id"] == "route:orders.show"
     assert result["edges"][0]["kind"] == "route_handler"
@@ -1145,16 +1462,10 @@ def test_hades_backend_graph_traverse_sends_organism_scope(monkeypatch, tmp_path
 
         def graph_traverse(self, **payload):
             self.calls.append(payload)
-            return {
-                "project_id": payload["project_id"],
-                "workspace_binding_id": payload["workspace_binding_id"],
-                "schema": "hades.organism_graph.v1",
-                "start": payload["start"],
+            return _live_organism_topology() | {
                 "direction": payload["direction"],
                 "max_depth": payload["max_depth"],
                 "limit": payload["limit"],
-                "nodes": [],
-                "edges": [],
             }
 
         def close(self):
@@ -1163,7 +1474,9 @@ def test_hades_backend_graph_traverse_sends_organism_scope(monkeypatch, tmp_path
     fake = FakeClient()
     import plugins.memory.hades_backend as hades_memory
 
-    monkeypatch.setattr(hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake)
+    monkeypatch.setattr(
+        hades_memory.runtime, "client_from_config", lambda *, timeout=None: fake
+    )
 
     result = json.loads(
         provider.handle_tool_call(
@@ -1193,7 +1506,9 @@ def test_hades_backend_graph_traverse_sends_organism_scope(monkeypatch, tmp_path
     ]
 
 
-def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(monkeypatch, tmp_path):
+def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(
+    monkeypatch, tmp_path
+):
     provider = _create_linked_provider(monkeypatch, tmp_path)
 
     from hermes_cli.gnothi.store import OrganismRevisionStore
@@ -1245,10 +1560,6 @@ def test_hades_backend_graph_organism_scope_falls_back_to_current_revision(monke
         "runtime:local-cli",
     }
     assert [edge["kind"] for edge in traverse["edges"]] == ["requires"]
-
-
-
-
 
 
 def test_hades_backend_memory_live_search_uses_short_timeout(monkeypatch, tmp_path):
