@@ -14,11 +14,17 @@ from hermes_cli.hades_graph_v2.model import (
     MethodSemantics,
     SourceIdentity,
 )
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkAdapterRegistry,
+    run_framework_adapters,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
     ExtractionContext,
     FrameworkLocalTarget,
+    InventoryFile,
     SourceLocationIR,
+    TerminalKind,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import (
@@ -44,6 +50,7 @@ def _location(root: Path, path: str) -> SourceLocationIR:
 
 def _context(root: Path) -> ExtractionContext:
     metadata = _location(root, "package.json")
+    source = (root / "app.js").read_bytes()
     return ExtractionContext(
         workspace_root=root,
         project_id="project",
@@ -66,6 +73,12 @@ def _context(root: Path) -> ExtractionContext:
         package_metadata=(ConfigLocatorIR(metadata, "package_json", 0),),
         tsconfig_metadata=(),
         file_accessor=lambda path: (root / path).read_bytes(),
+        inventory_files=(
+            InventoryFile(
+                "app.js", hashlib.sha256(source).hexdigest(), "javascript", True
+            ),
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -153,6 +166,16 @@ child.get('/items/:id', childHandler); parent.use('/v1', child); app.use('/api',
     ]
     assert route.framework_segment_keys == tuple(
         segment.local_key for segment in pipeline
+    )
+    registry = FrameworkAdapterRegistry()
+    registry.register(adapter)
+    facts = adapter.pipeline_facts(context, route)
+    assert [(item.source_block_key, item.kind) for item in facts.terminals] == [
+        (pipeline[-1].local_key, TerminalKind.RESPONSE)
+    ]
+    assert (
+        run_framework_adapters(registry, context, (_syntax(tmp_path),)).pipeline_facts
+        == facts
     )
 
 
@@ -507,10 +530,13 @@ app.get('/x', boom); app.use(errorHandler);
         "handler_target_unresolved",
     } <= _coverage(adapter, context)
     route = next(item for item in entries if item.public_path == "/x")
-    assert not any(
-        segment.framework_role == "error_middleware"
-        for segment in adapter.pipeline(context, route)
-    )
+    pipeline = adapter.pipeline(context, route)
+    assert not any(segment.framework_role == "error_middleware" for segment in pipeline)
+    facts = adapter.pipeline_facts(context, route)
+    assert [
+        (item.source_block_key, item.kind, item.exception_type)
+        for item in facts.terminals
+    ] == [(pipeline[-1].local_key, TerminalKind.EXCEPTION, "Error")]
 
 
 def test_computed_registration_target_is_unresolved_without_an_invented_route(
