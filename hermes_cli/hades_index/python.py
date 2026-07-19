@@ -25,7 +25,8 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_language_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
@@ -50,6 +51,86 @@ def extract_lifecycle_entrypoints(
         language="python",
         registry=registry,
     )
+
+
+def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
+    """Emit Django and SQLAlchemy resources directly into graph-v2 IR."""
+
+    parsed: list[tuple[str, ast.Module]] = []
+    for item in context.inventory_files:
+        if item.language != "python" or not item.parser_candidate or item.is_test:
+            continue
+        try:
+            tree = ast.parse(
+                context.file_accessor(Path(item.path)).decode("utf-8", errors="replace")
+            )
+        except (OSError, SyntaxError):
+            continue
+        parsed.append((item.path, tree))
+
+    django_tables: dict[str, str] = {}
+    for path, tree in parsed:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and _py_django_model_base(node):
+                table, _app = _py_django_model_table(node, path)
+                django_tables[node.name] = table
+
+    specs: list[TableSpec] = []
+    for path, tree in parsed:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if _py_django_model_base(node):
+                table, app = _py_django_model_table(node, path)
+                columns, foreign_keys = _py_django_model_fields(
+                    node, table, app, path, django_tables
+                )
+                if columns or foreign_keys:
+                    specs.append(
+                        TableSpec(
+                            "python",
+                            "django",
+                            path,
+                            node.lineno,
+                            table,
+                            node.name,
+                            tuple(
+                                (
+                                    str(row.get("column") or ""),
+                                    str(row.get("references_table") or ""),
+                                    int(row.get("line") or node.lineno),
+                                )
+                                for row in foreign_keys
+                                if row.get("references_table")
+                            ),
+                        )
+                    )
+                continue
+            table = _py_sqlalchemy_table_name(node)
+            if not table:
+                continue
+            columns, foreign_keys = _py_sqlalchemy_model_fields(node, table, path)
+            if columns or foreign_keys:
+                specs.append(
+                    TableSpec(
+                        "python",
+                        "sqlalchemy",
+                        path,
+                        node.lineno,
+                        table,
+                        node.name,
+                        tuple(
+                            (
+                                str(row.get("column") or ""),
+                                str(row.get("references_table") or ""),
+                                int(row.get("line") or node.lineno),
+                            )
+                            for row in foreign_keys
+                            if row.get("references_table")
+                        ),
+                    )
+                )
+    return table_adapter_result(context, tuple(specs))
 
 
 def _py_graph_summary(

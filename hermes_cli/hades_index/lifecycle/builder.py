@@ -179,6 +179,11 @@ _CAPABILITY_FIELDS = (
     "async_",
     "data_access",
 )
+_CALLABLE_OWNER_KINDS = frozenset({
+    NodeKind.MODULE,
+    NodeKind.ENTRYPOINT,
+    *EXECUTABLE_SOURCE_DECLARATION_KINDS,
+})
 _CAPABILITY_BY_IR = {
     CoverageCapability.INVENTORY: "inventory",
     CoverageCapability.ENTRYPOINT_DISCOVERY: "entrypoint_discovery",
@@ -834,7 +839,24 @@ class GraphBuilder:
                 "path": path,
             })
             file_node_ids[path] = public_id
+            all_path_events = tuple(coverage_by_path.get(path, ()))
+            inventory_path_events = tuple(
+                event
+                for event in all_path_events
+                if event.capability is CoverageCapability.INVENTORY
+            )
+            unavailable_reason = next(
+                (
+                    _reason_code(event.reason_code)
+                    for event in inventory_path_events
+                    if event.reason_code
+                    in {"symlink_unavailable", "submodule_unavailable"}
+                ),
+                None,
+            )
             try:
+                if unavailable_reason is not None:
+                    raise OSError("inventory entry is unavailable")
                 byte_size = (
                     inventory_file.byte_size
                     if inventory_file.byte_size is not None
@@ -845,13 +867,13 @@ class GraphBuilder:
             except OSError:
                 byte_size = 0
                 analysis_status = AnalysisStatus.FAILED
-                omission_reason = ReasonCode.FILE_READ_FAILED
+                omission_reason = unavailable_reason or ReasonCode.FILE_READ_FAILED
                 failure_language = language or (
                     context.detected_languages[0]
                     if len(context.detected_languages) == 1
                     else "unknown"
                 )
-                if not any(
+                if unavailable_reason is None and not any(
                     event.path == path
                     and event.reason_code == ReasonCode.FILE_READ_FAILED.value
                     for event in effective_coverage_events
@@ -873,12 +895,17 @@ class GraphBuilder:
                     and not inventory_by_path[path].parser_candidate
                 ):
                     analysis_status = AnalysisStatus.UNSUPPORTED
-                path_events = coverage_by_path.get(path, ())
                 failure_reason = next(
                     (
                         _reason_code(event.reason_code)
-                        for event in path_events
-                        if event.reason_code in {"parser_failed", "file_read_failed"}
+                        for event in all_path_events
+                        if event.reason_code
+                        in {
+                            "parser_failed",
+                            "file_read_failed",
+                            "symlink_unavailable",
+                            "submodule_unavailable",
+                        }
                     ),
                     None,
                 )
@@ -886,19 +913,20 @@ class GraphBuilder:
                     analysis_status = AnalysisStatus.FAILED
                     omission_reason = failure_reason
                 elif any(
-                    event.reason_code == "file_too_large" for event in path_events
+                    event.reason_code == "file_too_large"
+                    for event in all_path_events
                 ):
                     analysis_status = AnalysisStatus.TOO_LARGE
                     omission_reason = ReasonCode.FILE_TOO_LARGE
                 elif any(
                     event.reason_code == "resource_budget_reached"
-                    for event in path_events
+                    for event in inventory_path_events
                 ):
                     analysis_status = AnalysisStatus.BUDGET_OMITTED
                     omission_reason = ReasonCode.RESOURCE_BUDGET_REACHED
                 elif any(
                     event.outcome is CoverageOutcome.UNSUPPORTED
-                    for event in path_events
+                    for event in inventory_path_events
                 ):
                     analysis_status = AnalysisStatus.UNSUPPORTED
                     omission_reason = None
@@ -1632,6 +1660,7 @@ class GraphBuilder:
                 edge_owner_local[terminal.local_key] = framework_segment_owner_ids[
                     terminal.source_block_key
                 ]
+        edge_owner_local.update(framework_segment_owner_ids)
 
         effect_target_ids: dict[str, str] = {}
         resource_nodes: dict[str, Node] = {}
@@ -1745,6 +1774,12 @@ class GraphBuilder:
 
         boundary_target_ids: dict[str, str] = {}
         boundary_nodes: dict[str, Node] = {}
+        unresolved_boundary_edge_keys = {
+            fact.subject.local_key
+            for fact in unresolved_facts
+            if isinstance(fact.subject, EdgeSubjectIR)
+            and fact.candidate_set_knowledge is not CandidateSetKnowledge.COMPLETE
+        }
         framework_kind_by_role = {
             "middleware": NodeKind.MIDDLEWARE,
             "guard": NodeKind.GUARD,
@@ -1754,6 +1789,10 @@ class GraphBuilder:
         }
         for edge_ir in edge_facts:
             if type(edge_ir.target) is not BoundaryTarget:
+                continue
+            if edge_ir.local_key in unresolved_boundary_edge_keys:
+                # The uncertainty materializer below owns the one canonical
+                # UNKNOWN_BOUNDARY node and unresolved evidence envelope.
                 continue
             descriptor = edge_ir.target.descriptor
             owner_id = edge_owner_local[edge_ir.source_node_local_key]
@@ -1912,7 +1951,11 @@ class GraphBuilder:
                 _, source_id = entrypoint_owner
                 owner_id = source_id
             else:
-                source_id = local_node_ids[subject_ir.source_node_local_key]
+                source_id = (
+                    framework_segment_node_ids[subject_ir.source_node_local_key]
+                    if subject_ir.source_node_local_key in framework_segment_node_ids
+                    else local_node_ids[subject_ir.source_node_local_key]
+                )
                 owner_id = edge_owner_local[subject_ir.source_node_local_key]
             locator = subject_ir.locator
             structural = (
@@ -1920,29 +1963,77 @@ class GraphBuilder:
                 if type(locator) is AstLocatorIR
                 else locator.structural_pointer
             )
-            language = next(
-                node.language for node in nodes if node.id == owner_id
-            ) or next(node.language for node in nodes if node.id == source_id)
-            boundary_identity = SourceOccurrenceIdentity(
-                "source_occurrence",
-                context.workspace_binding_id,
-                language,
-                NodeKind.UNKNOWN_BOUNDARY,
-                owner_id,
-                f"{structural}/unknown_boundary",
-                locator.ordinal,
-                "unknown_boundary",
+            owner_node = next(node for node in nodes if node.id == owner_id)
+            language = owner_node.language or next(
+                node.language for node in nodes if node.id == source_id
             )
-            boundary_id = node_id({
-                "variant": "source_occurrence",
-                "workspace_binding_id": context.workspace_binding_id,
-                "language": language,
-                "kind": "unknown_boundary",
-                "owner_node_id": owner_id,
-                "structural_path": boundary_identity.structural_path,
-                "ordinal": locator.ordinal,
-                "semantic_role": "unknown_boundary",
-            })
+            boundary_qualified_name: str | None = None
+            boundary_kind = (
+                NodeKind.EXTERNAL_BOUNDARY
+                if fact.resolution_kind is ResolutionKind.EXTERNAL_TARGET
+                else NodeKind.UNKNOWN_BOUNDARY
+            )
+            boundary_properties: BoundaryProperties | IntegrationProperties = (
+                IntegrationProperties()
+                if boundary_kind is NodeKind.EXTERNAL_BOUNDARY
+                else BoundaryProperties(reason_code=fact.reason_code)
+            )
+            if owner_node.kind in _CALLABLE_OWNER_KINDS:
+                semantic_role = boundary_kind.value
+                boundary_identity = SourceOccurrenceIdentity(
+                    "source_occurrence",
+                    context.workspace_binding_id,
+                    language,
+                    boundary_kind,
+                    owner_id,
+                    f"{structural}/{semantic_role}",
+                    locator.ordinal,
+                    semantic_role,
+                )
+                boundary_identity_payload = {
+                    "variant": "source_occurrence",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": language,
+                    "kind": boundary_kind.value,
+                    "owner_node_id": owner_id,
+                    "structural_path": boundary_identity.structural_path,
+                    "ordinal": locator.ordinal,
+                    "semantic_role": semantic_role,
+                }
+            else:
+                if boundary_kind is not NodeKind.EXTERNAL_BOUNDARY:
+                    raise IRValidationError(
+                        "invalid_unresolved_owner",
+                        "non-callable unresolved targets must be external boundaries",
+                    )
+                boundary_qualified_name = (
+                    f"{locator.source_location.path}::{structural}::external_boundary"
+                )
+                boundary_identity = SemanticResourceIdentity(
+                    "semantic_resource",
+                    context.workspace_binding_id,
+                    language,
+                    boundary_kind,
+                    None,
+                    None,
+                    boundary_qualified_name,
+                    None,
+                    None,
+                    None,
+                )
+                boundary_identity_payload = {
+                    "variant": "semantic_resource",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": language,
+                    "kind": boundary_kind.value,
+                    "framework": None,
+                    "namespace": None,
+                    "qualified_name": boundary_qualified_name,
+                    "public_resource_name": None,
+                    "protocol": None,
+                    "operation": None,
+                }
+            boundary_id = node_id(boundary_identity_payload)
             condition = (
                 None
                 if subject_ir.condition is None
@@ -2001,7 +2092,7 @@ class GraphBuilder:
                 "source_id": source_id,
                 "target_id": boundary_id,
                 "relation": subject_ir.relation.value,
-                "flow": subject_ir.flow.value,
+                "flow": None if subject_ir.flow is None else subject_ir.flow.value,
                 "condition_hash": None if condition is None else condition.hash,
                 "branch_group_id": branch_id,
                 "call_site_id": call_id,
@@ -2062,15 +2153,19 @@ class GraphBuilder:
                 Node(
                     boundary_id,
                     boundary_identity,
-                    NodeKind.UNKNOWN_BOUNDARY,
+                    boundary_kind,
                     language,
                     None,
-                    "unknown boundary",
-                    None,
+                    (
+                        "unknown boundary"
+                        if boundary_kind is NodeKind.UNKNOWN_BOUNDARY
+                        else "external boundary"
+                    ),
+                    boundary_qualified_name,
                     None,
                     uncertainty_id_value,
                     _source_location(locator),
-                    BoundaryProperties(reason_code=fact.reason_code),
+                    boundary_properties,
                     _evidence(
                         subject_ir.evidence,
                         origin=EvidenceOrigin.UNRESOLVED,

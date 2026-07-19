@@ -1354,13 +1354,53 @@ def test_sync_graph_v2_resumes_server_missing_chunks_and_marks_exact_cache_only_
         "artifact_graph_version"
     ]
 
-    class NoNetworkClient:
+    class CacheHitClient:
+        def __init__(self):
+            self.summary_calls = []
+
         def create_graph_import(self, _manifest):
             raise AssertionError("exact ready cache must skip backend import calls")
 
+        def graph_verification_summary(self, **payload):
+            self.summary_calls.append(payload)
+            return {
+                "verification_queued": 0,
+                "verification_high_priority": 0,
+                "verification_by_domain": {},
+            }
+
+    cache_hit_client = CacheHitClient()
     assert _upload_job_artifact(
-        NoNetworkClient(), agent, binding, "job_graph_v2_retry", rebuilt
+        cache_hit_client, agent, binding, "job_graph_v2_retry", rebuilt
     ) == (0, 0, 1)
+    assert cache_hit_client.summary_calls == [
+        {
+            "project_id": binding.project_id,
+            "workspace_binding_id": binding.backend_workspace_binding_id,
+            "projection_version": "e" * 64,
+        }
+    ]
+    with hdb.connect_closing() as conn:
+        zero_summary = hdb.get_sync_state(conn, cache_key)
+    assert zero_summary["verification_summary"] == {
+        "verification_queued": 0,
+        "verification_high_priority": 0,
+        "verification_by_domain": {},
+    }
+
+    class UnavailableSummaryClient:
+        def create_graph_import(self, _manifest):
+            raise AssertionError("exact ready cache must skip backend import calls")
+
+        def graph_verification_summary(self, **_payload):
+            raise OSError("verification endpoint unavailable")
+
+    assert _upload_job_artifact(
+        UnavailableSummaryClient(), agent, binding, "job_graph_v2_retry", rebuilt
+    ) == (0, 0, 1)
+    with hdb.connect_closing() as conn:
+        unavailable_summary = hdb.get_sync_state(conn, cache_key)
+    assert unavailable_summary["verification_summary"] is None
     assert not artifact_path.exists()
 
 
@@ -1475,7 +1515,11 @@ def test_graph_v2_pending_import_keeps_locked_resume_and_retry_uses_same_import(
             raise AssertionError("ready retry must not duplicate chunk uploads")
 
         def graph_verification_summary(self, **_payload):
-            return {"verification_queued": 0}
+            return {
+                "verification_queued": 0,
+                "verification_high_priority": 0,
+                "verification_by_domain": {},
+            }
 
     assert _upload_job_artifact(
         ReadyRetryClient(), agent, binding, "job-pending-retry", result

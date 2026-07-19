@@ -99,6 +99,7 @@ class BundleLimits:
     max_chunks: int = MAX_CHUNKS
     backend_max_artifact_bytes: int | None = None
     backend_max_body_bytes: int | None = None
+    max_edges: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -110,7 +111,11 @@ class BundleLimits:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.max_chunks) is not int or not 0 <= self.max_chunks <= MAX_CHUNKS:
             raise ValueError("max_chunks must be between 0 and 512")
-        for name in ("backend_max_artifact_bytes", "backend_max_body_bytes"):
+        for name in (
+            "backend_max_artifact_bytes",
+            "backend_max_body_bytes",
+            "max_edges",
+        ):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError(f"{name} must be null or a positive integer")

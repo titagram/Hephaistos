@@ -29,7 +29,8 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_languages_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
@@ -53,6 +54,52 @@ def extract_lifecycle_entrypoints(
         languages=frozenset({"javascript", "typescript"}),
         registry=registry,
     )
+
+
+def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
+    """Emit Drizzle and Prisma resources directly into graph-v2 IR."""
+
+    specs: list[TableSpec] = []
+    for item in context.inventory_files:
+        if item.language not in {"javascript", "typescript", "prisma"}:
+            continue
+        try:
+            source = context.file_accessor(Path(item.path)).decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+        if item.language == "prisma":
+            tables, _symbols, _edges, _truncated = _prisma_model_graph(
+                source, item.path, max_symbols=100_000, max_edges=100_000
+            )
+            orm = "prisma"
+        else:
+            tables, _symbols, _edges, _truncated = _drizzle_schema_graph(
+                source, item.path, max_symbols=100_000, max_edges=100_000
+            )
+            orm = "drizzle"
+        for table in tables:
+            specs.append(
+                TableSpec(
+                    item.language,
+                    orm,
+                    item.path,
+                    int(table.get("line") or 1),
+                    str(table["table"]),
+                    str(table.get("model") or table.get("variable") or "") or None,
+                    tuple(
+                        (
+                            str(row.get("column") or ""),
+                            str(row.get("references_table") or ""),
+                            int(row.get("line") or table.get("line") or 1),
+                        )
+                        for row in table.get("foreign_keys") or ()
+                        if row.get("references_table")
+                    ),
+                )
+            )
+    return table_adapter_result(context, tuple(specs))
 TS_FUNCTION_RE = re.compile(r"\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(", re.MULTILINE)
 TS_ARROW_COMPONENT_RE = re.compile(
     r"\b(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Z][A-Za-z0-9_$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>",

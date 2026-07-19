@@ -1085,12 +1085,14 @@ _RESOLUTION_MATRIX = {
             Relation.READS,
             Relation.WRITES,
             Relation.QUERIES,
+            Relation.REFERENCES,
         }),
         frozenset({
             EdgeFlow.ALWAYS,
             EdgeFlow.CONDITIONAL,
             EdgeFlow.ALTERNATIVE,
             EdgeFlow.ASYNC,
+            None,
         }),
         frozenset({
             NodeKind.INTEGRATION,
@@ -1217,7 +1219,13 @@ def validate_uncertainty_ownership(
             and node.uncertainty_id not in index.uncertainties
         ):
             _fail("uncertainty_ownership", "node uncertainty ownership is not local")
-        if node.kind is NodeKind.UNKNOWN_BOUNDARY:
+        if node.kind is NodeKind.UNKNOWN_BOUNDARY or (
+            node.kind is NodeKind.EXTERNAL_BOUNDARY
+            and (
+                node.evidence.primary.origin is EvidenceOrigin.UNRESOLVED
+                or node.uncertainty_id is not None
+            )
+        ):
             if (
                 node.evidence.primary.origin is not EvidenceOrigin.UNRESOLVED
                 or node.uncertainty_id is None
@@ -1232,7 +1240,10 @@ def validate_uncertainty_ownership(
         ):
             _fail(
                 "uncertainty_ownership",
-                "non-boundary node carries unresolved ownership",
+                (
+                    f"non-boundary {node.kind.value} node {node.name!r} carries "
+                    "unresolved ownership"
+                ),
             )
     for edge in artifact.edges:
         if (
@@ -1399,10 +1410,12 @@ def validate_uncertainty_ownership(
                     "one-target candidate set cannot create dynamic dispatch",
                 )
         else:
-            if (
-                len(boundaries) != 1
-                or boundaries[0].kind is not NodeKind.UNKNOWN_BOUNDARY
-            ):
+            expected_boundary_kind = (
+                NodeKind.EXTERNAL_BOUNDARY
+                if uncertainty.resolution_kind is ResolutionKind.EXTERNAL_TARGET
+                else NodeKind.UNKNOWN_BOUNDARY
+            )
+            if len(boundaries) != 1 or boundaries[0].kind is not expected_boundary_kind:
                 _fail(
                     "uncertainty_ownership",
                     "uncertainty ownership requires one placeholder",
@@ -2323,6 +2336,15 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
                     if language is None
                     else observed[(reason.code, language)]
                 )
+                if (
+                    reason.code is ReasonCode.RESOURCE_BUDGET_REACHED
+                    and name not in {"inventory", "entrypoint_discovery"}
+                ):
+                    # Producer fact caps are capability-scoped ledgers.  They
+                    # intentionally do not consume the later bundle-pruning
+                    # ledger, which counts public records rather than omitted
+                    # parser/adapter facts.
+                    continue
                 if reason.code in _BUNDLE_BUDGET_REASON_CODES:
                     if not expected <= reason.count <= expected + omitted_ledger:
                         _fail(

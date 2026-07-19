@@ -1228,16 +1228,17 @@ def _candidate(
         locator,
         None,
     )
+    public_path = re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", spec.path)
     return (
         EntrypointCandidate(
             EntrypointKind.HTTP_ROUTE,
             "django",
             MethodSemantics.UNRESTRICTED,
             (),
-            spec.path,
+            public_path,
             spec.name,
             TriggerKind.HTTP,
-            f"ALL {spec.path}",
+            f"ALL {public_path}",
             MatchConstraints(None, (), None),
             locator,
             handler_key,

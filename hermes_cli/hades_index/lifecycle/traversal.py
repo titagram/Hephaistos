@@ -723,7 +723,9 @@ def build_lifecycle_flows(
         invocation_stages: dict[str, Stage] = {}
         returnable_call_sites: set[str] = set()
         throwable_call_sites: set[str] = set()
-        expanded_generation: dict[tuple[str, Stage, AsyncContext], int] = {}
+        expanded_generation: dict[
+            tuple[str, Stage, AsyncContext], tuple[int, int]
+        ] = {}
         queue = deque([root_state])
         step_values: dict[
             tuple[str, Stage, Stage, AsyncContext], dict[str, object]
@@ -731,11 +733,16 @@ def build_lifecycle_flows(
         while queue:
             state = queue.popleft()
             generation = len(invocation_stages)
-            if expanded_generation.get(state, -1) >= generation:
-                continue
-            expanded_generation[state] = generation
-            source_id, stage_from, async_context = state
             source_depth = depths[state]
+            previous_expansion = expanded_generation.get(state)
+            if (
+                previous_expansion is not None
+                and previous_expansion[0] >= generation
+                and previous_expansion[1] <= source_depth
+            ):
+                continue
+            expanded_generation[state] = (generation, source_depth)
+            source_id, stage_from, async_context = state
             for edge in outgoing.get(source_id, ()):
                 if edge.call_site_id is not None:
                     if edge.relation is Relation.RETURNS_TO and (

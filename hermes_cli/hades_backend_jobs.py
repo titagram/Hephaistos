@@ -1907,7 +1907,12 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         is_test_source_path,
     )
     from hermes_cli.hades_index.lifecycle.assembler import assemble_graph_v2_adapter_result
-    from hermes_cli.hades_index.sql import extract_lifecycle_data
+    from hermes_cli.hades_index.php import extract_lifecycle_data as extract_php_data
+    from hermes_cli.hades_index.python import extract_lifecycle_data as extract_python_data
+    from hermes_cli.hades_index.sql import extract_lifecycle_data as extract_sql_data
+    from hermes_cli.hades_index.typescript import (
+        extract_lifecycle_data as extract_typescript_data,
+    )
     from hermes_cli.hades_index.lifecycle.model import (
         CoverageCapability,
         CoverageEvent,
@@ -1919,6 +1924,28 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
 
     payload = job.get("payload") or {}
     graph_index_config = load_hades_graph_index_config(load_config_readonly())
+
+    def payload_cap(name: str, default: int, *, hard_max: int | None = None) -> int:
+        raw = payload.get(name)
+        value = default if raw is None else int(raw)
+        if value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+        return min(value, hard_max) if hard_max is not None else value
+
+    max_selected_parser_files = payload_cap("max_files", 10_000, hard_max=10_000)
+    max_file_bytes = min(
+        graph_index_config.max_file_bytes,
+        payload_cap("max_file_bytes", graph_index_config.max_file_bytes),
+    )
+    max_total_source_bytes = min(
+        graph_index_config.max_total_source_bytes,
+        payload_cap(
+            "max_total_bytes",
+            graph_index_config.max_total_source_bytes,
+        ),
+    )
+    max_symbols = payload_cap("max_symbols", 5_000, hard_max=5_000)
+    max_edges = payload_cap("max_edges", 10_000, hard_max=10_000)
     snapshot = build_source_snapshot(
         workspace_root,
         user_excluded_paths=graph_index_config.excluded_paths,
@@ -1990,21 +2017,33 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     inventory_paths = {item.path for item in inventory}
     inventory_tuple = tuple(inventory)
     parse_coverage: list[CoverageEvent] = []
+    for item in inventory_tuple:
+        if (workspace_root / item.path).is_symlink():
+            parse_coverage.append(
+                CoverageEvent(
+                    item.language or "unknown",
+                    CoverageCapability.INVENTORY,
+                    CoverageOutcome.PARTIAL,
+                    "symlink_unavailable",
+                    item.path,
+                    0,
+                    1,
+                )
+            )
     selected_parser_paths: set[str] = set()
     total_source_bytes = 0
-    max_selected_parser_files = 10_000
     for item in inventory_tuple:
         size = (
             item.byte_size
             if item.byte_size is not None
-            else graph_index_config.max_file_bytes + 1
+            else max_file_bytes + 1
         )
         coverage_language = item.language or (
             next(iter(sorted(detected_languages)))
             if len(detected_languages) == 1
             else "unknown"
         )
-        if size > graph_index_config.max_file_bytes:
+        if size > max_file_bytes:
             parse_coverage.append(
                 CoverageEvent(
                     coverage_language,
@@ -2032,7 +2071,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
                 )
             )
             continue
-        if total_source_bytes + size > graph_index_config.max_total_source_bytes:
+        if total_source_bytes + size > max_total_source_bytes:
             parse_coverage.append(
                 CoverageEvent(
                         item.language,
@@ -2049,20 +2088,22 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         selected_parser_paths.add(item.path)
     selected_data_paths: set[str] = set()
     for item in inventory_tuple:
-        if item.language != "sql" or item.path in selected_parser_paths:
+        if item.language not in {"prisma", "sql"} or item.path in selected_parser_paths:
             continue
         size = (
             item.byte_size
             if item.byte_size is not None
-            else graph_index_config.max_file_bytes + 1
+            else max_file_bytes + 1
         )
         if (
-            size > graph_index_config.max_file_bytes
-            or total_source_bytes + size > graph_index_config.max_total_source_bytes
+            size > max_file_bytes
+            or len(selected_parser_paths) + len(selected_data_paths)
+            >= max_selected_parser_files
+            or total_source_bytes + size > max_total_source_bytes
         ):
             parse_coverage.append(
                 CoverageEvent(
-                    "sql",
+                    item.language,
                     CoverageCapability.DATA_ACCESS,
                     CoverageOutcome.PARTIAL,
                     "resource_budget_reached",
@@ -2104,8 +2145,8 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         if not candidate.is_file():
             raise OSError("graph inventory entry is no longer a regular file")
         with candidate.open("rb") as handle:
-            raw = handle.read(graph_index_config.max_file_bytes + 1)
-        if len(raw) > graph_index_config.max_file_bytes:
+            raw = handle.read(max_file_bytes + 1)
+        if len(raw) > max_file_bytes:
             raise OSError("graph inventory file exceeds max_file_bytes")
         return raw
 
@@ -2140,7 +2181,6 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
     parser = TreeSitterAdapter()
     parser.require_languages(detected_languages)
     syntax = []
-    max_symbols = min(5_000, int(payload.get("max_symbols") or 5_000))
     selected_symbol_count = 0
     for item in inventory_tuple:
         if (
@@ -2154,12 +2194,23 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             candidate,
             relative_path=item.path,
             language=item.language,
-            max_bytes=graph_index_config.max_file_bytes,
+            max_bytes=max_file_bytes,
         )
         if parsed.syntax is not None:
             remaining_symbols = max(0, max_symbols - selected_symbol_count)
             retained_symbols = parsed.syntax.symbols[:remaining_symbols]
             if len(parsed.syntax.symbols) != len(retained_symbols):
+                parse_coverage.append(
+                    CoverageEvent(
+                        item.language,
+                        CoverageCapability.SYMBOL_RESOLUTION,
+                        CoverageOutcome.PARTIAL,
+                        "resource_budget_reached",
+                        item.path,
+                        len(retained_symbols),
+                        len(parsed.syntax.symbols) - len(retained_symbols),
+                    )
+                )
                 syntax.append(
                     replace(
                         parsed.syntax,
@@ -2180,9 +2231,67 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
         tuple(syntax),
         parse_coverage=tuple(parse_coverage),
     )
+    if len(assembled.edge_facts) > max_edges:
+        retained_edges = assembled.edge_facts[:max_edges]
+        omitted_by_path: dict[tuple[str, str], int] = {}
+        for edge in assembled.edge_facts[max_edges:]:
+            path = edge.locator.source_location.path
+            language = next(
+                (
+                    item.language
+                    for item in inventory_tuple
+                    if item.path == path and item.language is not None
+                ),
+                "unknown",
+            )
+            omitted_by_path[(language, path)] = (
+                omitted_by_path.get((language, path), 0) + 1
+            )
+        edge_coverage = list(assembled.coverage_events)
+        for (language, path), omitted_count in sorted(omitted_by_path.items()):
+            edge_coverage.append(
+                CoverageEvent(
+                    language,
+                    CoverageCapability.CALL_GRAPH,
+                    CoverageOutcome.PARTIAL,
+                    "resource_budget_reached",
+                    path,
+                    sum(
+                        edge.locator.source_location.path == path
+                        for edge in retained_edges
+                    ),
+                    omitted_count,
+                )
+            )
+        assembled = replace(
+            assembled,
+            edge_facts=retained_edges,
+            coverage_events=tuple(
+                sorted(
+                    edge_coverage,
+                    key=lambda event: (
+                        event.language,
+                        event.capability.value,
+                        event.outcome.value,
+                        event.reason_code or "",
+                        event.path or "",
+                    ),
+                )
+            ),
+        )
+        assembled.validate()
     adapter_results = [assembled]
+    if any(item.language == "python" for item in inventory_tuple):
+        adapter_results.append(extract_python_data(context))
+    if any(item.language == "php" for item in inventory_tuple):
+        adapter_results.append(extract_php_data(context))
+    if any(
+        item.language in {"javascript", "typescript", "prisma"}
+        for item in inventory_tuple
+    ):
+        adapter_results.append(extract_typescript_data(context))
     if any(item.language == "sql" for item in inventory_tuple):
-        adapter_results.append(extract_lifecycle_data(context))
+        adapter_results.append(extract_sql_data(context))
     complete = build_canonical_graph(context, tuple(adapter_results))
     limits = BundleLimits(
         max_chunk_uncompressed_bytes=graph_index_config.max_chunk_uncompressed_bytes,
@@ -2197,6 +2306,7 @@ def _execute_populate_backend_ast(job: dict[str, Any], workspace_root: Path) -> 
             if payload.get("backend_max_body_bytes") is not None
             else None
         ),
+        max_edges=max_edges,
     )
     selected = GraphBudgetPruner().select(complete, limits)
     source_slice_candidates = plan_source_slice_candidates(

@@ -1019,6 +1019,9 @@ class HadesBackendClient:
             requested_import_id=clean_import,
         )
 
+    def graph_verification_summary(self, **payload: Any) -> dict[str, Any]:
+        return self._request("GET", "graph/verification-summary", params=payload)
+
     def create_source_slice(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "source-slices", json_body=payload)
 

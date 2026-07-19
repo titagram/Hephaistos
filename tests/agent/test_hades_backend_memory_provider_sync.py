@@ -348,6 +348,13 @@ def test_graph_search_resolves_vector_candidate_with_exact_topology_query():
         project_id="project-1",
         backend_workspace_binding_id="binding-1",
     )
+    provider._active_graph_identity = lambda _scope: {
+        "schema": "hades.code_graph.v2",
+        "project_id": "project-1",
+        "workspace_binding_id": "binding-1",
+        "projection_version": "c" * 64,
+        "publication_status": "ready",
+    }
     traverse_calls = []
     provider._backend_memory_search = lambda **_kwargs: (
         {
@@ -375,6 +382,7 @@ def test_graph_search_resolves_vector_candidate_with_exact_topology_query():
                 "workspace_binding_id": "binding-1",
                 "schema": "hades.code_graph.v2",
                 "projection_version": "c" * 64,
+                "coverage": {"records": {"nodes": 1, "edges": 0}},
                 "start": payload["start"],
                 "direction": payload["direction"],
                 "max_depth": payload["max_depth"],
@@ -397,6 +405,8 @@ def test_graph_search_resolves_vector_candidate_with_exact_topology_query():
 
     assert result["topology_resolved"] is True
     assert result["schema"] == "hades.code_graph.v2"
+    assert result["projection_version"] == "c" * 64
+    assert result["coverage"] == {"records": {"nodes": 1, "edges": 0}}
     assert result["nodes"][0]["id"] == "hades:node:v2:order-handler"
     assert result["vector_candidate_handles"] == ["hades:node:v2:order-handler"]
     assert traverse_calls == [
@@ -408,6 +418,90 @@ def test_graph_search_resolves_vector_candidate_with_exact_topology_query():
             "scope": "project",
         }
     ]
+
+
+def test_graph_search_checks_every_vector_handle_against_authoritative_v2_identity():
+    import plugins.memory.hades_backend as provider_mod
+
+    provider = object.__new__(provider_mod.HadesBackendMemoryProvider)
+    provider._binding = SimpleNamespace(
+        project_id="project-1",
+        backend_workspace_binding_id="binding-1",
+    )
+    provider._active_graph_identity = lambda _scope: {
+        "schema": "hades.code_graph.v2",
+        "project_id": "project-1",
+        "workspace_binding_id": "binding-1",
+        "projection_version": "c" * 64,
+        "publication_status": "ready",
+    }
+    handles = [
+        "hades:node:v2:good",
+        "hades:node:v2:wrong-schema",
+        "hades:node:v2:wrong-project",
+        "hades:node:v2:wrong-binding",
+        "hades:node:v2:wrong-projection",
+        "hades:node:v2:missing-coverage",
+    ]
+    provider._backend_memory_search = lambda **_kwargs: (
+        {
+            "project_id": "project-1",
+            "workspace_binding_id": "binding-1",
+            "domain": "artifacts",
+            "items": [
+                {
+                    "id": f"vector-{index}",
+                    "kind": "vector_candidate",
+                    "graph_handle": handle,
+                    "score": 90 - index,
+                }
+                for index, handle in enumerate(handles)
+            ],
+        },
+        None,
+    )
+    traverse_calls = []
+
+    def topology(**payload):
+        traverse_calls.append(payload)
+        handle = payload["start"]
+        response = {
+            "project_id": "project-1",
+            "workspace_binding_id": "binding-1",
+            "schema": "hades.code_graph.v2",
+            "projection_version": "c" * 64,
+            "coverage": {"records": {"nodes": 1, "edges": 0}},
+            "start": handle,
+            "direction": payload["direction"],
+            "max_depth": payload["max_depth"],
+            "limit": payload["limit"],
+            "nodes": [{"id": handle, "kind": "function", "label": handle}],
+            "edges": [],
+        }
+        if handle.endswith("wrong-schema"):
+            response["schema"] = "hades.code_graph.v1"
+        elif handle.endswith("wrong-project"):
+            response["project_id"] = "project-2"
+        elif handle.endswith("wrong-binding"):
+            response["workspace_binding_id"] = "binding-2"
+        elif handle.endswith("wrong-projection"):
+            response["projection_version"] = "d" * 64
+        elif handle.endswith("missing-coverage"):
+            response.pop("coverage")
+        return response, None
+
+    provider._backend_graph_traverse = topology
+
+    result = json.loads(provider._handle_graph_search({"query": "order", "limit": 8}))
+
+    assert [call["start"] for call in traverse_calls] == handles
+    assert result["topology_resolved"] is False
+    assert result["topology_partial"] is True
+    assert result["topology_resolved_handles"] == ["hades:node:v2:good"]
+    assert result["topology_unresolved_handles"] == handles[1:]
+    assert result["vector_candidate_handles"] == handles
+    assert [node["id"] for node in result["nodes"]] == ["hades:node:v2:good"]
+    assert set(result["backend_topology_errors"]) == set(handles[1:])
 
 
 def test_vector_candidate_without_graph_query_remains_hint_not_topology():

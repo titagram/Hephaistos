@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -13,7 +14,13 @@ from hermes_cli.hades_backend_jobs import (
     _line_number,
     _ts_graph_summary,
 )
-from hermes_cli.hades_graph_v2.model import EvidenceOrigin, NodeKind
+from hermes_cli.hades_graph_v2.model import (
+    CandidateSetKnowledge,
+    EvidenceOrigin,
+    NodeKind,
+    Priority,
+    ResolutionKind,
+)
 from hermes_cli.hades_index.lifecycle.entrypoints import (
     EntrypointExtraction,
     sql_entrypoint_extraction,
@@ -22,16 +29,20 @@ from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
 from hermes_cli.hades_index.lifecycle.model import (
     AdapterResult,
     AstLocatorIR,
+    BoundaryTarget,
     CoverageCapability,
     CoverageEvent,
     CoverageOutcome,
     DataNodeIR,
     EdgeFactIR,
+    EdgeSubjectIR,
     ExtractionContext,
     IREvidence,
     LocalNodeTarget,
+    FrameworkBoundaryDescriptor,
     Relation,
     SourceLocationIR,
+    UnresolvedFact,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
@@ -76,8 +87,11 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
     nodes: list[DataNodeIR] = []
     edges: list[EdgeFactIR] = []
     coverage: list[CoverageEvent] = []
-    table_local_keys: dict[tuple[str, str], str] = {}
+    table_keys_by_name: dict[str, list[str]] = defaultdict(list)
     table_specs: list[tuple[object, int, object, str, str, str]] = []
+    represented_by_path: Counter[str] = Counter()
+    unresolved_by_path: Counter[str] = Counter()
+    unresolved: list[UnresolvedFact] = []
     executable_capabilities = (
         CoverageCapability.ENTRYPOINT_DISCOVERY,
         CoverageCapability.CALL_GRAPH,
@@ -142,9 +156,10 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     evidence,
                 )
             )
-            table_local_keys[(item.path, table_name)] = local_key
+            table_keys_by_name[table_name].append(local_key)
             table_specs.append((item, ordinal, match, table_name, local_key, source))
             represented += 1
+        represented_by_path[item.path] = represented
         coverage.extend(
             CoverageEvent(
                 "sql",
@@ -167,15 +182,6 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                 represented,
                 0,
             ),
-            CoverageEvent(
-                "sql",
-                CoverageCapability.DATA_ACCESS,
-                CoverageOutcome.FULL,
-                None,
-                item.path,
-                represented,
-                0,
-            ),
         ))
     for item, table_ordinal, match, table_name, source_key, source in table_specs:
         body_start = match.start("body")
@@ -186,9 +192,6 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
             if reference is None:
                 continue
             target_name = _sql_identifier(reference.group("table").split(".")[-1])
-            target_key = table_local_keys.get((item.path, target_name))
-            if target_key is None:
-                continue
             line = _line_number(source, body_start + offset)
             structural_path = f"sql/foreign_key/{table_ordinal}/{item_ordinal}"
             locator = AstLocatorIR(
@@ -202,11 +205,75 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                 locator,
                 None,
             )
+            target_keys = tuple(sorted(table_keys_by_name.get(target_name, ())))
+            edge_key = local_record_key(
+                "sql", item.path, "foreign_key", "ast", structural_path, item_ordinal
+            )
+            if len(target_keys) != 1:
+                unresolved_evidence = IREvidence(
+                    EvidenceOrigin.UNRESOLVED,
+                    "sql.schema-v2",
+                    locator,
+                    None,
+                )
+                edges.append(
+                    EdgeFactIR(
+                        edge_key,
+                        source_key,
+                        BoundaryTarget(
+                            FrameworkBoundaryDescriptor(
+                                "sql",
+                                "table_reference",
+                                target_name,
+                                locator,
+                                unresolved_evidence,
+                            )
+                        ),
+                        Relation.REFERENCES,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        locator,
+                        unresolved_evidence,
+                    )
+                )
+                unresolved_key = local_record_key(
+                    "sql",
+                    item.path,
+                    "foreign_key_uncertainty",
+                    "ast",
+                    structural_path,
+                    item_ordinal,
+                )
+                unresolved.append(
+                    UnresolvedFact(
+                        unresolved_key,
+                        EdgeSubjectIR(edge_key),
+                        ResolutionKind.EXTERNAL_TARGET,
+                        (
+                            CandidateSetKnowledge.INCOMPLETE
+                            if target_keys
+                            else CandidateSetKnowledge.NOT_APPLICABLE
+                        ),
+                        "external_boundary_unresolved",
+                        "Which unique table is referenced by this foreign key?",
+                        ("inspect_schema_declarations",),
+                        (locator,),
+                        target_keys,
+                        (),
+                        Priority.HIGH,
+                        "The foreign-key target cannot be selected authoritatively.",
+                    )
+                )
+                unresolved_by_path[item.path] += 1
+                continue
+            target_key = target_keys[0]
             edges.append(
                 EdgeFactIR(
-                    local_record_key(
-                        "sql", item.path, "foreign_key", "ast", structural_path, item_ordinal
-                    ),
+                    edge_key,
                     source_key,
                     LocalNodeTarget(target_key),
                     Relation.REFERENCES,
@@ -220,6 +287,22 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
                     evidence,
                 )
             )
+    for path, represented in sorted(represented_by_path.items()):
+        coverage.append(
+            CoverageEvent(
+                "sql",
+                CoverageCapability.DATA_ACCESS,
+                (
+                    CoverageOutcome.PARTIAL
+                    if unresolved_by_path[path]
+                    else CoverageOutcome.FULL
+                ),
+                None,
+                path,
+                represented,
+                0,
+            )
+        )
     result = AdapterResult(
         declarations=(),
         blocks=(),
@@ -232,7 +315,7 @@ def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
         effects=(),
         framework_segments=(),
         entrypoints=(),
-        unresolved_facts=(),
+        unresolved_facts=tuple(sorted(unresolved, key=lambda row: row.local_key)),
         coverage_events=tuple(
             sorted(
                 coverage,

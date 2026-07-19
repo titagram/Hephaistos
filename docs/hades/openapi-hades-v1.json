@@ -1465,6 +1465,66 @@
         }
       }
     },
+    "/api/hades/v1/graph/verification-summary": {
+      "get": {
+        "summary": "Read bounded verification counts for the active graph projection",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 128}
+          },
+          {
+            "name": "workspace_binding_id",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string", "minLength": 1, "maxLength": 128}
+          },
+          {
+            "name": "projection_version",
+            "in": "query",
+            "required": true,
+            "schema": {"$ref": "#/components/schemas/Sha256Digest"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregate verification counts only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["verification_queued", "verification_high_priority", "verification_by_domain"],
+                  "properties": {
+                    "verification_queued": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                    "verification_high_priority": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                    "verification_by_domain": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "graph": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                        "wiki": {"type": "integer", "minimum": 0, "maximum": 1000000}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/ValidationError"}
+        }
+      }
+    },
     "/api/hades/v1/graph/traverse": {
       "get": {
         "summary": "Traverse the current Hades code graph for a linked workspace",

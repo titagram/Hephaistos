@@ -1079,6 +1079,16 @@ def _resolve_framework_references(
 
     candidates = []
     for candidate in extraction.candidates:
+        if candidate.evidence.origin is EvidenceOrigin.UNRESOLVED:
+            candidate = replace(
+                candidate,
+                evidence=IREvidence(
+                    EvidenceOrigin.VERIFIED_FROM_CODE,
+                    "framework.registration-v2",
+                    candidate.registration_locator,
+                    None,
+                ),
+            )
         if (
             candidate.handler_local_key is not None
             and candidate.handler_local_key not in declaration_keys
@@ -1102,8 +1112,8 @@ def _resolve_framework_references(
                 handler_local_key=None,
                 unresolved_fact_local_key=unresolved_key,
                 evidence=IREvidence(
-                    EvidenceOrigin.UNRESOLVED,
-                    "framework.lifecycle-v2",
+                    EvidenceOrigin.VERIFIED_FROM_CODE,
+                    "framework.registration-v2",
                     locator,
                     None,
                 ),
@@ -1118,6 +1128,16 @@ def _resolve_framework_references(
     }
     normalized_segments = []
     for segment in segments:
+        if segment.evidence.origin is EvidenceOrigin.UNRESOLVED:
+            segment = replace(
+                segment,
+                evidence=IREvidence(
+                    EvidenceOrigin.VERIFIED_FROM_CODE,
+                    "framework.pipeline-registration-v2",
+                    segment.evidence.locator,
+                    None,
+                ),
+            )
         target = segment.target
         if (
             type(target) is FrameworkLocalTarget
@@ -1222,7 +1242,7 @@ def _resolve_framework_references(
                         0,
                     ),
                     (),
-                    descriptor.evidence,
+                    segment.evidence,
                 )
             )
             segment_keys.add(boundary_key)
@@ -1258,23 +1278,23 @@ def _resolve_framework_references(
         language = language_by_path.get(locator.source_location.path) or "unknown"
         registration_key = next(
             (
-                key
-                for key in candidate.framework_segment_keys
-                if key in segment_keys
+                row.local_key
+                for row in base.declarations
+                if type(locator) is AstLocatorIR
+                and row.locator.source_location.path
+                == locator.source_location.path
+                and (
+                    locator.structural_path == row.locator.structural_path
+                    or locator.structural_path.startswith(
+                        f"{row.locator.structural_path}/"
+                    )
+                )
             ),
             next(
                 (
-                    row.local_key
-                    for row in base.declarations
-                    if type(locator) is AstLocatorIR
-                    and row.locator.source_location.path
-                    == locator.source_location.path
-                    and (
-                        locator.structural_path == row.locator.structural_path
-                        or locator.structural_path.startswith(
-                            f"{row.locator.structural_path}/"
-                        )
-                    )
+                    key
+                    for key in candidate.framework_segment_keys
+                    if key in segment_keys
                 ),
                 None,
             ),

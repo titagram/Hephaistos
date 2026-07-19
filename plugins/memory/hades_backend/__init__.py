@@ -1387,20 +1387,54 @@ class HadesBackendMemoryProvider(MemoryProvider):
         )
         if backend_result is not None:
             handles = _vector_graph_handles(backend_result)
-            topology = None
-            topology_error = None
-            if handles:
+            topologies: list[tuple[str, dict[str, Any]]] = []
+            topology_errors: dict[str, str] = {}
+            active_identity: dict[str, Any] | None = None
+            active_identity_loaded = False
+            for handle in handles:
                 topology, topology_error = self._backend_graph_traverse(
-                    start=handles[0],
+                    start=handle,
                     direction="any",
                     max_depth=1,
                     limit=limit,
                     scope=scope,
                 )
-            if topology is not None:
-                result = _tool_result_from_backend_graph_traverse(topology)
+                if topology is None:
+                    topology_errors[handle] = (
+                        topology_error or "graph query returned no topology"
+                    )
+                    continue
+                if not active_identity_loaded:
+                    try:
+                        active_identity = self._active_graph_identity(scope)
+                    except Exception:
+                        active_identity = None
+                    active_identity_loaded = True
+                validation_error = _authoritative_v2_topology_error(
+                    topology,
+                    handle=handle,
+                    project_id=self._binding.project_id,
+                    workspace_binding_id=self._binding.backend_workspace_binding_id,
+                    active_identity=active_identity,
+                )
+                if validation_error:
+                    topology_errors[handle] = validation_error
+                    continue
+                topologies.append((handle, topology))
+            if topologies:
+                resolved_handles = [handle for handle, _topology in topologies]
+                result = _tool_result_from_backend_graph_traversals(
+                    [topology for _handle, topology in topologies]
+                )
                 result["tool_domain"] = "graph"
-                result["topology_resolved"] = True
+                result["topology_resolved"] = len(resolved_handles) == len(handles)
+                result["topology_partial"] = bool(topology_errors)
+                result["topology_resolved_handles"] = resolved_handles
+                if topology_errors:
+                    result["topology_unresolved_handles"] = [
+                        handle for handle in handles if handle in topology_errors
+                    ]
+                    result["backend_topology_errors"] = topology_errors
                 result["vector_candidate_handles"] = handles
             else:
                 result = _tool_result_from_backend_search(backend_result)
@@ -1408,8 +1442,13 @@ class HadesBackendMemoryProvider(MemoryProvider):
                 result["topology_resolved"] = False
                 if handles:
                     result["vector_candidate_handles"] = handles
-                if topology_error:
-                    result["backend_topology_error"] = topology_error
+                if topology_errors:
+                    result["topology_unresolved_handles"] = handles
+                    result["backend_topology_errors"] = topology_errors
+                    if len(topology_errors) == 1:
+                        result["backend_topology_error"] = next(
+                            iter(topology_errors.values())
+                        )
             if scope == "organism":
                 result["scope"] = scope
             return tool_result(result)
@@ -2636,6 +2675,7 @@ def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[s
         "backend_etag": response.get("etag"),
         "artifact_id": response.get("artifact_id"),
         "schema": response.get("schema"),
+        "projection_version": response.get("projection_version"),
         "head_commit": response.get("head_commit"),
         "start": response.get("start"),
         "direction": response.get("direction"),
@@ -2653,7 +2693,88 @@ def _tool_result_from_backend_graph_traverse(response: dict[str, Any]) -> dict[s
     freshness = response.get("freshness")
     if isinstance(freshness, dict):
         result["freshness"] = freshness
+    coverage = response.get("coverage")
+    if isinstance(coverage, dict):
+        result["coverage"] = _bounded_payload(coverage)
     return {key: value for key, value in result.items() if value not in ("", None)}
+
+
+def _authoritative_v2_topology_error(
+    response: dict[str, Any],
+    *,
+    handle: str,
+    project_id: str,
+    workspace_binding_id: str,
+    active_identity: dict[str, Any] | None,
+) -> str | None:
+    """Reject vector topology unless it belongs to the active v2 projection."""
+
+    if response.get("schema") != "hades.code_graph.v2":
+        return "graph topology schema is not hades.code_graph.v2"
+    if response.get("project_id") != project_id:
+        return "graph topology project does not match the linked project"
+    if response.get("workspace_binding_id") != workspace_binding_id:
+        return "graph topology binding does not match the linked workspace"
+    if (
+        not isinstance(active_identity, dict)
+        or active_identity.get("schema") != "hades.code_graph.v2"
+        or active_identity.get("project_id") != project_id
+        or active_identity.get("workspace_binding_id") != workspace_binding_id
+        or active_identity.get("publication_status") != "ready"
+    ):
+        return "active graph v2 identity is unavailable"
+    projection_version = str(response.get("projection_version") or "").strip()
+    if not projection_version or projection_version != active_identity.get(
+        "projection_version"
+    ):
+        return "graph topology projection does not match the active projection"
+    coverage = response.get("coverage")
+    if not isinstance(coverage, dict) or not coverage:
+        return "graph topology coverage is unavailable"
+    if response.get("start") != handle:
+        return "graph topology start does not match the vector handle"
+    nodes = response.get("nodes")
+    edges = response.get("edges")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(edges, list)
+        or any(not isinstance(node, dict) for node in nodes)
+        or any(not isinstance(edge, dict) for edge in edges)
+    ):
+        return "graph topology records are malformed"
+    if not any(node.get("id") == handle for node in nodes):
+        return "graph topology does not resolve the vector handle"
+    return None
+
+
+def _tool_result_from_backend_graph_traversals(
+    responses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Merge independently verified traversals without duplicating records."""
+
+    result = _tool_result_from_backend_graph_traverse(responses[0])
+    merged_nodes: list[dict[str, Any]] = []
+    merged_edges: list[dict[str, Any]] = []
+    seen_nodes: set[str] = set()
+    seen_edges: set[str] = set()
+    for response in responses:
+        converted = _tool_result_from_backend_graph_traverse(response)
+        for node in converted.get("nodes", []):
+            key = json.dumps(node, sort_keys=True, separators=(",", ":"))
+            if key not in seen_nodes:
+                seen_nodes.add(key)
+                merged_nodes.append(node)
+        for edge in converted.get("edges", []):
+            key = json.dumps(edge, sort_keys=True, separators=(",", ":"))
+            if key not in seen_edges:
+                seen_edges.add(key)
+                merged_edges.append(edge)
+    result["nodes"] = merged_nodes
+    result["edges"] = merged_edges
+    result["count"] = len(merged_nodes)
+    result["edge_count"] = len(merged_edges)
+    result["truncated"] = any(bool(response.get("truncated")) for response in responses)
+    return result
 
 
 def _iter_graph_candidates(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
@@ -2687,7 +2808,7 @@ def _vector_graph_handles(response: dict[str, Any]) -> list[str]:
             clean = _compact_text(candidate, max_chars=500)
             if clean and clean not in handles:
                 handles.append(clean)
-    return handles[:200]
+    return handles
 
 
 def _active_v2_identity_matches(

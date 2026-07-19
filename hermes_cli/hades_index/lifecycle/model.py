@@ -2670,6 +2670,11 @@ class AdapterResult:
                     EdgeFlow.CONDITIONAL,
                     EdgeFlow.ALTERNATIVE,
                 }
+            if (
+                kind is ResolutionKind.EXTERNAL_TARGET
+                and edge.relation is Relation.REFERENCES
+            ):
+                return edge.flow is None
             return edge.relation in {
                 Relation.CALLS_EXTERNAL,
                 Relation.READS,

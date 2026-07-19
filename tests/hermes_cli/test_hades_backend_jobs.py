@@ -629,22 +629,34 @@ def test_populate_backend_ast_hard_clamps_oversized_file_budget(tmp_path):
     workspace = tmp_path / "workspace"
     source = workspace / "src"
     source.mkdir(parents=True)
-    for index in range(10_001):
-        (source / f"module_{index:05d}.py").touch()
+    for index in range(3):
+        (source / f"module_{index:05d}.py").write_text(
+            f"class Module{index}:\n    pass\n", encoding="utf-8"
+        )
 
     result = execute_job(
         {
             "job_id": "job_hard_file_cap",
             "capability": "populate_backend_ast",
-            "payload": {"max_files": 20_000},
+            "payload": {"max_files": 2},
         },
         workspace_root=workspace,
     )
 
     artifact = _materialize_graph_v2(result)
-    coverage = artifact["graph_contract"]["coverage"]["files"]
-    assert coverage["analyzed"] == 10_000
+    contract = artifact["graph_contract"]
+    coverage = contract["coverage"]["files"]
+    reasons = contract["completeness"]["capabilities"]["inventory"]["reasons"]
+    assert coverage["analyzed"] == 2
     assert coverage["budget_omitted"] == 1
+    assert reasons == [
+        {
+            "code": "resource_budget_reached",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["src/module_00002.py"],
+        }
+    ]
 
 
 def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
@@ -655,29 +667,35 @@ def test_populate_backend_ast_hard_clamps_oversized_aggregate_byte_budget(
     workspace = tmp_path / "workspace"
     source = workspace / "src"
     source.mkdir(parents=True)
-    oversized = source / "oversized.py"
-    with oversized.open("wb") as handle:
-        handle.truncate(134_217_729)
+    source.joinpath("a.py").write_text("#" * 700, encoding="utf-8")
+    source.joinpath("b.py").write_text("#" * 700, encoding="utf-8")
 
     result = execute_job(
         {
             "job_id": "job_hard_byte_cap",
             "capability": "populate_backend_ast",
-            "payload": {"max_total_bytes": 268_435_456},
+            "payload": {
+                "max_file_bytes": 1_024,
+                "max_total_bytes": 900,
+            },
         },
         workspace_root=workspace,
     )
 
     artifact = _materialize_graph_v2(result)
-    coverage = artifact["graph_contract"]["coverage"]["files"]
-    assert coverage["analyzed"] == 0
-    assert coverage["too_large"] == 1
-    assert any(
-        node["kind"] == "file"
-        and node["qualified_name"] == "src/oversized.py"
-        and node["properties"]["omission_reason"] == "file_too_large"
-        for node in artifact["nodes"]
-    )
+    contract = artifact["graph_contract"]
+    coverage = contract["coverage"]["files"]
+    reasons = contract["completeness"]["capabilities"]["inventory"]["reasons"]
+    assert coverage["analyzed"] == 1
+    assert coverage["budget_omitted"] == 1
+    assert reasons == [
+        {
+            "code": "resource_budget_reached",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["src/b.py"],
+        }
+    ]
 
 
 def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
@@ -687,14 +705,13 @@ def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
     source = workspace / "src"
     source.mkdir(parents=True)
     oversized = source / "oversized.py"
-    with oversized.open("wb") as handle:
-        handle.truncate(512_001)
+    oversized.write_text("#" * 1_025, encoding="utf-8")
 
     result = execute_job(
         {
             "job_id": "job_hard_per_file_cap",
             "capability": "populate_backend_ast",
-            "payload": {"max_file_bytes": 1_024_000},
+            "payload": {"max_file_bytes": 1_024},
         },
         workspace_root=workspace,
     )
@@ -703,9 +720,59 @@ def test_populate_backend_ast_hard_clamps_oversized_per_file_budget(tmp_path):
     assert any(
         node["kind"] == "file"
         and node["qualified_name"] == "src/oversized.py"
-        and node["properties"]["omission_reason"] == "parser_failed"
+        and node["properties"]["omission_reason"] == "file_too_large"
         for node in artifact["nodes"]
     )
+    reasons = artifact["graph_contract"]["completeness"]["capabilities"][
+        "inventory"
+    ]["reasons"]
+    assert reasons == [
+        {
+            "code": "file_too_large",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["src/oversized.py"],
+        }
+    ]
+
+
+def test_populate_backend_ast_closes_invalid_symlink_inventory_reason(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("class Secret:\n    pass\n", encoding="utf-8")
+    _symlink_or_skip(workspace / "escape.py", outside)
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_graph_symlink_ledger",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=workspace,
+        )
+    )
+
+    symlink = next(
+        node for node in artifact["nodes"] if node["qualified_name"] == "escape.py"
+    )
+    assert symlink["properties"]["analysis_status"] == "failed"
+    assert symlink["properties"]["omission_reason"] == "symlink_unavailable"
+    inventory = artifact["graph_contract"]["completeness"]["capabilities"][
+        "inventory"
+    ]
+    assert inventory["status"] == "partial"
+    assert inventory["reasons"] == [
+        {
+            "code": "symlink_unavailable",
+            "count": 1,
+            "language": None,
+            "paths_sample": ["escape.py"],
+        }
+    ]
 
 
 def test_populate_backend_ast_counts_single_language_test_inventory_truncation(
@@ -809,15 +876,17 @@ def test_populate_backend_ast_preserves_polyglot_inventory_cap_coverage(tmp_path
     assert sum(node["kind"] == "file" for node in artifact["nodes"]) == 503
 
 
-def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
+def test_populate_backend_ast_closes_exact_symbol_cap_ledger(tmp_path):
     from hermes_cli.hades_backend_jobs import execute_job
 
     workspace = tmp_path / "workspace"
     source = workspace / "src"
     source.mkdir(parents=True)
     source.joinpath("graph.py").write_text(
-        "".join(f"import module_{index}\n" for index in range(10_001))
-        + "".join(f"class Class{index}:\n    pass\n" for index in range(5_001)),
+        "class Service:\n"
+        "    def first(self):\n        pass\n"
+        "    def second(self):\n        pass\n"
+        "    def third(self):\n        pass\n",
         encoding="utf-8",
     )
 
@@ -825,18 +894,68 @@ def test_populate_backend_ast_hard_clamps_symbol_and_edge_capacities(tmp_path):
         {
             "job_id": "job_hard_graph_caps",
             "capability": "populate_backend_ast",
-            "payload": {"max_symbols": 6_000, "max_edges": 12_000},
+            "payload": {"max_symbols": 2, "max_edges": 10},
         },
         workspace_root=workspace,
     )
 
     artifact = _materialize_graph_v2(result)
-    coverage = artifact["graph_contract"]["coverage"]["records"]
-    closure_nodes = [node for node in artifact["nodes"] if node["kind"] != "class"]
-    assert coverage["nodes"] == 5_000 + len(closure_nodes)
-    assert {node["kind"] for node in closure_nodes} == {"file"}
-    assert sum(node["kind"] == "class" for node in artifact["nodes"]) == 5_000
-    assert coverage["edges"] <= 10_000
+    symbol_resolution = artifact["graph_contract"]["completeness"]["capabilities"][
+        "symbol_resolution"
+    ]
+    assert symbol_resolution["status"] == "partial"
+    assert symbol_resolution["reasons"] == [
+        {
+            "code": "resource_budget_reached",
+            "count": 2,
+            "language": None,
+            "paths_sample": ["src/graph.py"],
+        }
+    ]
+    file_node = next(
+        node for node in artifact["nodes"] if node["qualified_name"] == "src/graph.py"
+    )
+    assert file_node["properties"]["analysis_status"] == "analyzed"
+
+
+def test_populate_backend_ast_closes_exact_edge_cap_ledger(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    source = tmp_path / "src"
+    source.mkdir()
+    source.joinpath("graph.py").write_text(
+        "class Service:\n"
+        "    def first(self):\n        pass\n"
+        "    def second(self):\n        pass\n"
+        "    def third(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_edge_cap_ledger",
+                "capability": "populate_backend_ast",
+                "payload": {"max_symbols": 10, "max_edges": 1},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+
+    call_graph = artifact["graph_contract"]["completeness"]["capabilities"][
+        "call_graph"
+    ]
+    assert len(artifact["edges"]) == 1
+    assert call_graph["status"] == "partial"
+    budget_reason = next(
+        reason
+        for reason in call_graph["reasons"]
+        if reason["code"] == "resource_budget_reached"
+    )
+    assert budget_reason["count"] == 8
+    assert budget_reason["paths_sample"] == ["src/graph.py"]
+    assert artifact["graph_contract"]["coverage"]["records"][
+        "omitted_by_bundle_budget"
+    ] == 6
 
 
 def test_workspace_file_iteration_reports_byte_budget_separately(tmp_path):
@@ -1155,6 +1274,11 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
 
     (tmp_path / "app").mkdir()
     (tmp_path / "project").mkdir()
+    (tmp_path / "requirements.txt").write_text("Django==5.2\nfastapi==0.116\n", encoding="utf-8")
+    (tmp_path / "project" / "settings.py").write_text(
+        "ROOT_URLCONF = 'project.urls'\nMIDDLEWARE = []\n",
+        encoding="utf-8",
+    )
     (tmp_path / "app" / "api.py").write_text(
         "import logging\n"
         "from fastapi import APIRouter, FastAPI\n"
@@ -1228,11 +1352,20 @@ def test_populate_backend_ast_extracts_python_web_graph_without_source(tmp_path)
     descriptor = result["artifact"]
     artifact = _materialize_graph_v2(result)
     node_names = {item["name"] for item in artifact["nodes"]}
+    entrypoints = {
+        (item["framework"], item["public_path"])
+        for item in artifact["entrypoints"]
+    }
 
     assert result["status"] == "completed"
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {item["name"] for item in artifact["languages"]} == {"python"}
     assert {"show_order", "order_detail", "OrderCreateView", "OrderService", "Customer", "Order"} <= node_names
+    assert ("django", "/orders/{pk}/") in entrypoints
+    assert {"customers", "orders"} <= {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(edge["relation"] == "references" for edge in artifact["edges"])
     assert "return service.load" not in str(artifact)
     assert "return {'id': order_id}" not in str(artifact)
     assert "order lookup failed" not in str(artifact)
@@ -1268,6 +1401,9 @@ def test_populate_backend_ast_extracts_django_models_graph_without_routes(tmp_pa
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {item["name"] for item in artifact["languages"]} == {"python"}
     assert "Invoice" in {item["name"] for item in artifact["nodes"]}
+    assert "billing_invoice" in {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
     assert "models.CharField" not in str(artifact)
 
 
@@ -1306,6 +1442,10 @@ def test_populate_backend_ast_extracts_sqlalchemy_schema_graph_without_routes(tm
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {item["name"] for item in artifact["languages"]} == {"python"}
     assert {"Customer", "Order"} <= {item["name"] for item in artifact["nodes"]}
+    assert {"customers", "orders"} <= {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(edge["relation"] == "references" for edge in artifact["edges"])
     assert "Column(" not in str(artifact)
     assert "ForeignKey(" not in str(artifact)
 
@@ -1315,6 +1455,9 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
 
     workspace = tmp_path / "repo"
     workspace.mkdir()
+    (workspace / "composer.json").write_text(
+        '{"require":{"laravel/framework":"^11.0"}}', encoding="utf-8"
+    )
     (workspace / "artisan").write_text("#!/usr/bin/env php\n", encoding="utf-8")
     (workspace / "routes").mkdir()
     (workspace / "app" / "Http" / "Controllers").mkdir(parents=True)
@@ -1789,6 +1932,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "StoreOrderRequest",
         "OrderResource",
     } <= node_names
+    assert any(
+        item["framework"] == "laravel" and item["public_path"] == "/orders/{order}"
+        for item in artifact["entrypoints"]
+    )
+    assert "orders" in {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(
+        item["kind"] in {"middleware", "authorization", "validator"}
+        for item in artifact["nodes"]
+    )
     assert "return view('orders.show'" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "order payment gateway degraded" not in str(artifact)
@@ -1799,6 +1953,9 @@ def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path
 
     workspace = tmp_path / "symfony"
     workspace.mkdir()
+    (workspace / "composer.json").write_text(
+        '{"require":{"symfony/framework-bundle":"^6.4"}}', encoding="utf-8"
+    )
     (workspace / "bin").mkdir()
     (workspace / "bin" / "console").write_text("#!/usr/bin/env php\n", encoding="utf-8")
     (workspace / "src" / "Controller").mkdir(parents=True)
@@ -1861,6 +2018,10 @@ def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path
     assert {"OrderController", "HealthController", "OrderService"} <= {
         item["name"] for item in artifact["nodes"]
     }
+    assert {
+        (item["framework"], item["public_path"])
+        for item in artifact["entrypoints"]
+    } >= {("symfony", "/admin/orders/{id}"), ("symfony", "/admin/legacy")}
     assert "#[Route" not in str(artifact)
     assert "@Route" not in str(artifact)
     assert "return new Response" not in str(artifact)
@@ -1993,6 +2154,10 @@ def test_populate_backend_ast_extracts_doctrine_schema_graph_without_source(tmp_
     assert result["status"] == "completed"
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {"Customer", "Order"} <= {item["name"] for item in artifact["nodes"]}
+    assert {"customers", "orders"} <= {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(edge["relation"] == "references" for edge in artifact["edges"])
     assert "#[ORM" not in str(artifact)
     assert "ORM\\Column" not in str(artifact)
     assert "ORM\\JoinColumn" not in str(artifact)
@@ -2103,7 +2268,10 @@ def test_populate_backend_ast_extracts_prisma_schema_graph_without_source(tmp_pa
     assert result["status"] == "completed"
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {item["name"] for item in artifact["languages"]} == {"prisma"}
-    assert "schema.prisma" in {item["name"] for item in artifact["nodes"]}
+    assert {"customers", "orders"} <= {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(edge["relation"] == "references" for edge in artifact["edges"])
     assert "model Order" not in str(artifact)
     assert "@relation" not in str(artifact)
     assert "@@map" not in str(artifact)
@@ -2142,7 +2310,10 @@ def test_populate_backend_ast_extracts_drizzle_schema_graph_without_source(tmp_p
     assert result["status"] == "completed"
     assert descriptor["schema"] == "hades.code_graph.v2"
     assert {item["name"] for item in artifact["languages"]} == {"typescript"}
-    assert "schema.ts" in {item["name"] for item in artifact["nodes"]}
+    assert {"customers", "orders"} <= {
+        item["name"] for item in artifact["nodes"] if item["kind"] == "table"
+    }
+    assert any(edge["relation"] == "references" for edge in artifact["edges"])
     assert "pgTable(" not in str(artifact)
     assert ".references(" not in str(artifact)
     assert "default('draft')" not in str(artifact)
@@ -2196,6 +2367,86 @@ def test_populate_backend_ast_extracts_sql_schema_graph_without_source(tmp_path)
     )
     assert "CREATE TABLE" not in str(artifact)
     assert "CONSTRAINT orders_customer_fk" not in str(artifact)
+
+
+def test_populate_backend_ast_resolves_unique_cross_file_sql_foreign_key(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "customers.sql").write_text(
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n", encoding="utf-8"
+    )
+    (tmp_path / "orders.sql").write_text(
+        "CREATE TABLE orders (customer_id INTEGER REFERENCES customers(id));\n",
+        encoding="utf-8",
+    )
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_sql_cross_file_fk",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+    tables = {
+        item["name"]: item
+        for item in artifact["nodes"]
+        if item["kind"] == "table"
+    }
+    assert any(
+        edge["relation"] == "references"
+        and edge["source_id"] == tables["orders"]["id"]
+        and edge["target_id"] == tables["customers"]["id"]
+        for edge in artifact["edges"]
+    )
+    assert artifact["uncertainties"] == []
+
+
+def test_populate_backend_ast_types_ambiguous_and_missing_sql_fk_uncertainty(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    (tmp_path / "a.sql").write_text(
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n", encoding="utf-8"
+    )
+    (tmp_path / "b.sql").write_text(
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY);\n", encoding="utf-8"
+    )
+    (tmp_path / "orders.sql").write_text(
+        "CREATE TABLE orders (\n"
+        " customer_id INTEGER REFERENCES customers(id),\n"
+        " owner_id INTEGER REFERENCES absent_owners(id)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+
+    artifact = _materialize_graph_v2(
+        execute_job(
+            {
+                "job_id": "job_sql_uncertain_fk",
+                "capability": "populate_backend_ast",
+                "payload": {},
+            },
+            workspace_root=tmp_path,
+        )
+    )
+    assert len(artifact["uncertainties"]) == 2
+    assert {
+        item["reason_code"] for item in artifact["uncertainties"]
+    } == {"external_boundary_unresolved"}
+    data_access = artifact["graph_contract"]["completeness"]["capabilities"][
+        "data_access"
+    ]
+    assert data_access["status"] == "partial"
+    assert data_access["reasons"] == [
+        {
+            "code": "external_boundary_unresolved",
+            "count": 2,
+            "language": None,
+            "paths_sample": ["orders.sql"],
+        }
+    ]
 
 
 def test_populate_backend_ast_omits_symlinked_python_escape(tmp_path):

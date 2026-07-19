@@ -914,6 +914,22 @@ CLIENT_ROUTE_CASES = [
             "publication_status": "ready",
         },
     },
+    {
+        "method_name": "graph_verification_summary",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/graph/verification-summary",
+        "wire_path": "/api/hades/v1/graph/verification-summary",
+        "kwargs": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "projection_version": "b" * 64,
+        },
+        "query": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "projection_version": "b" * 64,
+        },
+    },
 ]
 
 INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}

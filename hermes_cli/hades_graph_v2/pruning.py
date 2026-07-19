@@ -397,6 +397,81 @@ def _structural_units(
     return tuple(sorted(units, key=lambda unit: unit.sort_key))
 
 
+def _edge_bounded_structural_units(
+    index: _GraphIndex,
+    accepted: set[Token],
+    excluded_entrypoint_ids: set[str],
+) -> tuple[_Unit, ...]:
+    """Return smallest valid topology units for an explicit edge ceiling.
+
+    Byte pruning intentionally keeps connected structural components atomic.
+    An explicit edge-record ceiling is different: retaining one independently
+    valid edge plus its dependency closure is better than dropping an entire
+    connected source file.  Non-edge records are then considered individually,
+    so declarations/nodes that remain valid without a discarded relation are
+    preserved.
+    """
+
+    residual: set[Token] = {
+        (kind, public_id)
+        for kind in _TOPOLOGY_KINDS
+        for public_id, record in index.records[kind].items()
+        if (kind, public_id) not in accepted
+        and not (kind == "nodes" and record["kind"] in {"file", "entrypoint"})
+    }
+    invalid: set[Token] = set()
+    changed = True
+    while changed:
+        changed = False
+        for token in residual - invalid:
+            dependencies = index.direct_dependencies(token)
+            if (
+                any(
+                    dependency[0] in {"nodes", "entrypoints"}
+                    and dependency[1] in excluded_entrypoint_ids
+                    for dependency in dependencies
+                )
+                or dependencies & invalid
+            ):
+                invalid.add(token)
+                changed = True
+    residual -= invalid
+
+    ordered = sorted(
+        residual,
+        key=lambda token: (
+            0 if token[0] == "edges" else 1,
+            _record_sort_path(index, token),
+            token[0],
+        ),
+    )
+    units: list[_Unit] = []
+    seen: set[frozenset[Token]] = set()
+    for token in ordered:
+        closure = index.closure({token})
+        if any(
+            dependency[0] in {"entrypoints", "flows", "flow_steps"}
+            or (
+                dependency[0] == "nodes"
+                and cast(dict, index.record(dependency)).get("kind") == "entrypoint"
+            )
+            for dependency in closure
+        ):
+            continue
+        if closure in seen:
+            continue
+        seen.add(closure)
+        units.append(
+            _Unit(
+                "structural",
+                (*_record_sort_path(index, token), token[0]),
+                closure,
+                _reason_impacts(index, token),
+            )
+        )
+    return tuple(units)
+
+
 def _inventory_units(index: _GraphIndex, accepted: set[Token]) -> tuple[_Unit, ...]:
     units = []
     for public_id, record in index.records["nodes"].items():
@@ -578,11 +653,18 @@ def _finalize_candidate(
     completeness = contract["completeness"]
     language_rows = {row["language"]: row for row in completeness["languages"]}
     for (reason, language, capability_name), (count, paths) in reason_rows.items():
+        global_capability = completeness["capabilities"][capability_name]
+        global_language = language
+        if any(
+            row["code"] == reason.value and row["language"] is None
+            for row in global_capability["reasons"]
+        ):
+            global_language = None
         _merge_reason(
-            completeness["capabilities"][capability_name],
+            global_capability,
             code=reason,
             count=count,
-            language=language,
+            language=global_language,
             paths=paths,
         )
         if language in language_rows:
@@ -631,6 +713,10 @@ class GraphBudgetPruner:
         if (
             complete_plan is not None
             and complete_plan.logical_uncompressed_bytes <= limits.bundle_ceiling
+            and (
+                limits.max_edges is None
+                or len(artifact.edges) <= limits.max_edges
+            )
         ):
             return artifact
 
@@ -664,6 +750,14 @@ class GraphBudgetPruner:
                 candidate = _finalize_candidate(
                     original, index, candidate_tokens, tuple(rejections)
                 )
+                if (
+                    limits.max_edges is not None
+                    and len(candidate.edges) > limits.max_edges
+                ):
+                    rejections.append(
+                        _Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED)
+                    )
+                    return
                 plan = build_bundle_plan(
                     candidate, limits, enforce_total=False, _validated=True
                 )
@@ -696,7 +790,14 @@ class GraphBudgetPruner:
             public_id for kind, public_id in accepted if kind == "entrypoints"
         }
         excluded_entrypoints = set(index.records["entrypoints"]) - accepted_entrypoints
-        for unit in _structural_units(index, accepted, excluded_entrypoints):
+        structural_units = (
+            _edge_bounded_structural_units(
+                index, accepted, excluded_entrypoints
+            )
+            if limits.max_edges is not None
+            else _structural_units(index, accepted, excluded_entrypoints)
+        )
+        for unit in structural_units:
             consider(unit)
         for unit in _inventory_units(index, accepted):
             consider(unit)

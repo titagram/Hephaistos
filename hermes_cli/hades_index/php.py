@@ -33,7 +33,8 @@ from hermes_cli.hades_index.lifecycle.entrypoints import (
     extract_language_entrypoints,
 )
 from hermes_cli.hades_index.lifecycle.frameworks import FrameworkAdapterRegistry
-from hermes_cli.hades_index.lifecycle.model import ExtractionContext
+from hermes_cli.hades_index.lifecycle.data_access import TableSpec, table_adapter_result
+from hermes_cli.hades_index.lifecycle.model import AdapterResult, ExtractionContext
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
@@ -54,6 +55,142 @@ def extract_lifecycle_entrypoints(
         language="php",
         registry=registry,
     )
+
+
+def extract_lifecycle_data(context: ExtractionContext) -> AdapterResult:
+    """Emit Laravel migration and Doctrine resources directly into graph-v2 IR."""
+
+    sources: list[tuple[str, str]] = []
+    for item in context.inventory_files:
+        if item.language != "php" or not item.parser_candidate or item.is_test:
+            continue
+        try:
+            source = context.file_accessor(Path(item.path)).decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+        sources.append((item.path, source))
+
+    doctrine_table_by_class: dict[str, str] = {}
+    doctrine_classes_by_path: dict[str, list[dict[str, Any]]] = {}
+    laravel_models: list[tuple[str, int, str, str]] = []
+    for path, source in sources:
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes: list[dict[str, Any]] = []
+        for match in PHP_CLASS_RE.finditer(source):
+            short = match.group("name")
+            fqcn = _php_fqcn(namespace, short)
+            meta = _php_doctrine_entity_meta(source, match.start(), short)
+            if meta is not None:
+                doctrine_table_by_class[fqcn] = str(meta["table"])
+                classes.append(
+                    {
+                        "name": fqcn,
+                        "offset": match.start(),
+                        "line": int(meta["line"]),
+                        "table": str(meta["table"]),
+                    }
+                )
+                continue
+            extends = match.group("extends") or ""
+            resolved_extends = (
+                _php_fqcn_resolved(namespace, extends, uses) if extends else ""
+            )
+            if _php_role(path, fqcn, resolved_extends) == "model":
+                table_match = PHP_MODEL_TABLE_RE.search(source)
+                table = (
+                    table_match.group("table")
+                    if table_match is not None
+                    else f"{_snake_name(_php_short_name(fqcn))}s"
+                )
+                laravel_models.append(
+                    (path, _line_number(source, match.start()), fqcn, table)
+                )
+        doctrine_classes_by_path[path] = classes
+
+    specs: list[TableSpec] = []
+    migration_tables: set[str] = set()
+    for path, source in sources:
+        if not path.startswith("database/migrations/"):
+            continue
+        for table in _laravel_migration_tables(source, path):
+            table_name = str(table["table"])
+            migration_tables.add(table_name)
+            specs.append(
+                TableSpec(
+                    "php",
+                    "laravel",
+                    path,
+                    int(table.get("line") or 1),
+                    table_name,
+                    None,
+                    tuple(
+                        (
+                            str(row.get("column") or ""),
+                            str(row.get("references_table") or ""),
+                            int(row.get("line") or table.get("line") or 1),
+                        )
+                        for row in table.get("foreign_keys") or ()
+                        if row.get("references_table")
+                    ),
+                )
+            )
+    for path, line, model, table in laravel_models:
+        if table not in migration_tables:
+            specs.append(TableSpec("php", "laravel", path, line, table, model))
+
+    for path, source in sources:
+        namespace = _php_namespace(source)
+        uses = _php_use_map(source)
+        classes = doctrine_classes_by_path[path]
+        table_specs: dict[str, dict[str, Any]] = {
+            str(row["name"]): {
+                "path": path,
+                "line": int(row["line"]),
+                "table": str(row["table"]),
+                "foreign_keys": [],
+            }
+            for row in classes
+        }
+        for match in PHP_PROPERTY_RE.finditer(source):
+            class_info = _class_context(classes, match.start())
+            if class_info is None:
+                continue
+            attrs = _php_attributes_before(source, match.start())
+            target_class = _php_doctrine_relation_target(
+                attrs, match.group("type") or "", namespace, uses
+            )
+            join = _php_doctrine_join_column(
+                attrs,
+                match.group("name"),
+                path,
+                _line_number(source, match.start()),
+            )
+            if target_class and join is not None:
+                target_table = doctrine_table_by_class.get(target_class)
+                if target_table:
+                    table_specs[str(class_info["name"])]["foreign_keys"].append(
+                        (
+                            str(join["column"]),
+                            target_table,
+                            int(join["line"]),
+                        )
+                    )
+        for model, table in table_specs.items():
+            specs.append(
+                TableSpec(
+                    "php",
+                    "doctrine",
+                    str(table["path"]),
+                    int(table["line"]),
+                    str(table["table"]),
+                    model,
+                    tuple(table["foreign_keys"]),
+                )
+            )
+    return table_adapter_result(context, tuple(specs))
 PHP_NAMESPACE_RE = re.compile(r"^\s*namespace\s+(?P<namespace>[A-Za-z0-9_\\]+)\s*;", re.MULTILINE)
 PHP_CLASS_RE = re.compile(
     r"\b(?P<kind>class|interface|trait|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"

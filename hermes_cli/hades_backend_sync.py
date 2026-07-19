@@ -99,26 +99,66 @@ def _graph_v2_spool(
     )
 
 
-def _verification_summary_counts(value: object) -> dict[str, object]:
+def _verification_summary_counts(value: object) -> dict[str, object] | None:
     """Keep only fail-open aggregate counts; never cache verification payloads."""
 
-    source = value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return None
 
-    def count(key: str) -> int:
-        raw = source.get(key)
-        return raw if type(raw) is int and raw >= 0 else 0
+    def count(key: str) -> int | None:
+        raw = value.get(key)
+        return raw if type(raw) is int and 0 <= raw <= 1_000_000 else None
 
-    raw_domains = source.get("verification_by_domain")
+    queued = count("verification_queued")
+    high_priority = count("verification_high_priority")
+    raw_domains = value.get("verification_by_domain")
+    if queued is None or high_priority is None or not isinstance(raw_domains, dict):
+        return None
     domains = {
         str(key): raw
         for key, raw in raw_domains.items()
-        if isinstance(key, str) and type(raw) is int and raw >= 0
-    } if isinstance(raw_domains, dict) else {}
+        if isinstance(key, str)
+        and key in {"graph", "wiki"}
+        and type(raw) is int
+        and 0 <= raw <= 1_000_000
+    }
+    if len(domains) != len(raw_domains):
+        return None
     return {
-        "verification_queued": count("verification_queued"),
-        "verification_high_priority": count("verification_high_priority"),
+        "verification_queued": queued,
+        "verification_high_priority": high_priority,
         "verification_by_domain": dict(sorted(domains.items())),
     }
+
+
+def _fetch_graph_verification_summary(
+    client: object,
+    binding: db.WorkspaceBinding,
+    projection_version: str,
+) -> dict[str, object] | None:
+    from hermes_cli.hades_backend_client import redact_secret
+
+    try:
+        value = client.graph_verification_summary(
+            project_id=binding.project_id,
+            workspace_binding_id=binding.backend_workspace_binding_id,
+            projection_version=projection_version,
+        )
+        summary = _verification_summary_counts(value)
+        if summary is None:
+            raise ValueError("backend verification summary is malformed")
+        return summary
+    except Exception as exc:
+        logger.info(
+            "hades_backend.graph_v2.verification_summary_unavailable",
+            extra={
+                "hades_event": "graph_v2.verification_summary_unavailable",
+                "hades_project_id": binding.project_id,
+                "hades_workspace_binding_id": binding.backend_workspace_binding_id,
+                "hades_error": redact_secret(str(exc)),
+            },
+        )
+        return None
 
 
 def run_backend_sync(
@@ -782,9 +822,9 @@ def _agent_has_capability(agent: db.BackendAgent, capability: str) -> bool:
     if capability in capabilities:
         return bool(capabilities.get(capability))
     if capability == "sync_git_tree":
-        return bool(capabilities.get("artifacts", True))
+        return bool(capabilities.get("artifacts", False))
     if capability == "populate_backend_ast":
-        return bool(capabilities.get("populate_backend_ast", capabilities.get("artifacts", True)))
+        return bool(capabilities.get("artifacts", False))
     return True
 
 
@@ -1229,6 +1269,22 @@ def _upload_graph_v2_bundle(
         )
         is not None
     ):
+        refreshed = {
+            **cached,
+            "verification_summary": _fetch_graph_verification_summary(
+                client,
+                binding,
+                str(cached["projection_version"]),
+            ),
+        }
+        with db.connect_closing() as conn:
+            db.record_sync_states(
+                conn,
+                {
+                    cache_key: refreshed,
+                    _graph_v2_active_cache_key(binding): refreshed,
+                },
+            )
         writer.delete(spool, outcome="published")
         return (0, 0, 1)
 
@@ -1309,27 +1365,11 @@ def _upload_graph_v2_bundle(
                 )
                 return (0, 0, 1)
 
-            verification_summary = _verification_summary_counts(None)
-            summary_fetch = getattr(client, "graph_verification_summary", None)
-            if callable(summary_fetch):
-                try:
-                    verification_summary = _verification_summary_counts(
-                        summary_fetch(
-                            project_id=binding.project_id,
-                            workspace_binding_id=binding.backend_workspace_binding_id,
-                            projection_version=state.projection_version,
-                        )
-                    )
-                except Exception as exc:
-                    logger.info(
-                        "hades_backend.graph_v2.verification_summary_unavailable",
-                        extra={
-                            "hades_event": "graph_v2.verification_summary_unavailable",
-                            "hades_project_id": binding.project_id,
-                            "hades_workspace_binding_id": binding.backend_workspace_binding_id,
-                            "hades_error": redact_secret(str(exc)),
-                        },
-                    )
+            verification_summary = _fetch_graph_verification_summary(
+                client,
+                binding,
+                str(state.projection_version),
+            )
 
             ready_identity = {
                 **cache_identity,
