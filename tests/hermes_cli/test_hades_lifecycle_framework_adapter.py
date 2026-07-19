@@ -347,7 +347,7 @@ def test_framework_pipeline_protocol_rejects_orphan_duplicate_exception_scope(
         structure_key,
         candidate.handler_local_key,
         locator,
-        (ExceptionCatchArm("RuntimeError", target_key),),
+        (ExceptionCatchArm("RuntimeError", target_key, 0),),
         None,
         None,
     )
@@ -397,8 +397,8 @@ def test_framework_pipeline_facts_preserve_catch_type_target_pairs(
         "exception_handler",
         0,
         FrameworkLocalTarget(candidate.handler_local_key),
-        ExceptionSuccessor(z_target, scope_key, "AError", 0),
-        (ExceptionSuccessor(a_target, scope_key, "ZError", 1),),
+        ExceptionSuccessor(a_target, scope_key, "ZError", 0),
+        (ExceptionSuccessor(z_target, scope_key, "AError", 1),),
         candidate.evidence,
     )
 
@@ -409,9 +409,10 @@ def test_framework_pipeline_facts_preserve_catch_type_target_pairs(
     )
     scope = facts.exception_scopes[0]
 
-    assert {
-        (item.caught_type_name, item.target_block_key) for item in scope.catch_arms
-    } == {("AError", z_target), ("ZError", a_target)}
+    assert [
+        (item.caught_type_name, item.target_block_key, item.arm_ordinal)
+        for item in scope.catch_arms
+    ] == [("ZError", a_target, 0), ("AError", z_target, 1)]
 
 
 def test_framework_pipeline_protocol_rejects_orphan_and_duplicate_branch_arms(
@@ -439,7 +440,7 @@ def test_framework_pipeline_protocol_rejects_orphan_and_duplicate_branch_arms(
         "guard",
         0,
         FrameworkLocalTarget(candidate.handler_local_key),
-        BranchSuccessor(target_key, structure_key, 0),
+        BranchSuccessor(target_key, structure_key, 0, 0),
         (),
         candidate.evidence,
     )
@@ -481,6 +482,76 @@ def test_framework_pipeline_protocol_rejects_orphan_and_duplicate_branch_arms(
         )
     with pytest.raises(FrameworkAdapterError, match="duplicate branch arm identity"):
         FrameworkPipelineFacts(branch_arms=(arm, arm))
+
+
+def test_framework_pipeline_protocol_rejects_ambiguous_same_target_branch_arms(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    candidate = _candidate(context, framework="fastapi", public_name="main")
+    assert candidate.handler_local_key is not None
+    structure_key = local_record_key(
+        "python", "src/app.py", "structure", "ast", "pipeline/ambiguous", 0
+    )
+    first_source = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/source_a", 0
+    )
+    second_source = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/source_b", 0
+    )
+    target_key = local_record_key(
+        "python", "src/app.py", "basic_block", "ast", "pipeline/target", 0
+    )
+    segment = FrameworkPipelineSegment(
+        local_record_key(
+            "python", "src/app.py", "framework_segment", "ast", "pipeline/0", 0
+        ),
+        "guard",
+        0,
+        FrameworkLocalTarget(candidate.handler_local_key),
+        BranchSuccessor(target_key, structure_key, 0, 0),
+        (),
+        candidate.evidence,
+    )
+    locator = replace(
+        candidate.registration_locator, structural_path="pipeline/ambiguous"
+    )
+    structure = StructureIR(
+        structure_key,
+        StructureKind.BRANCH_GROUP,
+        candidate.handler_local_key,
+        "pipeline/ambiguous",
+        0,
+        StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+        None,
+        None,
+        replace(candidate.evidence, locator=locator),
+    )
+    arms = (
+        BranchArm(
+            structure_key,
+            first_source,
+            target_key,
+            ConditionPolarity.TRUE,
+            ConditionIR("predicate", "allowed", _DIGEST, ConditionPolarity.TRUE),
+            0,
+        ),
+        BranchArm(
+            structure_key,
+            second_source,
+            target_key,
+            ConditionPolarity.FALSE,
+            ConditionIR("predicate", "not_allowed", "b" * 64, ConditionPolarity.FALSE),
+            1,
+        ),
+    )
+
+    with pytest.raises(FrameworkAdapterError, match="orphan branch arms"):
+        _validate_pipeline_fact_references(
+            candidate,
+            (segment,),
+            FrameworkPipelineFacts(structures=(structure,), branch_arms=arms),
+        )
 
 
 def test_framework_pipeline_protocol_rejects_duplicate_structure_occurrence(
@@ -547,8 +618,8 @@ def test_exception_scope_rejects_conflicting_catch_pairs(tmp_path: Path) -> None
             candidate.handler_local_key,
             replace(candidate.registration_locator, structural_path="pipeline/scope"),
             (
-                ExceptionCatchArm("RuntimeError", first_target),
-                ExceptionCatchArm("RuntimeError", second_target),
+                ExceptionCatchArm("RuntimeError", first_target, 0),
+                ExceptionCatchArm("RuntimeError", second_target, 1),
             ),
             None,
             None,

@@ -196,8 +196,8 @@ def _fixture(
             1,
             _ast("body/if"),
             (
-                BranchSuccessor(true_block, branch_group, 0),
-                BranchSuccessor(false_block, branch_group, 1),
+                BranchSuccessor(true_block, branch_group, 0, 0),
+                BranchSuccessor(false_block, branch_group, 1, 1),
             ),
         ),
         BasicBlock(
@@ -383,7 +383,7 @@ def _fixture(
                 exception_structure,
                 handler,
                 _ast("body/try"),
-                (ExceptionCatchArm("Exception", catch),),
+                (ExceptionCatchArm("Exception", catch, 0),),
                 finally_block,
                 None,
             ),

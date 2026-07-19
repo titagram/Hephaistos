@@ -1812,6 +1812,18 @@ def _validate_flow_edge_closure(
         and edge.uncertainty_id is None
         and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
         and (
+            edge.relation in {Relation.RETURNS_TO, Relation.THROWS_TO}
+            or edge.occurrence.owner_node_id
+            in {
+                flow.entrypoint_id,
+                getattr(
+                    index.nodes[edge.source_id].identity,
+                    "owner_node_id",
+                    edge.source_id,
+                ),
+            }
+        )
+        and (
             (
                 edge.relation is Relation.RETURNS_TO
                 and edge.call_site_id in serialized_verified_invocation_call_sites

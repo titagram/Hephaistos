@@ -31,6 +31,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     AsyncSuccessor,
     DeclarationIdentityKind,
     ExecutableDeclaration,
+    ExceptionSuccessor,
     Modifier,
     local_record_key,
 )
@@ -445,6 +446,18 @@ def _framework_e2e_case(tmp_path, framework: str):
 
 def _companion_control_flow(context, extraction: EntrypointExtraction) -> AdapterResult:
     segment_keys = {item.local_key for item in extraction.framework_segments}
+    exception_declaration_keys = {
+        segment.target.local_key
+        for segment in extraction.framework_segments
+        if isinstance(segment.target, FrameworkLocalTarget)
+        and any(
+            isinstance(successor, ExceptionSuccessor)
+            for successor in (
+                segment.success_successor,
+                *segment.short_circuit_successors,
+            )
+        )
+    }
     references = {}
     for candidate in extraction.candidates:
         if candidate.handler_local_key is not None:
@@ -494,6 +507,14 @@ def _companion_control_flow(context, extraction: EntrypointExtraction) -> Adapte
             f"{locator.structural_path}/exit",
             0,
         )
+        exception_exit_key = local_record_key(
+            context.detected_languages[0],
+            locator.source_location.path,
+            "basic_block",
+            "ast",
+            f"{locator.structural_path}/exception_exit",
+            0,
+        )
         declarations.append(
             ExecutableDeclaration(
                 declaration_key,
@@ -510,7 +531,11 @@ def _companion_control_flow(context, extraction: EntrypointExtraction) -> Adapte
                 locator,
                 entry_key,
                 (exit_key,),
-                (),
+                (
+                    (exception_exit_key,)
+                    if declaration_key in exception_declaration_keys
+                    else ()
+                ),
             )
         )
         blocks.extend((
@@ -532,6 +557,21 @@ def _companion_control_flow(context, extraction: EntrypointExtraction) -> Adapte
             ),
         ))
         block_keys.update((entry_key, exit_key))
+        if declaration_key in exception_declaration_keys:
+            blocks.append(
+                BasicBlock(
+                    exception_exit_key,
+                    declaration_key,
+                    ControlKind.THROW,
+                    2,
+                    replace(
+                        locator,
+                        structural_path=(f"{locator.structural_path}/exception_exit"),
+                    ),
+                    (),
+                )
+            )
+            block_keys.add(exception_exit_key)
 
     handler_by_segment = {
         key: candidate.handler_local_key
@@ -665,4 +705,81 @@ def test_untouched_framework_extraction_aggregates_and_executes_callable_cfg(
             assert continuations
             assert all(edge.source_id in cfg_ids for edge in continuations)
     assert all(edge.source_id in nodes for edge in edges)
+    validate_artifact(artifact)
+
+
+def test_django_two_routes_sharing_exception_handler_reach_final_graph(tmp_path):
+    from hermes_cli.hades_index.lifecycle.frameworks.django import (
+        DjangoLifecycleAdapter,
+    )
+    from hermes_cli.hades_index.python import extract_lifecycle_entrypoints
+    from tests.hermes_cli import test_hades_lifecycle_django as fixture
+
+    fixture._prepare_project(tmp_path)
+    fixture._write(
+        tmp_path,
+        "project/urls.py",
+        "from . import views\n"
+        "urlpatterns = [\n"
+        "    path('a/', views.items, name='a'),\n"
+        "    path('b/', views.items, name='b'),\n"
+        "]\n",
+    )
+    fixture._write(
+        tmp_path,
+        "project/views.py",
+        "def items(request):\n"
+        "    try:\n"
+        "        raise RuntimeError()\n"
+        "    except RuntimeError:\n"
+        "        return HttpResponse('error')\n",
+    )
+    context = fixture._context(tmp_path)
+    syntax = (
+        fixture._syntax(
+            tmp_path,
+            "project/views.py",
+            fixture._function("items", 1),
+        ),
+    )
+    registry = FrameworkAdapterRegistry()
+    registry.register(DjangoLifecycleAdapter())
+
+    extraction = extract_lifecycle_entrypoints(context, syntax, registry=registry)
+    canonical_context = _context(tmp_path)
+    context = replace(
+        context,
+        project_id=canonical_context.project_id,
+        workspace_binding_id=canonical_context.workspace_binding_id,
+        source_identity=canonical_context.source_identity,
+    )
+    assembled = aggregate_entrypoint_extraction(
+        _companion_control_flow(context, extraction), extraction
+    )
+    artifact = build_canonical_graph(
+        context,
+        (assembled,),
+        generated_at=lambda: "2026-07-19T12:00:00Z",
+    )
+
+    assert len(extraction.candidates) == 2
+    assert len(artifact.entrypoints) == 2
+    assert all(
+        any(
+            edge.relation.value == "throws_to" and edge.exception_scope_id is not None
+            for edge in artifact.edges
+            if (
+                getattr(edge.occurrence, "ast_path", None)
+                or getattr(edge.occurrence, "structural_pointer", "")
+            ).startswith(f"pipeline/{segment.pipeline_order}/")
+        )
+        for segment in extraction.framework_segments
+        if any(
+            isinstance(successor, ExceptionSuccessor)
+            for successor in (
+                segment.success_successor,
+                *segment.short_circuit_successors,
+            )
+        )
+    )
     validate_artifact(artifact)

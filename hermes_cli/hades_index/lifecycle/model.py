@@ -450,6 +450,7 @@ class AlwaysSuccessor:
 class BranchSuccessor:
     target_block_key: str
     branch_arm_key: str
+    arm_ordinal: int
     order: int
     kind: Literal["branch"] = "branch"
 
@@ -458,6 +459,7 @@ class BranchSuccessor:
             _fail("invalid_discriminator", "branch successor kind must be branch")
         _nfc(self.target_block_key, field_name="target_block_key", limit=128)
         _nfc(self.branch_arm_key, field_name="branch_arm_key", limit=128)
+        _nonnegative(self.arm_ordinal, field_name="successor.arm_ordinal")
         _nonnegative(self.order, field_name="successor.order")
 
 
@@ -576,6 +578,7 @@ def successor_to_json(successor: Successor) -> dict[str, object]:
             "kind": successor.kind,
             "target_block_key": successor.target_block_key,
             "branch_arm_key": successor.branch_arm_key,
+            "arm_ordinal": successor.arm_ordinal,
             "order": successor.order,
         }
     if type(successor) is ExceptionSuccessor:
@@ -617,7 +620,13 @@ def successor_from_json(value: object) -> Successor:
     kind = value["kind"]
     expected: dict[str, frozenset[str]] = {
         "always": frozenset({"kind", "target_block_key", "order"}),
-        "branch": frozenset({"kind", "target_block_key", "branch_arm_key", "order"}),
+        "branch": frozenset({
+            "kind",
+            "target_block_key",
+            "branch_arm_key",
+            "arm_ordinal",
+            "order",
+        }),
         "exception": frozenset({
             "kind",
             "target_block_key",
@@ -636,7 +645,10 @@ def successor_from_json(value: object) -> Successor:
             return AlwaysSuccessor(value["target_block_key"], value["order"])
         if kind == "branch":
             return BranchSuccessor(
-                value["target_block_key"], value["branch_arm_key"], value["order"]
+                value["target_block_key"],
+                value["branch_arm_key"],
+                value["arm_ordinal"],
+                value["order"],
             )
         if kind == "exception":
             return ExceptionSuccessor(
@@ -992,11 +1004,13 @@ class EdgeFactIR:
 class ExceptionCatchArm:
     caught_type_name: str | None
     target_block_key: str
+    arm_ordinal: int
 
     def __post_init__(self) -> None:
         if self.caught_type_name is not None:
             _nfc(self.caught_type_name, field_name="caught_type_name", limit=256)
         _key(self.target_block_key, field_name="catch_arm.target_block_key")
+        _nonnegative(self.arm_ordinal, field_name="catch_arm.arm_ordinal")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1018,13 +1032,11 @@ class ExceptionScope:
         arms = _tuple(self.catch_arms, field_name="catch_arms")
         if any(type(item) is not ExceptionCatchArm for item in arms):
             _fail("invalid_discriminator", "catch_arms must contain ExceptionCatchArm")
-        identities = tuple(
-            (item.caught_type_name, item.target_block_key) for item in arms
-        )
+        identities = tuple(item.arm_ordinal for item in arms)
         _sorted_unique(
             identities,
             field_name="catch_arms",
-            key=lambda item: ((item[0] or ""), item[1]),
+            key=lambda item: item,
         )
         targets_by_type: dict[str | None, str] = {}
         for arm in arms:
@@ -2139,6 +2151,7 @@ class AdapterResult:
                         arm
                         for arm in self.branch_arms
                         if arm.branch_local_key == successor.branch_arm_key
+                        and arm.arm_ordinal == successor.arm_ordinal
                         and arm.source_block_key == block.local_key
                         and arm.target_block_key == successor.target_block_key
                     ]
@@ -2390,6 +2403,7 @@ class AdapterResult:
                             arm
                             for arm in self.branch_arms
                             if arm.branch_local_key == successor.branch_arm_key
+                            and arm.arm_ordinal == successor.arm_ordinal
                             and arm.target_block_key == successor.target_block_key
                         ]
                         if len(matching_arms) != 1:

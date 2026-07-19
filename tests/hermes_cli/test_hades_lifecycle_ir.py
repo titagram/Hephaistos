@@ -280,7 +280,7 @@ def _records() -> dict[str, object]:
         structure_key=exception_structure,
         declaration_key=decl,
         locator=_ast("body/try"),
-        catch_arms=(ExceptionCatchArm("RuntimeError", catch),),
+        catch_arms=(ExceptionCatchArm("RuntimeError", catch, 0),),
         finally_block_key=None,
         parent_scope_key=None,
     )
@@ -398,7 +398,12 @@ def _valid_result() -> AdapterResult:
     "successor",
     [
         AlwaysSuccessor(target_block_key="b2", order=0),
-        BranchSuccessor(target_block_key="b2", branch_arm_key="arm", order=0),
+        BranchSuccessor(
+            target_block_key="b2",
+            branch_arm_key="arm",
+            arm_ordinal=0,
+            order=0,
+        ),
         ExceptionSuccessor(
             target_block_key="catch",
             exception_scope_key="scope",
@@ -1002,6 +1007,7 @@ def test_branch_arms_are_unambiguous_and_successors_match_the_exact_arm() -> Non
                         BranchSuccessor(
                             target_block_key=different_block.local_key,
                             branch_arm_key=arm.branch_local_key,
+                            arm_ordinal=arm.arm_ordinal,
                             order=0,
                         ),
                     ),

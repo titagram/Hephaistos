@@ -752,7 +752,7 @@ def test_framework_pipeline_materializes_every_successor_union(tmp_path):
         FrameworkLocalTarget(declaration.local_key),
         AlwaysSuccessor(keys[1], 0),
         (
-            BranchSuccessor(entry.local_key, branch_key, 0),
+            BranchSuccessor(entry.local_key, branch_key, 0, 0),
             ExceptionSuccessor(
                 entry.local_key,
                 exception_structure.local_key,
@@ -1144,7 +1144,7 @@ def test_callee_exception_uses_nearest_nested_lexical_scope(tmp_path):
         inner_structure.local_key,
         handler.local_key,
         _complex_ast(inner_path),
-        (ExceptionCatchArm("RuntimeError", inner_catch.local_key),),
+        (ExceptionCatchArm("RuntimeError", inner_catch.local_key, 0),),
         None,
         outer_scope.local_key,
     )
@@ -1523,14 +1523,15 @@ def test_framework_exception_continuation_requires_exact_exception_exit(tmp_path
 @pytest.mark.parametrize(
     ("language", "thrown", "caught", "expected"),
     (
-        ("python", "FileNotFoundError", "OSError", True),
-        ("python", "RuntimeError", "Error", False),
-        ("python", None, "Exception", False),
-        ("php", "RuntimeException", "Exception", True),
-        ("php", "RuntimeException", "Error", False),
-        ("javascript", "TypeError", "Error", True),
-        ("typescript", "RangeError", "Error", True),
-        ("typescript", "RuntimeError", "Error", False),
+        ("python", "FileNotFoundError", "OSError", "match"),
+        ("python", "RuntimeError", "Error", "no_match"),
+        ("python", None, None, "match"),
+        ("python", None, "Exception", "unresolved"),
+        ("php", "RuntimeException", "Exception", "match"),
+        ("php", "RuntimeException", "Error", "no_match"),
+        ("javascript", "TypeError", "Error", "match"),
+        ("typescript", "RangeError", "Error", "match"),
+        ("typescript", "RuntimeError", "Error", "unresolved"),
     ),
 )
 def test_exception_type_matching_uses_only_the_owner_language_hierarchy(
@@ -1538,7 +1539,206 @@ def test_exception_type_matching_uses_only_the_owner_language_hierarchy(
 ):
     from hermes_cli.hades_index.lifecycle.builder import _exception_type_matches
 
-    assert _exception_type_matches(language, thrown, caught) is expected
+    result = _exception_type_matches(language, thrown, caught)
+
+    assert getattr(result, "value", result) == expected
+
+
+def _unknown_exception_result(*, catch_all: bool):
+    result = _complex_result()
+    worker = next(item for item in result.declarations if item.name == "worker")
+    worker_entry = next(
+        item for item in result.blocks if item.local_key == worker.entry_block_key
+    )
+    scope = result.exception_scopes[0]
+    catch_arm = scope.catch_arms[0]
+    if catch_all:
+        scope = replace(
+            scope,
+            catch_arms=(ExceptionCatchArm(None, catch_arm.target_block_key, 0),),
+        )
+    exceptional = replace(
+        result,
+        declarations=_sort(
+            replace(
+                worker,
+                normal_exit_block_keys=(),
+                exception_exit_block_keys=(worker.entry_block_key,),
+            )
+            if item.local_key == worker.local_key
+            else item
+            for item in result.declarations
+        ),
+        blocks=_sort(
+            replace(item, control_kind=ControlKind.THROW, successors=())
+            if item.local_key == worker_entry.local_key
+            else item
+            for item in result.blocks
+        ),
+        exception_scopes=_sort(
+            scope if item.local_key == scope.local_key else item
+            for item in result.exception_scopes
+        ),
+    )
+    exceptional.validate()
+    return exceptional
+
+
+def test_unknown_exception_matches_nearest_lexical_catch_all(tmp_path):
+    result = _unknown_exception_result(catch_all=True)
+    catch_key = result.exception_scopes[0].catch_arms[0].target_block_key
+
+    artifact = _build(tmp_path, result)
+    catch_id = next(
+        node.id
+        for node in artifact.nodes
+        if getattr(node.identity, "structural_path", None)
+        == next(
+            block.locator.structural_path
+            for block in result.blocks
+            if block.local_key == catch_key
+        )
+    )
+    propagated = next(
+        edge
+        for edge in artifact.edges
+        if edge.relation is Relation.THROWS_TO and edge.call_site_id is not None
+    )
+
+    assert propagated.target_id == catch_id
+    assert propagated.uncertainty_id is None
+
+
+def test_unknown_exception_to_typed_catch_stops_at_partial_uncertainty(tmp_path):
+    artifact = _build(tmp_path, _unknown_exception_result(catch_all=False))
+    propagated = next(
+        edge
+        for edge in artifact.edges
+        if edge.relation is Relation.THROWS_TO and edge.call_site_id is not None
+    )
+    target = next(node for node in artifact.nodes if node.id == propagated.target_id)
+
+    assert target.kind is NodeKind.UNKNOWN_BOUNDARY
+    assert propagated.uncertainty_id is not None
+    assert propagated.uncertainty_id == target.uncertainty_id
+    uncertainty = next(
+        item for item in artifact.uncertainties if item.id == propagated.uncertainty_id
+    )
+    assert len(artifact.uncertainties) == 1
+    assert uncertainty.reason_code.value == "exception_target_unresolved"
+    assert artifact.graph_contract.completeness.status.value == "partial"
+    assert any(
+        reason.code.value == "exception_target_unresolved"
+        for reason in artifact.graph_contract.completeness.capabilities.exceptions.reasons
+    )
+    assert artifact.graph_contract.coverage.records.uncertainties == 1
+    containing_flow = next(
+        flow
+        for flow in artifact.flows
+        if any(
+            step.flow_id == flow.id and step.edge_id == propagated.id
+            for step in artifact.flow_steps
+        )
+    )
+    assert containing_flow.completeness.status.value == "partial"
+    assert containing_flow.uncertainty_count.represented == 1
+
+
+def test_unknown_exception_uncertainty_is_adapter_permutation_invariant(tmp_path):
+    from hermes_cli.hades_index.lifecycle.builder import GraphBuilder
+
+    result = _unknown_exception_result(catch_all=False)
+    empty = _empty_result()
+    builder = GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z")
+
+    first = builder.build(_context(tmp_path), (result, empty))
+    second = builder.build(_context(tmp_path), (empty, result))
+
+    assert artifact_to_payload(first) == artifact_to_payload(second)
+
+
+@pytest.mark.parametrize("specific_first", (True, False))
+def test_overlapping_exception_catches_follow_lexical_arm_order(
+    tmp_path, specific_first
+):
+    result = _complex_result()
+    handler = next(item for item in result.declarations if item.name == "handler")
+    worker = next(item for item in result.declarations if item.name == "worker")
+    worker_entry = next(
+        item for item in result.blocks if item.local_key == worker.entry_block_key
+    )
+    scope = result.exception_scopes[0]
+    original_catch = scope.catch_arms[0].target_block_key
+    general_catch = replace(
+        next(item for item in result.blocks if item.local_key == original_catch),
+        local_key=_complex_key("basic_block", "body/general_catch"),
+        locator=_complex_ast("body/general_catch"),
+        ordinal=9,
+    )
+    arm_specs = (
+        ("RuntimeError", original_catch),
+        ("Exception", general_catch.local_key),
+    )
+    if not specific_first:
+        arm_specs = tuple(reversed(arm_specs))
+    arms = tuple(
+        ExceptionCatchArm(caught, target, ordinal)
+        for ordinal, (caught, target) in enumerate(arm_specs)
+    )
+    terminal = Terminal(
+        _complex_key("terminal", "worker/runtime_error/overlap"),
+        worker_entry.local_key,
+        TerminalKind.EXCEPTION,
+        None,
+        "RuntimeError",
+        _complex_ast("worker/runtime_error/overlap"),
+    )
+    exceptional = replace(
+        result,
+        declarations=_sort(
+            replace(
+                worker,
+                normal_exit_block_keys=(),
+                exception_exit_block_keys=(worker.entry_block_key,),
+            )
+            if item.local_key == worker.local_key
+            else item
+            for item in result.declarations
+        ),
+        blocks=_sort((
+            general_catch,
+            *(
+                replace(
+                    item,
+                    control_kind=ControlKind.THROW,
+                    successors=(ReturnSuccessor(terminal.local_key, 0),),
+                )
+                if item.local_key == worker_entry.local_key
+                else item
+                for item in result.blocks
+            ),
+        )),
+        exception_scopes=(replace(scope, catch_arms=arms),),
+        terminals=_sort((*result.terminals, terminal)),
+    )
+    exceptional.validate()
+
+    artifact = _build(tmp_path, exceptional)
+    expected_path = (
+        next(
+            item for item in result.blocks if item.local_key == original_catch
+        ).locator.structural_path
+        if specific_first
+        else general_catch.locator.structural_path
+    )
+    propagated = next(
+        edge
+        for edge in artifact.edges
+        if edge.relation is Relation.THROWS_TO and edge.call_site_id is not None
+    )
+    target = next(node for node in artifact.nodes if node.id == propagated.target_id)
+
+    assert getattr(target.identity, "structural_path", None) == expected_path
 
 
 def test_framework_return_and_exception_references_are_closed() -> None:
@@ -1637,8 +1837,8 @@ def test_framework_branch_and_loop_successors_preserve_exact_semantics(tmp_path)
             replace(
                 segment,
                 short_circuit_successors=(
-                    BranchSuccessor(entry.local_key, branch_key, 0),
-                    BranchSuccessor(catch.local_key, branch_key, 1),
+                    BranchSuccessor(entry.local_key, branch_key, 0, 0),
+                    BranchSuccessor(catch.local_key, branch_key, 1, 1),
                     LoopSuccessor(entry.local_key, "body", 2),
                     LoopSuccessor(body.local_key, "back", 3),
                     LoopSuccessor(catch.local_key, "exit", 4),
@@ -1774,7 +1974,7 @@ def _shared_exception_callee_result():
         scope_structure_key,
         declaration_key,
         _complex_ast("disconnected/try"),
-        (ExceptionCatchArm("RuntimeError", catch_key),),
+        (ExceptionCatchArm(None, catch_key, 0),),
         None,
         None,
     )
@@ -1819,6 +2019,8 @@ def _shared_exception_callee_result():
         _complex_ast(call_path),
         _complex_evidence(_complex_ast(call_path)),
     )
+    # The shared worker intentionally has no extracted exception type. Catch-all
+    # scopes keep this fixture focused on verified propagation and flow closure.
     shared = replace(
         result,
         declarations=_sort((
@@ -1832,7 +2034,15 @@ def _shared_exception_callee_result():
         structures=_sort((*result.structures, scope_structure, call_structure)),
         call_sites=_sort((*result.call_sites, call_site)),
         edge_facts=_sort((*result.edge_facts, invocation)),
-        exception_scopes=_sort((*result.exception_scopes, scope)),
+        exception_scopes=_sort(
+            replace(
+                item,
+                catch_arms=tuple(
+                    replace(arm, caught_type_name=None) for arm in item.catch_arms
+                ),
+            )
+            for item in (*result.exception_scopes, scope)
+        ),
     )
     shared.validate()
     return shared, catch_key
@@ -1954,6 +2164,8 @@ def test_artifact_validation_rejects_omitted_active_interprocedural_throw(
     sync_flow["represented_step_count"] -= 1
     sync_flow["terminal_count"]["represented"] -= 1
     sync_flow["terminal_count"]["value"] -= 1
+    if sync_flow["terminal_count"]["represented"] == 0:
+        sync_flow["terminal_count"]["knowledge"] = "absence_verified"
     sync_flow["stage_counts"].pop("error")
     for step in steps:
         edge = edges[step["edge_id"]]
@@ -1964,6 +2176,10 @@ def test_artifact_validation_rejects_omitted_active_interprocedural_throw(
             and edge["source_id"] not in active_callee_ids
         ):
             step["backbone_role"] = "mandatory"
+        if step is not throw_step and step["stage_from"] == "error":
+            step["min_depth"] += 1
+            order_prefix, _depth, order_suffix = step["order_key"].split(":", 2)
+            step["order_key"] = f"{order_prefix}:{step['min_depth']:06d}:{order_suffix}"
     payload["graph_contract"]["coverage"]["records"]["flow_steps"] -= 1
     payload["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
         payload
@@ -2001,7 +2217,7 @@ def test_exception_propagation_skips_inner_nonmatching_catch_and_preserves_type(
         outer_scope,
         catch_arms=(
             ExceptionCatchArm(
-                "RuntimeError", outer_scope.catch_arms[0].target_block_key
+                "RuntimeError", outer_scope.catch_arms[0].target_block_key, 0
             ),
         ),
     )
@@ -2032,7 +2248,7 @@ def test_exception_propagation_skips_inner_nonmatching_catch_and_preserves_type(
         inner_structure.local_key,
         handler.local_key,
         _complex_ast(inner_path),
-        (ExceptionCatchArm("ValueError", inner_catch.local_key),),
+        (ExceptionCatchArm("ValueError", inner_catch.local_key, 0),),
         None,
         outer_scope.local_key,
     )

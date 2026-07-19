@@ -12,6 +12,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -143,6 +144,8 @@ from hermes_cli.hades_index.lifecycle.model import (
     LoopRole,
     LoopSuccessor,
     Modifier,
+    Priority,
+    ResolutionKind,
     StructureIR,
     ExceptionSuccessor,
     ReturnSuccessor,
@@ -580,33 +583,41 @@ def _exception_type_name(value: str) -> str:
     return value.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
 
 
+class ExceptionMatch(str, Enum):
+    MATCH = "match"
+    NO_MATCH = "no_match"
+    UNRESOLVED = "unresolved"
+
+
 def _exception_type_matches(
     language: str, thrown: str | None, caught: str | None
-) -> bool:
+) -> ExceptionMatch:
     """Match only exact or resolved built-in ancestry in the owner's language."""
 
-    if thrown is None:
-        return False
     if caught is None:
-        return True
+        return ExceptionMatch.MATCH
+    if thrown is None:
+        return ExceptionMatch.UNRESOLVED
     thrown_name = _exception_type_name(thrown)
     caught_name = _exception_type_name(caught)
     if thrown == caught or thrown_name == caught_name:
-        return True
+        return ExceptionMatch.MATCH
     ancestry = _EXCEPTION_BASES_BY_LANGUAGE.get(language)
-    if ancestry is None or thrown_name not in ancestry or caught_name not in ancestry:
-        return False
+    if ancestry is None or thrown_name not in ancestry:
+        return ExceptionMatch.UNRESOLVED
+    if caught_name not in ancestry:
+        return ExceptionMatch.NO_MATCH
     pending = list(ancestry[thrown_name])
     seen: set[str] = set()
     while pending:
         current = pending.pop()
         if current == caught_name:
-            return True
+            return ExceptionMatch.MATCH
         if current in seen:
             continue
         seen.add(current)
         pending.extend(ancestry.get(current, ()))
-    return False
+    return ExceptionMatch.NO_MATCH
 
 
 def _all_locators(
@@ -2438,6 +2449,7 @@ class GraphBuilder:
                             arm
                             for arm in branch_arms
                             if arm.branch_local_key == successor.branch_arm_key
+                            and arm.arm_ordinal == successor.arm_ordinal
                             and arm.target_block_key == successor.target_block_key
                         )
                         condition = Condition(
@@ -2770,6 +2782,169 @@ class GraphBuilder:
                     occurrence_ordinal=successor.order,
                 )
 
+        def materialize_unresolved_exception_target(
+            *,
+            invocation: Edge,
+            edge_ir: EdgeFactIR,
+            site: CallSite,
+            scope_ir: ExceptionScope,
+            source_id: str,
+            exit_key: str,
+            ordinal: int,
+        ) -> None:
+            """Create one conservative frontier for an unknown catch relation."""
+
+            if invocation.call_site_id is None:
+                raise IRValidationError(
+                    "invalid_call_site",
+                    "exception uncertainty requires its exact invocation call site",
+                )
+            caller = declaration_by_key[site.caller_declaration_key]
+            caller_id = local_node_ids[site.caller_declaration_key]
+            exception_id_value = structure_ids[scope_ir.structure_key]
+            role = "exception_target_unresolved"
+            structural_path = (
+                f"{site.locator.structural_path}/exception_return/{ordinal}/"
+                f"unknown_boundary/{exit_key[:16]}"
+            )
+            boundary_identity = SourceOccurrenceIdentity(
+                "source_occurrence",
+                context.workspace_binding_id,
+                caller.language,
+                NodeKind.UNKNOWN_BOUNDARY,
+                caller_id,
+                structural_path,
+                ordinal,
+                role,
+            )
+            boundary_id = node_id({
+                "variant": "source_occurrence",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": caller.language,
+                "kind": NodeKind.UNKNOWN_BOUNDARY.value,
+                "owner_node_id": caller_id,
+                "structural_path": structural_path,
+                "ordinal": ordinal,
+                "semantic_role": role,
+            })
+            normalized = "exception_type_unresolved"
+            condition = Condition(
+                "predicate",
+                normalized,
+                condition_hash(normalized),
+                ConditionPolarity.EXCEPTION,
+            )
+            occurrence_path = (
+                f"{site.locator.structural_path}/exception_return/{ordinal}/unresolved"
+            )
+            occurrence_payload = {
+                "kind": "ast",
+                "owner_node_id": caller_id,
+                "ast_path": occurrence_path,
+                "ordinal": ordinal,
+            }
+            public_edge_id = edge_id({
+                "source_id": source_id,
+                "target_id": boundary_id,
+                "relation": Relation.THROWS_TO.value,
+                "flow": EdgeFlow.EXCEPTION.value,
+                "condition_hash": condition.hash,
+                "branch_group_id": None,
+                "call_site_id": invocation.call_site_id,
+                "exception_scope_id": exception_id_value,
+                "occurrence": occurrence_payload,
+            })
+            subject = EdgeSubject(public_edge_id)
+            question = "Which lexical catch arm handles the unresolved exception type?"
+            fingerprint_identity = {
+                "domain": "graph",
+                "project_id": context.project_id,
+                "workspace_binding_id": context.workspace_binding_id,
+                "subject": {"edge_id": public_edge_id},
+                "resolution_kind": ResolutionKind.EXCEPTION_TARGET.value,
+                "reason_code": ReasonCode.EXCEPTION_TARGET_UNRESOLVED.value,
+                "question": question,
+            }
+            fingerprint = uncertainty_fingerprint(fingerprint_identity)
+            uncertainty_id_value = f"hades:uncertainty:v2:{fingerprint}"
+            unresolved_evidence = _evidence(
+                edge_ir.evidence,
+                origin=EvidenceOrigin.UNRESOLVED,
+                inference_rule=None,
+            )
+            unknown_nodes.append(
+                Node(
+                    boundary_id,
+                    boundary_identity,
+                    NodeKind.UNKNOWN_BOUNDARY,
+                    caller.language,
+                    None,
+                    "unresolved exception target",
+                    None,
+                    None,
+                    uncertainty_id_value,
+                    _source_location(site.locator),
+                    BoundaryProperties(
+                        reason_code=ReasonCode.EXCEPTION_TARGET_UNRESOLVED.value
+                    ),
+                    unresolved_evidence,
+                )
+            )
+            propagated = append_edge(
+                source_id=source_id,
+                target_id=boundary_id,
+                relation=Relation.THROWS_TO,
+                flow=EdgeFlow.EXCEPTION,
+                locator=site.locator,
+                owner_id=caller_id,
+                evidence=unresolved_evidence,
+                condition=condition,
+                call_id=invocation.call_site_id,
+                exception_id=exception_id_value,
+                occurrence_path=occurrence_path,
+                occurrence_ordinal=ordinal,
+                uncertainty_id_value=uncertainty_id_value,
+            )
+            if propagated.id != public_edge_id:
+                raise IRValidationError(
+                    "semantic_collision",
+                    "exception uncertainty edge identity is inconsistent",
+                )
+            uncertainties.append(
+                Uncertainty(
+                    uncertainty_id_value,
+                    "graph",
+                    subject,
+                    ResolutionKind.EXCEPTION_TARGET,
+                    ReasonCode.EXCEPTION_TARGET_UNRESOLVED,
+                    question,
+                    ("resolve_exception_type",),
+                    (
+                        SourceRef(
+                            site.locator.source_location.path,
+                            site.locator.source_location.start_line,
+                        ),
+                    ),
+                    (),
+                    (),
+                    CandidateSetKnowledge.NOT_APPLICABLE,
+                    Priority.HIGH,
+                    "Exception flow stops until the thrown type is resolved.",
+                    fingerprint,
+                )
+            )
+            effective_coverage_events.append(
+                CoverageEvent(
+                    caller.language,
+                    CoverageCapability.EXCEPTIONS,
+                    CoverageOutcome.PARTIAL,
+                    ReasonCode.EXCEPTION_TARGET_UNRESOLVED.value,
+                    site.locator.source_location.path,
+                    0,
+                    1,
+                )
+            )
+
         # Normal returns are generated only for the invocation's exact call
         # site and continuation.  They are never shared across callers.
         for invocation, edge_ir in invocation_ir:
@@ -2828,29 +3003,33 @@ class GraphBuilder:
                 exception_structure_key = site.exception_scope_key
                 exception_id_value: str | None = None
                 target_id: str | None = None
+                unresolved_scope: ExceptionScope | None = None
                 if exception_structure_key is not None:
                     scope_ir = scope_by_structure_key.get(exception_structure_key)
                     while scope_ir is not None:
                         owner_language = declaration_by_key[
                             scope_ir.declaration_key
                         ].language
-                        matching_catch_arm = next(
-                            (
-                                arm
-                                for arm in scope_ir.catch_arms
-                                if _exception_type_matches(
-                                    owner_language,
-                                    thrown_type,
-                                    arm.caught_type_name,
-                                )
-                            ),
-                            None,
-                        )
+                        matching_catch_arm = None
+                        for arm in scope_ir.catch_arms:
+                            match = _exception_type_matches(
+                                owner_language,
+                                thrown_type,
+                                arm.caught_type_name,
+                            )
+                            if match is ExceptionMatch.MATCH:
+                                matching_catch_arm = arm
+                                break
+                            if match is ExceptionMatch.UNRESOLVED:
+                                unresolved_scope = scope_ir
+                                break
                         if matching_catch_arm is not None:
                             target_id = local_node_ids[
                                 matching_catch_arm.target_block_key
                             ]
                             exception_id_value = structure_ids[scope_ir.structure_key]
+                            break
+                        if unresolved_scope is not None:
                             break
                         scope_ir = next(
                             (
@@ -2860,6 +3039,17 @@ class GraphBuilder:
                             ),
                             None,
                         )
+                if unresolved_scope is not None:
+                    materialize_unresolved_exception_target(
+                        invocation=invocation,
+                        edge_ir=edge_ir,
+                        site=site,
+                        scope_ir=unresolved_scope,
+                        source_id=source_id,
+                        exit_key=exit_key,
+                        ordinal=ordinal,
+                    )
+                    continue
                 if target_id is None:
                     caller_id = local_node_ids[site.caller_declaration_key]
                     caller = declaration_by_key[site.caller_declaration_key]

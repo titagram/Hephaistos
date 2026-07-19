@@ -225,22 +225,25 @@ def framework_pipeline_facts(
         sorted(exception_successors.items())
     ):
         locator = _framework_fact_locator(candidate, f"framework_exception/{ordinal}")
+        catch_arms = tuple(
+            sorted(
+                (
+                    ExceptionCatchArm(
+                        successor.caught_type_name,
+                        successor.target_block_key,
+                        successor.order,
+                    )
+                    for _segment, successor in values
+                ),
+                key=lambda item: item.arm_ordinal,
+            )
+        )
+        locator = replace(locator, ordinal=ordinal)
         evidence = replace(candidate.evidence, locator=locator)
         structural = (
             locator.structural_path
             if type(locator) is AstLocatorIR
             else locator.structural_pointer
-        )
-        catch_arms = tuple(
-            sorted(
-                {
-                    ExceptionCatchArm(
-                        successor.caught_type_name, successor.target_block_key
-                    )
-                    for _segment, successor in values
-                },
-                key=lambda item: (item.caught_type_name or "", item.target_block_key),
-            )
         )
         structures.append(
             StructureIR(
@@ -290,13 +293,12 @@ def _validate_pipeline_fact_references(
     terminals = {item.local_key: item for item in facts.terminals}
     structures = {item.local_key: item for item in facts.structures}
     arms = {
-        (item.branch_local_key, item.target_block_key): item
-        for item in facts.branch_arms
+        (item.branch_local_key, item.arm_ordinal): item for item in facts.branch_arms
     }
     referenced_terminals: set[str] = set()
     referenced_structures: set[str] = set()
-    referenced_arms: set[tuple[str, str]] = set()
-    referenced_exception_arms: dict[str, set[tuple[str | None, str]]] = {}
+    referenced_arms: set[tuple[str, int]] = set()
+    referenced_exception_arms: dict[str, set[tuple[str | None, str, int]]] = {}
     for segment in pipeline:
         for successor in (segment.success_successor, *segment.short_circuit_successors):
             if type(successor) is ReturnSuccessor:
@@ -320,14 +322,16 @@ def _validate_pipeline_fact_references(
                 referenced_exception_arms.setdefault(structure.local_key, set()).add((
                     successor.caught_type_name,
                     successor.target_block_key,
+                    successor.order,
                 ))
             elif type(successor) is BranchSuccessor:
                 structure = structures.get(successor.branch_arm_key)
+                arm = arms.get((successor.branch_arm_key, successor.arm_ordinal))
                 if (
                     structure is None
                     or structure.kind is not StructureKind.BRANCH_GROUP
-                    or (successor.branch_arm_key, successor.target_block_key)
-                    not in arms
+                    or arm is None
+                    or arm.target_block_key != successor.target_block_key
                 ):
                     raise FrameworkAdapterError(
                         "framework branch successor lacks its exact typed arm"
@@ -335,7 +339,7 @@ def _validate_pipeline_fact_references(
                 referenced_structures.add(structure.local_key)
                 referenced_arms.add((
                     successor.branch_arm_key,
-                    successor.target_block_key,
+                    successor.arm_ordinal,
                 ))
     if referenced_terminals != set(terminals):
         raise FrameworkAdapterError("framework pipeline emitted orphan terminals")
@@ -363,7 +367,8 @@ def _validate_pipeline_fact_references(
                 "framework exception scope lacks its exact StructureIR"
             )
         actual_arms = {
-            (item.caught_type_name, item.target_block_key) for item in scope.catch_arms
+            (item.caught_type_name, item.target_block_key, item.arm_ordinal)
+            for item in scope.catch_arms
         }
         if actual_arms != expected_arms:
             raise FrameworkAdapterError(
