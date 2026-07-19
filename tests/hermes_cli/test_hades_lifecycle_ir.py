@@ -1021,3 +1021,21 @@ def test_branch_arms_are_unambiguous_and_successors_match_the_exact_arm() -> Non
     )
     with pytest.raises(IRValidationError, match="exact branch arm"):
         replace(result, blocks=mismatched_successors).validate()
+
+
+def test_executable_declaration_rejects_async_boundary_source_kind() -> None:
+    declaration = _valid_result().declarations[0]
+
+    with pytest.raises(IRValidationError, match="executable source declaration"):
+        replace(declaration, declaration_kind=NodeKind.ASYNC_BOUNDARY)
+
+
+def test_anonymous_executable_declaration_requires_function_kind() -> None:
+    declaration = _valid_result().declarations[0]
+
+    with pytest.raises(IRValidationError, match="anonymous declaration"):
+        replace(
+            declaration,
+            declaration_kind=NodeKind.EVENT,
+            identity_kind=DeclarationIdentityKind.ANONYMOUS,
+        )

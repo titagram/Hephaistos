@@ -45,6 +45,7 @@ from .model import (
     EvidenceEnvelope,
     EvidenceItem,
     EvidenceOrigin,
+    EXECUTABLE_SOURCE_DECLARATION_KINDS,
     FileIdentity,
     FileProperties,
     FileSourceLocator,
@@ -122,19 +123,7 @@ _STRUCTURAL_RELATIONS = frozenset({
 _CALLABLE_OWNER_KINDS = frozenset({
     NodeKind.MODULE,
     NodeKind.ENTRYPOINT,
-    NodeKind.FUNCTION,
-    NodeKind.METHOD,
-    NodeKind.CONTROLLER,
-    NodeKind.SERVICE,
-    NodeKind.DOMAIN,
-    NodeKind.REPOSITORY,
-    NodeKind.MIDDLEWARE,
-    NodeKind.GUARD,
-    NodeKind.AUTHORIZATION,
-    NodeKind.VALIDATOR,
-    NodeKind.BINDING,
-    NodeKind.LISTENER,
-    NodeKind.JOB,
+    *EXECUTABLE_SOURCE_DECLARATION_KINDS,
 })
 _TERMINAL_KINDS = frozenset({
     NodeKind.RESPONSE,

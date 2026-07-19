@@ -69,6 +69,7 @@ from hermes_cli.hades_graph_v2.model import (
     EvidenceEnvelope,
     EvidenceItem,
     EvidenceOrigin,
+    EXECUTABLE_SOURCE_DECLARATION_KINDS,
     FileCoverage,
     FileIdentity,
     FileProperties,
@@ -916,6 +917,14 @@ class GraphBuilder:
             progressed = False
             for declaration in tuple(pending):
                 if (
+                    declaration.declaration_kind
+                    not in EXECUTABLE_SOURCE_DECLARATION_KINDS
+                ):
+                    raise IRValidationError(
+                        "invalid_declaration_kind",
+                        "builder requires a schema-legal executable source declaration",
+                    )
+                if (
                     declaration.identity_kind is DeclarationIdentityKind.ANONYMOUS
                     and declaration.owner_declaration_key not in local_node_ids
                 ):
@@ -986,20 +995,29 @@ class GraphBuilder:
                     namespace = owner.namespace
                 local_node_ids[declaration.local_key] = public_id
                 modifier_values = tuple(item.value for item in declaration.modifiers)
-                declaration_properties = (
-                    AsyncProperties(
+                if declaration.declaration_kind in {
+                    NodeKind.EVENT,
+                    NodeKind.LISTENER,
+                    NodeKind.JOB,
+                    NodeKind.QUEUE,
+                }:
+                    declaration_properties = AsyncProperties(
                         channel_kind=declaration.declaration_kind.value,
                         public_name=qualified_name or name,
                     )
-                    if declaration.declaration_kind
-                    in {
-                        NodeKind.EVENT,
-                        NodeKind.LISTENER,
-                        NodeKind.JOB,
-                        NodeKind.QUEUE,
-                        NodeKind.ASYNC_BOUNDARY,
-                    }
-                    else CallableProperties(
+                elif declaration.declaration_kind in {
+                    NodeKind.MIDDLEWARE,
+                    NodeKind.GUARD,
+                    NodeKind.AUTHORIZATION,
+                    NodeKind.VALIDATOR,
+                    NodeKind.BINDING,
+                }:
+                    declaration_properties = FrameworkProperties(
+                        framework_role=declaration.declaration_kind.value,
+                        boundary_name=qualified_name or name,
+                    )
+                else:
+                    declaration_properties = CallableProperties(
                         visibility=next(
                             (
                                 item.value
@@ -1019,7 +1037,6 @@ class GraphBuilder:
                         return_type=declaration.return_type,
                         modifiers=modifier_values,
                     )
-                )
                 nodes.append(
                     Node(
                         public_id,

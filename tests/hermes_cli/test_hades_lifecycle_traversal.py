@@ -535,8 +535,25 @@ def test_complete_call_candidates_are_closed_dynamic_frontiers(tmp_path):
     validate_artifact(artifact)
 
 
-def test_verified_async_dispatch_links_child_without_inline_child_steps(tmp_path):
+@pytest.mark.parametrize(
+    "declaration_kind",
+    (NodeKind.EVENT, NodeKind.LISTENER, NodeKind.JOB, NodeKind.QUEUE),
+)
+def test_verified_async_dispatch_links_executable_child_owned_cfg(
+    tmp_path, declaration_kind
+):
     result = _complex_result()
+    worker = next(item for item in result.declarations if item.name == "worker")
+    result = replace(
+        result,
+        declarations=_sort(
+            replace(item, declaration_kind=declaration_kind)
+            if item.local_key == worker.local_key
+            else item
+            for item in result.declarations
+        ),
+    )
+    result.validate()
     artifact = _build(tmp_path, replace(result, edge_facts=()))
     edges = {edge.id: edge for edge in artifact.edges}
     parent = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
@@ -550,16 +567,71 @@ def test_verified_async_dispatch_links_child_without_inline_child_steps(tmp_path
     assert dispatch.async_child_flow_id == child.id
     assert dispatch.async_context is AsyncContext.SYNCHRONOUS
     assert child.root_node_id == edges[dispatch.edge_id].target_id
-    assert all(
-        step.async_context is AsyncContext.LINKED_ASYNC
-        for step in artifact.flow_steps
-        if step.flow_id == child.id
+    child_steps = tuple(
+        step for step in artifact.flow_steps if step.flow_id == child.id
+    )
+    assert child_steps
+    assert all(step.async_context is AsyncContext.LINKED_ASYNC for step in child_steps)
+    assert any(
+        edges[step.edge_id].source_id == child.root_node_id for step in child_steps
     )
     assert all(
         not (
             step.flow_id == parent.id
             and edges[step.edge_id].source_id == child.root_node_id
         )
+        for step in artifact.flow_steps
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration_kind",
+    (
+        NodeKind.MIDDLEWARE,
+        NodeKind.GUARD,
+        NodeKind.AUTHORIZATION,
+        NodeKind.VALIDATOR,
+        NodeKind.BINDING,
+    ),
+)
+def test_schema_legal_framework_callable_declaration_owns_cfg(
+    tmp_path, declaration_kind
+):
+    result = _complex_result()
+    worker = next(item for item in result.declarations if item.name == "worker")
+    result = replace(
+        result,
+        declarations=_sort(
+            replace(item, declaration_kind=declaration_kind)
+            if item.local_key == worker.local_key
+            else item
+            for item in result.declarations
+        ),
+        blocks=_sort(
+            replace(
+                block,
+                successors=tuple(
+                    successor
+                    for successor in block.successors
+                    if not isinstance(successor, AsyncSuccessor)
+                ),
+            )
+            for block in result.blocks
+        ),
+    )
+    result.validate()
+
+    artifact = _build(tmp_path, result)
+    declaration_node = next(
+        node
+        for node in artifact.nodes
+        if node.kind is declaration_kind
+        and node.qualified_name == worker.qualified_name
+    )
+    edges = {edge.id: edge for edge in artifact.edges}
+
+    assert any(
+        edges[step.edge_id].source_id == declaration_node.id
         for step in artifact.flow_steps
     )
 

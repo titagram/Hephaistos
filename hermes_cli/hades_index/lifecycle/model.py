@@ -28,6 +28,7 @@ from hermes_cli.hades_graph_v2.model import (
     EdgeFlow,
     EntrypointKind,
     EvidenceOrigin,
+    EXECUTABLE_SOURCE_DECLARATION_KINDS,
     FrameworkRecord,
     MethodSemantics,
     NodeKind,
@@ -699,11 +700,24 @@ class ExecutableDeclaration:
                 "invalid_identifier", "declaration.language must be a lower identifier"
             )
         _require_enum(self.declaration_kind, NodeKind, field_name="declaration.kind")
+        if self.declaration_kind not in EXECUTABLE_SOURCE_DECLARATION_KINDS:
+            _fail(
+                "invalid_declaration_kind",
+                "declaration.kind must be a schema-legal executable source declaration",
+            )
         _require_enum(
             self.identity_kind,
             DeclarationIdentityKind,
             field_name="declaration.identity_kind",
         )
+        if (
+            self.identity_kind is DeclarationIdentityKind.ANONYMOUS
+            and self.declaration_kind is not NodeKind.FUNCTION
+        ):
+            _fail(
+                "invalid_declaration_kind",
+                "anonymous declaration kind must be function",
+            )
         if self.owner_declaration_key is not None:
             _key(
                 self.owner_declaration_key,

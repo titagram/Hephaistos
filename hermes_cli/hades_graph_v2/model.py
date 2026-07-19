@@ -145,6 +145,25 @@ class NodeKind(_ContractEnum):
     UNKNOWN_BOUNDARY = "unknown_boundary"
 
 
+EXECUTABLE_SOURCE_DECLARATION_KINDS = frozenset({
+    NodeKind.FUNCTION,
+    NodeKind.METHOD,
+    NodeKind.MIDDLEWARE,
+    NodeKind.GUARD,
+    NodeKind.AUTHORIZATION,
+    NodeKind.VALIDATOR,
+    NodeKind.BINDING,
+    NodeKind.CONTROLLER,
+    NodeKind.SERVICE,
+    NodeKind.DOMAIN,
+    NodeKind.REPOSITORY,
+    NodeKind.EVENT,
+    NodeKind.LISTENER,
+    NodeKind.JOB,
+    NodeKind.QUEUE,
+})
+
+
 class AnalysisStatus(_ContractEnum):
     ANALYZED = "analyzed"
     UNSUPPORTED = "unsupported"
@@ -1156,7 +1175,12 @@ __all__ = [
         and (
             isinstance(value, type)
             or name
-            in {"artifact_from_payload", "artifact_to_payload", "dataclass_wire_fields"}
+            in {
+                "EXECUTABLE_SOURCE_DECLARATION_KINDS",
+                "artifact_from_payload",
+                "artifact_to_payload",
+                "dataclass_wire_fields",
+            }
         )
         and not keyword.iskeyword(name)
     )

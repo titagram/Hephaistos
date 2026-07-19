@@ -21,6 +21,7 @@ from hermes_cli.hades_graph_v2.model import (
     Entrypoint,
     EntrypointKind,
     EvidenceOrigin,
+    EXECUTABLE_SOURCE_DECLARATION_KINDS,
     Flow,
     FlowCompleteness,
     FlowKind,
@@ -264,22 +265,7 @@ def build_callable_summaries(
         for node in graph.nodes
         if _node_owner(node) in nodes
         and nodes[_node_owner(node)].kind
-        in {
-            NodeKind.ENTRYPOINT,
-            NodeKind.FUNCTION,
-            NodeKind.METHOD,
-            NodeKind.CONTROLLER,
-            NodeKind.SERVICE,
-            NodeKind.DOMAIN,
-            NodeKind.REPOSITORY,
-            NodeKind.MIDDLEWARE,
-            NodeKind.GUARD,
-            NodeKind.AUTHORIZATION,
-            NodeKind.VALIDATOR,
-            NodeKind.BINDING,
-            NodeKind.LISTENER,
-            NodeKind.JOB,
-        }
+        in {NodeKind.ENTRYPOINT, *EXECUTABLE_SOURCE_DECLARATION_KINDS}
     })
     direct_edges: dict[str, tuple[Edge, ...]] = {
         callable_id: tuple(
