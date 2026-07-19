@@ -749,7 +749,7 @@ def test_project_unlink_local_only_requires_explicit_yes(monkeypatch, tmp_path, 
     assert binding.status == "linked"
 
 
-def test_hades_backend_benchmark_reports_compressed_large_artifact():
+def test_hades_backend_benchmark_never_reports_legacy_graph_upload_cases():
     from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
 
     report = run_hades_backend_benchmark(
@@ -761,48 +761,77 @@ def test_hades_backend_benchmark_reports_compressed_large_artifact():
 
     assert report["schema"] == "hades.backend_benchmark.v1"
     assert report["status"] == "passed"
-    assert report["case_count"] == 2
-    large = report["cases"][1]
-    assert large["schema"] == "hades.code_graph.v1"
-    assert large["raw_source_included"] is False
-    assert large["upload_mode"] == "compressed"
-    assert large["compressed_bytes"] < large["original_bytes"]
-    assert large["compression_ratio"] < 0.75
-    assert len(large["payload_sha256"]) == 64
+    assert report["case_count"] == 1
+    assert [case["name"] for case in report["cases"]] == ["graph_v2_scale"]
+    graph = report["cases"][0]
+    assert graph["schema"] == "hades.code_graph.v2"
+    assert graph["raw_source_included"] is False
+    assert graph["upload_mode"] == "chunked"
+    assert graph["compressed_bytes"] < graph["original_bytes"]
+    assert graph["compression_ratio"] < 0.75
+    assert len(graph["payload_sha256"]) == 64
 
 
-def test_hades_backend_benchmark_reports_real_workspace_artifacts(tmp_path):
+def test_hades_backend_benchmark_v2_scale_closes_every_chunk_and_omission_count():
+    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS
+
+    report = run_hades_backend_benchmark(cases=[])
+
+    graph = next(case for case in report["cases"] if case["name"] == "graph_v2_scale")
+    assert graph["schema"] == "hades.code_graph.v2"
+    assert graph["requested_counts"]["nodes"] >= 5_501
+    assert graph["requested_counts"]["edges"] >= 10_501
+    assert graph["requested_counts"]["entrypoints"] >= 501
+    assert graph["source_counts"]["nodes"] >= graph["requested_counts"]["nodes"]
+    assert graph["source_counts"]["edges"] >= graph["requested_counts"]["edges"]
+    assert graph["source_counts"]["entrypoints"] >= graph["requested_counts"]["entrypoints"]
+    assert graph["chunk_count"] > len(CHUNK_KINDS)
+    assert graph["delivered_counts"] == graph["manifest_counts"]
+    assert graph["descriptor_counts"] == graph["manifest_counts"]
+    assert {
+        kind: graph["delivered_counts"][kind] + graph["omitted_counts"][kind]
+        for kind in CHUNK_KINDS
+    } == graph["source_counts"]
+    assert graph["omitted_record_count"] == sum(graph["omitted_counts"].values())
+    assert graph["delivery_complete"] is (graph["omitted_record_count"] == 0)
+    assert graph["deterministic"] is True
+    assert len(graph["artifact_graph_version"]) == 64
+    assert len(graph["manifest_sha256"]) == 64
+    assert set(graph["timing_ms"]) == {"build", "prune", "bundle", "total"}
+    assert all(type(value) is int and value >= 0 for value in graph["timing_ms"].values())
+
+
+def test_hades_backend_benchmark_reports_real_workspace_artifacts(
+    monkeypatch, tmp_path
+):
     from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
 
-    routes = tmp_path / "routes"
-    controller_dir = tmp_path / "app" / "Http" / "Controllers"
-    routes.mkdir()
-    controller_dir.mkdir(parents=True)
-    (routes / "api.php").write_text(
-        "<?php\n"
-        "use App\\Http\\Controllers\\OrderController;\n"
-        "Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');\n"
-    )
-    (controller_dir / "OrderController.php").write_text(
-        "<?php\n"
-        "namespace App\\Http\\Controllers;\n"
-        "class OrderController { public function show(int $order): array { return ['id' => $order]; } }\n"
-    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path.parent / f"{tmp_path.name}-home"))
+
+    (tmp_path / "README.md").write_text("# Workspace benchmark\n")
 
     report = run_hades_backend_benchmark(cases=[], workspace=tmp_path)
 
     assert report["schema"] == "hades.backend_benchmark.v1"
     assert report["has_workspace_dataset"] is True
-    assert report["case_count"] == 2
-    assert [case["name"] for case in report["cases"]] == ["workspace_git_tree", "workspace_code_graph"]
-    tree, graph = report["cases"]
+    assert report["case_count"] == 3
+    assert [case["name"] for case in report["cases"]] == [
+        "graph_v2_scale",
+        "workspace_git_tree",
+        "workspace_code_graph",
+    ]
+    _, tree, graph = report["cases"]
     assert tree["source"] == "workspace"
     assert tree["schema"] == "hades.git_tree.v1"
-    assert tree["file_count"] >= 2
+    assert tree["file_count"] >= 1
     assert graph["source"] == "workspace"
-    assert graph["schema"] == "hades.php_graph.v1"
-    assert graph["route_count"] == 1
+    assert graph["schema"] == "hades.code_graph.v2"
+    assert graph["bundle_schema"] == "hades.graph_bundle.v2"
+    assert graph["route_count"] == 0
+    assert graph["symbol_count"] >= 1
     assert graph["raw_source_included"] is False
+    assert graph["descriptor_counts"] == graph["manifest_counts"]
     assert isinstance(graph["index_duration_ms"], int)
     assert len(graph["payload_sha256"]) == 64
 
@@ -824,7 +853,7 @@ def test_backend_benchmark_command_emits_json(capsys):
     assert rc == 0
     assert payload["schema"] == "hades.backend_benchmark.v1"
     assert payload["status"] == "passed"
-    assert [case["name"] for case in payload["cases"]] == ["medium_code_graph", "large_code_graph"]
+    assert [case["name"] for case in payload["cases"]] == ["graph_v2_scale"]
 
 
 def test_backend_schedule_quality_creates_and_updates_cron_job(monkeypatch, tmp_path, capsys):
