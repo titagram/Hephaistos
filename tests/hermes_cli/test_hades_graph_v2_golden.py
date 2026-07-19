@@ -1147,6 +1147,42 @@ def test_identity_vectors() -> None:
         "hades:edge:v2:" + by_kind["edge_id"]["sha256"]
     )
 
+    named_identity = copy.deepcopy(by_kind["node_id"]["input"])
+    named_record = {
+        "identity": named_identity,
+        "location": {"path": "src/Service.php", "start_line": 10, "end_line": 20},
+    }
+    moved_record = copy.deepcopy(named_record)
+    moved_record["location"].update(start_line=900, end_line=910)
+    assert node_id(named_record["identity"]) == node_id(moved_record["identity"])
+
+    permuted_identity = {
+        key: named_identity[key] for key in reversed(tuple(named_identity))
+    }
+    assert node_id(permuted_identity) == node_id(named_identity)
+
+    binding = named_identity["workspace_binding_id"]
+    occurrence = {
+        "variant": "source_occurrence",
+        "workspace_binding_id": binding,
+        "language": "php",
+        "kind": "basic_block",
+        "owner_node_id": node_id(named_identity),
+        "structural_path": "body/if/arm",
+        "ordinal": 0,
+        "semantic_role": "branch",
+    }
+    sibling = {**occurrence, "ordinal": 1}
+    assert node_id(occurrence) != node_id(sibling)
+
+    edge_identity = copy.deepcopy(by_kind["edge_id"]["input"])
+    sibling_edge = copy.deepcopy(edge_identity)
+    sibling_edge["occurrence"]["ordinal"] += 1
+    assert edge_id(edge_identity) != edge_id(sibling_edge)
+    assert edge_id({
+        key: edge_identity[key] for key in reversed(tuple(edge_identity))
+    }) == edge_id(edge_identity)
+
 
 def test_python_vectors_match_locked_contract() -> None:
     test_canonicalization_vectors_have_exact_bytes_and_digests()

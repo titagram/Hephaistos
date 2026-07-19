@@ -443,9 +443,10 @@ class _Parser:
         return type("Tree", (), {"root_node": self.root})()
 
 
-@pytest.mark.parametrize(
-    ("language", "nodes"),
-    [
+def test_cfg_matrix(tmp_path):
+    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+
+    matrix = [
         (
             "php",
             (
@@ -488,33 +489,38 @@ class _Parser:
                 "call_expression",
             ),
         ),
-    ],
-)
-def test_cfg_matrix(language, nodes):
-    from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
+    ]
+    for language, nodes in matrix:
+        root = _Node(
+            "program",
+            children=tuple(_Node(node, row=index) for index, node in enumerate(nodes)),
+        )
+        result = TreeSitterAdapter(
+            parser_loader=lambda _language, root=root: _Parser(root)
+        ).parse_bytes(b"safe source", path=f"src/sample.{language}", language=language)
 
-    root = _Node(
-        "program",
-        children=tuple(_Node(node, row=index) for index, node in enumerate(nodes)),
+        assert result.status == "parsed"
+        assert result.syntax is not None
+        kinds = {item.kind for item in result.syntax.controls}
+        assert {
+            "branch",
+            "merge",
+            "return",
+            "catch",
+            "finally",
+            "loop",
+            "async_dispatch",
+            "call",
+        } <= kinds
+        assert len(result.syntax.controls) <= len(nodes) * 2
+
+    test_control_flow_is_finite_and_keeps_branch_return_exception_loop_and_async_boundaries()
+    test_interprocedural_resolution_never_guesses_a_dynamic_target_or_unbounded_recursion()
+    from tests.hermes_cli.test_hades_lifecycle_traversal import (
+        test_self_and_mutual_recursion_reach_finite_fixed_points,
     )
-    result = TreeSitterAdapter(
-        parser_loader=lambda _language: _Parser(root)
-    ).parse_bytes(b"safe source", path=f"src/sample.{language}", language=language)
 
-    assert result.status == "parsed"
-    assert result.syntax is not None
-    kinds = {item.kind for item in result.syntax.controls}
-    assert {
-        "branch",
-        "merge",
-        "return",
-        "catch",
-        "finally",
-        "loop",
-        "async_dispatch",
-        "call",
-    } <= kinds
-    assert len(result.syntax.controls) <= len(nodes) * 2
+    test_self_and_mutual_recursion_reach_finite_fixed_points(tmp_path)
 
 
 def test_missing_parser_partial():

@@ -35,8 +35,9 @@ from hermes_cli.hades_index.tree_sitter_adapter import (
 )
 
 
-def _write(root: Path, content: str) -> None:
-    (root / "app.js").write_text(content, encoding="utf-8")
+def _write(root: Path, content: str, *, language: str = "javascript") -> None:
+    filename = "app.ts" if language == "typescript" else "app.js"
+    (root / filename).write_text(content, encoding="utf-8")
     (root / "package.json").write_text(
         '{"dependencies":{"express":"5.2.1"}}', encoding="utf-8"
     )
@@ -49,19 +50,20 @@ def _location(root: Path, path: str) -> SourceLocationIR:
     )
 
 
-def _context(root: Path) -> ExtractionContext:
+def _context(root: Path, *, language: str = "javascript") -> ExtractionContext:
+    filename = "app.ts" if language == "typescript" else "app.js"
     metadata = _location(root, "package.json")
-    source = (root / "app.js").read_bytes()
+    source = (root / filename).read_bytes()
     return ExtractionContext(
         workspace_root=root,
         project_id="project",
         workspace_binding_id="binding",
         source_identity=SourceIdentity(None, "a" * 64, False, None),
         graph_config=load_hades_graph_index_config({}),
-        detected_languages=("javascript",),
+        detected_languages=(language,),
         detected_frameworks=(
             FrameworkRecord(
-                language="javascript",
+                language=language,
                 name="express",
                 version="5.2.1",
                 detector="package_json",
@@ -75,16 +77,15 @@ def _context(root: Path) -> ExtractionContext:
         tsconfig_metadata=(),
         file_accessor=lambda path: (root / path).read_bytes(),
         inventory_files=(
-            InventoryFile(
-                "app.js", hashlib.sha256(source).hexdigest(), "javascript", True
-            ),
+            InventoryFile(filename, hashlib.sha256(source).hexdigest(), language, True),
         ),
         excluded_path_count=0,
     )
 
 
-def _syntax(root: Path) -> SyntaxIR:
-    source = (root / "app.js").read_text(encoding="utf-8")
+def _syntax(root: Path, *, language: str = "javascript") -> SyntaxIR:
+    filename = "app.ts" if language == "typescript" else "app.js"
+    source = (root / filename).read_text(encoding="utf-8")
     symbols = tuple(
         StructuralSymbol(
             match.group("name"),
@@ -96,15 +97,19 @@ def _syntax(root: Path) -> SyntaxIR:
             r"(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(", source
         )
     )
-    return SyntaxIR(ParsedFile("app.js", "javascript", symbols, (), ()), ())
+    return SyntaxIR(ParsedFile(filename, language, symbols, (), ()), ())
 
 
-def _adapter(root: Path):
+def _adapter(root: Path, *, language: str = "javascript"):
     from hermes_cli.hades_index.lifecycle.frameworks.express import (
         ExpressLifecycleAdapter,
     )
 
-    return ExpressLifecycleAdapter(), _context(root), _syntax(root)
+    return (
+        ExpressLifecycleAdapter(language),
+        _context(root, language=language),
+        _syntax(root, language=language),
+    )
 
 
 def _entries(root: Path):
@@ -119,6 +124,42 @@ def _roles(adapter, context, entry):
 
 def _coverage(adapter, context):
     return {event.reason_code for event in adapter.coverage_events(context)}
+
+
+def test_typescript_adapter_preserves_language_in_every_generated_identity(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        """
+import express from 'express';
+const app = express();
+function health(req, res) { res.json({ok: true}); }
+app.get('/health', health);
+app[method]('/computed', health);
+""",
+        language="typescript",
+    )
+    adapter, context, syntax = _adapter(tmp_path, language="typescript")
+
+    entries = adapter.entrypoints(context, (syntax,))
+    route = next(item for item in entries if item.public_path == "/health")
+    segments = adapter.pipeline(context, route)
+
+    assert adapter.language == "typescript"
+    assert adapter.detect(context).detected is True
+    assert route.handler_local_key == local_record_key(
+        "typescript",
+        "app.ts",
+        "executable_declaration",
+        "ast",
+        "symbol/health",
+        0,
+    )
+    assert segments
+    assert all(
+        event.language == "typescript" for event in adapter.coverage_events(context)
+    )
 
 
 def _function_key(root: Path, name: str) -> str:

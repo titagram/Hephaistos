@@ -782,6 +782,20 @@ class GraphBuilder:
         digest_by_path = {
             item.path: item.file_sha256 for item in context.inventory_files
         }
+
+        def candidate_language(candidate: EntrypointCandidate) -> str | None:
+            declaration = declaration_by_key.get(candidate.handler_local_key or "")
+            if declaration is not None:
+                return declaration.language
+            inventory = inventory_by_path.get(
+                candidate.registration_locator.source_location.path
+            )
+            if inventory is not None and inventory.language is not None:
+                return inventory.language
+            if len(context.detected_languages) == 1:
+                return context.detected_languages[0]
+            return None
+
         locators = _all_locators(collected)
         for locator in locators:
             path = _locator_path(locator)
@@ -806,12 +820,7 @@ class GraphBuilder:
                 declaration.language
             )
         for candidate in entrypoint_candidates:
-            if candidate.handler_local_key in declaration_by_key:
-                language = declaration_by_key[candidate.handler_local_key].language
-            elif len(context.detected_languages) == 1:
-                language = context.detected_languages[0]
-            else:
-                language = "unknown"
+            language = candidate_language(candidate) or "unknown"
             path_languages[candidate.registration_locator.source_location.path].add(
                 language
             )
@@ -1322,11 +1331,8 @@ class GraphBuilder:
             tuple[EntrypointCandidate, EntrypointIdentity, str, str]
         ] = []
         for candidate in entrypoint_candidates:
-            if candidate.handler_local_key in declaration_by_key:
-                language = declaration_by_key[candidate.handler_local_key].language
-            elif len(context.detected_languages) == 1:
-                language = context.detected_languages[0]
-            else:
+            language = candidate_language(candidate)
+            if language is None:
                 raise IRValidationError(
                     "entrypoint_language_unresolved",
                     "entrypoint language cannot be derived deterministically",

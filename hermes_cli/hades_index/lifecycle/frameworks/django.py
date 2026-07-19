@@ -794,9 +794,10 @@ def _collect_routes(
     result: list[_RouteSpec] = []
     current_seen = seen_modules | {path}
     for item in entries:
+        constructor = _dotted(item.func) if isinstance(item, ast.Call) else None
         if (
             not isinstance(item, ast.Call)
-            or _dotted(item.func) not in _URL_CALLS
+            or constructor not in _URL_CALLS
             or len(item.args) < 2
         ):
             diagnostics.mark(path, reason_code="url_pattern_unresolved")
@@ -805,6 +806,8 @@ def _collect_routes(
         if pattern is None:
             diagnostics.mark(path, reason_code="url_pattern_unresolved")
             continue
+        if constructor == "path":
+            pattern = re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", pattern)
         target = item.args[1]
         target_name = _dotted(target.func) if isinstance(target, ast.Call) else None
         if target_name == "include":
@@ -1228,7 +1231,7 @@ def _candidate(
         locator,
         None,
     )
-    public_path = re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", spec.path)
+    public_path = spec.path
     return (
         EntrypointCandidate(
             EntrypointKind.HTTP_ROUTE,

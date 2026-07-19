@@ -1846,16 +1846,20 @@ def _graph_v2_framework_context(
             })
             for language in languages:
                 remember(language, "nextjs", dependencies["next"], "package_json", "package.json")
-        if "express" in dependencies and any(
-            item.language == "javascript" for item in inventory
-        ):
-            remember(
-                "javascript",
-                "express",
-                dependencies["express"],
-                "package_json",
-                "package.json",
-            )
+        if "express" in dependencies:
+            languages = sorted({
+                item.language
+                for item in inventory
+                if item.language in {"javascript", "typescript"}
+            })
+            for language in languages:
+                remember(
+                    language,
+                    "express",
+                    dependencies["express"],
+                    "package_json",
+                    "package.json",
+                )
 
     for path in python_paths:
         try:

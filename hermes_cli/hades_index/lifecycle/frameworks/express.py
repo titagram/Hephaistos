@@ -203,9 +203,9 @@ def _matches(prefix: str, path: str) -> bool:
     )
 
 
-def _event(reason: str, path: str | None = None) -> CoverageEvent:
+def _event(language: str, reason: str, path: str | None = None) -> CoverageEvent:
     return CoverageEvent(
-        "javascript",
+        language,
         CoverageCapability.FRAMEWORK_LIFECYCLE,
         CoverageOutcome.PARTIAL,
         reason,
@@ -288,10 +288,12 @@ def _outcome(function: _Function | None) -> tuple[str | None, str | None]:
 
 
 class ExpressLifecycleAdapter:
-    language = "javascript"
     framework = "express"
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "javascript") -> None:
+        if language not in {"javascript", "typescript"}:
+            raise ValueError(f"unsupported Express language: {language}")
+        self.language = language
         self._snapshots: dict[tuple[str, str, str, str], _Snapshot] = {}
 
     def _key(self, context: ExtractionContext) -> tuple[str, str, str, str]:
@@ -312,7 +314,7 @@ class ExpressLifecycleAdapter:
             self.language,
             self.framework,
             any(
-                row.language == "javascript" and row.name == "express"
+                row.language == self.language and row.name == "express"
                 for row in context.detected_frameworks
             ),
         )
@@ -331,7 +333,7 @@ class ExpressLifecycleAdapter:
         ordinal = 0
         sources: list[tuple[SyntaxIR, str, str]] = []
         for item in syntax:
-            if item.language not in {"javascript", "typescript"}:
+            if item.language != self.language:
                 continue
             try:
                 source = context.file_accessor(
@@ -361,7 +363,7 @@ class ExpressLifecycleAdapter:
                 ]
                 local = (
                     local_record_key(
-                        "javascript",
+                        self.language,
                         item.path,
                         "executable_declaration",
                         "ast",
@@ -382,10 +384,12 @@ class ExpressLifecycleAdapter:
             for match in _COMPUTED.finditer(masked):
                 owner = _object_key(item.path, match.group("owner"))
                 if owner in objects:
-                    coverage.append(_event("route_method_unresolved", item.path))
+                    coverage.append(
+                        _event(self.language, "route_method_unresolved", item.path)
+                    )
                 elif match.group("owner") != "res":
                     coverage.extend(
-                        _event(reason, item.path)
+                        _event(self.language, reason, item.path)
                         for reason in (
                             "registration_target_unresolved",
                             "route_method_unresolved",
@@ -400,7 +404,7 @@ class ExpressLifecycleAdapter:
                 args = _parts(source[match.end() : end]) if end is not None else None
                 if owner not in objects:
                     coverage.extend(
-                        _event(reason, item.path)
+                        _event(self.language, reason, item.path)
                         for reason in (
                             "registration_target_unresolved",
                             "route_method_unresolved",
@@ -410,7 +414,9 @@ class ExpressLifecycleAdapter:
                     )
                     continue
                 if args is None:
-                    coverage.append(_event("handler_target_unresolved", item.path))
+                    coverage.append(
+                        _event(self.language, "handler_target_unresolved", item.path)
+                    )
                     continue
                 if method == "use":
                     if args and _literal(args[0]) is not None:
@@ -420,7 +426,7 @@ class ExpressLifecycleAdapter:
                     else:
                         path, handlers = None, args[1:]
                         coverage.extend(
-                            _event(reason, item.path)
+                            _event(self.language, reason, item.path)
                             for reason in (
                                 "mount_prefix_unresolved",
                                 "router_target_unresolved",
@@ -429,7 +435,9 @@ class ExpressLifecycleAdapter:
                 else:
                     path, handlers = (_literal(args[0]) if args else None), args[1:]
                     if path is None:
-                        coverage.append(_event("route_path_unresolved", item.path))
+                        coverage.append(
+                            _event(self.language, "route_path_unresolved", item.path)
+                        )
                         continue
                 resolved = tuple(
                     _function_key(item.path, value)
@@ -439,8 +447,8 @@ class ExpressLifecycleAdapter:
                 )
                 if any(not _IDENT.fullmatch(value) for value in handlers):
                     coverage.extend((
-                        _event("middleware_order_unresolved", item.path),
-                        _event("handler_target_unresolved", item.path),
+                        _event(self.language, "middleware_order_unresolved", item.path),
+                        _event(self.language, "handler_target_unresolved", item.path),
                     ))
                 if method == "use" and any(
                     _function_key(item.path, value) not in functions
@@ -449,8 +457,12 @@ class ExpressLifecycleAdapter:
                     if _IDENT.fullmatch(value)
                 ):
                     coverage.extend((
-                        _event("error_middleware_arity_unresolved", item.path),
-                        _event("handler_target_unresolved", item.path),
+                        _event(
+                            self.language,
+                            "error_middleware_arity_unresolved",
+                            item.path,
+                        ),
+                        _event(self.language, "handler_target_unresolved", item.path),
                     ))
                 registrations.append(
                     _Registration(
@@ -469,16 +481,16 @@ class ExpressLifecycleAdapter:
             kind, _identity = _outcome(function)
             if kind == "computed_next":
                 coverage.extend(
-                    _event(reason)
+                    _event(self.language, reason)
                     for reason in (
                         "continuation_kind_unresolved",
                         "error_flow_unresolved",
                     )
                 )
             elif kind == "computed_terminal":
-                coverage.append(_event("response_outcome_unresolved"))
+                coverage.append(_event(self.language, "response_outcome_unresolved"))
             elif kind == "detached_rejection":
-                coverage.append(_event("async_error_flow_unresolved"))
+                coverage.append(_event(self.language, "async_error_flow_unresolved"))
         by_owner: dict[str, list[_Registration]] = {}
         for row in registrations:
             by_owner.setdefault(row.owner, []).append(row)
@@ -492,7 +504,7 @@ class ExpressLifecycleAdapter:
             seen: frozenset[str],
         ) -> None:
             if owner in seen:
-                coverage.append(_event("router_target_unresolved"))
+                coverage.append(_event(self.language, "router_target_unresolved"))
                 return
             for row in by_owner.get(owner, ()):
                 if row.method in _METHODS or row.method == "all":
@@ -542,7 +554,7 @@ class ExpressLifecycleAdapter:
                 None
                 if handler
                 else local_record_key(
-                    "javascript",
+                    self.language,
                     row.source_path,
                     "unresolved_fact",
                     "ast",
@@ -751,7 +763,7 @@ class ExpressLifecycleAdapter:
         registration_identity = _registration_identity(candidate)
         keys = [
             local_record_key(
-                "javascript",
+                self.language,
                 candidate.registration_locator.source_location.path,
                 "framework_pipeline",
                 "ast",
@@ -792,7 +804,7 @@ class ExpressLifecycleAdapter:
             successor = (
                 ReturnSuccessor(
                     local_record_key(
-                        "javascript",
+                        self.language,
                         candidate.registration_locator.source_location.path,
                         "framework_terminal",
                         "ast",
@@ -807,7 +819,7 @@ class ExpressLifecycleAdapter:
                     if index + 1 < len(keys)
                     else ReturnSuccessor(
                         local_record_key(
-                            "javascript",
+                            self.language,
                             candidate.registration_locator.source_location.path,
                             "framework_terminal",
                             "ast",

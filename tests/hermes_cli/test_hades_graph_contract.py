@@ -125,6 +125,50 @@ def test_v2_only() -> None:
     assert not hasattr(facade, "DEFAULT_MAX_GRAPH_NODES")
     assert not hasattr(facade, "_NODE_ID_PREFIX")
 
+    test_schema_facade_rejects_unknown_names_and_v1_with_typed_codes()
+
+    from hermes_cli.hades_backend_sync import _upload_job_artifact
+    from plugins.memory import hades_backend as memory_provider
+
+    for legacy_schema in ("hades.code_graph.v1", "hades.php_graph.v1"):
+        assert _upload_job_artifact(
+            object(),
+            object(),
+            object(),
+            "legacy-job",
+            {"artifact": {"schema": legacy_schema}},
+        ) == (0, 1, 0)
+        assert (
+            memory_provider._graph_artifact_from_source({
+                "item": {"schema": legacy_schema, "nodes": [], "edges": []}
+            })
+            is None
+        )
+        assert legacy_schema not in memory_provider.GRAPH_ARTIFACT_SCHEMAS
+        assert (
+            memory_provider._local_graph_artifacts([
+                {
+                    "item": {"schema": legacy_schema, "nodes": [], "edges": []},
+                    "origin": "legacy-cache",
+                }
+            ])
+            == []
+        )
+        assert not memory_provider._active_v2_identity_matches(
+            {}, {}, {"schema": legacy_schema}
+        )
+        assert (
+            memory_provider._authoritative_v2_topology_error(
+                {"schema": legacy_schema},
+                handle="hades:node:v2:" + "a" * 64,
+                project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+                workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+                active_identity={"schema": legacy_schema},
+            )
+            == "graph topology schema is not hades.code_graph.v2"
+        )
+    assert "hades.code_graph.v2" in memory_provider.GRAPH_ARTIFACT_SCHEMAS
+
 
 def test_named_node_id_survives_unrelated_line_insertion() -> None:
     named_node = {
@@ -1276,20 +1320,105 @@ def test_schema_and_dataclass_public_field_inventories_match() -> None:
 
 def test_base_provenance_and_candidate_ownership() -> None:
     _, _, validation = _task3_api()
-    payload = _valid_semantic_artifact()
-    payload["nodes"][0]["evidence"]["primary"]["origin"] = "agent_verified"
-
-    with pytest.raises(validation.GraphValidationError) as exc_info:
-        validation.validate_artifact(payload)
-
-    assert exc_info.value.code == "base_evidence_origin"
-    assert "base artifact evidence origin" in exc_info.value.message
+    for reserved_origin in ("agent_verified", "observed_runtime"):
+        payload = _valid_semantic_artifact()
+        payload["nodes"][0]["evidence"]["primary"]["origin"] = reserved_origin
+        with pytest.raises(validation.GraphValidationError) as exc_info:
+            validation.validate_artifact(payload)
+        assert exc_info.value.code == "base_evidence_origin"
+        assert "base artifact evidence origin" in exc_info.value.message
 
     candidate_payload = _with_external_uncertainty()
-    candidate_payload["edges"][0]["uncertainty_id"] = None
-    with pytest.raises(validation.GraphValidationError) as candidate_error:
-        validation.validate_artifact(candidate_payload)
-    assert candidate_error.value.code == "uncertainty_ownership"
+    subject = candidate_payload["edges"][0]
+    uncertainty = candidate_payload["uncertainties"][0]
+    owner = next(
+        node for node in candidate_payload["nodes"] if node["kind"] == "method"
+    )
+    path = subject["location"]["path"]
+    target_identity = {
+        "variant": "semantic_resource",
+        "workspace_binding_id": candidate_payload["project"]["workspace_binding_id"],
+        "language": "php",
+        "kind": "external_boundary",
+        "framework": None,
+        "namespace": None,
+        "qualified_name": None,
+        "public_resource_name": "orders-api",
+        "protocol": "https",
+        "operation": "request",
+    }
+    target_id = node_id(target_identity)
+    candidate_payload["nodes"].append({
+        "id": target_id,
+        "identity": target_identity,
+        "kind": "external_boundary",
+        "language": "php",
+        "framework": None,
+        "name": "orders-api",
+        "qualified_name": None,
+        "namespace": None,
+        "uncertainty_id": None,
+        "location": {"path": path, "start_line": 2, "end_line": 2},
+        "properties": {
+            "protocol": "https",
+            "operation": "request",
+            "destination_kind": "service",
+        },
+        "evidence": _producer_evidence(candidate_payload, "body/call/0"),
+    })
+    candidate_identity = {
+        "source_id": owner["id"],
+        "target_id": target_id,
+        "relation": subject["relation"],
+        "flow": subject["flow"],
+        "condition_hash": None,
+        "branch_group_id": subject["branch_group_id"],
+        "call_site_id": subject["call_site_id"],
+        "exception_scope_id": subject["exception_scope_id"],
+        "occurrence": subject["occurrence"],
+    }
+    candidate_id = edge_id(candidate_identity)
+    inferred = _producer_evidence(candidate_payload, "body/call/0")
+    inferred["primary"].update(origin="inferred", inference_rule="graphify_candidate")
+    candidate_payload["edges"].append({
+        **copy.deepcopy(subject),
+        "id": candidate_id,
+        "target_id": target_id,
+        "uncertainty_id": uncertainty["id"],
+        "evidence": inferred,
+    })
+    uncertainty.update(
+        candidate_target_node_ids=[target_id],
+        candidate_edge_ids=[candidate_id],
+        candidate_set_knowledge="incomplete",
+    )
+    candidate_payload["nodes"].sort(key=lambda item: item["id"])
+    candidate_payload["edges"].sort(key=lambda item: item["id"])
+    candidate_payload["graph_contract"]["coverage"]["records"].update(
+        nodes=len(candidate_payload["nodes"]),
+        edges=len(candidate_payload["edges"]),
+    )
+    _rehash_artifact(candidate_payload)
+    validation.validate_artifact(candidate_payload)
+
+    ownership_breaks = []
+    missing_candidate_owner = copy.deepcopy(candidate_payload)
+    next(
+        edge for edge in missing_candidate_owner["edges"] if edge["id"] == candidate_id
+    )["uncertainty_id"] = None
+    ownership_breaks.append(missing_candidate_owner)
+    missing_subject_owner = copy.deepcopy(candidate_payload)
+    next(
+        edge for edge in missing_subject_owner["edges"] if edge["id"] == subject["id"]
+    )["uncertainty_id"] = None
+    ownership_breaks.append(missing_subject_owner)
+    mismatched_candidate_array = copy.deepcopy(candidate_payload)
+    mismatched_candidate_array["uncertainties"][0]["candidate_edge_ids"] = []
+    ownership_breaks.append(mismatched_candidate_array)
+    for broken in ownership_breaks:
+        with pytest.raises(validation.GraphValidationError) as candidate_error:
+            validation.validate_artifact(broken)
+        assert candidate_error.value.code == "uncertainty_ownership"
 
 
 def test_unresolved_target_requires_exact_uncertainty_subject() -> None:
@@ -1306,17 +1435,39 @@ def test_unresolved_target_requires_exact_uncertainty_subject() -> None:
 
 def test_privacy_rejection() -> None:
     _, _, validation = _task3_api()
-    payload = _valid_semantic_artifact()
+    for unsafe_path in (
+        "/absolute/private.php",
+        "C:/private.php",
+        "src/../private.php",
+        "src//private.php",
+        "src/\u0000private.php",
+        "src/\u202eprivate.php",
+    ):
+        with pytest.raises(GraphContractError) as exc_info:
+            normalize_source_path(unsafe_path)
+        assert exc_info.value.code == "unsafe_source_path"
+
+    raw_source = _valid_semantic_artifact()
+    raw_source["nodes"][0]["properties"]["raw_source"] = "<?php secret ?>"
+    with pytest.raises(validation.GraphValidationError) as raw_error:
+        validation.validate_artifact(raw_source)
+    assert raw_error.value.code == "schema_validation_failed"
+
+    secret = _valid_semantic_artifact()
+    secret["nodes"][0]["name"] = "api_key=do-not-persist"
+    with pytest.raises(validation.GraphValidationError) as secret_error:
+        validation.validate_artifact(secret)
+    assert secret_error.value.code == "secret_like_literal"
+
     private_path = "private/credentials.php"
-    evidence = payload["nodes"][0]["evidence"]["primary"]
+    dangling = _valid_semantic_artifact()
+    evidence = dangling["nodes"][0]["evidence"]["primary"]
     evidence["source_locator"]["path"] = private_path
     evidence["source_fingerprint"] = file_source_fingerprint("e" * 64, private_path)
-
-    with pytest.raises(validation.GraphValidationError) as exc_info:
-        validation.validate_artifact(payload)
-
-    assert exc_info.value.code == "dangling_file_locator"
-    assert private_path not in str(exc_info.value)
+    with pytest.raises(validation.GraphValidationError) as dangling_error:
+        validation.validate_artifact(dangling)
+    assert dangling_error.value.code == "dangling_file_locator"
+    assert private_path not in str(dangling_error.value)
 
 
 def test_serialized_ids_are_recomputed_not_trusted() -> None:
@@ -1332,6 +1483,63 @@ def test_serialized_ids_are_recomputed_not_trusted() -> None:
 
 def test_reference_resolution() -> None:
     _, _, validation = _task3_api()
+    validation.validate_artifact(_valid_flow_artifact())
+    validation.validate_artifact(_with_external_uncertainty())
+
+    dangling_edge = _valid_flow_artifact()
+    edge = dangling_edge["edges"][0]
+    old_edge_id = edge["id"]
+    edge["target_id"] = "hades:node:v2:" + "f" * 64
+    edge["id"] = edge_id({
+        "source_id": edge["source_id"],
+        "target_id": edge["target_id"],
+        "relation": edge["relation"],
+        "flow": edge["flow"],
+        "condition_hash": (
+            None if edge["condition"] is None else edge["condition"]["hash"]
+        ),
+        "branch_group_id": edge["branch_group_id"],
+        "call_site_id": edge["call_site_id"],
+        "exception_scope_id": edge["exception_scope_id"],
+        "occurrence": edge["occurrence"],
+    })
+    for step in dangling_edge["flow_steps"]:
+        if step["edge_id"] != old_edge_id:
+            continue
+        step["edge_id"] = edge["id"]
+        step["id"] = flow_step_id(
+            step["flow_id"],
+            step["edge_id"],
+            step["stage_from"],
+            step["stage_to"],
+            step["async_context"],
+        )
+    dangling_edge["edges"].sort(key=lambda record: record["id"])
+    dangling_edge["flow_steps"].sort(key=lambda record: record["id"])
+    _rehash_artifact(dangling_edge)
+    with pytest.raises(validation.GraphValidationError) as edge_error:
+        validation.validate_artifact(dangling_edge)
+    assert edge_error.value.code == "dangling_node_reference"
+
+    dangling_step = _valid_flow_artifact()
+    step = dangling_step["flow_steps"][0]
+    step["edge_id"] = "hades:edge:v2:" + "f" * 64
+    step["id"] = flow_step_id(
+        step["flow_id"],
+        step["edge_id"],
+        step["stage_from"],
+        step["stage_to"],
+        step["async_context"],
+    )
+    dangling_step["flow_steps"].sort(key=lambda record: record["id"])
+    _rehash_artifact(dangling_step)
+    with pytest.raises(validation.GraphValidationError) as step_error:
+        validation.validate_artifact(dangling_step)
+    assert step_error.value.code == "dangling_edge_reference"
+
+    test_flow_step_membership_cannot_reference_another_artifact()
+    test_return_edge_requires_a_matching_invocation()
+
     other = _valid_semantic_artifact()
     other["nodes"][0]["identity"]["path"] = "src/Elsewhere.php"
     other["nodes"][0]["qualified_name"] = "src/Elsewhere.php"
@@ -2133,10 +2341,29 @@ def test_schema_unique_items_uses_linear_handler_without_relaxing_duplicates() -
         assert exc_info.value.code == "schema_validation_failed"
 
 
-def test_evidence_flow_completeness_orthogonal() -> None:
+def test_evidence_flow_completeness_orthogonal(tmp_path: Path) -> None:
     _, _, validation = _task3_api()
 
     validation.validate_artifact(_valid_flow_artifact())
+
+    from tests.hermes_cli.test_hades_lifecycle_traversal import (
+        _build,
+        _complex_result,
+    )
+
+    artifact = _build(tmp_path, _complex_result(unresolved=True))
+    branch_edges = tuple(
+        edge
+        for edge in artifact.edges
+        if edge.flow is not None and edge.flow.value in {"conditional", "alternative"}
+    )
+    assert artifact.graph_contract.completeness.status.value == "partial"
+    assert branch_edges
+    assert all(
+        edge.evidence.primary.origin.value == "verified_from_code"
+        for edge in branch_edges
+    )
+    validation.validate_artifact(artifact)
 
 
 def _flow_by_kind(artifact: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -2518,7 +2745,7 @@ def test_global_and_language_capability_reason_counts_reconcile() -> None:
     assert exc_info.value.code == "capability_reason_scope_mismatch"
 
 
-def test_omission_ledgers() -> None:
+def test_omission_ledgers(tmp_path: Path) -> None:
     _, _, validation = _task3_api()
     payload = json.loads(json.dumps(_valid_semantic_artifact()))
     payload["graph_contract"]["completeness"]["status"] = "partial"
@@ -2541,6 +2768,25 @@ def test_omission_ledgers() -> None:
         validation.validate_artifact(payload)
 
     assert exc_info.value.code == "capability_reason_count_mismatch"
+
+    test_capability_reason_count_matches_affected_records()
+    test_global_and_language_capability_reason_counts_reconcile()
+    test_full_flow_rejects_omitted_reachable_verified_async_dispatch()
+    test_full_flow_rejects_omitted_reachable_verified_branch()
+    test_partial_flow_rejects_omitted_represented_verified_response()
+    test_partial_flow_rejects_omitted_represented_verified_async_dispatch()
+
+    from tests.hermes_cli.test_hades_graph_config import (
+        test_symlink_to_excluded_secret_is_out_of_scope_not_partial,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_traversal import (
+        test_excluded_path_count_is_carried_from_typed_inventory_context,
+    )
+
+    test_symlink_to_excluded_secret_is_out_of_scope_not_partial(tmp_path / "excluded")
+    test_excluded_path_count_is_carried_from_typed_inventory_context(
+        tmp_path / "ledger"
+    )
 
 
 def _unknown_count(represented: int, reason: str) -> dict[str, Any]:

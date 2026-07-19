@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -195,6 +196,23 @@ def _run_graph_v2_case(case: dict[str, int | str]) -> dict[str, Any]:
     if not deterministic:
         raise RuntimeError("graph v2 benchmark chunk digests do not close")
 
+    from hermes_cli.hades_graph_v2.model import (
+        artifact_from_payload,
+        artifact_to_payload,
+    )
+    from hermes_cli.hades_graph_v2.validation import validate_artifact
+
+    reassembled = {kind: [] for kind in CHUNK_KINDS}
+    for raw in plan.uncompressed_chunks:
+        chunk = json.loads(raw)
+        kind = str(chunk["kind"])
+        reassembled[kind].extend(chunk["records"])
+    reassembled_payload = artifact_to_payload(selected)
+    reassembled_payload.update(reassembled)
+    reassembled_artifact = artifact_from_payload(reassembled_payload)
+    validate_artifact(reassembled_artifact)
+    reassembled_counts = {kind: len(reassembled[kind]) for kind in CHUNK_KINDS}
+
     delivered_counts = {
         kind: len(getattr(selected, kind))
         for kind in CHUNK_KINDS
@@ -255,6 +273,7 @@ def _run_graph_v2_case(case: dict[str, int | str]) -> dict[str, Any]:
         "delivered_counts": delivered_counts,
         "manifest_counts": manifest_counts,
         "descriptor_counts": descriptor_counts,
+        "reassembled_counts": reassembled_counts,
         "omitted_counts": omitted_counts,
         "omitted_record_count": omitted_record_count,
         "coverage_omission_ledger": coverage_omission_ledger,
@@ -263,6 +282,10 @@ def _run_graph_v2_case(case: dict[str, int | str]) -> dict[str, Any]:
             "complete" if omitted_record_count == 0 else "counted_omissions"
         ),
         "deterministic": deterministic,
+        "reassembly_valid": True,
+        "reassembled_artifact_graph_version": (
+            reassembled_artifact.graph_contract.artifact_graph_version
+        ),
         "chunk_count": len(plan.chunks),
         "artifact_graph_version": artifact_graph_version,
         "manifest_sha256": manifest_sha256,

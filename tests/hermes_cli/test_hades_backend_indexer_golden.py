@@ -120,7 +120,7 @@ def test_inventory_ledger_materializes_failure_only_file_and_counts_it(tmp_path)
     assert artifact.graph_contract.coverage.files.failed == 1
 
 
-def test_polyglot(tmp_path):
+def test_polyglot(tmp_path, monkeypatch):
     python = _complex_result()
     typescript = _empty_result(
         CoverageEvent(
@@ -151,6 +151,122 @@ def test_polyglot(tmp_path):
     assert tuple(
         item.language for item in first.graph_contract.completeness.languages
     ) == ("python", "typescript")
+
+    from hermes_cli.hades_backend_jobs import execute_job
+    from tests.hermes_cli.test_hades_backend_jobs import _materialize_graph_v2
+
+    workspace = tmp_path / "all-adapters"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hades-home"))
+    (workspace / "composer.json").write_text(
+        '{"require":{"laravel/framework":"11.0","symfony/framework-bundle":"7.0"}}',
+        encoding="utf-8",
+    )
+    (workspace / "requirements.txt").write_text(
+        "django==5.1\nfastapi==0.115\n", encoding="utf-8"
+    )
+    (workspace / "package.json").write_text(
+        '{"dependencies":{"express":"5.2.1","next":"15.0.0"}}',
+        encoding="utf-8",
+    )
+    (workspace / "app.js").write_text(
+        "const express = require('express');\n"
+        "const app = express();\n"
+        "function health(req, res) { res.json({ok:true}); }\n"
+        "app.get('/express-health', health);\n",
+        encoding="utf-8",
+    )
+    next_route = workspace / "app" / "api" / "items" / "route.ts"
+    next_route.parent.mkdir(parents=True)
+    next_route.write_text(
+        "export async function GET() { return Response.json([]); }\n",
+        encoding="utf-8",
+    )
+    (workspace / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/fastapi-health')\n"
+        "def fastapi_health(): return {'ok': True}\n"
+        "def main(): return 0\n",
+        encoding="utf-8",
+    )
+    project = workspace / "project"
+    project.mkdir()
+    (project / "settings.py").write_text(
+        'ROOT_URLCONF = "project.urls"\nMIDDLEWARE = []\n', encoding="utf-8"
+    )
+    (project / "urls.py").write_text(
+        "from django.urls import path\n"
+        "from . import views\n"
+        "urlpatterns = [path('django-health/', views.health, name='health')]\n",
+        encoding="utf-8",
+    )
+    (project / "views.py").write_text(
+        "def health(request): return None\n", encoding="utf-8"
+    )
+    laravel = workspace / "routes" / "web.php"
+    laravel.parent.mkdir()
+    laravel.write_text(
+        "<?php\nRoute::get('/laravel-health', [HealthController::class, 'show']);\n",
+        encoding="utf-8",
+    )
+    controller = workspace / "app" / "Http" / "Controllers" / "HealthController.php"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "<?php\nclass HealthController { public function show() { return 'ok'; } }\n",
+        encoding="utf-8",
+    )
+    symfony = workspace / "src" / "Controller" / "StatusController.php"
+    symfony.parent.mkdir(parents=True)
+    symfony.write_text(
+        "<?php\nuse Symfony\\Component\\Routing\\Attribute\\Route;\n"
+        "class StatusController { #[Route('/symfony-health', name: 'status')] "
+        "public function status() { return 'ok'; } }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_all_adapters",
+            "capability": "populate_backend_ast",
+            "payload": {
+                "project_id": "01KXJD0SV73EBGWKNE2EK3M4KD",
+                "workspace_binding_id": "01KXJD1BDMQ2TFABMVJV6EFE8Q",
+                "max_files": 100,
+                "max_symbols": 500,
+                "max_edges": 1_000,
+            },
+        },
+        workspace_root=workspace,
+    )
+    all_adapters = _materialize_graph_v2(result)
+    assert {
+        (item["language"], item["name"]) for item in all_adapters["frameworks"]
+    } == {
+        ("python", "django"),
+        ("python", "fastapi"),
+        ("php", "laravel"),
+        ("php", "symfony"),
+        ("javascript", "express"),
+        ("typescript", "express"),
+        ("javascript", "nextjs"),
+        ("typescript", "nextjs"),
+    }
+    assert {item["language"] for item in all_adapters["nodes"]} >= {
+        "javascript",
+        "php",
+        "python",
+        "typescript",
+    }
+    assert {item.get("framework") for item in all_adapters["entrypoints"]} >= {
+        "django",
+        "express",
+        "fastapi",
+        "laravel",
+        "nextjs",
+        "symfony",
+    }
+    test_v2_aggregation_rejects_cross_adapter_semantic_collisions()
 
 
 def test_empty_file_and_no_entrypoint_coverage_remain_distinct(tmp_path):

@@ -306,7 +306,7 @@ def test_registry_requires_the_formal_coverage_events_adapter_method() -> None:
         FrameworkAdapterRegistry().register(_LegacyAdapterWithoutCoverage())
 
 
-def test_all_required_framework_golden_suites_are_registered() -> None:
+def test_all_required_framework_golden_suites_are_registered(tmp_path: Path) -> None:
     """The production registry owns every framework backed by a golden suite."""
 
     assert tuple(
@@ -318,9 +318,81 @@ def test_all_required_framework_golden_suites_are_registered() -> None:
         ("php", "laravel"),
         ("php", "symfony"),
         ("javascript", "express"),
+        ("typescript", "express"),
         ("javascript", "nextjs"),
         ("typescript", "nextjs"),
     )
+
+    from tests.hermes_cli.test_hades_lifecycle_django import (
+        test_recurses_static_includes_preserves_order_namespace_prefix_and_converters,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_express import (
+        test_nested_router_mount_composes_literal_path_prefix_exactly,
+        test_typescript_adapter_preserves_language_in_every_generated_identity,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_fastapi import (
+        test_nested_routers_methods_dependencies_cache_cleanup_and_background_child,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_laravel import (
+        test_detects_laravel_and_preserves_nested_group_registration_order,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_nextjs import (
+        test_app_route_static_get_and_post_exports_are_method_entrypoints,
+    )
+    from tests.hermes_cli.test_hades_lifecycle_symfony import (
+        test_routes_keep_yaml_and_attribute_collision_and_apply_import_context,
+    )
+
+    cases = (
+        (
+            test_detects_laravel_and_preserves_nested_group_registration_order,
+            "laravel",
+            (),
+        ),
+        (
+            test_routes_keep_yaml_and_attribute_collision_and_apply_import_context,
+            "symfony",
+            (),
+        ),
+        (
+            test_recurses_static_includes_preserves_order_namespace_prefix_and_converters,
+            "django",
+            (),
+        ),
+        (
+            test_nested_routers_methods_dependencies_cache_cleanup_and_background_child,
+            "fastapi",
+            (),
+        ),
+        (
+            test_nested_router_mount_composes_literal_path_prefix_exactly,
+            "express-js",
+            (),
+        ),
+        (
+            test_typescript_adapter_preserves_language_in_every_generated_identity,
+            "express-ts",
+            (),
+        ),
+        (
+            test_app_route_static_get_and_post_exports_are_method_entrypoints,
+            "next-js",
+            ("javascript",),
+        ),
+        (
+            test_app_route_static_get_and_post_exports_are_method_entrypoints,
+            "next-ts",
+            ("typescript",),
+        ),
+    )
+    for test_case, directory, arguments in cases:
+        case_root = tmp_path / directory
+        case_root.mkdir()
+        test_case(case_root, *arguments)
+
+    generic_root = tmp_path / "generic"
+    generic_root.mkdir()
+    test_generic_entrypoints_cover_non_http_runtime_roots(generic_root)
 
 
 def test_framework_pipeline_protocol_rejects_orphan_duplicate_exception_scope(

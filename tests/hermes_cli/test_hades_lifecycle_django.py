@@ -175,8 +175,9 @@ urlpatterns = [
     assert adapter.detect(_context(tmp_path)).detected is True
     assert [(item.public_path, item.public_name) for item in routes] == [
         ("/api/{tenant_id}/items/", "v1:items"),
-        ("/^legacy/(?P{slug}[-\\w]+)/$", "legacy"),
+        ("/^legacy/(?P<slug>[-\\w]+)/$", "legacy"),
     ]
+    assert all("(?P{" not in (item.public_path or "") for item in routes)
     assert all(item.kind is EntrypointKind.HTTP_ROUTE for item in routes)
     assert all(item.method_semantics is MethodSemantics.UNRESTRICTED for item in routes)
     assert all(item.handler_local_key is not None for item in routes)

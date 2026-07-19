@@ -656,14 +656,35 @@ def test_self_and_mutual_recursion_reach_finite_fixed_points(tmp_path):
 
 
 def test_async_terminal_semantics(tmp_path):
-    artifact = _build(tmp_path, _complex_result())
+    artifact = _build(tmp_path, replace(_complex_result(), edge_facts=()))
     parent = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
+    child = next(flow for flow in artifact.flows if flow.kind.value == "async_flow")
+    edges = {edge.id: edge for edge in artifact.edges}
+    dispatch = next(
+        step
+        for step in artifact.flow_steps
+        if step.flow_id == parent.id and edges[step.edge_id].flow is EdgeFlow.ASYNC
+    )
+    child_steps = tuple(
+        step for step in artifact.flow_steps if step.flow_id == child.id
+    )
 
     assert parent.terminal_count.knowledge is Knowledge.EXACT
     assert parent.terminal_count.value == parent.terminal_count.represented
     assert parent.linked_async_flow_count.value == 1
     assert parent.uncertainty_count.knowledge is Knowledge.ABSENCE_VERIFIED
     assert parent.uncertainty_count.value == 0
+    assert dispatch.async_child_flow_id == child.id
+    assert dispatch.async_context is AsyncContext.SYNCHRONOUS
+    assert child_steps
+    assert all(step.async_context is AsyncContext.LINKED_ASYNC for step in child_steps)
+    assert all(
+        not (
+            step.flow_id == parent.id
+            and edges[step.edge_id].source_id == child.root_node_id
+        )
+        for step in artifact.flow_steps
+    )
 
 
 def test_graph_builder_is_permutation_invariant_and_deduplicates_identical_ir(tmp_path):

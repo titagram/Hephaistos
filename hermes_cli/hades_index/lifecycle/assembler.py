@@ -119,7 +119,8 @@ def default_framework_registry() -> FrameworkAdapterRegistry:
         FastAPILifecycleAdapter(),
         LaravelLifecycleAdapter(),
         SymfonyLifecycleAdapter(),
-        ExpressLifecycleAdapter(),
+        ExpressLifecycleAdapter("javascript"),
+        ExpressLifecycleAdapter("typescript"),
         NextJSLifecycleAdapter("javascript"),
         NextJSLifecycleAdapter("typescript"),
     ):

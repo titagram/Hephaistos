@@ -513,21 +513,27 @@ def test_populate_backend_ast_combines_php_and_typescript_in_one_polyglot_graph(
         "PhpController",
         "healthHandler",
     }
-    # Express is not a registered v2 lifecycle adapter.  Preserve the
-    # polyglot syntax inventory without manufacturing an HTTP entrypoint.
+    # Route-looking syntax without package metadata must not manufacture a
+    # framework record or HTTP entrypoint.
     assert not any(
         entrypoint.get("public_path") == "/health"
         for entrypoint in artifact["entrypoints"]
     )
 
 
-def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tmp_path):
+@pytest.mark.parametrize(
+    ("filename", "language"),
+    (("api.js", "javascript"), ("api.ts", "typescript")),
+)
+def test_populate_backend_ast_materializes_package_proven_express_route(
+    tmp_path, filename, language
+):
     from hermes_cli.hades_backend_jobs import execute_job
 
     (tmp_path / "package.json").write_text(
         '{"dependencies":{"express":"latest"}}', encoding="utf-8"
     )
-    route = tmp_path / "server" / "api.js"
+    route = tmp_path / "server" / filename
     route.parent.mkdir(parents=True)
     route.write_text(
         "import express from 'express';\n"
@@ -550,7 +556,7 @@ def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tm
 
     artifact = _materialize_graph_v2(result)
     assert any(
-        framework["name"] == "express" and framework["language"] == "javascript"
+        framework["name"] == "express" and framework["language"] == language
         for framework in artifact["frameworks"]
     )
     assert any(
@@ -558,6 +564,34 @@ def test_populate_backend_ast_materializes_express_route_when_adapter_arrives(tm
         and entrypoint.get("methods") == ["GET"]
         and entrypoint.get("public_path") == "/api/health"
         for entrypoint in artifact["entrypoints"]
+    )
+
+
+def test_populate_backend_ast_does_not_infer_express_from_route_syntax(tmp_path):
+    from hermes_cli.hades_backend_jobs import execute_job
+
+    route = tmp_path / "server" / "api.js"
+    route.parent.mkdir(parents=True)
+    route.write_text(
+        "const app = express();\n"
+        "app.get('/health', healthHandler);\n"
+        "function healthHandler(req, res) { res.json({ok: true}); }\n",
+        encoding="utf-8",
+    )
+
+    result = execute_job(
+        {
+            "job_id": "job_express_syntax_only",
+            "capability": "populate_backend_ast",
+            "payload": {"max_files": 20, "max_symbols": 50, "max_edges": 50},
+        },
+        workspace_root=tmp_path,
+    )
+
+    artifact = _materialize_graph_v2(result)
+    assert not any(item["name"] == "express" for item in artifact["frameworks"])
+    assert not any(
+        item.get("framework") == "express" for item in artifact["entrypoints"]
     )
 
 

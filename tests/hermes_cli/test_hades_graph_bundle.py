@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import gzip
+import importlib.util
 import hashlib
 import json
 import os
@@ -318,23 +319,72 @@ def test_chunk_bytes_are_permutation_invariant_at_the_canonical_boundary(tmp_pat
 
 
 def test_large_bundle(tmp_path):
-    from hermes_cli.hades_graph_v2.bundle import GraphBundleError, GraphBundleWriter
+    from hermes_cli.hades_backend_benchmark import run_hades_backend_benchmark
+    from hermes_cli.hades_graph_v2.bundle import CHUNK_KINDS
 
-    writer = GraphBundleWriter()
-    measured = writer.write(_valid_semantic_artifact(), tmp_path / "measure", _limits())
-    exact = _logical_bytes(measured)
-
-    writer.write(
-        _valid_semantic_artifact(),
-        tmp_path / "exact",
-        _limits(max_bundle_uncompressed_bytes=exact),
+    del tmp_path
+    report = run_hades_backend_benchmark(
+        cases=[
+            {
+                "name": "large_code_graph",
+                "nodes": 5_501,
+                "entrypoints": 501,
+                "edges": 10_501,
+            }
+        ]
     )
-    with pytest.raises(GraphBundleError, match="total-byte limit"):
-        writer.write(
-            _valid_semantic_artifact(),
-            tmp_path / "short",
-            _limits(max_bundle_uncompressed_bytes=exact - 1),
-        )
+    assert report["case_count"] == 1
+    graph = report["cases"][0]
+    assert graph["requested_counts"] == {
+        "nodes": 5_501,
+        "entrypoints": 501,
+        "edges": 10_501,
+    }
+    assert all(
+        graph["source_counts"][kind] >= graph["requested_counts"][kind]
+        for kind in graph["requested_counts"]
+    )
+    assert graph["chunk_count"] > len(CHUNK_KINDS)
+    assert graph["delivered_counts"] == graph["manifest_counts"]
+    assert graph["descriptor_counts"] == graph["manifest_counts"]
+    assert graph["reassembled_counts"] == graph["manifest_counts"]
+    assert {
+        kind: graph["delivered_counts"][kind] + graph["omitted_counts"][kind]
+        for kind in CHUNK_KINDS
+    } == graph["source_counts"]
+    assert graph["coverage_omission_ledger"] == sum(graph["omitted_counts"].values())
+    assert graph["deterministic"] is True
+    assert graph["reassembly_valid"] is True
+    assert (
+        graph["reassembled_artifact_graph_version"] == graph["artifact_graph_version"]
+    )
+    assert len(graph["artifact_graph_version"]) == 64
+    assert len(graph["manifest_sha256"]) == 64
+
+
+def test_gate_report_generator_rejects_nonpassing_pytest_summaries() -> None:
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "generate_graph_v2_agent_gates.py"
+    )
+    spec = importlib.util.spec_from_file_location("graph_v2_gate_report", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    expected_python = Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"
+    assert module._resolved_python(Path(".venv/bin/python")) == expected_python
+    assert module._resolved_python(expected_python) == expected_python
+    assert module._passed_count(". 1 passed in 0.10s") == 1
+    for output in (
+        "1 skipped in 0.10s",
+        "1 xfailed in 0.10s",
+        "1 passed, 1 deselected in 0.10s",
+        "no tests ran in 0.10s",
+    ):
+        with pytest.raises(ValueError, match="gate subprocess"):
+            module._passed_count(output)
 
 
 def test_resume_after_chunk_two_tracks_only_persisted_acknowledgements(tmp_path):
