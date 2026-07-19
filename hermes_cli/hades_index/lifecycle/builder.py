@@ -3288,11 +3288,7 @@ class GraphBuilder:
             ),
             EntrypointCoverage(
                 len(entrypoints),
-                sum(
-                    flow.completeness.status is CompletenessStatus.FULL
-                    for flow in flows
-                    if flow.kind is not FlowKind.ASYNC_FLOW
-                ),
+                len(entrypoints),
                 sum(
                     flow.completeness.status is CompletenessStatus.PARTIAL
                     for flow in flows

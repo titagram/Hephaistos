@@ -24,6 +24,7 @@ from .identity import (
     uncertainty_fingerprint,
 )
 from .model import (
+    AnalysisStatus,
     AnonymousCallableIdentity,
     AstSourceLocator,
     AsyncContext,
@@ -2290,6 +2291,14 @@ def _observed_reason_counts(
 
 def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
     observed, reconcilable = _observed_reason_counts(artifact)
+    # Bundle pruning removes the affected public records, so their per-language
+    # observations are intentionally absent.  The exact authoritative count is
+    # coverage.records.omitted_by_bundle_budget; capability reasons describe
+    # affected semantic families rather than duplicating that record ledger.
+    reconcilable.difference_update({
+        ReasonCode.RECORD_TOO_LARGE,
+        ReasonCode.RESOURCE_BUDGET_REACHED,
+    })
     completeness = artifact.graph_contract.completeness
     scoped_envelopes = [(None, completeness.capabilities)]
     scoped_envelopes.extend(
@@ -2464,20 +2473,21 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         node for node in artifact.nodes if isinstance(node.identity, FileIdentity)
     )
     coverage = contract.coverage.files
-    if coverage.discovered != len(files) or coverage.hashed != len(files):
-        _fail("file_coverage_mismatch", "file coverage does not match inventory nodes")
+    if coverage.discovered != coverage.hashed or coverage.discovered < len(files):
+        _fail("file_coverage_mismatch", "file discovery/hash coverage does not close")
     status_counts = Counter(
         cast(FileProperties, node.properties).analysis_status.value for node in files
     )
-    for field_name in (
-        "analyzed",
-        "unsupported",
-        "failed",
-        "too_large",
-        "budget_omitted",
-    ):
+    for field_name in ("analyzed", "unsupported", "failed", "too_large"):
         if getattr(coverage, field_name) != status_counts[field_name]:
             _fail("file_coverage_mismatch", "file status coverage does not close")
+    missing_file_records = coverage.discovered - len(files)
+    if coverage.budget_omitted != (
+        status_counts[AnalysisStatus.BUDGET_OMITTED.value] + missing_file_records
+    ):
+        _fail("file_coverage_mismatch", "file budget omissions do not close")
+    if sum(status_counts.values()) != len(files):
+        _fail("file_coverage_mismatch", "represented file statuses do not close")
     if (
         coverage.parser_candidates > coverage.discovered
         or coverage.analyzed > coverage.parser_candidates
@@ -2486,32 +2496,34 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
 
     kind_counts = Counter(item.entrypoint_kind.value for item in artifact.entrypoints)
     entrypoint_coverage = contract.coverage.entrypoints
-    if entrypoint_coverage.detected != len(artifact.entrypoints):
-        _fail("entrypoint_coverage_mismatch", "entrypoint coverage does not close")
-    represented_kind_counts = {
+    detected_kind_counts = {
         item.metadata.get("wire_name", item.name): getattr(
             entrypoint_coverage.by_kind, item.name
         )
         for item in fields(entrypoint_coverage.by_kind)
         if getattr(entrypoint_coverage.by_kind, item.name) is not None
     }
-    if represented_kind_counts != dict(kind_counts):
+    if (
+        sum(detected_kind_counts.values()) != entrypoint_coverage.detected
+        or entrypoint_coverage.detected < len(artifact.entrypoints)
+        or any(
+            detected_kind_counts.get(kind, 0) < represented
+            for kind, represented in kind_counts.items()
+        )
+    ):
         _fail("entrypoint_coverage_mismatch", "entrypoint kind counts do not close")
-    full_entrypoints = sum(
-        1
-        for flow in artifact.flows
-        if flow.kind is not FlowKind.ASYNC_FLOW
-        and flow.completeness.status is CompletenessStatus.FULL
-    )
     partial_entrypoints = sum(
         1
         for flow in artifact.flows
         if flow.kind is not FlowKind.ASYNC_FLOW
         and flow.completeness.status is CompletenessStatus.PARTIAL
     )
+    rejected_entrypoints = entrypoint_coverage.detected - len(artifact.entrypoints)
     if (
-        entrypoint_coverage.analyzed != full_entrypoints
-        or entrypoint_coverage.partial != partial_entrypoints
+        entrypoint_coverage.analyzed != len(artifact.entrypoints)
+        or entrypoint_coverage.partial != partial_entrypoints + rejected_entrypoints
+        or entrypoint_coverage.analyzed > entrypoint_coverage.detected
+        or entrypoint_coverage.partial > entrypoint_coverage.detected
     ):
         _fail("entrypoint_coverage_mismatch", "entrypoint analysis counts do not close")
 
@@ -2537,10 +2549,15 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         )
     for language in artifact.languages:
         if (
-            language.detected_file_count != file_language_counts[language.name]
+            language.detected_file_count < file_language_counts[language.name]
             or language.analyzed_file_count != analyzed_language_counts[language.name]
         ):
             _fail("language_coverage_mismatch", "language file counts do not close")
+    if (
+        sum(item.detected_file_count for item in artifact.languages)
+        > coverage.discovered
+    ):
+        _fail("language_coverage_mismatch", "language detection exceeds file coverage")
     if {item.language for item in contract.completeness.languages} != {
         item.name for item in artifact.languages
     }:
@@ -2636,8 +2653,6 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         if (omission_reason := cast(FileProperties, node.properties).omission_reason)
         is not None
     }
-    if record_counts.omitted_by_bundle_budget:
-        omitted_reasons.add(ReasonCode.RESOURCE_BUDGET_REACHED)
     global_reason_codes = {
         reason.code
         for name in _CAPABILITY_ORDER
@@ -2645,6 +2660,18 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
     }
     if omitted_reasons - global_reason_codes:
         _fail("coverage_omission_reason", "in-scope omission lacks a counted reason")
+    if record_counts.omitted_by_bundle_budget:
+        if record_counts.omitted_by_bundle_budget < missing_file_records or not (
+            {
+                ReasonCode.RESOURCE_BUDGET_REACHED,
+                ReasonCode.RECORD_TOO_LARGE,
+            }
+            & global_reason_codes
+        ):
+            _fail(
+                "coverage_omission_reason",
+                "bundle omission lacks an exact budget reason ledger",
+            )
 
 
 def validate_artifact_digest(artifact: GraphArtifactV2) -> None:
