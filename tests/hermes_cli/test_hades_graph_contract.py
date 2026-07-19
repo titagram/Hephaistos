@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 from typing import Any
 
 import pytest
@@ -51,7 +52,7 @@ PACKAGED_CONTRACT_ROOT = ROOT / "hermes_cli" / "hades_graph_v2" / "contracts"
 CANONICALIZATION_GOLDEN = CONTRACT_ROOT / "golden" / "canonicalization.json"
 VERIFICATION_GOLDEN = CONTRACT_ROOT / "golden" / "verification-results.json"
 CONTRACT_LOCK = CONTRACT_ROOT / "contract-lock.json"
-SCHEMA_SOURCE_COMMIT = "3f8498e0f9a6902e1b68ed45495a2d89993a7a9e"
+SCHEMA_SOURCE_COMMIT = "1a6cf20566eed3bd45d1a14c765bbae8608d4958"
 
 
 def _golden() -> dict[str, Any]:
@@ -281,6 +282,24 @@ def test_contract_lock_pins_manifest_and_all_registered_schemas() -> None:
         if row["path"] in SCHEMA_NAMES
     }
     assert set(lock["schema_digests"]) == SCHEMA_NAMES
+
+
+def test_contract_lock_source_commit_contains_every_locked_schema_byte() -> None:
+    lock = json.loads(CONTRACT_LOCK.read_text(encoding="utf-8"))
+    source_commit = lock["schema_source_commit"]
+
+    for schema_name, expected_digest in lock["schema_digests"].items():
+        completed = subprocess.run(
+            [
+                "git",
+                "show",
+                f"{source_commit}:contracts/hades/graph-v2/{schema_name}",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        assert hashlib.sha256(completed.stdout).hexdigest() == expected_digest
 
 
 def test_packaged_schema_resources_are_byte_identical_to_contract_sources() -> None:
