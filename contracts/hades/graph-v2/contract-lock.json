@@ -1,9 +1,9 @@
 {
   "schema": "hades.graph_v2_contract_lock.v1",
-  "schema_source_commit": "1a6cf20566eed3bd45d1a14c765bbae8608d4958",
-  "manifest_sha256": "ffed8ebbf613990b76657bdc543fa69752ef193edb773840fc72dbce79ab584a",
+  "schema_source_commit": "bb3c4b3b495425cf9c9a303af606065e9ee78146",
+  "manifest_sha256": "cfb469a60fd0c59a13ca254df5e60871c83ffa207f21e3d307ced6ade6233644",
   "schema_digests": {
-    "artifact.schema.json": "53b1352e382fdc3402bbf52693c58292739125da539dded6daec84a8aea5bc04",
+    "artifact.schema.json": "a6f44bdd5de4dbd3f4a4e21c388538a16488a81c583b4340f9c97791e77d166b",
     "bundle.schema.json": "28fcf6bac68689288b89c6e7b5e1b2dcbd39b93af88bba6ed224be114fbea0bd",
     "chunk.schema.json": "b1c5e3084b84864b44c22d2e615b9d554dd40d65e322bdc4122cd6c86f219eec",
     "dashboard-query.schema.json": "0a9f11fb4597b9dbcd513904f186524d8e62c35dc0c029861f6f3e2e8d9db99d",

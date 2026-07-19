@@ -1394,7 +1394,7 @@
               "properties": {
                 "relation": {"const": "throws_to"},
                 "flow": {"const": "exception"},
-                "call_site_id": {"type": "null"}
+                "call_site_id": {"oneOf": [{"$ref": "#/$defs/callSiteId"}, {"type": "null"}]}
               }
             },
             {

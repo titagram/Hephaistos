@@ -52,7 +52,7 @@ PACKAGED_CONTRACT_ROOT = ROOT / "hermes_cli" / "hades_graph_v2" / "contracts"
 CANONICALIZATION_GOLDEN = CONTRACT_ROOT / "golden" / "canonicalization.json"
 VERIFICATION_GOLDEN = CONTRACT_ROOT / "golden" / "verification-results.json"
 CONTRACT_LOCK = CONTRACT_ROOT / "contract-lock.json"
-SCHEMA_SOURCE_COMMIT = "1a6cf20566eed3bd45d1a14c765bbae8608d4958"
+SCHEMA_SOURCE_COMMIT = "bb3c4b3b495425cf9c9a303af606065e9ee78146"
 
 
 def _golden() -> dict[str, Any]:
@@ -2092,6 +2092,21 @@ def _rehash_artifact(artifact: dict[str, Any]) -> None:
     artifact["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
         artifact
     )
+
+
+def test_schema_allows_exact_call_site_id_on_interprocedural_throw() -> None:
+    payload = _valid_call_return_flow_artifact()
+    edge = next(item for item in payload["edges"] if item["relation"] == "returns_to")
+    edge["relation"] = "throws_to"
+    edge["flow"] = "exception"
+    edge["condition"] = {
+        "kind": "predicate",
+        "normalized": "RuntimeException",
+        "hash": condition_hash("RuntimeException"),
+        "polarity": "exception",
+    }
+
+    validate_schema("artifact.schema.json", payload)
 
 
 def test_valid_semantic_sync_and_async_flow_fixture() -> None:
