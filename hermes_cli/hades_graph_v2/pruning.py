@@ -12,7 +12,9 @@ from typing import Any, cast
 from .bundle import (
     CHUNK_KINDS,
     BundleLimits,
-    GraphBundleError,
+    GraphEnvelopeTooLargeError,
+    GraphRecoverableCapacityError,
+    GraphUnitRecordTooLargeError,
     build_bundle_plan,
     record_fits_chunk,
 )
@@ -74,6 +76,24 @@ _STRUCTURAL_CAPABILITIES = frozenset({
 
 class GraphBudgetError(RuntimeError):
     """The graph cannot produce a valid envelope within its hard budgets."""
+
+    code = "graph_budget_invalid"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(f"{self.code}: {message}")
+
+
+class GraphRequiredEnvelopeTooLargeError(GraphBudgetError):
+    """Required record or manifest metadata cannot fit its hard envelope."""
+
+    code = "graph_record_too_large"
+
+
+class GraphBundleBudgetTooSmallError(GraphBudgetError):
+    """Even the final valid selected graph cannot fit total capacity."""
+
+    code = "graph_bundle_budget_too_small"
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,7 +621,9 @@ class GraphBudgetPruner:
             complete_plan = build_bundle_plan(
                 artifact, limits, enforce_total=False, _validated=True
             )
-        except GraphBundleError:
+        except GraphEnvelopeTooLargeError as exc:
+            raise GraphRequiredEnvelopeTooLargeError(exc.message) from exc
+        except GraphRecoverableCapacityError:
             complete_plan = None
         if (
             complete_plan is not None
@@ -618,8 +640,8 @@ class GraphBudgetPruner:
         for token in accepted:
             record = cast(dict[str, Any], index.record(token))
             if not record_fits_chunk(token[0], record, limits):
-                raise GraphBudgetError(
-                    "graph_record_too_large: required envelope record exceeds chunk ceiling"
+                raise GraphRequiredEnvelopeTooLargeError(
+                    "required envelope record exceeds the chunk ceiling"
                 )
 
         rejections: list[_Rejection] = []
@@ -642,13 +664,13 @@ class GraphBudgetPruner:
                 plan = build_bundle_plan(
                     candidate, limits, enforce_total=False, _validated=True
                 )
-            except GraphBundleError as exc:
-                if "graph_record_too_large" in str(exc):
-                    rejections.append(_Rejection(unit, ReasonCode.RECORD_TOO_LARGE))
-                else:
-                    rejections.append(
-                        _Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED)
-                    )
+            except GraphUnitRecordTooLargeError:
+                rejections.append(_Rejection(unit, ReasonCode.RECORD_TOO_LARGE))
+                return
+            except GraphEnvelopeTooLargeError as exc:
+                raise GraphRequiredEnvelopeTooLargeError(exc.message) from exc
+            except GraphRecoverableCapacityError:
+                rejections.append(_Rejection(unit, ReasonCode.RESOURCE_BUDGET_REACHED))
                 return
             if plan.logical_uncompressed_bytes <= limits.bundle_ceiling:
                 accepted.update(unit.tokens)
@@ -681,14 +703,21 @@ class GraphBudgetPruner:
             plan = build_bundle_plan(
                 selected, limits, enforce_total=False, _validated=True
             )
-        except GraphBundleError as exc:
-            raise GraphBudgetError(f"graph_bundle_budget_too_small: {exc}") from exc
+        except GraphEnvelopeTooLargeError as exc:
+            raise GraphRequiredEnvelopeTooLargeError(exc.message) from exc
+        except GraphRecoverableCapacityError as exc:
+            raise GraphBundleBudgetTooSmallError(exc.message) from exc
         if plan.logical_uncompressed_bytes > limits.bundle_ceiling:
-            raise GraphBudgetError(
-                "graph_bundle_budget_too_small: empty valid artifact envelope exceeds limit"
+            raise GraphBundleBudgetTooSmallError(
+                "empty valid artifact envelope exceeds the total-byte limit"
             )
         validate_artifact(selected)
         return selected
 
 
-__all__ = ["GraphBudgetError", "GraphBudgetPruner"]
+__all__ = [
+    "GraphBudgetError",
+    "GraphBudgetPruner",
+    "GraphBundleBudgetTooSmallError",
+    "GraphRequiredEnvelopeTooLargeError",
+]

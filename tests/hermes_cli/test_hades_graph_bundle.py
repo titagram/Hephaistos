@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import json
@@ -11,6 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli.hades_graph_v2 import (
+    artifact_graph_version,
+    artifact_to_payload,
     canonical_json_bytes,
     load_json_bytes,
     validate_artifact,
@@ -48,6 +51,180 @@ def _rewrite_resume_manifest_digest(spool: Path) -> None:
     ).hexdigest()
     resume_path.write_bytes(canonical_json_bytes(resume))
     os.chmod(resume_path, 0o600)
+
+
+@pytest.fixture(scope="module")
+def exact_manifest_ceiling_artifact():
+    from hermes_cli.hades_graph_v2.bundle import (
+        MAX_MANIFEST_BYTES,
+        build_bundle_plan,
+    )
+
+    payload = copy.deepcopy(_valid_semantic_artifact())
+    payload["nodes"] = []
+    payload["graph_contract"]["coverage"]["files"].update(
+        discovered=0,
+        hashed=0,
+        parser_candidates=0,
+        analyzed=0,
+    )
+    payload["graph_contract"]["coverage"]["records"]["nodes"] = 0
+    payload["languages"][0].update(
+        detected_file_count=0,
+        analyzed_file_count=0,
+    )
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["languages"][0]["capabilities"] = copy.deepcopy(
+        completeness["languages"][0]["capabilities"]
+    )
+    completeness["status"] = "partial"
+    reasons = []
+    for reason_index in range(103):
+        reasons.append({
+            "code": "invalid_source_fact",
+            "count": 1,
+            "language": None,
+            "paths_sample": [
+                f"manifest/{reason_index:03d}/{path_index:02d}-x"
+                for path_index in range(10)
+            ],
+        })
+    completeness["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": reasons,
+    }
+    payload["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        payload
+    )
+    limits = _limits(max_bundle_uncompressed_bytes=16 * 1024 * 1024)
+    initial = build_bundle_plan(payload, limits)
+    remaining = MAX_MANIFEST_BYTES - len(initial.manifest_bytes)
+    assert remaining > 0
+
+    for reason in reasons:
+        for index, path in enumerate(reason["paths_sample"]):
+            growth = min(remaining, 4_096 - len(path))
+            reason["paths_sample"][index] = path + ("x" * growth)
+            remaining -= growth
+            if remaining == 0:
+                break
+        if remaining == 0:
+            break
+    assert remaining == 0
+    payload["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        payload
+    )
+    exact = build_bundle_plan(payload, limits)
+    assert len(exact.manifest_bytes) == MAX_MANIFEST_BYTES
+    return payload
+
+
+def _shift_manifest_size(payload: dict, delta: int) -> dict:
+    shifted = copy.deepcopy(payload)
+    reasons = shifted["graph_contract"]["completeness"]["capabilities"]["inventory"][
+        "reasons"
+    ]
+    if delta < 0:
+        path = reasons[0]["paths_sample"][0]
+        assert len(path) > len("manifest/000/00-x")
+        reasons[0]["paths_sample"][0] = path[:delta]
+    elif delta > 0:
+        for reason in reasons:
+            for index, path in enumerate(reason["paths_sample"]):
+                if len(path) < 4_096:
+                    reason["paths_sample"][index] = path + ("x" * delta)
+                    break
+            else:
+                continue
+            break
+        else:  # pragma: no cover - fixture capacity invariant
+            raise AssertionError("manifest fixture has no remaining safe-path capacity")
+    shifted["graph_contract"]["artifact_graph_version"] = artifact_graph_version(
+        shifted
+    )
+    return shifted
+
+
+@pytest.mark.parametrize("delta", [-1, 0], ids=["below", "exact"])
+def test_manifest_envelope_below_or_at_4mib_is_valid_for_writer_and_pruner(
+    tmp_path,
+    exact_manifest_ceiling_artifact,
+    delta,
+):
+    from hermes_cli.hades_graph_v2.bundle import (
+        MAX_MANIFEST_BYTES,
+        GraphBundleWriter,
+    )
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+
+    artifact = _shift_manifest_size(exact_manifest_ceiling_artifact, delta)
+    limits = _limits(max_bundle_uncompressed_bytes=16 * 1024 * 1024)
+    bundle = GraphBundleWriter().write(
+        artifact,
+        tmp_path / f"writer-{delta}",
+        limits,
+    )
+    assert len(canonical_json_bytes(bundle.manifest)) == MAX_MANIFEST_BYTES + delta
+
+    selected = GraphBudgetPruner().select(artifact, limits)
+    assert artifact_to_payload(selected) == artifact
+
+
+def test_manifest_envelope_above_4mib_is_graph_record_too_large_for_both_entrypoints(
+    tmp_path,
+    exact_manifest_ceiling_artifact,
+):
+    from hermes_cli.hades_graph_v2.bundle import (
+        CHUNK_KINDS,
+        GraphBundleError,
+        GraphBundleWriter,
+        build_bundle_plan,
+    )
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetError, GraphBudgetPruner
+
+    artifact = _shift_manifest_size(exact_manifest_ceiling_artifact, 1)
+    limits = _limits(max_bundle_uncompressed_bytes=16 * 1024 * 1024)
+    assert all(not artifact[kind] for kind in CHUNK_KINDS)
+    with pytest.raises(GraphBundleError):
+        build_bundle_plan(artifact, limits, enforce_total=False)
+    with pytest.raises(GraphBundleError) as writer_error:
+        GraphBundleWriter().write(artifact, tmp_path / "writer-above", limits)
+    with pytest.raises(GraphBudgetError) as pruner_error:
+        GraphBudgetPruner().select(artifact, limits)
+
+    assert writer_error.value.code == "graph_record_too_large"
+    assert type(writer_error.value).__name__ == "GraphEnvelopeTooLargeError"
+    assert pruner_error.value.code == "graph_record_too_large"
+
+
+def test_record_derived_manifest_overflow_is_recoverable_by_atomic_pruning(
+    tmp_path,
+    monkeypatch,
+):
+    from hermes_cli.hades_graph_v2 import bundle as bundle_module
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+    from tests.hermes_cli.test_hades_graph_budget_pruner import _route_artifact
+
+    artifact = _route_artifact(3)
+    limits = _limits(max_bundle_uncompressed_bytes=32 * 1024 * 1024)
+    normal = bundle_module.build_bundle_plan(artifact, limits)
+    manifest_ceiling = 8_000
+    assert len(normal.manifest_bytes) > manifest_ceiling
+    monkeypatch.setattr(bundle_module, "MAX_MANIFEST_BYTES", manifest_ceiling)
+
+    with pytest.raises(bundle_module.GraphBundleError) as writer_error:
+        bundle_module.GraphBundleWriter().write(
+            artifact,
+            tmp_path / "writer-record-derived",
+            limits,
+        )
+    selected = GraphBudgetPruner().select(artifact, limits)
+    final = bundle_module.build_bundle_plan(selected, limits)
+
+    assert writer_error.value.code == "resource_budget_reached"
+    assert type(writer_error.value).__name__ == "GraphManifestCapacityError"
+    assert 0 < len(selected.entrypoints) < len(artifact["entrypoints"])
+    assert len(final.manifest_bytes) <= manifest_ceiling
 
 
 def test_writer_emits_descriptor_order_exact_jcs_and_single_member_gzip(tmp_path):
@@ -361,12 +538,14 @@ def test_successful_or_canceled_spool_is_deleted_explicitly(tmp_path):
 def test_record_larger_than_chunk_is_a_typed_hard_writer_failure(tmp_path):
     from hermes_cli.hades_graph_v2.bundle import GraphBundleError, GraphBundleWriter
 
-    with pytest.raises(GraphBundleError, match="graph_record_too_large"):
+    with pytest.raises(GraphBundleError, match="record_too_large") as exc_info:
         GraphBundleWriter().write(
             _valid_semantic_artifact(),
             tmp_path / "spool",
             _limits(max_chunk_uncompressed_bytes=512),
         )
+    assert exc_info.value.code == "record_too_large"
+    assert type(exc_info.value).__name__ == "GraphUnitRecordTooLargeError"
 
 
 def test_zero_record_artifact_emits_zero_chunks(tmp_path):

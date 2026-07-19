@@ -7,7 +7,10 @@ byte/chunk ceilings and emits deterministic, resumable, privately spooled
 bundles without entity-count truncation. The implementation preserves every
 surviving public ID, recomputes authoritative omission/coverage/completeness
 ledgers and the artifact digest, and validates the selected artifact before it
-can be written.
+can be written. The independent-review blockers C1 and I1 are repaired: the
+shared validator closes every derivable file/entrypoint gap against explicit
+omission provenance, and the bundle boundary distinguishes recoverable
+record-derived capacity from an irreducibly oversized required envelope.
 
 ## TDD evidence
 
@@ -25,6 +28,24 @@ Two later audit counterexamples were also observed RED before repair:
   unconditionally (`1 failed`).
 
 Both cases are now covered in the final suite.
+
+The independent review then supplied three additional counterexamples. All
+three were reproduced through both `validate_artifact` and
+`GraphBundleWriter.write` before the repair:
+
+- a missing represented file with `files.budget_omitted=1` but a zero bundle
+  omission ledger was accepted;
+- a real pruner result with one missing detected entrypoint remained accepted
+  after changing only its omission ledger from 16 to zero;
+- a represented `budget_omitted` file with one observable budget event was
+  accepted with global and language reason counts of 999.
+
+The focused RED run was `3 failed` because neither entrypoint raised. Two
+additional closure counterexamples were also RED: a single ledger unit could
+cover disjoint missing-file and missing-entrypoint gaps, and arbitrary budget
+reason counts were accepted when a nonzero ledger existed. The repaired
+focused tranche is `5 passed`; the full Task 15 tranche below covers these
+cases through both public entrypoints.
 
 ## Atomic selection
 
@@ -69,6 +90,17 @@ represented count:
   record exactly once, and any nonzero omission requires an explicit
   `resource_budget_reached` or `record_too_large` capability reason.
 
+The repair removes the remaining silent-omission escape hatches without
+restoring the invalid `detected == len(entrypoints)` assumption. Missing file
+records and missing detected entrypoints form a derivable, disjoint lower
+bound for `records.omitted_by_bundle_budget`. Each affected semantic family
+must be `partial` with budget evidence (`inventory` for files,
+`entrypoint_discovery` for entrypoints), global completeness must be partial,
+and the global ledger must carry a budget reason. Budget reason counts remain
+exact when the omission ledger is zero; with pruning provenance they are
+bounded by observable events plus that explicit ledger, including a guard
+against double-counting both budget reason codes inside one capability.
+
 The Task 14 builder now emits `entrypoints.analyzed == len(entrypoints)` so a
 represented partial flow does not falsely become “not analyzed.” The adjacent
 501-test producer/contract matrix proves this stronger overlapping invariant is
@@ -90,6 +122,31 @@ compatible with full, partial, polyglot, and framework graphs.
   stale spools are removed, and published/canceled spools are explicitly
   deleted.
 
+## Typed capacity and envelope failures
+
+Bundle planning now exposes stable typed failures instead of parsing generic
+exception text:
+
+- `GraphUnitRecordTooLargeError` (`record_too_large`) is recoverable by
+  rejecting the containing atomic semantic unit;
+- `GraphManifestCapacityError` and `GraphChunkCapacityError`
+  (`resource_budget_reached`) represent capacity that whole-unit pruning can
+  legally reduce;
+- `GraphEnvelopeTooLargeError` (`graph_record_too_large`) means the required
+  manifest remains above 4 MiB even after all public chunk records and
+  descriptors are removed;
+- `GraphBundleBudgetTooSmallError` (`graph_bundle_budget_too_small`) is
+  reserved for a final valid empty selected artifact that exceeds total
+  capacity.
+
+The pruner catches only the recoverable capacity subclasses. Schema, digest,
+integrity, and other generic bundle failures propagate rather than being
+misreported as an ordinary unit rejection. Boundary tests construct a valid
+zero-public-record envelope one byte below, exactly at, and one byte above
+4 MiB and exercise both writer and pruner. A separate record-derived manifest
+overflow proves that descriptor-driven overflow is still recoverable by
+atomic pruning.
+
 ## Verification
 
 Final Task 15 suite:
@@ -100,7 +157,10 @@ Final Task 15 suite:
   tests/hermes_cli/test_hades_graph_bundle.py -q
 ```
 
-Result: `27 passed in 189.58s`. This includes a single over-budget flow,
+Result after independent-review repair: `36 passed in 639.79s`. This includes
+all original coverage plus the five validator/writer counterexamples, the real
+below/at/above 4 MiB required-envelope boundary, and recoverable
+record-derived manifest overflow. The original coverage includes a single over-budget flow,
 accepted/rejected shared topology, a smaller later unit, oversized record,
 exact byte ceiling, zero-chunk envelope, more than 5,000 nodes, more than
 10,000 edges, more than 500 routes, permutation-invariant bytes, referential
@@ -108,13 +168,13 @@ reassembly, deterministic gzip, trailing/concatenated members, both digest
 mismatches, resume after chunk index 2, mutation after acknowledgements,
 private modes, locks, stale cleanup, and explicit terminal cleanup.
 
-Adjacent Task 14/contract/golden suite: `501 passed in 16.16s` across the 12
+Adjacent Task 14/contract/golden suite: `501 passed in 16.67s` across the 12
 modules listed by the Task 14 report.
 
 Fresh final static verification:
 
 ```text
-ruff format --check  # 6 files already formatted
+ruff format --check  # scoped repair files already formatted
 ruff check           # All checks passed
 python -m py_compile # exit 0
 git diff --check     # exit 0
@@ -133,5 +193,6 @@ git diff --check     # exit 0
 The shared Task 17 changes in `hermes_cli/hades_backend_client.py`,
 `tests/hermes_cli/test_hades_backend_client.py`, and
 `.superpowers/sdd/progress.md` were neither modified for Task 15 nor staged.
-The required commit subject is
-`feat(hades): bundle graph v2 without silent truncation`.
+The original implementation commit is
+`84640d689 feat(hades): bundle graph v2 without silent truncation`; the review
+repair is recorded as a separate commit.

@@ -109,6 +109,10 @@ _CAPABILITY_ORDER = (
     "async_",
     "data_access",
 )
+_BUNDLE_BUDGET_REASON_CODES = frozenset({
+    ReasonCode.RECORD_TOO_LARGE,
+    ReasonCode.RESOURCE_BUDGET_REACHED,
+})
 _STAGE_ORDER = tuple(Stage)
 _STRUCTURAL_RELATIONS = frozenset({
     Relation.DECLARES,
@@ -2291,14 +2295,7 @@ def _observed_reason_counts(
 
 def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
     observed, reconcilable = _observed_reason_counts(artifact)
-    # Bundle pruning removes the affected public records, so their per-language
-    # observations are intentionally absent.  The exact authoritative count is
-    # coverage.records.omitted_by_bundle_budget; capability reasons describe
-    # affected semantic families rather than duplicating that record ledger.
-    reconcilable.difference_update({
-        ReasonCode.RECORD_TOO_LARGE,
-        ReasonCode.RESOURCE_BUDGET_REACHED,
-    })
+    omitted_ledger = artifact.graph_contract.coverage.records.omitted_by_bundle_budget
     completeness = artifact.graph_contract.completeness
     scoped_envelopes = [(None, completeness.capabilities)]
     scoped_envelopes.extend(
@@ -2307,9 +2304,8 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
     )
     for envelope_language, capabilities in scoped_envelopes:
         for name in _CAPABILITY_ORDER:
+            budget_excess = 0
             for reason in getattr(capabilities, name).reasons:
-                if reason.code not in reconcilable:
-                    continue
                 language = (
                     reason.language if envelope_language is None else envelope_language
                 )
@@ -2322,11 +2318,23 @@ def _validate_reason_record_counts(artifact: GraphArtifactV2) -> None:
                     if language is None
                     else observed[(reason.code, language)]
                 )
-                if reason.count != expected:
+                if reason.code in _BUNDLE_BUDGET_REASON_CODES:
+                    if not expected <= reason.count <= expected + omitted_ledger:
+                        _fail(
+                            "capability_reason_count_mismatch",
+                            "bundle-budget reason exceeds observable events and omission ledger",
+                        )
+                    budget_excess += reason.count - expected
+                elif reason.code in reconcilable and reason.count != expected:
                     _fail(
                         "capability_reason_count_mismatch",
                         "capability reason count does not match affected records",
                     )
+            if budget_excess > omitted_ledger:
+                _fail(
+                    "capability_reason_count_mismatch",
+                    "bundle-budget reasons double-count the explicit omission ledger",
+                )
 
 
 def _validate_flow_reason_counts_and_scopes(artifact: GraphArtifactV2) -> None:
@@ -2411,7 +2419,6 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         for name in _CAPABILITY_ORDER:
             _validate_capability(getattr(capabilities, name))
     _validate_global_language_reason_scopes(artifact)
-    _validate_reason_record_counts(artifact)
     _validate_flow_reason_counts_and_scopes(artifact)
     for language in contract.completeness.languages:
         if not _status_matches_capabilities(language.status, language.capabilities):
@@ -2660,18 +2667,44 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
     }
     if omitted_reasons - global_reason_codes:
         _fail("coverage_omission_reason", "in-scope omission lacks a counted reason")
-    if record_counts.omitted_by_bundle_budget:
-        if record_counts.omitted_by_bundle_budget < missing_file_records or not (
-            {
-                ReasonCode.RESOURCE_BUDGET_REACHED,
-                ReasonCode.RECORD_TOO_LARGE,
-            }
-            & global_reason_codes
-        ):
+    omitted_ledger = record_counts.omitted_by_bundle_budget
+    derived_public_record_gaps = missing_file_records + rejected_entrypoints
+    if omitted_ledger < derived_public_record_gaps:
+        _fail(
+            "coverage_omission_ledger",
+            "bundle omission ledger is below derivable public-record gaps",
+        )
+
+    def closes_budget_gap(capability_name: str) -> bool:
+        capability = getattr(contract.completeness.capabilities, capability_name)
+        return capability.status is CapabilityStatus.PARTIAL and any(
+            reason.code in _BUNDLE_BUDGET_REASON_CODES for reason in capability.reasons
+        )
+
+    if omitted_ledger:
+        if not (_BUNDLE_BUDGET_REASON_CODES & global_reason_codes):
             _fail(
                 "coverage_omission_reason",
-                "bundle omission lacks an exact budget reason ledger",
+                "bundle omission lacks a budget or record-size reason",
             )
+        if contract.completeness.status is not CompletenessStatus.PARTIAL or not any(
+            closes_budget_gap(name) for name in _CAPABILITY_ORDER
+        ):
+            _fail(
+                "coverage_omission_completeness",
+                "bundle omission must make global and capability completeness partial",
+            )
+    if missing_file_records and not closes_budget_gap("inventory"):
+        _fail(
+            "coverage_omission_completeness",
+            "missing file records require partial inventory budget evidence",
+        )
+    if rejected_entrypoints and not closes_budget_gap("entrypoint_discovery"):
+        _fail(
+            "coverage_omission_completeness",
+            "missing entrypoints require partial discovery budget evidence",
+        )
+    _validate_reason_record_counts(artifact)
 
 
 def validate_artifact_digest(artifact: GraphArtifactV2) -> None:

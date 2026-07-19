@@ -55,6 +55,38 @@ _RESUME_FIELDS = frozenset({
 class GraphBundleError(RuntimeError):
     """A deterministic local bundle failure that prevents publication."""
 
+    code = "graph_bundle_invalid"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(f"{self.code}: {message}")
+
+
+class GraphRecoverableCapacityError(GraphBundleError):
+    """A unit-local capacity failure for which whole-unit pruning is legal."""
+
+    code = "resource_budget_reached"
+
+
+class GraphUnitRecordTooLargeError(GraphRecoverableCapacityError):
+    """One public chunk record cannot fit and its semantic unit must be rejected."""
+
+    code = "record_too_large"
+
+
+class GraphManifestCapacityError(GraphRecoverableCapacityError):
+    """Record-derived descriptors make a prunable manifest exceed its ceiling."""
+
+
+class GraphChunkCapacityError(GraphRecoverableCapacityError):
+    """Chunk count, wire body, ratio, or total bytes require unit pruning."""
+
+
+class GraphEnvelopeTooLargeError(GraphBundleError):
+    """Required manifest metadata alone exceeds the hard envelope ceiling."""
+
+    code = "graph_record_too_large"
+
 
 @dataclass(frozen=True, slots=True)
 class BundleLimits:
@@ -305,8 +337,8 @@ def _partition_records(
                 current_size = candidate_size
                 continue
             if not current:
-                raise GraphBundleError(
-                    f"graph_record_too_large: {kind} record does not fit one chunk"
+                raise GraphUnitRecordTooLargeError(
+                    f"{kind} record does not fit one chunk"
                 )
             partitions.append((
                 kind,
@@ -318,8 +350,8 @@ def _partition_records(
             current_bytes = [record_bytes]
             current_size = len(_chunk_payload(next_index, kind, [])) + len(record_bytes)
             if current_size > limits.chunk_ceiling:
-                raise GraphBundleError(
-                    f"graph_record_too_large: {kind} record does not fit one chunk"
+                raise GraphUnitRecordTooLargeError(
+                    f"{kind} record does not fit one chunk"
                 )
         if current:
             partitions.append((
@@ -329,7 +361,9 @@ def _partition_records(
             ))
             next_index += 1
     if len(partitions) > limits.max_chunks:
-        raise GraphBundleError("graph bundle exceeds the configured chunk-count limit")
+        raise GraphChunkCapacityError(
+            "graph bundle exceeds the configured chunk-count limit"
+        )
     return partitions
 
 
@@ -350,9 +384,13 @@ def build_bundle_plan(
     for index, (kind, records, raw) in enumerate(partitions):
         compressed = _deterministic_gzip(raw)
         if len(compressed) > limits.body_ceiling:
-            raise GraphBundleError("compressed graph chunk exceeds the wire body limit")
+            raise GraphChunkCapacityError(
+                "compressed graph chunk exceeds the wire body limit"
+            )
         if len(raw) > len(compressed) * MAX_DECOMPRESSION_RATIO:
-            raise GraphBundleError("graph chunk exceeds the decompression ratio limit")
+            raise GraphChunkCapacityError(
+                "graph chunk exceeds the decompression ratio limit"
+            )
         descriptors.append({
             "index": index,
             "kind": kind,
@@ -389,10 +427,25 @@ def build_bundle_plan(
     validate_schema("bundle.schema.json", manifest)
     manifest_bytes = canonical_json_bytes(manifest)
     if len(manifest_bytes) > MAX_MANIFEST_BYTES:
-        raise GraphBundleError("graph bundle manifest exceeds 4 MiB")
+        envelope = copy.deepcopy(manifest)
+        envelope["counts"] = {
+            "frameworks": len(cast(list, payload["frameworks"])),
+            "languages": len(cast(list, payload["languages"])),
+            **{kind: 0 for kind in CHUNK_KINDS},
+        }
+        envelope["chunks"] = []
+        if len(canonical_json_bytes(envelope)) > MAX_MANIFEST_BYTES:
+            raise GraphEnvelopeTooLargeError(
+                "required graph bundle manifest metadata exceeds 4 MiB"
+            )
+        raise GraphManifestCapacityError(
+            "record-derived graph bundle manifest exceeds 4 MiB"
+        )
     total = len(manifest_bytes) + sum(len(raw) for raw in raw_chunks)
     if enforce_total and total > limits.bundle_ceiling:
-        raise GraphBundleError("graph bundle exceeds the configured total-byte limit")
+        raise GraphChunkCapacityError(
+            "graph bundle exceeds the configured total-byte limit"
+        )
     return BundlePlan(
         manifest,
         manifest_bytes,
@@ -678,6 +731,11 @@ __all__ = [
     "CHUNK_KINDS",
     "GraphBundleError",
     "GraphBundleWriter",
+    "GraphChunkCapacityError",
+    "GraphEnvelopeTooLargeError",
+    "GraphManifestCapacityError",
+    "GraphRecoverableCapacityError",
+    "GraphUnitRecordTooLargeError",
     "build_bundle_plan",
     "record_fits_chunk",
 ]

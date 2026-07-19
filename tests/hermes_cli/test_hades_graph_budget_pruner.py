@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.hades_graph_v2 import (
+    GraphValidationError,
     artifact_from_payload,
     artifact_graph_version,
     artifact_to_payload,
@@ -272,6 +273,196 @@ def _omitted_public_records(before: dict, after: dict) -> int:
         len({record["id"] for record in before[kind]})
         - len({record["id"] for record in after[kind]})
         for kind in kinds
+    )
+
+
+def _assert_validator_and_writer_reject(
+    payload: dict,
+    tmp_path: Path,
+    *,
+    code: str,
+) -> None:
+    with pytest.raises(GraphValidationError) as validation_error:
+        validate_artifact(payload)
+    assert validation_error.value.code == code
+
+    with pytest.raises(GraphValidationError) as writer_error:
+        GraphBundleWriter().write(payload, tmp_path / code, _limits())
+    assert writer_error.value.code == code
+
+
+def test_validator_and_writer_reject_silent_missing_file_with_zero_omission_ledger(
+    tmp_path: Path,
+):
+    payload = copy.deepcopy(_valid_semantic_artifact())
+    payload["nodes"] = []
+    coverage = payload["graph_contract"]["coverage"]
+    coverage["files"].update(analyzed=0, budget_omitted=1)
+    coverage["records"].update(nodes=0, omitted_by_bundle_budget=0)
+    payload["languages"][0]["analyzed_file_count"] = 0
+    _rehash(payload)
+
+    _assert_validator_and_writer_reject(
+        payload,
+        tmp_path,
+        code="coverage_omission_ledger",
+    )
+
+
+def test_validator_and_writer_reject_silent_missing_entrypoint_with_zero_ledger(
+    tmp_path: Path,
+):
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+
+    payload = _route_artifact(1)
+    measured = GraphBundleWriter().write(
+        payload, tmp_path / "measure", _limits(total=32 * 1024 * 1024)
+    )
+    selected = GraphBudgetPruner().select(
+        artifact_from_payload(payload),
+        _limits(total=_logical_bytes(measured) - 1),
+    )
+    forged = artifact_to_payload(selected)
+    assert forged["graph_contract"]["coverage"]["entrypoints"]["detected"] == 1
+    assert forged["entrypoints"] == []
+    forged["graph_contract"]["coverage"]["records"]["omitted_by_bundle_budget"] = 0
+    _rehash(forged)
+
+    _assert_validator_and_writer_reject(
+        forged,
+        tmp_path,
+        code="coverage_omission_ledger",
+    )
+
+
+def test_validator_and_writer_reject_arbitrary_observable_budget_reason_count(
+    tmp_path: Path,
+):
+    payload = copy.deepcopy(_valid_semantic_artifact())
+    file_node = payload["nodes"][0]
+    file_node["properties"].update(
+        analysis_status="budget_omitted",
+        omission_reason="resource_budget_reached",
+    )
+    coverage = payload["graph_contract"]["coverage"]
+    coverage["files"].update(analyzed=0, budget_omitted=1)
+    payload["languages"][0]["analyzed_file_count"] = 0
+    reason = {
+        "code": "resource_budget_reached",
+        "count": 999,
+        "language": "php",
+        "paths_sample": [file_node["identity"]["path"]],
+    }
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["status"] = "partial"
+    completeness["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    completeness["languages"][0]["status"] = "partial"
+    completeness["languages"][0]["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(reason)],
+    }
+    _rehash(payload)
+
+    _assert_validator_and_writer_reject(
+        payload,
+        tmp_path,
+        code="capability_reason_count_mismatch",
+    )
+
+
+def test_validator_and_writer_require_ledger_to_cover_disjoint_file_and_entrypoint_gaps(
+    tmp_path: Path,
+):
+    payload = copy.deepcopy(_valid_semantic_artifact())
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["languages"][0]["capabilities"] = copy.deepcopy(
+        completeness["languages"][0]["capabilities"]
+    )
+    payload["nodes"] = []
+    coverage = payload["graph_contract"]["coverage"]
+    coverage["files"].update(analyzed=0, budget_omitted=1)
+    coverage["entrypoints"].update(
+        detected=1,
+        analyzed=0,
+        partial=1,
+        by_kind={"http_route": 1},
+    )
+    coverage["records"].update(nodes=0, omitted_by_bundle_budget=1)
+    payload["languages"][0]["analyzed_file_count"] = 0
+    inventory_reason = {
+        "code": "resource_budget_reached",
+        "count": 1,
+        "language": "php",
+        "paths_sample": ["src/Example.php"],
+    }
+    entrypoint_reason = {
+        "code": "resource_budget_reached",
+        "count": 1,
+        "language": None,
+        "paths_sample": [],
+    }
+    completeness["status"] = "partial"
+    completeness["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(inventory_reason)],
+    }
+    completeness["capabilities"]["entrypoint_discovery"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(entrypoint_reason)],
+    }
+    completeness["languages"][0]["status"] = "partial"
+    completeness["languages"][0]["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": [copy.deepcopy(inventory_reason)],
+    }
+    _rehash(payload)
+
+    _assert_validator_and_writer_reject(
+        payload,
+        tmp_path,
+        code="coverage_omission_ledger",
+    )
+
+
+def test_validator_and_writer_bound_budget_reason_counts_by_explicit_ledger(
+    tmp_path: Path,
+):
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+
+    payload = _route_artifact(1)
+    measured = GraphBundleWriter().write(
+        payload, tmp_path / "bounded-measure", _limits(total=32 * 1024 * 1024)
+    )
+    selected = GraphBudgetPruner().select(
+        artifact_from_payload(payload),
+        _limits(total=_logical_bytes(measured) - 1),
+    )
+    forged = artifact_to_payload(selected)
+    ledger = forged["graph_contract"]["coverage"]["records"]["omitted_by_bundle_budget"]
+    assert ledger > 0
+    completeness = forged["graph_contract"]["completeness"]
+    scopes = [completeness["capabilities"]]
+    scopes.extend(row["capabilities"] for row in completeness["languages"])
+    mutated = 0
+    for capabilities in scopes:
+        for capability in capabilities.values():
+            for reason in capability["reasons"]:
+                if reason["code"] in {
+                    "record_too_large",
+                    "resource_budget_reached",
+                }:
+                    reason["count"] = 999
+                    mutated += 1
+    assert mutated > 0
+    _rehash(forged)
+
+    _assert_validator_and_writer_reject(
+        forged,
+        tmp_path,
+        code="capability_reason_count_mismatch",
     )
 
 
