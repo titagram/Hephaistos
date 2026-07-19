@@ -17,7 +17,9 @@ from hermes_cli.hades_graph_v2.model import (
 from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
     ExtractionContext,
+    FrameworkLocalTarget,
     SourceLocationIR,
+    local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import (
     ParsedFile,
@@ -103,6 +105,22 @@ def _roles(adapter, context, entry):
 
 def _coverage(adapter, context):
     return {event.reason_code for event in adapter.coverage_events(context)}
+
+
+def _function_key(root: Path, name: str) -> str:
+    syntax = _syntax(root)
+    return next(
+        local_record_key(
+            "javascript",
+            syntax.path,
+            "executable_declaration",
+            "ast",
+            f"symbol/{symbol.name}",
+            ordinal,
+        )
+        for ordinal, symbol in enumerate(syntax.symbols)
+        if symbol.name == name
+    )
 
 
 def test_nested_router_mount_composes_literal_path_prefix_exactly(
@@ -197,6 +215,7 @@ app.all('/all', handler);
     route = next(item for item in entries if item.public_path == "/all")
     assert route.method_semantics is MethodSemantics.UNRESTRICTED
     assert route.methods == ()
+    assert route.public_name == "handler"
 
 
 def test_all_with_computed_path_is_partial_without_an_invented_path(
@@ -237,6 +256,26 @@ app.use(first); app.use('/ordered', second); app.use('/api', apiOnly); app.get('
         "route_handler",
         "route_handler",
     ]
+    pipeline = adapter.pipeline(context, route)
+    targets = [
+        segment.target.local_key
+        for segment in pipeline
+        if isinstance(segment.target, FrameworkLocalTarget)
+    ]
+    assert targets == [
+        _function_key(tmp_path, "first"),
+        _function_key(tmp_path, "first"),
+        _function_key(tmp_path, "second"),
+        _function_key(tmp_path, "second"),
+        _function_key(tmp_path, "routeFirst"),
+        _function_key(tmp_path, "routeFirst"),
+        _function_key(tmp_path, "routeSecond"),
+        _function_key(tmp_path, "routeSecond"),
+    ]
+    assert not {
+        "error_middleware_arity_unresolved",
+        "handler_target_unresolved",
+    } & _coverage(adapter, context)
     apiary = next(item for item in entries if item.public_path == "/apiary")
     assert _roles(adapter, context, apiary).count("middleware") == 1
 
@@ -251,9 +290,16 @@ const express = require('express'); const app = express();
 app.use(...middleware); app.get('/items', ...handlers);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert {"middleware_order_unresolved", "handler_target_unresolved"} <= _coverage(
         adapter, context
+    )
+    assert all(
+        not any(
+            segment.framework_role in {"middleware", "route_handler"}
+            for segment in adapter.pipeline(context, entry)
+        )
+        for entry in entries
     )
 
 
@@ -299,9 +345,17 @@ const express = require('express'); const app = express();
 function handler(req,res,next) { next(mode); } app.get('/next', handler);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert {"continuation_kind_unresolved", "error_flow_unresolved"} <= _coverage(
         adapter, context
+    )
+    assert all(
+        not any(
+            segment.framework_role
+            in {"continuation_next", "continuation_next_error", "error_middleware"}
+            for segment in adapter.pipeline(context, entry)
+        )
+        for entry in entries
     )
 
 
@@ -346,8 +400,15 @@ const express = require('express'); const app = express();
 function handler(req,res) { res[terminal](value); } app.get('/x', handler);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert "response_outcome_unresolved" in _coverage(adapter, context)
+    assert all(
+        not any(
+            segment.framework_role.startswith("terminal_")
+            for segment in adapter.pipeline(context, entry)
+        )
+        for entry in entries
+    )
 
 
 def test_direct_throw_and_returned_async_rejection_enter_error_flow(
@@ -396,8 +457,15 @@ const express = require('express'); const app = express();
 function handler(req,res) { Promise.reject(new Error('x')); } app.get('/x', handler);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert "async_error_flow_unresolved" in _coverage(adapter, context)
+    assert all(
+        not any(
+            segment.framework_role in {"error_transition", "error_middleware"}
+            for segment in adapter.pipeline(context, entry)
+        )
+        for entry in entries
+    )
 
 
 def test_four_parameter_error_middleware_is_selected_by_arity(tmp_path: Path) -> None:
@@ -431,11 +499,18 @@ def test_computed_error_middleware_target_is_partial_with_explicit_arity_uncerta
 const express = require('express'); const app = express(); app.use(errorHandler);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert {
         "error_middleware_arity_unresolved",
         "handler_target_unresolved",
     } <= _coverage(adapter, context)
+    assert all(
+        not any(
+            segment.framework_role == "error_middleware"
+            for segment in adapter.pipeline(context, entry)
+        )
+        for entry in entries
+    )
 
 
 def test_computed_registration_target_is_unresolved_without_an_invented_route(

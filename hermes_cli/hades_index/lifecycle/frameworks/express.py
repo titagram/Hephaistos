@@ -431,7 +431,7 @@ class ExpressLifecycleAdapter:
                         _event("handler_target_unresolved", item.path),
                     ))
                 if method == "use" and any(
-                    value not in functions
+                    _function_key(item.path, value) not in functions
                     and _object_key(item.path, value) not in objects
                     for value in handlers
                     if _IDENT.fullmatch(value)
@@ -616,6 +616,8 @@ class ExpressLifecycleAdapter:
                 continue
             for handler in row.handlers:
                 function = snap.functions.get(handler)
+                if function is None:
+                    continue
                 if function and function.arity == 4:
                     continue
                 stages.append(_Stage("middleware", handler))
@@ -643,6 +645,8 @@ class ExpressLifecycleAdapter:
         while error_at is None:
             for handler in active.handlers:
                 function = snap.functions.get(handler)
+                if function is None:
+                    continue
                 stages.append(_Stage("route_handler", handler))
                 kind, identity = _outcome(function)
                 if kind == "next":
