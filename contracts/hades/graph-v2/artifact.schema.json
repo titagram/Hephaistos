@@ -763,7 +763,7 @@
         "variant": {"const": "source_occurrence"},
         "workspace_binding_id": {"$ref": "#/$defs/ulid"},
         "language": {"$ref": "#/$defs/languageName"},
-        "kind": {"enum": ["basic_block", "branch", "merge", "loop", "response", "redirect", "abort", "exception", "exit", "async_boundary", "unknown_boundary", "framework_boundary", "external_boundary"]},
+        "kind": {"enum": ["basic_block", "branch", "merge", "loop", "middleware", "guard", "authorization", "validator", "binding", "response", "redirect", "abort", "exception", "exit", "async_boundary", "unknown_boundary", "framework_boundary", "external_boundary"]},
         "owner_node_id": {"$ref": "#/$defs/nodeId"},
         "structural_path": {"$ref": "#/$defs/structuralPath"},
         "ordinal": {"$ref": "#/$defs/safeInteger"},

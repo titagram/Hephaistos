@@ -146,6 +146,13 @@ _TERMINAL_KINDS = frozenset({
     NodeKind.FRAMEWORK_BOUNDARY,
     NodeKind.UNKNOWN_BOUNDARY,
 })
+_TERMINAL_OUTCOME_KINDS = frozenset({
+    NodeKind.RESPONSE,
+    NodeKind.REDIRECT,
+    NodeKind.ABORT,
+    NodeKind.EXCEPTION,
+    NodeKind.EXIT,
+})
 _EXECUTABLE_HANDLER_KINDS = frozenset({
     NodeKind.FUNCTION,
     NodeKind.METHOD,
@@ -1568,9 +1575,10 @@ def _recursive_invocation_edge_ids(
     reverse_adjacency: dict[str, set[str]] = defaultdict(set)
     nodes: set[str] = set()
     for edge in invocation_edges:
-        adjacency[edge.source_id].add(edge.target_id)
-        reverse_adjacency[edge.target_id].add(edge.source_id)
-        nodes.update((edge.source_id, edge.target_id))
+        source_callable = edge.occurrence.owner_node_id
+        adjacency[source_callable].add(edge.target_id)
+        reverse_adjacency[edge.target_id].add(source_callable)
+        nodes.update((source_callable, edge.target_id))
 
     finish_order: list[str] = []
     seen: set[str] = set()
@@ -1610,10 +1618,14 @@ def _recursive_invocation_edge_ids(
     return {
         edge.id
         for edge in invocation_edges
-        if component_by_node[edge.source_id] == component_by_node[edge.target_id]
+        if component_by_node[edge.occurrence.owner_node_id]
+        == component_by_node[edge.target_id]
         and (
-            edge.source_id == edge.target_id
-            or component_sizes[component_by_node[edge.source_id]] > 1
+            edge.occurrence.owner_node_id == edge.target_id
+            or component_sizes[
+                component_by_node[edge.occurrence.owner_node_id]
+            ]
+            > 1
         )
     }
 
@@ -2011,16 +2023,31 @@ def validate_flow_membership(artifact: GraphArtifactV2, index: _RecordIndex) -> 
                 "async flow root is not a compatible asynchronous target",
             )
         flow_steps = steps_by_flow[flow.id]
-        frontier_targets = {
-            index.edges[step.edge_id].target_id
-            for step in flow_steps
-            if index.edges[step.edge_id].uncertainty_id is not None
-        }
+        uncertain_call_sites: set[str] = set()
+        frontier_targets: set[str] = set()
+        for step in flow_steps:
+            edge = index.edges[step.edge_id]
+            if edge.uncertainty_id is None:
+                continue
+            uncertainty = index.uncertainties[edge.uncertainty_id]
+            if isinstance(uncertainty.subject, CallSiteSubject):
+                uncertain_call_sites.add(uncertainty.subject.call_site_id)
+            else:
+                frontier_targets.add(edge.target_id)
         if any(
             index.edges[step.edge_id].source_id in frontier_targets
             for step in flow_steps
         ):
             _fail("flow_frontier", "flow continues beyond an uncertainty frontier")
+        if any(
+            (edge := index.edges[step.edge_id]).relation is Relation.RETURNS_TO
+            and edge.call_site_id in uncertain_call_sites
+            for step in flow_steps
+        ):
+            _fail(
+                "flow_frontier",
+                "uncertain invocation has a serialized companion return",
+            )
         order_keys = [step.order_key for step in flow_steps]
         if len(order_keys) != len(set(order_keys)):
             _fail("flow_membership", "flow-step order keys must be unique per flow")
@@ -2230,7 +2257,7 @@ def _observed_reason_counts(
         for reason in getattr(capabilities, name).reasons
     }
     for code in {ReasonCode.UNSUPPORTED_LANGUAGE, ReasonCode.PARSER_UNAVAILABLE}:
-        if code in declared_codes:
+        if code in declared_codes and unsupported_by_language:
             reconcilable.add(code)
             for language, count in unsupported_by_language.items():
                 observed[(code, language)] += count
@@ -2477,9 +2504,12 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         and node.identity.language is not None
         and cast(FileProperties, node.properties).analysis_status.value == "analyzed"
     )
-    if {item.name for item in artifact.languages} != set(file_language_counts):
+    if not set(file_language_counts).issubset(
+        {item.name for item in artifact.languages}
+    ):
         _fail(
-            "language_coverage_mismatch", "language records do not match file inventory"
+            "language_coverage_mismatch",
+            "file inventory language is missing its language record",
         )
     for language in artifact.languages:
         if (
@@ -2514,7 +2544,8 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         terminals = len({
             edges_by_id[step.edge_id].target_id
             for step in steps
-            if node_kinds_by_id[edges_by_id[step.edge_id].target_id] in _TERMINAL_KINDS
+            if node_kinds_by_id[edges_by_id[step.edge_id].target_id]
+            in _TERMINAL_OUTCOME_KINDS
         })
         capabilities = flow.completeness.capabilities
         _validate_count_relation(

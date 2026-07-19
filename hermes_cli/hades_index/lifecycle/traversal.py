@@ -48,12 +48,15 @@ _STRUCTURAL_RELATIONS = frozenset({
     Relation.DOCUMENTS,
     Relation.MAPS_TO,
 })
-_TERMINAL_KINDS = frozenset({
+_TERMINAL_OUTCOME_KINDS = frozenset({
     NodeKind.RESPONSE,
     NodeKind.REDIRECT,
     NodeKind.ABORT,
     NodeKind.EXCEPTION,
     NodeKind.EXIT,
+})
+_STOP_KINDS = frozenset({
+    *_TERMINAL_OUTCOME_KINDS,
     NodeKind.EXTERNAL_BOUNDARY,
     NodeKind.FRAMEWORK_BOUNDARY,
     NodeKind.UNKNOWN_BOUNDARY,
@@ -139,6 +142,8 @@ class CanonicalTopology:
     edges: tuple[Edge, ...]
     uncertainties: tuple[Uncertainty, ...]
     capabilities: Capabilities
+    normal_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    exception_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _node_owner(node: Node) -> str:
@@ -247,6 +252,8 @@ def build_callable_summaries(
     """
 
     nodes = {node.id: node for node in graph.nodes}
+    declared_normal_exits = dict(graph.normal_exits_by_callable)
+    declared_exception_exits = dict(graph.exception_exits_by_callable)
     callables = sorted({
         _node_owner(node)
         for node in graph.nodes
@@ -333,8 +340,20 @@ def build_callable_summaries(
     def direct_summary(callable_id: str, stage: Stage) -> CallableSummary:
         invocation_stages: dict[str, Stage] = {}
         states: set[EdgeStageState] = set()
-        normal: set[str] = set()
-        exceptional: set[str] = set()
+        normal: set[str] = {
+            edge.source_id
+            for edge in graph.edges
+            if edge.relation is Relation.RETURNS_TO
+            and _node_owner(nodes[edge.source_id]) == callable_id
+        }
+        normal.update(declared_normal_exits.get(callable_id, ()))
+        exceptional: set[str] = {
+            edge.source_id
+            for edge in graph.edges
+            if edge.relation is Relation.THROWS_TO
+            and _node_owner(nodes[edge.source_id]) == callable_id
+        }
+        exceptional.update(declared_exception_exits.get(callable_id, ()))
         terminals: set[str] = set()
         effects: set[str] = set()
         async_edges: set[str] = set()
@@ -363,7 +382,7 @@ def build_callable_summaries(
             )
             if edge.flow is EdgeFlow.EXCEPTION:
                 exceptional.add(edge.target_id)
-            if nodes[edge.target_id].kind in _TERMINAL_KINDS:
+            if nodes[edge.target_id].kind in _TERMINAL_OUTCOME_KINDS:
                 terminals.add(edge.target_id)
             if edge.relation in {
                 Relation.READS,
@@ -403,7 +422,7 @@ def build_callable_summaries(
                 if (
                     edge.flow is EdgeFlow.ASYNC
                     or edge.uncertainty_id is not None
-                    or nodes[edge.target_id].kind in _TERMINAL_KINDS
+                    or nodes[edge.target_id].kind in _STOP_KINDS
                 ):
                     continue
                 pending.append((edge.target_id, stage_to))
@@ -468,7 +487,11 @@ def _flow_capabilities(
     for name in _CAPABILITY_FIELDS:
         capability = getattr(capabilities, name)
         reasons = tuple(
-            replace(reason, count=frontier_reasons[reason.code])
+            (
+                replace(reason, count=frontier_reasons[reason.code])
+                if reason.code in _FRONTIER_REASON_CODES
+                else reason
+            )
             for reason in capability.reasons
             if reason.code not in _FRONTIER_REASON_CODES
             or frontier_reasons[reason.code]
@@ -488,16 +511,17 @@ def _recursive_invocations(steps: Sequence[FlowStep], edges: Mapping[str, Edge])
     ]
     adjacency: dict[str, set[str]] = defaultdict(set)
     for edge in invocation_edges:
-        adjacency[edge.source_id].add(edge.target_id)
+        adjacency[edge.occurrence.owner_node_id].add(edge.target_id)
     recursive: set[str] = set()
     components = _strong_components(adjacency)
     component_by_node = {
         node: component for component in components for node in component
     }
     for edge in invocation_edges:
-        component = component_by_node.get(edge.source_id, ())
+        source_callable = edge.occurrence.owner_node_id
+        component = component_by_node.get(source_callable, ())
         if edge.target_id in component and (
-            edge.source_id == edge.target_id or len(component) > 1
+            source_callable == edge.target_id or len(component) > 1
         ):
             recursive.add(edge.id)
     return recursive
@@ -522,7 +546,7 @@ def _assign_backbone_roles(
         predecessors[target].append((source, step.id))
         if (
             edge.uncertainty_id is not None
-            or nodes[edge.target_id].kind in _TERMINAL_KINDS
+            or nodes[edge.target_id].kind in _STOP_KINDS
         ):
             terminal_states.add(target)
     step_bits = {
@@ -573,12 +597,21 @@ def _assign_backbone_roles(
 def build_lifecycle_flows(
     graph: CanonicalTopology,
     entrypoints: Sequence[Entrypoint],
+    summaries: Mapping[tuple[str, Stage], CallableSummary] | None = None,
 ) -> tuple[tuple[Flow, ...], tuple[FlowStep, ...]]:
     """Traverse every verified edge-stage state once with no arbitrary limit."""
 
     nodes = {node.id: node for node in graph.nodes}
     edges = {edge.id: edge for edge in graph.edges}
     uncertainties = {item.id: item for item in graph.uncertainties}
+    callable_summaries = summaries or build_callable_summaries(graph)
+    uncertain_call_sites = {
+        edge.call_site_id
+        for edge in graph.edges
+        if edge.relation is Relation.INVOKES
+        and edge.call_site_id is not None
+        and edge.uncertainty_id is not None
+    }
     mutable_outgoing: dict[str, list[Edge]] = defaultdict(list)
     for edge in graph.edges:
         if edge.relation not in _STRUCTURAL_RELATIONS:
@@ -608,6 +641,7 @@ def build_lifecycle_flows(
         root_state = (root_node_id, Stage.ENTRY, context)
         depths: dict[tuple[str, Stage, AsyncContext], int] = {root_state: 0}
         invocation_stages: dict[str, Stage] = {}
+        returnable_call_sites: set[str] = set()
         expanded_generation: dict[tuple[str, Stage, AsyncContext], int] = {}
         queue = deque([root_state])
         step_values: dict[tuple[str, Stage, Stage, AsyncContext], dict[str, object]] = {}
@@ -622,6 +656,8 @@ def build_lifecycle_flows(
             for edge in outgoing.get(source_id, ()):
                 if edge.relation is Relation.RETURNS_TO and (
                     edge.call_site_id not in invocation_stages
+                    or edge.call_site_id in uncertain_call_sites
+                    or edge.call_site_id not in returnable_call_sites
                 ):
                     continue
                 if edge.uncertainty_id is not None:
@@ -646,6 +682,18 @@ def build_lifecycle_flows(
                         continue
                     if previous is None:
                         invocation_stages[edge.call_site_id] = stage_from
+                        # Demand the callee summary for this exact input stage.
+                        # Return edges remain call-site scoped below; this lookup
+                        # deliberately never enables a companion uncertain return.
+                        callee_summary = callable_summaries.get(
+                            (edge.target_id, stage_to)
+                        )
+                        if (
+                            edge.uncertainty_id is None
+                            and callee_summary is not None
+                            and callee_summary.normal_exit_node_ids
+                        ):
+                            returnable_call_sites.add(edge.call_site_id)
                         queue.extend(sorted(depths, key=lambda item: (item[0], item[1].value, item[2].value)))
                 stage_to = _stage_to(edge, stage_from, nodes, invocation_stages)
                 key = (edge.id, stage_from, stage_to, async_context)
@@ -675,7 +723,7 @@ def build_lifecycle_flows(
                 stop = (
                     edge.flow is EdgeFlow.ASYNC
                     or edge.uncertainty_id is not None
-                    or nodes[edge.target_id].kind in _TERMINAL_KINDS
+                    or nodes[edge.target_id].kind in _STOP_KINDS
                 )
                 if stop:
                     continue
@@ -729,7 +777,7 @@ def build_lifecycle_flows(
         terminal_ids = {
             edges[step.edge_id].target_id
             for step in steps
-            if nodes[edges[step.edge_id].target_id].kind in _TERMINAL_KINDS
+            if nodes[edges[step.edge_id].target_id].kind in _TERMINAL_OUTCOME_KINDS
         }
         linked_ids = {step.async_child_flow_id for step in steps if step.async_child_flow_id}
         stage_members: dict[Stage, set[str]] = defaultdict(set)

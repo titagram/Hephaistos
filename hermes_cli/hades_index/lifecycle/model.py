@@ -1493,6 +1493,33 @@ class ReadOnlyFileAccessor(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class InventoryFile:
+    """Authoritative in-scope file identity supplied by inventory discovery."""
+
+    path: str
+    file_sha256: str
+    language: str | None
+    parser_candidate: bool
+
+    def __post_init__(self) -> None:
+        _safe_path(self.path, field_name="inventory.path")
+        _digest(self.file_sha256, field_name="inventory.file_sha256")
+        if self.language is not None:
+            language = _nfc(
+                self.language, field_name="inventory.language", limit=32
+            )
+            if not _IDENTIFIER_RE.fullmatch(language):
+                _fail(
+                    "invalid_identifier",
+                    "inventory.language must be a lower identifier",
+                )
+        if type(self.parser_candidate) is not bool:
+            _fail(
+                "invalid_scalar", "inventory.parser_candidate must be boolean"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionContext:
     workspace_root: Path
     project_id: str
@@ -1506,6 +1533,7 @@ class ExtractionContext:
     package_metadata: tuple[ConfigLocatorIR, ...]
     tsconfig_metadata: tuple[ConfigLocatorIR, ...]
     file_accessor: ReadOnlyFileAccessor
+    inventory_files: tuple[InventoryFile, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_root, Path):
@@ -1565,6 +1593,16 @@ class ExtractionContext:
                 _fail("duplicate_record", f"{field_name} must be unique")
         if not callable(self.file_accessor):
             _fail("invalid_context", "file_accessor must be read-only callable")
+        inventory = _tuple(self.inventory_files, field_name="inventory_files")
+        if any(type(item) is not InventoryFile for item in inventory):
+            _fail(
+                "invalid_context",
+                "inventory_files must contain exact InventoryFile values",
+            )
+        if tuple(sorted(inventory, key=lambda item: item.path)) != inventory:
+            _fail("not_sorted", "inventory_files must be sorted by path")
+        if len({item.path for item in inventory}) != len(inventory):
+            _fail("duplicate_record", "inventory_files paths must be unique")
 
 
 def local_record_key(
@@ -2285,17 +2323,27 @@ class AdapterResult:
                     ExceptionSuccessor,
                     LoopSuccessor,
                 }:
-                    need(
-                        blocks, successor.target_block_key, "framework successor block"
-                    )
+                    if successor.target_block_key not in blocks:
+                        need(
+                            segments,
+                            successor.target_block_key,
+                            "framework successor block or segment",
+                        )
+                    if type(successor) is ExceptionSuccessor and (
+                        successor.exception_scope_key not in structures
+                    ):
+                        _key(
+                            successor.exception_scope_key,
+                            field_name="framework exception scope key",
+                        )
                 elif type(successor) is AsyncSuccessor:
                     need_node(successor.target_local_key, "framework async target")
                 else:
-                    need(
-                        terminals,
-                        successor.terminal_local_key,
-                        "framework return terminal",
-                    )
+                    if successor.terminal_local_key not in terminals:
+                        _key(
+                            successor.terminal_local_key,
+                            field_name="framework return terminal key",
+                        )
 
         entrypoints_by_unresolved: dict[str, EntrypointCandidate] = {}
         for entrypoint in self.entrypoints:
@@ -2633,6 +2681,7 @@ __all__ = [
     "FrameworkTargetIR",
     "IREvidence",
     "IRValidationError",
+    "InventoryFile",
     "LocalNodeTarget",
     "LoopRole",
     "LoopSuccessor",

@@ -211,6 +211,22 @@ _TERMINAL_NODE_KIND = {
 }
 
 
+def _framework_node_kind(role: str) -> NodeKind:
+    if "middleware" in role:
+        return NodeKind.MIDDLEWARE
+    if "authorization" in role or "permission" in role or "policy" in role:
+        return NodeKind.AUTHORIZATION
+    if "auth" in role or "guard" in role or "security" in role:
+        return NodeKind.GUARD
+    if "validat" in role:
+        return NodeKind.VALIDATOR
+    if "bind" in role or "dependency" in role:
+        return NodeKind.BINDING
+    if "unresolved" in role or role.endswith("_boundary"):
+        return NodeKind.FRAMEWORK_BOUNDARY
+    return NodeKind.MIDDLEWARE
+
+
 def _default_generated_at() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
@@ -231,6 +247,58 @@ def _deduplicate(records: Iterable[_T], *, key: Callable[[_T], object]) -> tuple
             )
         by_key.setdefault(identity, record)
     return tuple(by_key[item] for item in sorted(by_key, key=repr))
+
+
+def _evidence_item_key(item: EvidenceItem) -> tuple[object, ...]:
+    return (
+        {
+            EvidenceOrigin.VERIFIED_FROM_CODE: 1,
+            EvidenceOrigin.INFERRED: 3,
+            EvidenceOrigin.UNRESOLVED: 4,
+        }[item.origin],
+        item.extractor,
+        item.source_fingerprint,
+        repr(item.source_locator),
+    )
+
+
+def _merge_evidence(
+    left: EvidenceEnvelope, right: EvidenceEnvelope
+) -> EvidenceEnvelope:
+    values = {
+        _evidence_item_key(item): item
+        for envelope in (left, right)
+        for item in (envelope.primary, *envelope.supporting)
+    }
+    ordered = tuple(values[key] for key in sorted(values))
+    omitted = left.supporting_omitted_count + right.supporting_omitted_count
+    supporting = ordered[1:8]
+    omitted += max(0, len(ordered) - 8)
+    return EvidenceEnvelope(ordered[0], supporting, omitted)
+
+
+def _deduplicate_edges(records: Iterable[Edge]) -> tuple[Edge, ...]:
+    """Merge compatible evidence and reject every semantic public-ID collision."""
+
+    by_id: dict[str, Edge] = {}
+    for record in records:
+        previous = by_id.get(record.id)
+        if previous is None:
+            by_id[record.id] = record
+            continue
+        if previous == record:
+            continue
+        if replace(record, evidence=previous.evidence) == previous:
+            by_id[record.id] = replace(
+                previous,
+                evidence=_merge_evidence(previous.evidence, record.evidence),
+            )
+            continue
+        raise IRValidationError(
+            "semantic_collision",
+            "one canonical edge identity maps to different semantic values",
+        )
+    return tuple(by_id[key] for key in sorted(by_id))
 
 
 def _locator_path(locator: FileLocatorIR | AstLocatorIR | ConfigLocatorIR) -> str:
@@ -569,7 +637,18 @@ class GraphBuilder:
                     "conflicting_file_digest",
                     "one represented source path has conflicting file digests",
                 )
+        inventory_by_path = {item.path: item for item in context.inventory_files}
+        for item in context.inventory_files:
+            previous = digest_by_path.setdefault(item.path, item.file_sha256)
+            if previous != item.file_sha256:
+                raise IRValidationError(
+                    "conflicting_file_digest",
+                    "inventory and semantic locators disagree about a file digest",
+                )
         path_languages: dict[str, set[str]] = defaultdict(set)
+        for item in context.inventory_files:
+            if item.language is not None:
+                path_languages[item.path].add(item.language)
         for declaration in declarations:
             path_languages[declaration.locator.source_location.path].add(
                 declaration.language
@@ -584,10 +663,15 @@ class GraphBuilder:
             path_languages[candidate.registration_locator.source_location.path].add(
                 language
             )
+        effective_coverage_events = list(coverage_events)
 
         nodes: list[Node] = []
         local_node_ids: dict[str, str] = {}
         file_node_ids: dict[str, str] = {}
+        coverage_by_path: dict[str, list[CoverageEvent]] = defaultdict(list)
+        for event in coverage_events:
+            if event.path is not None:
+                coverage_by_path[event.path].append(event)
         for path in sorted(digest_by_path):
             languages = path_languages.get(path, set())
             language = next(iter(languages)) if len(languages) == 1 else None
@@ -604,8 +688,69 @@ class GraphBuilder:
             file_node_ids[path] = public_id
             try:
                 byte_size = len(context.file_accessor(Path(path)))
+                analysis_status = AnalysisStatus.ANALYZED
+                omission_reason = None
             except OSError:
                 byte_size = 0
+                analysis_status = AnalysisStatus.FAILED
+                omission_reason = ReasonCode.FILE_READ_FAILED
+                failure_language = language or (
+                    context.detected_languages[0]
+                    if len(context.detected_languages) == 1
+                    else "unknown"
+                )
+                if not any(
+                    event.path == path
+                    and event.reason_code == ReasonCode.FILE_READ_FAILED.value
+                    for event in effective_coverage_events
+                ):
+                    effective_coverage_events.append(
+                        CoverageEvent(
+                            failure_language,
+                            CoverageCapability.INVENTORY,
+                            CoverageOutcome.PARTIAL,
+                            ReasonCode.FILE_READ_FAILED.value,
+                            path,
+                            0,
+                            1,
+                        )
+                    )
+            if analysis_status is AnalysisStatus.ANALYZED:
+                if (
+                    path in inventory_by_path
+                    and not inventory_by_path[path].parser_candidate
+                ):
+                    analysis_status = AnalysisStatus.UNSUPPORTED
+                path_events = coverage_by_path.get(path, ())
+                failure_reason = next(
+                    (
+                        _reason_code(event.reason_code)
+                        for event in path_events
+                        if event.reason_code
+                        in {"parser_failed", "file_read_failed"}
+                    ),
+                    None,
+                )
+                if failure_reason is not None:
+                    analysis_status = AnalysisStatus.FAILED
+                    omission_reason = failure_reason
+                elif any(
+                    event.reason_code == "file_too_large" for event in path_events
+                ):
+                    analysis_status = AnalysisStatus.TOO_LARGE
+                    omission_reason = ReasonCode.FILE_TOO_LARGE
+                elif any(
+                    event.reason_code == "resource_budget_reached"
+                    for event in path_events
+                ):
+                    analysis_status = AnalysisStatus.BUDGET_OMITTED
+                    omission_reason = ReasonCode.RESOURCE_BUDGET_REACHED
+                elif any(
+                    event.outcome is CoverageOutcome.UNSUPPORTED
+                    for event in path_events
+                ):
+                    analysis_status = AnalysisStatus.UNSUPPORTED
+                    omission_reason = None
             nodes.append(
                 Node(
                     public_id,
@@ -621,8 +766,8 @@ class GraphBuilder:
                     FileProperties(
                         digest_by_path[path],
                         byte_size,
-                        AnalysisStatus.ANALYZED,
-                        None,
+                        analysis_status,
+                        omission_reason,
                         False,
                         False,
                     ),
@@ -871,6 +1016,164 @@ class GraphBuilder:
             )
             entrypoint_data.append((candidate, identity_value, public_id, language))
 
+        framework_segment_node_ids: dict[str, str] = {}
+        framework_segment_owner_ids: dict[str, str] = {}
+        framework_segment_language: dict[str, str] = {}
+        framework_terminal_node_ids: dict[str, str] = {}
+        entrypoint_data_by_segment = {
+            segment_key: data
+            for data in entrypoint_data
+            for segment_key in data[0].framework_segment_keys
+        }
+        for segment in framework_segments:
+            if segment.local_key not in entrypoint_data_by_segment:
+                raise IRValidationError(
+                    "orphan_framework_segment",
+                    "framework segment is not owned by an entrypoint pipeline",
+                )
+            candidate, _identity, owner_id, language = entrypoint_data_by_segment[
+                segment.local_key
+            ]
+            descriptor = (
+                segment.target.descriptor
+                if type(segment.target) is FrameworkBoundaryTarget
+                else None
+            )
+            kind = _framework_node_kind(segment.framework_role)
+            locator = descriptor.locator if descriptor is not None else segment.evidence.locator
+            structural = (
+                locator.structural_path
+                if type(locator) is AstLocatorIR
+                else locator.structural_pointer
+            )
+            structural_path = (
+                f"{structural}/pipeline/{segment.pipeline_order}/"
+                f"{segment.framework_role}"
+            )
+            identity = SourceOccurrenceIdentity(
+                "source_occurrence",
+                context.workspace_binding_id,
+                language,
+                kind,
+                owner_id,
+                structural_path,
+                segment.pipeline_order,
+                segment.framework_role,
+            )
+            public_id = node_id({
+                "variant": "source_occurrence",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": language,
+                "kind": kind.value,
+                "owner_node_id": owner_id,
+                "structural_path": structural_path,
+                "ordinal": segment.pipeline_order,
+                "semantic_role": segment.framework_role,
+            })
+            framework_segment_node_ids[segment.local_key] = public_id
+            framework_segment_owner_ids[segment.local_key] = owner_id
+            framework_segment_language[segment.local_key] = language
+            nodes.append(
+                Node(
+                    public_id,
+                    identity,
+                    kind,
+                    language,
+                    descriptor.framework if descriptor is not None else candidate.framework,
+                    (
+                        descriptor.public_name
+                        if descriptor is not None and descriptor.public_name is not None
+                        else segment.framework_role
+                    ),
+                    None,
+                    None,
+                    None,
+                    _source_location(locator),
+                    FrameworkProperties(
+                        segment.framework_role,
+                        segment.pipeline_order,
+                        None if descriptor is None else descriptor.public_name,
+                    ),
+                    _evidence(segment.evidence),
+                )
+            )
+
+        def framework_terminal_id(
+            segment: FrameworkPipelineSegment,
+            successor: ReturnSuccessor,
+        ) -> str:
+            existing = local_node_ids.get(successor.terminal_local_key)
+            if existing is not None:
+                return existing
+            cached = framework_terminal_node_ids.get(successor.terminal_local_key)
+            if cached is not None:
+                return cached
+            owner_id = framework_segment_owner_ids[segment.local_key]
+            language = framework_segment_language[segment.local_key]
+            terminal_kind = (
+                NodeKind.EXCEPTION
+                if "exception" in segment.framework_role
+                else (
+                    NodeKind.EXIT
+                    if "lifespan" in segment.framework_role
+                    or "shutdown" in segment.framework_role
+                    else NodeKind.RESPONSE
+                )
+            )
+            locator = segment.evidence.locator
+            structural = (
+                locator.structural_path
+                if type(locator) is AstLocatorIR
+                else locator.structural_pointer
+            )
+            structural_path = (
+                f"{structural}/pipeline_terminal/"
+                f"{successor.terminal_local_key[:16]}"
+            )
+            semantic_role = f"framework_{terminal_kind.value}"
+            identity = SourceOccurrenceIdentity(
+                "source_occurrence",
+                context.workspace_binding_id,
+                language,
+                terminal_kind,
+                owner_id,
+                structural_path,
+                successor.order,
+                semantic_role,
+            )
+            public_id = node_id({
+                "variant": "source_occurrence",
+                "workspace_binding_id": context.workspace_binding_id,
+                "language": language,
+                "kind": terminal_kind.value,
+                "owner_node_id": owner_id,
+                "structural_path": structural_path,
+                "ordinal": successor.order,
+                "semantic_role": semantic_role,
+            })
+            framework_terminal_node_ids[successor.terminal_local_key] = public_id
+            nodes.append(
+                Node(
+                    public_id,
+                    identity,
+                    terminal_kind,
+                    language,
+                    None,
+                    terminal_kind.value,
+                    None,
+                    None,
+                    None,
+                    _source_location(locator),
+                    TerminalProperties(
+                        None,
+                        "exception" if terminal_kind is NodeKind.EXCEPTION else None,
+                        terminal_kind.value,
+                    ),
+                    _evidence(segment.evidence),
+                )
+            )
+            return public_id
+
         structure_ids: dict[str, str] = {}
         for structure in structures_ir:
             owner_id = local_node_ids[structure.owner_declaration_key]
@@ -926,6 +1229,66 @@ class GraphBuilder:
                     _evidence(structure.evidence),
                 )
             )
+
+        framework_exception_scope_ids: dict[str, str] = {}
+        for segment in framework_segments:
+            for successor in (
+                segment.success_successor,
+                *segment.short_circuit_successors,
+            ):
+                if type(successor) is not ExceptionSuccessor:
+                    continue
+                if successor.exception_scope_key in structure_ids:
+                    framework_exception_scope_ids[successor.exception_scope_key] = (
+                        structure_ids[successor.exception_scope_key]
+                    )
+                    continue
+                owner_id = framework_segment_owner_ids[segment.local_key]
+                locator = segment.evidence.locator
+                structural = (
+                    locator.structural_path
+                    if type(locator) is AstLocatorIR
+                    else locator.structural_pointer
+                )
+                structural_path = (
+                    f"{structural}/pipeline_exception/"
+                    f"{successor.exception_scope_key[:16]}"
+                )
+                identity = {
+                    "kind": StructureKind.EXCEPTION_SCOPE.value,
+                    "owner_node_id": owner_id,
+                    "structural_path": structural_path,
+                    "ordinal": successor.order,
+                    "subtype": StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER.value,
+                }
+                public_id = exception_scope_id(identity)
+                previous = framework_exception_scope_ids.setdefault(
+                    successor.exception_scope_key, public_id
+                )
+                if previous != public_id:
+                    raise IRValidationError(
+                        "semantic_collision",
+                        "framework exception scope key has conflicting owners",
+                    )
+                if not any(item.id == public_id for item in structures):
+                    target_id = (
+                        local_node_ids[successor.target_block_key]
+                        if successor.target_block_key in local_node_ids
+                        else framework_segment_node_ids[successor.target_block_key]
+                    )
+                    structures.append(
+                        Structure(
+                            public_id,
+                            StructureKind.EXCEPTION_SCOPE,
+                            owner_id,
+                            structural_path,
+                            successor.order,
+                            StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER,
+                            None,
+                            None,
+                            _evidence(segment.evidence),
+                        )
+                    )
 
         # Loop successors do not carry a structure key in the frozen IR, so
         # the canonical producer derives their branch group from the loop
@@ -1759,9 +2122,168 @@ class GraphBuilder:
                 local_key=effect.local_key,
             )
 
+        framework_branch_ids: dict[tuple[str, int, str], str] = {}
+
+        def framework_target_id(key: str) -> str:
+            if key in local_node_ids:
+                return local_node_ids[key]
+            return framework_segment_node_ids[key]
+
+        for segment in framework_segments:
+            source_id = framework_segment_node_ids[segment.local_key]
+            owner_id = framework_segment_owner_ids[segment.local_key]
+            if type(segment.target) is FrameworkLocalTarget:
+                append_edge(
+                    source_id=source_id,
+                    target_id=local_node_ids[segment.target.local_key],
+                    relation=Relation.ROUTES_TO,
+                    flow=EdgeFlow.ALWAYS,
+                    locator=segment.evidence.locator,
+                    owner_id=owner_id,
+                    evidence=_evidence(segment.evidence),
+                    order=0,
+                    occurrence_path=(
+                        f"pipeline/{segment.pipeline_order}/target"
+                    ),
+                )
+            for successor in (
+                segment.success_successor,
+                *segment.short_circuit_successors,
+            ):
+                relation = Relation.PASSES_THROUGH
+                flow = EdgeFlow.ALWAYS
+                condition: Condition | None = None
+                branch_id: str | None = None
+                exception_id_value: str | None = None
+                if type(successor) is ReturnSuccessor:
+                    target_id = framework_terminal_id(segment, successor)
+                    target_kind = next(
+                        node.kind for node in nodes if node.id == target_id
+                    )
+                    relation = {
+                        NodeKind.RESPONSE: Relation.RESPONDS_WITH,
+                        NodeKind.REDIRECT: Relation.REDIRECTS_TO,
+                        NodeKind.ABORT: Relation.ABORTS_WITH,
+                        NodeKind.EXCEPTION: Relation.THROWS_TO,
+                        NodeKind.EXIT: Relation.EXITS_AT,
+                    }[target_kind]
+                    if target_kind is NodeKind.EXCEPTION:
+                        flow = EdgeFlow.EXCEPTION
+                        condition = Condition(
+                            "predicate",
+                            "exception",
+                            condition_hash("exception"),
+                            ConditionPolarity.EXCEPTION,
+                        )
+                elif type(successor) is AsyncSuccessor:
+                    target_id = local_node_ids[successor.target_local_key]
+                    relation = Relation.DISPATCHES
+                    flow = EdgeFlow.ASYNC
+                else:
+                    target_id = framework_target_id(successor.target_block_key)
+                    if type(successor) is BranchSuccessor:
+                        relation = Relation.BRANCHES_TO
+                        flow = EdgeFlow.CONDITIONAL
+                        normalized = f"framework_{segment.framework_role}"
+                        condition = Condition(
+                            "predicate",
+                            normalized,
+                            condition_hash(normalized),
+                            ConditionPolarity.TRUE,
+                        )
+                    elif type(successor) is ExceptionSuccessor:
+                        relation = Relation.THROWS_TO
+                        flow = EdgeFlow.EXCEPTION
+                        normalized = successor.caught_type_name or "exception"
+                        condition = Condition(
+                            "predicate",
+                            normalized,
+                            condition_hash(normalized),
+                            ConditionPolarity.EXCEPTION,
+                        )
+                        exception_id_value = framework_exception_scope_ids[
+                            successor.exception_scope_key
+                        ]
+                    elif type(successor) is LoopSuccessor:
+                        relation = Relation.BRANCHES_TO
+                        flow = EdgeFlow.LOOP
+                    if type(successor) in {BranchSuccessor, LoopSuccessor}:
+                        branch_key = (
+                            segment.local_key,
+                            successor.order,
+                            successor.kind,
+                        )
+                        structural_path = (
+                            f"pipeline/{segment.pipeline_order}/"
+                            f"{successor.kind}/{successor.order}"
+                        )
+                        identity = {
+                            "kind": StructureKind.BRANCH_GROUP.value,
+                            "owner_node_id": owner_id,
+                            "structural_path": structural_path,
+                            "ordinal": successor.order,
+                            "subtype": StructureSubtype.FRAMEWORK_SHORT_CIRCUIT.value,
+                        }
+                        branch_id = framework_branch_ids.setdefault(
+                            branch_key, branch_group_id(identity)
+                        )
+                        if not any(item.id == branch_id for item in structures):
+                            structures.append(
+                                Structure(
+                                    branch_id,
+                                    StructureKind.BRANCH_GROUP,
+                                    owner_id,
+                                    structural_path,
+                                    successor.order,
+                                    StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+                                    None,
+                                    None,
+                                    _evidence(segment.evidence),
+                                )
+                            )
+                append_edge(
+                    source_id=source_id,
+                    target_id=target_id,
+                    relation=relation,
+                    flow=flow,
+                    locator=segment.evidence.locator,
+                    owner_id=owner_id,
+                    evidence=_evidence(segment.evidence),
+                    condition=condition,
+                    branch_id=branch_id,
+                    exception_id=exception_id_value,
+                    order=successor.order,
+                    occurrence_path=(
+                        f"pipeline/{segment.pipeline_order}/"
+                        f"{successor.kind}/{successor.order}"
+                    ),
+                    occurrence_ordinal=successor.order,
+                )
+
         # One explicit synchronous root edge per resolved entrypoint.
         for candidate, _, public_id, _ in entrypoint_data:
             if candidate.handler_local_key is None:
+                continue
+            if candidate.framework_segment_keys:
+                first_segment_key = candidate.framework_segment_keys[0]
+                append_edge(
+                    source_id=public_id,
+                    target_id=framework_segment_node_ids[first_segment_key],
+                    relation=Relation.ENTERS,
+                    flow=EdgeFlow.ALWAYS,
+                    locator=candidate.registration_locator,
+                    owner_id=public_id,
+                    evidence=_evidence(candidate.evidence),
+                    order=0,
+                    occurrence_path=(
+                        f"{candidate.registration_locator.structural_path}/pipeline"
+                        if type(candidate.registration_locator) is AstLocatorIR
+                        else (
+                            f"{candidate.registration_locator.structural_pointer}"
+                            "/pipeline"
+                        )
+                    ),
+                )
                 continue
             append_edge(
                 source_id=public_id,
@@ -1977,10 +2499,119 @@ class GraphBuilder:
                     occurrence_ordinal=ordinal,
                 )
 
-        # Canonical identity deduplication happens after every edge family has
-        # been materialized; a collision with differing bytes is impossible
-        # because all identity fields are explicit above.
-        edges = list({edge.id: edge for edge in edges}.values())
+            for ordinal, exit_key in enumerate(callee.exception_exit_block_keys):
+                source_id = local_node_ids[exit_key]
+                exception_structure_key = site.exception_scope_key
+                exception_id_value: str | None = None
+                target_id: str | None = None
+                if exception_structure_key is not None:
+                    scope_structure = structure_ir_by_key[exception_structure_key]
+                    scope_ir = next(
+                        (
+                            item
+                            for item in exception_scopes
+                            if item.declaration_key == site.caller_declaration_key
+                            and item.locator.structural_path
+                            == scope_structure.structural_path
+                            and item.locator.ordinal == scope_structure.ordinal
+                        ),
+                        None,
+                    )
+                    while scope_ir is not None:
+                        if scope_ir.catch_block_keys:
+                            target_id = local_node_ids[scope_ir.catch_block_keys[0]]
+                            matching_structure = next(
+                                (
+                                    item
+                                    for item in structures_ir
+                                    if item.kind is StructureKind.EXCEPTION_SCOPE
+                                    and item.owner_declaration_key
+                                    == scope_ir.declaration_key
+                                    and item.structural_path
+                                    == scope_ir.locator.structural_path
+                                    and item.ordinal == scope_ir.locator.ordinal
+                                ),
+                                None,
+                            )
+                            if matching_structure is not None:
+                                exception_id_value = structure_ids[
+                                    matching_structure.local_key
+                                ]
+                            break
+                        scope_ir = next(
+                            (
+                                item
+                                for item in exception_scopes
+                                if item.local_key == scope_ir.parent_scope_key
+                            ),
+                            None,
+                        )
+                if target_id is None:
+                    caller_id = local_node_ids[site.caller_declaration_key]
+                    caller = declaration_by_key[site.caller_declaration_key]
+                    structural_path = (
+                        f"{site.locator.structural_path}/unhandled_exception"
+                    )
+                    identity = SourceOccurrenceIdentity(
+                        "source_occurrence",
+                        context.workspace_binding_id,
+                        caller.language,
+                        NodeKind.EXCEPTION,
+                        caller_id,
+                        structural_path,
+                        ordinal,
+                        "unhandled_exception",
+                    )
+                    target_id = node_id({
+                        "variant": "source_occurrence",
+                        "workspace_binding_id": context.workspace_binding_id,
+                        "language": caller.language,
+                        "kind": NodeKind.EXCEPTION.value,
+                        "owner_node_id": caller_id,
+                        "structural_path": structural_path,
+                        "ordinal": ordinal,
+                        "semantic_role": "unhandled_exception",
+                    })
+                    if not any(node.id == target_id for node in nodes):
+                        nodes.append(
+                            Node(
+                                target_id,
+                                identity,
+                                NodeKind.EXCEPTION,
+                                caller.language,
+                                None,
+                                "unhandled exception",
+                                None,
+                                None,
+                                None,
+                                _source_location(site.locator),
+                                TerminalProperties(None, "exception", "exception"),
+                                _synthetic_evidence(site.locator),
+                            )
+                        )
+                normalized = "exception"
+                append_edge(
+                    source_id=source_id,
+                    target_id=target_id,
+                    relation=Relation.THROWS_TO,
+                    flow=EdgeFlow.EXCEPTION,
+                    locator=site.locator,
+                    owner_id=local_node_ids[site.caller_declaration_key],
+                    evidence=_synthetic_evidence(site.locator),
+                    condition=Condition(
+                        "predicate",
+                        normalized,
+                        condition_hash(normalized),
+                        ConditionPolarity.EXCEPTION,
+                    ),
+                    exception_id=exception_id_value,
+                    occurrence_path=(
+                        f"{site.locator.structural_path}/exception_return/{ordinal}"
+                    ),
+                    occurrence_ordinal=ordinal,
+                )
+
+        edges = list(_deduplicate_edges(edges))
 
         nodes.extend(unknown_nodes)
         entrypoints: list[Entrypoint] = []
@@ -2022,16 +2653,20 @@ class GraphBuilder:
             )
 
         language_names = tuple(
-            sorted({
-                node.identity.language
-                for node in nodes
-                if isinstance(node.identity, FileIdentity)
-                and node.identity.language is not None
-            })
+            sorted(
+                set(context.detected_languages)
+                | {event.language for event in effective_coverage_events}
+                | {
+                    node.identity.language
+                    for node in nodes
+                    if isinstance(node.identity, FileIdentity)
+                    and node.identity.language is not None
+                }
+            )
         )
         capabilities, language_completeness = self._completeness(
             language_names,
-            coverage_events,
+            effective_coverage_events,
             unresolved_facts,
             entrypoint_candidates,
         )
@@ -2041,13 +2676,42 @@ class GraphBuilder:
             tuple(edges),
             tuple(uncertainties),
             capabilities,
+            tuple(
+                sorted(
+                    (
+                        local_node_ids[item.local_key],
+                        tuple(
+                            sorted(
+                                local_node_ids[key]
+                                for key in item.normal_exit_block_keys
+                            )
+                        ),
+                    )
+                    for item in declarations
+                )
+            ),
+            tuple(
+                sorted(
+                    (
+                        local_node_ids[item.local_key],
+                        tuple(
+                            sorted(
+                                local_node_ids[key]
+                                for key in item.exception_exit_block_keys
+                            )
+                        ),
+                    )
+                    for item in declarations
+                )
+            ),
         )
         # Summaries are computed before entrypoint traversal so recursive
         # callable components converge independently of public-flow order.
-        build_callable_summaries(topology)
+        summaries = build_callable_summaries(topology)
         flows, flow_steps = build_lifecycle_flows(
             topology,
             tuple(sorted(entrypoints, key=lambda item: item.id)),
+            summaries,
         )
 
         completeness = Completeness(
@@ -2067,6 +2731,11 @@ class GraphBuilder:
                 "public_api",
             )
         }
+        file_status_counts = Counter(
+            node.properties.analysis_status
+            for node in nodes
+            if isinstance(node.identity, FileIdentity)
+        )
         coverage = Coverage(
             CoverageScope(
                 (".",),
@@ -2076,12 +2745,19 @@ class GraphBuilder:
             FileCoverage(
                 len(file_node_ids),
                 len(file_node_ids),
-                len(file_node_ids),
-                len(file_node_ids),
-                0,
-                0,
-                0,
-                0,
+                sum(
+                    (
+                        inventory_by_path[path].parser_candidate
+                        if path in inventory_by_path
+                        else True
+                    )
+                    for path in file_node_ids
+                ),
+                file_status_counts[AnalysisStatus.ANALYZED],
+                file_status_counts[AnalysisStatus.UNSUPPORTED],
+                file_status_counts[AnalysisStatus.FAILED],
+                file_status_counts[AnalysisStatus.TOO_LARGE],
+                file_status_counts[AnalysisStatus.BUDGET_OMITTED],
             ),
             EntrypointCoverage(
                 len(entrypoints),
@@ -2113,9 +2789,22 @@ class GraphBuilder:
             if isinstance(node.identity, FileIdentity)
             and node.identity.language is not None
         )
+        analyzed_file_counts = Counter(
+            node.identity.language
+            for node in nodes
+            if isinstance(node.identity, FileIdentity)
+            and node.identity.language is not None
+            and node.properties.analysis_status is AnalysisStatus.ANALYZED
+        )
         languages = tuple(
-            LanguageRecord(name, "hades.lifecycle.v2", "2", count, count)
-            for name, count in sorted(file_counts.items())
+            LanguageRecord(
+                name,
+                "hades.lifecycle.v2",
+                "2",
+                file_counts[name],
+                analyzed_file_counts[name],
+            )
+            for name in language_names
         )
         frameworks = tuple(
             sorted(context.detected_frameworks, key=lambda item: (item.language, item.name))
@@ -2261,19 +2950,32 @@ class GraphBuilder:
             values: dict[str, Capability] = {}
             for name in _CAPABILITY_FIELDS:
                 scoped_languages = tuple(languages) if language is None else (language,)
+                framework_not_applicable = (
+                    name == "framework_lifecycle"
+                    and not any(item.framework for item in entrypoints)
+                )
+                missing_languages = (
+                    ()
+                    if framework_not_applicable
+                    else tuple(
+                        item
+                        for item in scoped_languages
+                        if (item, name) not in statuses
+                    )
+                )
                 selected_statuses = [
                     statuses[(item, name)]
                     for item in scoped_languages
                     if (item, name) in statuses
                 ]
+                if missing_languages:
+                    selected_statuses.append(CapabilityStatus.PARTIAL)
                 if selected_statuses:
                     status = max(selected_statuses, key=lambda item: rank[item])
-                elif name == "framework_lifecycle" and not any(
-                    item.framework for item in entrypoints
-                ):
+                elif framework_not_applicable:
                     status = CapabilityStatus.NOT_APPLICABLE
                 else:
-                    status = CapabilityStatus.FULL
+                    status = CapabilityStatus.PARTIAL
                 reasons: list[CapabilityReason] = []
                 for reason in ReasonCode:
                     count = sum(
@@ -2294,7 +2996,28 @@ class GraphBuilder:
                             tuple(paths),
                         )
                     )
-                values[name] = Capability(status, tuple(reasons))
+                if missing_languages:
+                    reasons.append(
+                        CapabilityReason(
+                            ReasonCode.INVALID_SOURCE_FACT,
+                            max(1, len(missing_languages)),
+                            language,
+                            (),
+                        )
+                    )
+                values[name] = Capability(
+                    status,
+                    tuple(
+                        sorted(
+                            reasons,
+                            key=lambda item: (
+                                item.code.value,
+                                item.language or "",
+                                item.paths_sample[0] if item.paths_sample else "",
+                            ),
+                        )
+                    ),
+                )
             return Capabilities(**values)
 
         language_rows = tuple(
