@@ -832,11 +832,35 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "description": "Graph import not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportNotFoundErrorResponse"
+                }
+              }
+            }
+          },
           "409": {
-            "$ref": "#/components/responses/Error"
+            "description": "Manifest conflicts with an existing import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphManifestConflictErrorResponse"
+                }
+              }
+            }
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Manifest failed graph-v2 validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphManifestErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -882,7 +906,8 @@
             "required": true,
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 8388608
             }
           },
           {
@@ -899,7 +924,8 @@
             "required": true,
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 8388608
             }
           }
         ],
@@ -942,13 +968,34 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
-            "$ref": "#/components/responses/Error"
+            "description": "Graph import not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportNotFoundErrorResponse"
+                }
+              }
+            }
           },
           "409": {
-            "$ref": "#/components/responses/Error"
+            "description": "Chunk digest conflicts with an existing upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphChunkConflictErrorResponse"
+                }
+              }
+            }
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Chunk or import state failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphChunkValidationErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1018,16 +1065,44 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
-            "$ref": "#/components/responses/Error"
+            "description": "Graph import not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportNotFoundErrorResponse"
+                }
+              }
+            }
           },
           "409": {
-            "$ref": "#/components/responses/Error"
+            "description": "Graph import validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportFailedErrorResponse"
+                }
+              }
+            }
           },
           "410": {
-            "$ref": "#/components/responses/Error"
+            "description": "Graph import attempt is stale",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportStaleErrorResponse"
+                }
+              }
+            }
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Manifest or chunk set is incomplete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphCompleteValidationErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1068,7 +1143,14 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
-            "$ref": "#/components/responses/Error"
+            "description": "Graph import not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportNotFoundErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2299,7 +2381,11 @@
         "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
       },
       "GraphBundleManifest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://home-sweet-home.cloud/contracts/hades/graph-v2/bundle.schema.json",
+        "title": "Hades Code Graph Bundle v2",
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "schema",
           "artifact_schema",
@@ -2313,44 +2399,49 @@
           "counts",
           "chunks"
         ],
-        "additionalProperties": false,
         "properties": {
-          "schema": {
-            "const": "hades.graph_bundle.v2"
-          },
-          "artifact_schema": {
-            "const": "hades.code_graph.v2"
-          },
-          "artifact_graph_version": {
-            "$ref": "#/components/schemas/Sha256Digest"
-          },
-          "generated_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "source": {
-            "type": "object"
-          },
-          "project": {
-            "type": "object"
-          },
-          "graph_contract": {
-            "type": "object"
-          },
+          "schema": {"const": "hades.graph_bundle.v2"},
+          "artifact_schema": {"const": "hades.code_graph.v2"},
+          "artifact_graph_version": {"$ref": "#/$defs/digest"},
+          "generated_at": {"$ref": "#/$defs/utcTimestamp"},
+          "source": {"$ref": "#/$defs/source"},
+          "project": {"$ref": "#/$defs/project"},
+          "graph_contract": {"$ref": "#/$defs/graphContract"},
           "frameworks": {
             "type": "array",
-            "items": {
-              "type": "object"
-            }
+            "maxItems": 9007199254740991,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/framework"}
           },
           "languages": {
             "type": "array",
-            "items": {
-              "type": "object"
-            }
+            "maxItems": 9007199254740991,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/language"}
+          },
+          "counts": {"$ref": "#/$defs/counts"},
+          "chunks": {
+            "type": "array",
+            "maxItems": 512,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/chunkDescriptor"}
+          }
+        },
+        "$defs": {
+          "digest": {"$ref": "artifact.schema.json#/$defs/digest"},
+          "utcTimestamp": {"$ref": "artifact.schema.json#/$defs/utcTimestamp"},
+          "safeInteger": {"$ref": "artifact.schema.json#/$defs/safeInteger"},
+          "source": {"$ref": "artifact.schema.json#/$defs/source"},
+          "project": {"$ref": "artifact.schema.json#/$defs/project"},
+          "graphContract": {"$ref": "artifact.schema.json#/$defs/graphContract"},
+          "framework": {"$ref": "artifact.schema.json#/$defs/framework"},
+          "language": {"$ref": "artifact.schema.json#/$defs/language"},
+          "chunkKind": {
+            "enum": ["entrypoints", "nodes", "structures", "edges", "flows", "flow_steps", "uncertainties"]
           },
           "counts": {
             "type": "object",
+            "additionalProperties": false,
             "required": [
               "frameworks",
               "languages",
@@ -2362,64 +2453,31 @@
               "flow_steps",
               "uncertainties"
             ],
-            "additionalProperties": false,
             "properties": {
-              "frameworks": {"type": "integer", "minimum": 0},
-              "languages": {"type": "integer", "minimum": 0},
-              "entrypoints": {"type": "integer", "minimum": 0},
-              "nodes": {"type": "integer", "minimum": 0},
-              "structures": {"type": "integer", "minimum": 0},
-              "edges": {"type": "integer", "minimum": 0},
-              "flows": {"type": "integer", "minimum": 0},
-              "flow_steps": {"type": "integer", "minimum": 0},
-              "uncertainties": {"type": "integer", "minimum": 0}
+              "frameworks": {"$ref": "#/$defs/safeInteger"},
+              "languages": {"$ref": "#/$defs/safeInteger"},
+              "entrypoints": {"$ref": "#/$defs/safeInteger"},
+              "nodes": {"$ref": "#/$defs/safeInteger"},
+              "structures": {"$ref": "#/$defs/safeInteger"},
+              "edges": {"$ref": "#/$defs/safeInteger"},
+              "flows": {"$ref": "#/$defs/safeInteger"},
+              "flow_steps": {"$ref": "#/$defs/safeInteger"},
+              "uncertainties": {"$ref": "#/$defs/safeInteger"}
             }
           },
-          "chunks": {
-            "type": "array",
-            "maxItems": 512,
-            "items": {
-              "type": "object",
-              "required": [
-                "index",
-                "kind",
-                "record_count",
-                "sha256",
-                "uncompressed_bytes",
-                "compression",
-                "compressed_sha256",
-                "compressed_bytes"
-              ],
-              "additionalProperties": false,
-              "properties": {
-                "index": {"type": "integer", "minimum": 0, "maximum": 511},
-                "kind": {
-                  "type": "string",
-                  "enum": [
-                    "entrypoints",
-                    "nodes",
-                    "structures",
-                    "edges",
-                    "flows",
-                    "flow_steps",
-                    "uncertainties"
-                  ]
-                },
-                "record_count": {"type": "integer", "minimum": 1},
-                "sha256": {"$ref": "#/components/schemas/Sha256Digest"},
-                "uncompressed_bytes": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 8388608
-                },
-                "compression": {"const": "gzip"},
-                "compressed_sha256": {"$ref": "#/components/schemas/Sha256Digest"},
-                "compressed_bytes": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 8388608
-                }
-              }
+          "chunkDescriptor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "kind", "record_count", "sha256", "uncompressed_bytes", "compression", "compressed_sha256", "compressed_bytes"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0, "maximum": 511},
+              "kind": {"$ref": "#/$defs/chunkKind"},
+              "record_count": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+              "sha256": {"$ref": "#/$defs/digest"},
+              "uncompressed_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
+              "compression": {"const": "gzip"},
+              "compressed_sha256": {"$ref": "#/$defs/digest"},
+              "compressed_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608}
             }
           }
         }
@@ -2490,7 +2548,12 @@
           "received_chunks": {"type": "integer", "minimum": 0, "maximum": 512},
           "expected_chunks": {"type": "integer", "minimum": 0, "maximum": 512},
           "missing_chunk_indexes": {"$ref": "#/components/schemas/GraphMissingChunkIndexes"},
-          "failure": {"type": ["object", "null"]},
+          "failure": {
+            "oneOf": [
+              {"$ref": "#/components/schemas/GraphImportFailure"},
+              {"type": "null"}
+            ]
+          },
           "projection_version": {"$ref": "#/components/schemas/NullableGraphProjectionVersion"},
           "expires_at": {"$ref": "#/components/schemas/NullableGraphImportExpiry"}
         }
@@ -2518,6 +2581,166 @@
       "NullableGraphImportExpiry": {
         "type": ["string", "null"],
         "format": "date-time"
+      },
+      "GraphImportFailure": {
+        "type": "object",
+        "required": ["code", "details"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,127}$"
+          },
+          "details": {"type": ["object", "null"]}
+        }
+      },
+      "GraphImportNotFoundErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "graph_import_not_found"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphManifestConflictErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "graph_import_manifest_conflict"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphManifestErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "graph_manifest_invalid"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphChunkConflictErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "chunk_digest_conflict"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphChunkValidationErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": ["graph_chunk_invalid", "graph_chunk_too_large", "graph_import_not_staging"]
+              },
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphImportFailedErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "graph_import_failed"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphImportStaleErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {"const": "graph_import_stale"},
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
+      },
+      "GraphCompleteValidationErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": ["graph_manifest_invalid", "graph_import_incomplete"]
+              },
+              "message": {"type": "string"},
+              "next_step": {"type": ["string", "null"]},
+              "details": {"type": ["object", "null"]}
+            }
+          }
+        }
       },
       "ErrorResponse": {
         "type": "object",
