@@ -787,6 +787,292 @@
         }
       }
     },
+    "/api/hades/v1/graph-imports": {
+      "post": {
+        "summary": "Create or resume an immutable graph-v2 import",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphBundleManifest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing live or validated import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportCreateResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New import attempt created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportCreateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/graph-imports/{graphImport}/chunks/{index}": {
+      "put": {
+        "summary": "Upload one exact deterministic-gzip graph chunk",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "graphImport",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/GraphImportId"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 511
+            }
+          },
+          {
+            "name": "X-Hades-Chunk-Sha256",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            }
+          },
+          {
+            "name": "X-Hades-Chunk-Uncompressed-Bytes",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "X-Hades-Chunk-Compressed-Sha256",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Sha256Digest"
+            }
+          },
+          {
+            "name": "X-Hades-Chunk-Compressed-Bytes",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/vnd.hades.graph-chunk+gzip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Identical chunk replay accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphChunkAcceptedResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Chunk accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphChunkAcceptedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/graph-imports/{graphImport}/complete": {
+      "post": {
+        "summary": "Complete a graph import and request asynchronous publication",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "graphImport",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/GraphImportId"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "artifact_graph_version"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "artifact_graph_version": {
+                    "$ref": "#/components/schemas/Sha256Digest"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import was already published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportCompletionResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Validation or publication is pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportCompletionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/graph-imports/{graphImport}": {
+      "get": {
+        "summary": "Read graph import validation and publication state",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "graphImport",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/GraphImportId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current graph import state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphImportStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/api/hades/v1/doctor/reports": {
       "post": {
         "summary": "Submit an explicit Hades doctor report",
@@ -2004,6 +2290,235 @@
       }
     },
     "schemas": {
+      "Sha256Digest": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "GraphImportId": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+      },
+      "GraphBundleManifest": {
+        "type": "object",
+        "required": [
+          "schema",
+          "artifact_schema",
+          "artifact_graph_version",
+          "generated_at",
+          "source",
+          "project",
+          "graph_contract",
+          "frameworks",
+          "languages",
+          "counts",
+          "chunks"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "const": "hades.graph_bundle.v2"
+          },
+          "artifact_schema": {
+            "const": "hades.code_graph.v2"
+          },
+          "artifact_graph_version": {
+            "$ref": "#/components/schemas/Sha256Digest"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "object"
+          },
+          "project": {
+            "type": "object"
+          },
+          "graph_contract": {
+            "type": "object"
+          },
+          "frameworks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "counts": {
+            "type": "object",
+            "required": [
+              "frameworks",
+              "languages",
+              "entrypoints",
+              "nodes",
+              "structures",
+              "edges",
+              "flows",
+              "flow_steps",
+              "uncertainties"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "frameworks": {"type": "integer", "minimum": 0},
+              "languages": {"type": "integer", "minimum": 0},
+              "entrypoints": {"type": "integer", "minimum": 0},
+              "nodes": {"type": "integer", "minimum": 0},
+              "structures": {"type": "integer", "minimum": 0},
+              "edges": {"type": "integer", "minimum": 0},
+              "flows": {"type": "integer", "minimum": 0},
+              "flow_steps": {"type": "integer", "minimum": 0},
+              "uncertainties": {"type": "integer", "minimum": 0}
+            }
+          },
+          "chunks": {
+            "type": "array",
+            "maxItems": 512,
+            "items": {
+              "type": "object",
+              "required": [
+                "index",
+                "kind",
+                "record_count",
+                "sha256",
+                "uncompressed_bytes",
+                "compression",
+                "compressed_sha256",
+                "compressed_bytes"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "index": {"type": "integer", "minimum": 0, "maximum": 511},
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "entrypoints",
+                    "nodes",
+                    "structures",
+                    "edges",
+                    "flows",
+                    "flow_steps",
+                    "uncertainties"
+                  ]
+                },
+                "record_count": {"type": "integer", "minimum": 1},
+                "sha256": {"$ref": "#/components/schemas/Sha256Digest"},
+                "uncompressed_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                },
+                "compression": {"const": "gzip"},
+                "compressed_sha256": {"$ref": "#/components/schemas/Sha256Digest"},
+                "compressed_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                }
+              }
+            }
+          }
+        }
+      },
+      "GraphChunkAcceptedResponse": {
+        "type": "object",
+        "required": ["index", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "index": {"type": "integer", "minimum": 0, "maximum": 511},
+          "status": {"const": "accepted"}
+        }
+      },
+      "GraphImportCreateResponse": {
+        "type": "object",
+        "required": [
+          "import_id",
+          "attempt_generation",
+          "validation_status",
+          "publication_status",
+          "missing_chunk_indexes",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "import_id": {"$ref": "#/components/schemas/GraphImportId"},
+          "attempt_generation": {"type": "integer", "minimum": 1},
+          "validation_status": {"$ref": "#/components/schemas/GraphImportValidationStatus"},
+          "publication_status": {"$ref": "#/components/schemas/GraphImportPublicationStatus"},
+          "missing_chunk_indexes": {"$ref": "#/components/schemas/GraphMissingChunkIndexes"},
+          "expires_at": {"$ref": "#/components/schemas/NullableGraphImportExpiry"}
+        }
+      },
+      "GraphImportCompletionResponse": {
+        "type": "object",
+        "required": [
+          "import_id",
+          "validation_status",
+          "publication_status",
+          "projection_version"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "import_id": {"$ref": "#/components/schemas/GraphImportId"},
+          "validation_status": {"$ref": "#/components/schemas/GraphImportValidationStatus"},
+          "publication_status": {"$ref": "#/components/schemas/GraphImportPublicationStatus"},
+          "projection_version": {"$ref": "#/components/schemas/NullableGraphProjectionVersion"}
+        }
+      },
+      "GraphImportStatusResponse": {
+        "type": "object",
+        "required": [
+          "import_id",
+          "validation_status",
+          "publication_status",
+          "received_chunks",
+          "expected_chunks",
+          "missing_chunk_indexes",
+          "failure",
+          "projection_version",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "import_id": {"$ref": "#/components/schemas/GraphImportId"},
+          "validation_status": {"$ref": "#/components/schemas/GraphImportValidationStatus"},
+          "publication_status": {"$ref": "#/components/schemas/GraphImportPublicationStatus"},
+          "received_chunks": {"type": "integer", "minimum": 0, "maximum": 512},
+          "expected_chunks": {"type": "integer", "minimum": 0, "maximum": 512},
+          "missing_chunk_indexes": {"$ref": "#/components/schemas/GraphMissingChunkIndexes"},
+          "failure": {"type": ["object", "null"]},
+          "projection_version": {"$ref": "#/components/schemas/NullableGraphProjectionVersion"},
+          "expires_at": {"$ref": "#/components/schemas/NullableGraphImportExpiry"}
+        }
+      },
+      "GraphImportValidationStatus": {
+        "type": "string",
+        "enum": ["staging", "validating", "validated", "failed", "stale"]
+      },
+      "GraphImportPublicationStatus": {
+        "type": "string",
+        "enum": ["not_requested", "queued", "projecting", "ready", "failed", "stale"]
+      },
+      "GraphMissingChunkIndexes": {
+        "type": "array",
+        "maxItems": 512,
+        "uniqueItems": true,
+        "items": {"type": "integer", "minimum": 0, "maximum": 511}
+      },
+      "NullableGraphProjectionVersion": {
+        "oneOf": [
+          {"$ref": "#/components/schemas/Sha256Digest"},
+          {"type": "null"}
+        ]
+      },
+      "NullableGraphImportExpiry": {
+        "type": ["string", "null"],
+        "format": "date-time"
+      },
       "ErrorResponse": {
         "type": "object",
         "required": [

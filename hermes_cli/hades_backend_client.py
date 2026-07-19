@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator, Mapping
 from urllib.parse import unquote
 
 import httpx
@@ -28,6 +29,166 @@ _SECRET_PATTERNS = (
 )
 _WIKI_PAGE_ID = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
 _ROUTE_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+_GRAPH_IMPORT_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+_MAX_GRAPH_CHUNK_INDEX = 511
+_MAX_GRAPH_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def validate_graph_import_id(value: Any) -> str:
+    """Return one opaque graph-import route segment or reject it locally."""
+
+    clean = str(value or "").strip()
+    if _GRAPH_IMPORT_ID.fullmatch(clean) is None:
+        raise ValueError("graph import id must be a safe route segment")
+    return clean
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkHeaders:
+    """Digest and size descriptor for one immutable graph-v2 chunk."""
+
+    sha256: str
+    uncompressed_bytes: int
+    compressed_sha256: str
+    compressed_bytes: int
+
+    def __post_init__(self) -> None:
+        if not _SHA256.fullmatch(self.sha256):
+            raise ValueError("chunk sha256 must be a lower-case SHA-256 digest")
+        if not _SHA256.fullmatch(self.compressed_sha256):
+            raise ValueError(
+                "chunk compressed_sha256 must be a lower-case SHA-256 digest"
+            )
+        if type(self.uncompressed_bytes) is not int or self.uncompressed_bytes < 1:
+            raise ValueError("chunk uncompressed_bytes must be a positive integer")
+        if self.uncompressed_bytes > _MAX_GRAPH_CHUNK_BYTES:
+            raise ValueError("chunk uncompressed_bytes must be at most 8 MiB")
+        if type(self.compressed_bytes) is not int or self.compressed_bytes < 1:
+            raise ValueError("chunk compressed_bytes must be a positive integer")
+        if self.compressed_bytes > _MAX_GRAPH_CHUNK_BYTES:
+            raise ValueError("chunk compressed_bytes must be at most 8 MiB")
+
+    def as_http_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/vnd.hades.graph-chunk+gzip",
+            "X-Hades-Chunk-Sha256": self.sha256,
+            "X-Hades-Chunk-Uncompressed-Bytes": str(self.uncompressed_bytes),
+            "X-Hades-Chunk-Compressed-Sha256": self.compressed_sha256,
+            "X-Hades-Chunk-Compressed-Bytes": str(self.compressed_bytes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GraphChunkState:
+    index: int
+    status: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "GraphChunkState":
+        index = payload.get("index")
+        status = payload.get("status")
+        if (
+            type(index) is not int
+            or not 0 <= index <= _MAX_GRAPH_CHUNK_INDEX
+            or status != "accepted"
+        ):
+            raise HadesBackendError("graph chunk response has an invalid contract")
+        return cls(index=index, status=status)
+
+
+@dataclass(frozen=True, slots=True)
+class GraphImportState:
+    import_id: str
+    attempt_generation: int | None
+    validation_status: str
+    publication_status: str
+    missing_chunk_indexes: tuple[int, ...]
+    expires_at: str | None
+    received_chunks: int | None
+    expected_chunks: int | None
+    failure: Any | None
+    projection_version: str | None
+
+    @property
+    def is_ready(self) -> bool:
+        return (
+            self.validation_status == "validated"
+            and self.publication_status == "ready"
+            and self.projection_version is not None
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "GraphImportState":
+        import_id = payload.get("import_id")
+        validation = payload.get("validation_status")
+        publication = payload.get("publication_status")
+        try:
+            import_id = validate_graph_import_id(import_id)
+        except ValueError:
+            raise HadesBackendError(
+                "graph import response has an invalid import_id"
+            ) from None
+        if validation not in {"staging", "validating", "validated", "failed", "stale"}:
+            raise HadesBackendError("graph import response has an invalid validation status")
+        if publication not in {
+            "not_requested",
+            "queued",
+            "projecting",
+            "ready",
+            "failed",
+            "stale",
+        }:
+            raise HadesBackendError("graph import response has an invalid publication status")
+        raw_missing = payload.get("missing_chunk_indexes", [])
+        if (
+            not isinstance(raw_missing, list)
+            or any(
+                type(index) is not int
+                or not 0 <= index <= _MAX_GRAPH_CHUNK_INDEX
+                for index in raw_missing
+            )
+            or raw_missing != sorted(set(raw_missing))
+        ):
+            raise HadesBackendError("graph import response has invalid missing chunks")
+
+        attempt = payload.get("attempt_generation")
+        received = payload.get("received_chunks")
+        expected = payload.get("expected_chunks")
+        for name, value, positive in (
+            ("attempt_generation", attempt, True),
+            ("received_chunks", received, False),
+            ("expected_chunks", expected, False),
+        ):
+            if value is not None and (
+                type(value) is not int or value < (1 if positive else 0)
+            ):
+                raise HadesBackendError(
+                    f"graph import response has invalid {name}"
+                )
+        projection = payload.get("projection_version")
+        if projection is not None and not (
+            isinstance(projection, str) and _SHA256.fullmatch(projection)
+        ):
+            raise HadesBackendError("graph import response has invalid projection_version")
+        expires_at = payload.get("expires_at")
+        if expires_at is not None and not isinstance(expires_at, str):
+            raise HadesBackendError("graph import response has invalid expires_at")
+        failure = payload.get("failure")
+        if failure is not None and not isinstance(failure, dict):
+            raise HadesBackendError("graph import response has invalid failure")
+        return cls(
+            import_id=import_id,
+            attempt_generation=attempt,
+            validation_status=validation,
+            publication_status=publication,
+            missing_chunk_indexes=tuple(raw_missing),
+            expires_at=expires_at,
+            received_chunks=received,
+            expected_chunks=expected,
+            failure=failure,
+            projection_version=projection,
+        )
 
 
 class HadesBackendError(RuntimeError):
@@ -48,6 +209,47 @@ class HadesBackendError(RuntimeError):
         self.code = code
         self.next_step = next_step
         self.details = details
+
+
+def _parse_graph_import_response(
+    payload: Mapping[str, Any],
+    *,
+    operation: str,
+    required_fields: tuple[str, ...],
+    requested_import_id: str | None = None,
+) -> GraphImportState:
+    missing = [field for field in required_fields if field not in payload]
+    if missing:
+        raise HadesBackendError(
+            f"graph import {operation} response is missing {', '.join(missing)}"
+        )
+    state = GraphImportState.from_mapping(payload)
+    if requested_import_id is not None and state.import_id != requested_import_id:
+        raise HadesBackendError(
+            f"graph import {operation} response import_id does not match request"
+        )
+    if operation == "create" and state.attempt_generation is None:
+        raise HadesBackendError(
+            "graph import create response has invalid attempt_generation"
+        )
+    if operation == "get" and (
+        state.received_chunks is None or state.expected_chunks is None
+    ):
+        raise HadesBackendError(
+            "graph import get response has invalid received_chunks or expected_chunks"
+        )
+    if operation == "get":
+        received = state.received_chunks
+        expected = state.expected_chunks
+        assert received is not None and expected is not None
+        if (
+            not 0 <= received <= expected <= _MAX_GRAPH_CHUNK_INDEX + 1
+            or len(state.missing_chunk_indexes) != expected - received
+        ):
+            raise HadesBackendError(
+                "graph import get response has invalid chunk accounting"
+            )
+    return state
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -83,6 +285,23 @@ def redact_secret(text: Any) -> str:
     value = text if isinstance(text, str) else json.dumps(text, sort_keys=True, default=str)
     for pattern in _SECRET_PATTERNS:
         value = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "***", value)
+    return value
+
+
+def _redact_structured(value: Any) -> Any:
+    """Redact secrets recursively while preserving backend error structure."""
+
+    if isinstance(value, str):
+        return redact_secret(value)
+    if isinstance(value, dict):
+        return {
+            redact_secret(key) if isinstance(key, str) else key: _redact_structured(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structured(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_structured(item) for item in value)
     return value
 
 
@@ -227,13 +446,20 @@ class HadesBackendClient:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        content_body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        success_statuses: tuple[int, ...] | None = None,
     ) -> dict[str, Any] | list[Any]:
+        if json_body is not None and content_body is not None:
+            raise ValueError("a backend request cannot have both JSON and raw content")
         try:
             response = self._client.request(
                 method,
                 self._url(path),
                 json=json_body,
+                content=content_body,
                 params=_query_params(params),
+                headers=dict(headers or {}),
             )
         except httpx.HTTPError as exc:
             raise HadesBackendError(redact_secret(str(exc))) from exc
@@ -249,14 +475,25 @@ class HadesBackendClient:
                 error = body.get("error")
                 if isinstance(error, dict):
                     code = str(error.get("code") or "") or None
-                    next_step = str(error.get("next_step") or "") or None
-                    details = error.get("details")
+                    raw_next_step = str(error.get("next_step") or "") or None
+                    next_step = (
+                        redact_secret(raw_next_step) if raw_next_step is not None else None
+                    )
+                    details = _redact_structured(error.get("details"))
             raise HadesBackendError(
                 f"{response.status_code}: {redact_secret(body)}",
                 status_code=response.status_code,
                 code=code,
                 next_step=next_step,
                 details=details,
+            )
+        if (
+            success_statuses is not None
+            and response.status_code not in success_statuses
+        ):
+            raise HadesBackendError(
+                f"backend returned unexpected success status {response.status_code}",
+                status_code=response.status_code,
             )
         if not response.content:
             return {}
@@ -384,6 +621,134 @@ class HadesBackendClient:
 
     def upload_artifact(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "artifacts", json_body=payload)
+
+    def create_graph_import(self, manifest: dict[str, object]) -> GraphImportState:
+        """Create or resume the immutable import identified by a v2 manifest."""
+
+        if not isinstance(manifest, dict):
+            raise TypeError("graph import manifest must be a dictionary")
+        if (
+            manifest.get("schema") != "hades.graph_bundle.v2"
+            or manifest.get("artifact_schema") != "hades.code_graph.v2"
+        ):
+            raise ValueError("graph import requires a graph bundle v2 manifest")
+        version = manifest.get("artifact_graph_version")
+        if not isinstance(version, str) or _SHA256.fullmatch(version) is None:
+            raise ValueError(
+                "graph import artifact_graph_version must be a lower-case SHA-256 digest"
+            )
+        result = self._request(
+            "POST",
+            "graph-imports",
+            json_body=manifest,
+            success_statuses=(200, 201),
+        )
+        if not isinstance(result, dict):
+            raise HadesBackendError("graph import create response must be an object")
+        return _parse_graph_import_response(
+            result,
+            operation="create",
+            required_fields=(
+                "import_id",
+                "attempt_generation",
+                "validation_status",
+                "publication_status",
+                "missing_chunk_indexes",
+                "expires_at",
+            ),
+        )
+
+    def upload_graph_chunk(
+        self,
+        import_id: str,
+        index: int,
+        body: BinaryIO,
+        headers: ChunkHeaders,
+    ) -> GraphChunkState:
+        """Upload one exact deterministic-gzip member without re-encoding it."""
+
+        clean_import = validate_graph_import_id(import_id)
+        if type(index) is not int or not 0 <= index <= _MAX_GRAPH_CHUNK_INDEX:
+            raise ValueError("graph chunk index must be between 0 and 511")
+        if not isinstance(headers, ChunkHeaders):
+            raise TypeError("graph chunk headers must be ChunkHeaders")
+        if not hasattr(body, "read"):
+            raise TypeError("graph chunk body must be a binary file object")
+        wire_body = body.read(headers.compressed_bytes + 1)
+        if not isinstance(wire_body, bytes):
+            raise TypeError("graph chunk body must produce bytes")
+        if len(wire_body) != headers.compressed_bytes:
+            raise ValueError("graph chunk body changed after its size was recorded")
+        if hashlib.sha256(wire_body).hexdigest() != headers.compressed_sha256:
+            raise ValueError("graph chunk body changed after its digest was recorded")
+        result = self._request(
+            "PUT",
+            f"graph-imports/{clean_import}/chunks/{index}",
+            content_body=wire_body,
+            headers=headers.as_http_headers(),
+            success_statuses=(200, 201),
+        )
+        if not isinstance(result, dict):
+            raise HadesBackendError("graph chunk response must be an object")
+        state = GraphChunkState.from_mapping(result)
+        if state.index != index:
+            raise HadesBackendError("graph chunk response index does not match request")
+        return state
+
+    def complete_graph_import(
+        self,
+        import_id: str,
+        artifact_graph_version: str,
+    ) -> GraphImportState:
+        clean_import = validate_graph_import_id(import_id)
+        version = str(artifact_graph_version or "").strip()
+        if not _SHA256.fullmatch(version):
+            raise ValueError("artifact graph version must be a lower-case SHA-256 digest")
+        result = self._request(
+            "POST",
+            f"graph-imports/{clean_import}/complete",
+            json_body={"artifact_graph_version": version},
+            success_statuses=(200, 202),
+        )
+        if not isinstance(result, dict):
+            raise HadesBackendError("graph import complete response must be an object")
+        return _parse_graph_import_response(
+            result,
+            operation="complete",
+            required_fields=(
+                "import_id",
+                "validation_status",
+                "publication_status",
+                "projection_version",
+            ),
+            requested_import_id=clean_import,
+        )
+
+    def graph_import(self, import_id: str) -> GraphImportState:
+        clean_import = validate_graph_import_id(import_id)
+        result = self._request(
+            "GET",
+            f"graph-imports/{clean_import}",
+            success_statuses=(200,),
+        )
+        if not isinstance(result, dict):
+            raise HadesBackendError("graph import response must be an object")
+        return _parse_graph_import_response(
+            result,
+            operation="get",
+            required_fields=(
+                "import_id",
+                "validation_status",
+                "publication_status",
+                "received_chunks",
+                "expected_chunks",
+                "missing_chunk_indexes",
+                "failure",
+                "projection_version",
+                "expires_at",
+            ),
+            requested_import_id=clean_import,
+        )
 
     def create_source_slice(self, **payload: Any) -> dict[str, Any]:
         return self._request("POST", "source-slices", json_body=payload)

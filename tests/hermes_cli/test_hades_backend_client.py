@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -713,6 +715,98 @@ CLIENT_ROUTE_CASES = [
         },
         "stream": True,
     },
+    {
+        "method_name": "create_graph_import",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/graph-imports",
+        "wire_path": "/api/hades/v1/graph-imports",
+        "args": [{
+            "schema": "hades.graph_bundle.v2",
+            "artifact_schema": "hades.code_graph.v2",
+            "artifact_graph_version": "a" * 64,
+        }],
+        "json_body": {
+            "schema": "hades.graph_bundle.v2",
+            "artifact_schema": "hades.code_graph.v2",
+            "artifact_graph_version": "a" * 64,
+        },
+        "response_json": {
+            "import_id": "import-1",
+            "attempt_generation": 1,
+            "validation_status": "staging",
+            "publication_status": "not_requested",
+            "missing_chunk_indexes": [0],
+            "expires_at": "2026-07-19T12:00:00Z",
+        },
+        "response_fields": {
+            "import_id": "import-1",
+            "missing_chunk_indexes": (0,),
+        },
+    },
+    {
+        "method_name": "upload_graph_chunk",
+        "http_method": "PUT",
+        "openapi_path": "/api/hades/v1/graph-imports/{graphImport}/chunks/{index}",
+        "wire_path": "/api/hades/v1/graph-imports/import-1/chunks/0",
+        "args": [
+            "import-1",
+            0,
+            BytesIO(b"x"),
+        ],
+        "kwargs_factory": lambda: {
+            "headers": __import__(
+                "hermes_cli.hades_backend_client", fromlist=["ChunkHeaders"]
+            ).ChunkHeaders(
+                sha256="a" * 64,
+                uncompressed_bytes=1,
+                compressed_sha256=hashlib.sha256(b"x").hexdigest(),
+                compressed_bytes=1,
+            )
+        },
+        "raw_body": b"x",
+        "response_json": {"index": 0, "status": "accepted"},
+        "response_fields": {"index": 0, "status": "accepted"},
+    },
+    {
+        "method_name": "complete_graph_import",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/graph-imports/{graphImport}/complete",
+        "wire_path": "/api/hades/v1/graph-imports/import-1/complete",
+        "args": ["import-1", "a" * 64],
+        "json_body": {"artifact_graph_version": "a" * 64},
+        "response_json": {
+            "import_id": "import-1",
+            "validation_status": "validating",
+            "publication_status": "not_requested",
+            "projection_version": None,
+        },
+        "response_fields": {
+            "import_id": "import-1",
+            "validation_status": "validating",
+        },
+    },
+    {
+        "method_name": "graph_import",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/graph-imports/{graphImport}",
+        "wire_path": "/api/hades/v1/graph-imports/import-1",
+        "args": ["import-1"],
+        "response_json": {
+            "import_id": "import-1",
+            "validation_status": "validated",
+            "publication_status": "ready",
+            "received_chunks": 1,
+            "expected_chunks": 1,
+            "missing_chunk_indexes": [],
+            "failure": None,
+            "projection_version": "b" * 64,
+            "expires_at": None,
+        },
+        "response_fields": {
+            "import_id": "import-1",
+            "publication_status": "ready",
+        },
+    },
 ]
 
 INTENTIONALLY_UNMAPPED_OPENAPI_ROUTES = {}
@@ -724,6 +818,765 @@ INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
     "code_claim_release",
     "code_claim_detect_conflicts",
 }
+
+
+def test_graph_import_create_is_idempotent_for_200_and_201():
+    from hermes_cli.hades_backend_client import HadesBackendClient, GraphImportState
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            201 if len(requests) == 1 else 200,
+            json={
+                "import_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "attempt_generation": 1,
+                "validation_status": "staging",
+                "publication_status": "not_requested",
+                "missing_chunk_indexes": [0, 2],
+                "expires_at": "2026-07-19T12:00:00Z",
+            },
+        )
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+    manifest = {
+        "schema": "hades.graph_bundle.v2",
+        "artifact_schema": "hades.code_graph.v2",
+        "artifact_graph_version": "a" * 64,
+    }
+
+    first = client.create_graph_import(manifest)
+    replay = client.create_graph_import(manifest)
+
+    assert first == replay == GraphImportState(
+        import_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        attempt_generation=1,
+        validation_status="staging",
+        publication_status="not_requested",
+        missing_chunk_indexes=(0, 2),
+        expires_at="2026-07-19T12:00:00Z",
+        received_chunks=None,
+        expected_chunks=None,
+        failure=None,
+        projection_version=None,
+    )
+    assert all(request.url.path == "/api/hades/v1/graph-imports" for request in requests)
+    assert all(_json_request_body(request) == manifest for request in requests)
+
+
+def test_graph_import_chunk_uses_exact_raw_body_and_digest_headers():
+    from hermes_cli.hades_backend_client import (
+        ChunkHeaders,
+        GraphChunkState,
+        HadesBackendClient,
+    )
+
+    body = b"\x1f\x8bdeterministic-gzip"
+    compressed_sha256 = hashlib.sha256(body).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path.endswith("/graph-imports/import-1/chunks/2")
+        assert request.content == body
+        assert request.headers["content-type"] == "application/vnd.hades.graph-chunk+gzip"
+        assert request.headers["x-hades-chunk-sha256"] == "a" * 64
+        assert request.headers["x-hades-chunk-uncompressed-bytes"] == "42"
+        assert request.headers["x-hades-chunk-compressed-sha256"] == compressed_sha256
+        assert request.headers["x-hades-chunk-compressed-bytes"] == str(len(body))
+        return httpx.Response(201, json={"index": 2, "status": "accepted"})
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+    class TrackingBody(BytesIO):
+        read_sizes: list[int]
+
+        def __init__(self, value: bytes) -> None:
+            super().__init__(value)
+            self.read_sizes = []
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    stream = TrackingBody(body)
+    state = client.upload_graph_chunk(
+        "import-1",
+        2,
+        stream,
+        ChunkHeaders(
+            sha256="a" * 64,
+            uncompressed_bytes=42,
+            compressed_sha256=compressed_sha256,
+            compressed_bytes=len(body),
+        ),
+    )
+
+    assert state == GraphChunkState(index=2, status="accepted")
+    assert stream.read_sizes == [len(body) + 1]
+
+
+def test_graph_import_chunk_conflict_preserves_stable_backend_error():
+    from hermes_cli.hades_backend_client import (
+        ChunkHeaders,
+        HadesBackendClient,
+        HadesBackendError,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={"error": {"code": "chunk_digest_conflict"}},
+        )
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+    headers = ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1)
+
+    with pytest.raises(HadesBackendError) as raised:
+        client.upload_graph_chunk("import-1", 0, BytesIO(b"x"), headers)
+
+    assert raised.value.status_code == 409
+    assert raised.value.code == "chunk_digest_conflict"
+
+
+def test_graph_import_chunk_replay_accepts_the_typed_200_response():
+    from hermes_cli.hades_backend_client import (
+        ChunkHeaders,
+        GraphChunkState,
+        HadesBackendClient,
+    )
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"index": 0, "status": "accepted"},
+            )
+        ),
+    )
+
+    state = client.upload_graph_chunk(
+        "import-1",
+        0,
+        BytesIO(b"x"),
+        ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1),
+    )
+
+    assert state == GraphChunkState(index=0, status="accepted")
+
+
+@pytest.mark.parametrize(
+    "import_id",
+    [
+        "",
+        "../other",
+        "import/other",
+        "import%2Fother",
+        "import%252Fother",
+        "import?admin=1",
+        "import#fragment",
+        "import\\other",
+        "import\x00other",
+        ".",
+        "..",
+        "a" * 129,
+    ],
+)
+@pytest.mark.parametrize(
+    "method_name",
+    ["upload_graph_chunk", "complete_graph_import", "graph_import"],
+)
+def test_graph_import_methods_reject_unsafe_import_ids_before_network(
+    method_name,
+    import_id,
+):
+    from hermes_cli.hades_backend_client import ChunkHeaders, HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (
+                requests.append(request)
+                or httpx.Response(200, json={"unexpected": True})
+            )
+        ),
+    )
+    if method_name == "upload_graph_chunk":
+        args = (
+            import_id,
+            0,
+            BytesIO(b"x"),
+            ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1),
+        )
+    elif method_name == "complete_graph_import":
+        args = (import_id, "a" * 64)
+    else:
+        args = (import_id,)
+
+    with pytest.raises(ValueError, match="safe route segment"):
+        getattr(client, method_name)(*args)
+
+    assert requests == []
+
+
+@pytest.mark.parametrize("index", [-1, 512, True, "0"])
+def test_graph_import_chunk_rejects_invalid_indexes_before_network(index):
+    from hermes_cli.hades_backend_client import ChunkHeaders, HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (
+                requests.append(request)
+                or httpx.Response(200, json={"unexpected": True})
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="between 0 and 511"):
+        client.upload_graph_chunk(
+            "import-1",
+            index,
+            BytesIO(b"x"),
+            ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1),
+        )
+
+    assert requests == []
+
+
+def test_graph_import_create_rejects_v1_manifest_before_network():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda request: (
+                requests.append(request)
+                or httpx.Response(200, json={"unexpected": True})
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="graph bundle v2"):
+        client.create_graph_import(
+            {
+                "schema": "hades.graph_bundle.v1",
+                "artifact_schema": "hades.code_graph.v1",
+                "artifact_graph_version": "a" * 64,
+            }
+        )
+
+    assert requests == []
+
+
+def test_graph_import_create_rejects_unsafe_response_import_id():
+    from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                201,
+                    json={
+                        "import_id": "../other",
+                        "attempt_generation": 1,
+                        "validation_status": "staging",
+                        "publication_status": "not_requested",
+                        "missing_chunk_indexes": [],
+                        "expires_at": "2026-07-19T12:00:00Z",
+                    },
+            )
+        ),
+    )
+
+    with pytest.raises(HadesBackendError, match="invalid import_id"):
+        client.create_graph_import(
+            {
+                "schema": "hades.graph_bundle.v2",
+                "artifact_schema": "hades.code_graph.v2",
+                "artifact_graph_version": "a" * 64,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "response", "expected_missing"),
+    [
+        (
+            "create_graph_import",
+            {
+                "import_id": "import-1",
+                "validation_status": "staging",
+                "publication_status": "not_requested",
+                "missing_chunk_indexes": [],
+                "expires_at": None,
+            },
+            "attempt_generation",
+        ),
+        (
+            "complete_graph_import",
+            {
+                "import_id": "import-1",
+                "validation_status": "validating",
+                "publication_status": "not_requested",
+            },
+            "projection_version",
+        ),
+        (
+            "graph_import",
+            {
+                "import_id": "import-1",
+                "validation_status": "validated",
+                "publication_status": "ready",
+                "received_chunks": 1,
+                "expected_chunks": 1,
+                "missing_chunk_indexes": [],
+                "failure": None,
+                "projection_version": "a" * 64,
+            },
+            "expires_at",
+        ),
+    ],
+)
+def test_graph_import_methods_reject_responses_missing_operation_fields(
+    method_name,
+    response,
+    expected_missing,
+):
+    from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=response)
+        ),
+    )
+    if method_name == "create_graph_import":
+        args = (
+            {
+                "schema": "hades.graph_bundle.v2",
+                "artifact_schema": "hades.code_graph.v2",
+                "artifact_graph_version": "a" * 64,
+            },
+        )
+    elif method_name == "complete_graph_import":
+        args = ("import-1", "a" * 64)
+    else:
+        args = ("import-1",)
+
+    with pytest.raises(HadesBackendError, match=expected_missing):
+        getattr(client, method_name)(*args)
+
+
+@pytest.mark.parametrize("method_name", ["complete_graph_import", "graph_import"])
+def test_graph_import_methods_reject_response_for_a_different_import(method_name):
+    from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+
+    response = {
+        "import_id": "import-2",
+        "validation_status": "validated",
+        "publication_status": "ready",
+        "received_chunks": 1,
+        "expected_chunks": 1,
+        "missing_chunk_indexes": [],
+        "failure": None,
+        "projection_version": "a" * 64,
+        "expires_at": None,
+    }
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=response)
+        ),
+    )
+    args = (
+        ("import-1", "a" * 64)
+        if method_name == "complete_graph_import"
+        else ("import-1",)
+    )
+
+    with pytest.raises(HadesBackendError, match="does not match request"):
+        getattr(client, method_name)(*args)
+
+
+@pytest.mark.parametrize(
+    ("received", "expected", "missing"),
+    [
+        (513, 513, []),
+        (2, 1, []),
+        (1, 3, [2]),
+    ],
+)
+def test_graph_import_get_rejects_impossible_chunk_accounting(
+    received,
+    expected,
+    missing,
+):
+    from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "import_id": "import-1",
+                    "validation_status": "staging",
+                    "publication_status": "not_requested",
+                    "received_chunks": received,
+                    "expected_chunks": expected,
+                    "missing_chunk_indexes": missing,
+                    "failure": None,
+                    "projection_version": None,
+                    "expires_at": "2026-07-19T12:00:00Z",
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(HadesBackendError, match="chunk accounting"):
+        client.graph_import("import-1")
+
+
+@pytest.mark.parametrize(
+    ("method_name", "unexpected_status", "response"),
+    [
+        (
+            "create_graph_import",
+            202,
+            {
+                "import_id": "import-1",
+                "attempt_generation": 1,
+                "validation_status": "staging",
+                "publication_status": "not_requested",
+                "missing_chunk_indexes": [],
+                "expires_at": "2026-07-19T12:00:00Z",
+            },
+        ),
+        (
+            "upload_graph_chunk",
+            202,
+            {"index": 0, "status": "accepted"},
+        ),
+        (
+            "complete_graph_import",
+            201,
+            {
+                "import_id": "import-1",
+                "validation_status": "validating",
+                "publication_status": "not_requested",
+                "projection_version": None,
+            },
+        ),
+        (
+            "graph_import",
+            201,
+            {
+                "import_id": "import-1",
+                "validation_status": "validated",
+                "publication_status": "ready",
+                "received_chunks": 0,
+                "expected_chunks": 0,
+                "missing_chunk_indexes": [],
+                "failure": None,
+                "projection_version": "a" * 64,
+                "expires_at": None,
+            },
+        ),
+    ],
+)
+def test_graph_import_methods_reject_uncontracted_success_statuses(
+    method_name,
+    unexpected_status,
+    response,
+):
+    from hermes_cli.hades_backend_client import (
+        ChunkHeaders,
+        HadesBackendClient,
+        HadesBackendError,
+    )
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(unexpected_status, json=response)
+        ),
+    )
+    if method_name == "create_graph_import":
+        args = (
+            {
+                "schema": "hades.graph_bundle.v2",
+                "artifact_schema": "hades.code_graph.v2",
+                "artifact_graph_version": "a" * 64,
+            },
+        )
+    elif method_name == "upload_graph_chunk":
+        args = (
+            "import-1",
+            0,
+            BytesIO(b"x"),
+            ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1),
+        )
+    elif method_name == "complete_graph_import":
+        args = ("import-1", "a" * 64)
+    else:
+        args = ("import-1",)
+
+    with pytest.raises(HadesBackendError, match="unexpected success status"):
+        getattr(client, method_name)(*args)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"uncompressed_bytes": 8 * 1024 * 1024 + 1},
+        {"compressed_bytes": 8 * 1024 * 1024 + 1},
+    ],
+)
+def test_graph_chunk_headers_reject_values_above_the_contract_ceiling(kwargs):
+    from hermes_cli.hades_backend_client import ChunkHeaders
+
+    values = {
+        "sha256": "a" * 64,
+        "uncompressed_bytes": 1,
+        "compressed_sha256": "b" * 64,
+        "compressed_bytes": 1,
+    }
+    values.update(kwargs)
+
+    with pytest.raises(ValueError, match="at most 8 MiB"):
+        ChunkHeaders(**values)
+
+
+def test_graph_import_errors_redact_all_structured_secret_fields():
+    from hermes_cli.hades_backend_client import (
+        ChunkHeaders,
+        HadesBackendClient,
+        HadesBackendError,
+    )
+
+    secret = "hades_agent_01ARZ3NDEKTSV4RRFFQ69G5FAV|" + "S" * 64
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                409,
+                json={
+                    "error": {
+                        "code": "chunk_digest_conflict",
+                        "message": f"conflict for {secret}",
+                        "next_step": f"do not reuse token={secret}",
+                        "details": {
+                            "received": f"Bearer {secret}",
+                            f"token={secret}": "redact dictionary keys too",
+                        },
+                    }
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(HadesBackendError) as raised:
+        client.upload_graph_chunk(
+            "import-1",
+            0,
+            BytesIO(b"x"),
+            ChunkHeaders("a" * 64, 1, hashlib.sha256(b"x").hexdigest(), 1),
+        )
+
+    error = raised.value
+    assert secret not in str(error)
+    assert secret not in (error.next_step or "")
+    assert secret not in json.dumps(error.details)
+    assert error.status_code == 409
+    assert error.code == "chunk_digest_conflict"
+
+
+def test_graph_import_complete_and_poll_keep_validation_and_publication_separate():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    responses = iter(
+        [
+            {
+                "import_id": "import-1",
+                "validation_status": "validating",
+                "publication_status": "not_requested",
+                "projection_version": None,
+            },
+            {
+                "import_id": "import-1",
+                "validation_status": "validated",
+                "publication_status": "queued",
+                "received_chunks": 3,
+                "expected_chunks": 3,
+                "missing_chunk_indexes": [],
+                "failure": None,
+                "projection_version": None,
+                "expires_at": None,
+            },
+            {
+                "import_id": "import-1",
+                "validation_status": "validated",
+                "publication_status": "ready",
+                "received_chunks": 3,
+                "expected_chunks": 3,
+                "missing_chunk_indexes": [],
+                "failure": None,
+                "projection_version": "c" * 64,
+                "expires_at": None,
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = next(responses)
+        if request.method == "POST":
+            assert _json_request_body(request) == {"artifact_graph_version": "a" * 64}
+            return httpx.Response(202, json=payload)
+        return httpx.Response(200, json=payload)
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    validating = client.complete_graph_import("import-1", "a" * 64)
+    validated = client.graph_import("import-1")
+    ready = client.graph_import("import-1")
+
+    assert (validating.validation_status, validating.publication_status) == (
+        "validating",
+        "not_requested",
+    )
+    assert (validated.validation_status, validated.publication_status) == (
+        "validated",
+        "queued",
+    )
+    assert ready.is_ready
+    assert ready.projection_version == "c" * 64
+
+
+def test_openapi_graph_import_wire_contract_is_exact():
+    spec = _openapi_spec()
+    paths = spec["paths"]
+    schemas = spec["components"]["schemas"]
+    create = paths["/api/hades/v1/graph-imports"]["post"]
+    chunk = paths["/api/hades/v1/graph-imports/{graphImport}/chunks/{index}"][
+        "put"
+    ]
+    complete = paths["/api/hades/v1/graph-imports/{graphImport}/complete"]["post"]
+    get = paths["/api/hades/v1/graph-imports/{graphImport}"]["get"]
+
+    assert create["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/GraphImportCreateResponse"
+    }
+    assert create["responses"]["201"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/GraphImportCreateResponse"
+    }
+    for status in ("200", "201"):
+        assert chunk["responses"][status]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/GraphChunkAcceptedResponse"
+        }
+    for status in ("200", "202"):
+        assert complete["responses"][status]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/GraphImportCompletionResponse"}
+    assert get["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/GraphImportStatusResponse"
+    }
+
+    graph_import_parameters = [
+        next(
+            parameter
+            for parameter in operation["parameters"]
+            if parameter["name"] == "graphImport"
+        )
+        for operation in (chunk, complete, get)
+    ]
+    assert all(
+        parameter["schema"] == {"$ref": "#/components/schemas/GraphImportId"}
+        for parameter in graph_import_parameters
+    )
+    index_parameter = next(
+        parameter for parameter in chunk["parameters"] if parameter["name"] == "index"
+    )
+    assert index_parameter["schema"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 511,
+    }
+    assert chunk["requestBody"]["content"][
+        "application/vnd.hades.graph-chunk+gzip"
+    ]["schema"] == {"type": "string", "format": "binary"}
+
+    assert schemas["GraphChunkAcceptedResponse"] == {
+        "type": "object",
+        "required": ["index", "status"],
+        "additionalProperties": False,
+        "properties": {
+            "index": {"type": "integer", "minimum": 0, "maximum": 511},
+            "status": {"const": "accepted"},
+        },
+    }
+    assert schemas["GraphImportCreateResponse"]["required"] == [
+        "import_id",
+        "attempt_generation",
+        "validation_status",
+        "publication_status",
+        "missing_chunk_indexes",
+        "expires_at",
+    ]
+    assert schemas["GraphImportCompletionResponse"]["required"] == [
+        "import_id",
+        "validation_status",
+        "publication_status",
+        "projection_version",
+    ]
+    assert schemas["GraphImportStatusResponse"]["required"] == [
+        "import_id",
+        "validation_status",
+        "publication_status",
+        "received_chunks",
+        "expected_chunks",
+        "missing_chunk_indexes",
+        "failure",
+        "projection_version",
+        "expires_at",
+    ]
+    assert all(
+        schemas[name]["additionalProperties"] is False
+        for name in (
+            "GraphImportCreateResponse",
+            "GraphImportCompletionResponse",
+            "GraphImportStatusResponse",
+        )
+    )
 
 
 def _openapi_routes() -> dict[tuple[str, str], dict]:
@@ -769,6 +1622,8 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
         assert request.headers["authorization"] == "Bearer agent-token"
         if "json_body" in case:
             assert _json_request_body(request) == case["json_body"]
+        elif "raw_body" in case:
+            assert request.content == case["raw_body"]
         else:
             assert request.content == b""
         if "query" in case:
@@ -779,7 +1634,7 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
                 headers={"content-type": "text/event-stream"},
                 text='data: {"ok":true}\n\n',
             )
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json=case.get("response_json", {"ok": True}))
 
     client = HadesBackendClient(
         "https://backend.example",
@@ -787,13 +1642,21 @@ def test_client_methods_are_backed_by_openapi_fixture(case):
         transport=httpx.MockTransport(handler),
     )
 
+    kwargs = dict(case.get("kwargs") or {})
+    if "kwargs_factory" in case:
+        kwargs.update(case["kwargs_factory"]())
     response = getattr(client, case["method_name"])(
-        *(case.get("args") or ()), **(case.get("kwargs") or {})
+        *(case.get("args") or ()), **kwargs
     )
     if case.get("stream"):
         response = list(response)
 
-    assert response == ([{"ok": True}] if case.get("stream") else {"ok": True})
+    if "response_fields" in case:
+        assert {
+            name: getattr(response, name) for name in case["response_fields"]
+        } == case["response_fields"]
+    else:
+        assert response == ([{"ok": True}] if case.get("stream") else {"ok": True})
     assert seen
 
 
