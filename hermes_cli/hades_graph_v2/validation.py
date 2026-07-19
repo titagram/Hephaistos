@@ -104,6 +104,8 @@ _PRIVATE_RESOURCE_RE = re.compile(
     r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
 _CAPABILITY_ORDER = (
     "inventory",
     "entrypoint_discovery",
@@ -298,11 +300,29 @@ def validate_scalar_and_privacy_rules(artifact: GraphArtifactV2) -> None:
         )
         if resource is None:
             continue
-        path_parts = resource.split("/")
+        parsed_resource = None
+        if resource.startswith(("http://", "https://")):
+            from urllib.parse import urlsplit
+
+            parsed_resource = urlsplit(resource)
         if (
             _PRIVATE_RESOURCE_RE.search(resource)
+            or _CONTROL_CHARACTER_RE.search(resource)
             or resource.startswith(("/", "~"))
-            or any(part in {".", ".."} or part.startswith(".") for part in path_parts)
+            or any(
+                part in {".", ".."} or part in _SENSITIVE_HIDDEN_COMPONENTS
+                for part in re.split(r"[/:]", resource)
+            )
+            or (
+                parsed_resource is not None
+                and (
+                    not parsed_resource.hostname
+                    or parsed_resource.username is not None
+                    or parsed_resource.password is not None
+                    or bool(parsed_resource.query)
+                    or bool(parsed_resource.fragment)
+                )
+            )
         ):
             _fail(
                 "private_resource_name",

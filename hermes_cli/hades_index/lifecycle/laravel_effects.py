@@ -75,6 +75,15 @@ _PRIVATE_RE = re.compile(
     r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
+
+
+def _unsafe_public_components(value: str, *, separators: str) -> bool:
+    return any(
+        component in {".", ".."} or component in _SENSITIVE_HIDDEN_COMPONENTS
+        for component in re.split(separators, value)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,26 +104,31 @@ def _canonical_facade(value: str) -> str | None:
 
 
 def _safe_cache_key(value: str | None) -> str | None:
-    if value is None or _PRIVATE_RE.search(value):
+    if value is None or _PRIVATE_RE.search(value) or _CONTROL_CHARACTER_RE.search(value):
         return None
     if value.startswith(("/", "~")) or "/" in value:
         return None
-    if any(part in {"", ".", ".."} or part.startswith(".") for part in value.split(":")):
+    if _unsafe_public_components(value, separators=r":"):
         return None
     return value
 
 
 def _safe_storage_path(value: str | None) -> str | None:
-    if value is None or _PRIVATE_RE.search(value) or value.startswith(("/", "~")):
+    if (
+        value is None
+        or _PRIVATE_RE.search(value)
+        or _CONTROL_CHARACTER_RE.search(value)
+        or value.startswith(("/", "~"))
+    ):
         return None
     parts = value.split("/")
-    if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+    if any(part == "" for part in parts) or _unsafe_public_components(value, separators=r"/"):
         return None
     return value
 
 
 def _safe_http_endpoint(value: str | None) -> str | None:
-    if value is None:
+    if value is None or _PRIVATE_RE.search(value) or _CONTROL_CHARACTER_RE.search(value):
         return None
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -122,7 +136,7 @@ def _safe_http_endpoint(value: str | None) -> str | None:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return None
     path = parsed.path or "/"
-    if any(part in {".", ".."} or part.startswith(".") for part in path.split("/") if part):
+    if _unsafe_public_components(path, separators=r"/"):
         return None
     authority = parsed.hostname.lower()
     if parsed.port is not None:

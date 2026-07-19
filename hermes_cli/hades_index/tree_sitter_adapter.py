@@ -27,6 +27,7 @@ _PRIVATE_LITERAL_RE = re.compile(
     r"(?i)(?:^sk[_-]|^eyJ[A-Za-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|"
     r"auth(?:orization)?|secret|password|bearer)(?:[_:-]|$))"
 )
+_SENSITIVE_HIDDEN_COMPONENTS = frozenset({".env", ".ssh", ".git", ".aws"})
 _LARAVEL_FACADE_PREFIX = "Illuminate\\Support\\Facades\\"
 _LARAVEL_FACADES = frozenset({
     "DB",
@@ -454,8 +455,8 @@ def _safe_literal(source: bytes, node: Any | None) -> str | None:
     if _PRIVATE_LITERAL_RE.search(value):
         return None
     if value.startswith(("/", "~")) or any(
-        segment in {".", ".."} or segment.startswith(".")
-        for segment in value.split("/")
+        segment in {".", ".."} or segment in _SENSITIVE_HIDDEN_COMPONENTS
+        for segment in re.split(r"[/:]", value)
     ):
         return None
     if value.startswith(("http://", "https://")) and any(

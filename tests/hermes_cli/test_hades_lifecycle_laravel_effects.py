@@ -15,6 +15,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageCapability,
     CoverageOutcome,
     EffectKind,
+    IRValidationError,
     ResolutionKind,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import TreeSitterAdapter
@@ -233,6 +234,81 @@ class Orders {
     )
 
 
+def test_laravel_effects_allow_public_dot_segments_and_reject_sensitive_ones(
+    tmp_path: Path,
+) -> None:
+    _prepare_project(tmp_path)
+    source = """<?php
+use Illuminate\\Support\\Facades\\Cache;
+use Illuminate\\Support\\Facades\\Http;
+use Illuminate\\Support\\Facades\\Storage;
+class Orders {
+    public function show() {
+        Cache::get('.well-known');
+        Storage::get('.well-known/acme-challenge');
+        Http::get('https://api.example.test/.well-known/openid-configuration');
+        Storage::get('../x');
+        Storage::get('.env');
+        Storage::get('.ssh/id_rsa');
+        Cache::get('.env');
+        Http::get('https://api.example.test/.well-known/openid-configuration?token=x');
+        Http::get('https://user:pass@api.example.test/path');
+        Http::get('https://api.example.test/path#fragment');
+    }
+}
+"""
+    _write(tmp_path, "app/Http/Controllers/Orders.php", source)
+    parsed = TreeSitterAdapter().parse_bytes(
+        source.encode(), path="app/Http/Controllers/Orders.php", language="php"
+    )
+
+    assert parsed.status == "parsed"
+    calls = parsed.syntax.calls  # type: ignore[union-attr]
+    literal_by_receiver = {
+        (call.receiver, call.member, index): argument.value
+        for call in calls
+        for index, argument in enumerate(call.arguments)
+        if argument.kind == "literal"
+    }
+    assert literal_by_receiver[("Cache", "get", 0)] == ".well-known"
+    assert literal_by_receiver[("Storage", "get", 0)] == ".well-known/acme-challenge"
+    assert (
+        literal_by_receiver[("Http", "get", 0)]
+        == "https://api.example.test/.well-known/openid-configuration"
+    )
+    assert not {
+        "../x",
+        ".env",
+        ".ssh/id_rsa",
+        "https://api.example.test/.well-known/openid-configuration?token=x",
+        "https://user:pass@api.example.test/path",
+        "https://api.example.test/path#fragment",
+    } & set(literal_by_receiver.values())
+
+    result = assemble_graph_v2_adapter_result(_context(tmp_path), (parsed.syntax,))  # type: ignore[arg-type]
+    effects = {(effect.kind, effect.public_resource_name) for effect in result.effects}
+    assert {
+        (EffectKind.CACHE_READ, ".well-known"),
+        (EffectKind.STORAGE_READ, ".well-known/acme-challenge"),
+        (
+            EffectKind.EXTERNAL_CALL,
+            "https://api.example.test/.well-known/openid-configuration",
+        ),
+    } <= effects
+    assert not any(
+        resource in {"../x", ".env", ".ssh/id_rsa"}
+        for _kind, resource in effects
+    )
+    valid_context = replace(
+        _context(tmp_path),
+        project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
+        workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
+    )
+    GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+        valid_context, (result,)
+    )
+
+
 def test_laravel_effects_keep_exact_ownership_chain_and_blocks(tmp_path: Path) -> None:
     _prepare_project(tmp_path)
     source = """<?php
@@ -329,7 +405,28 @@ class A { public function show($event, $job) {
     assert len([node for node in artifact.nodes if node.kind is NodeKind.QUEUE]) == 1
 
 
-@pytest.mark.parametrize("private_resource", ["sk_live_supersecret", "/Users/alice/.ssh/id_rsa", "../../.env"])
+@pytest.mark.parametrize(
+    "private_resource",
+    [
+        "sk_live_supersecret",
+        "eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        "access_token:secret",
+        "/Users/alice/.ssh/id_rsa",
+        "~/.aws/credentials",
+        "../../.env",
+        ".",
+        "..",
+        "../x",
+        ".env",
+        ".ssh/id_rsa",
+        ".git/config",
+        ".aws/credentials",
+        "https://api.example.test/path?query=1",
+        "https://user:pass@api.example.test/path",
+        "https://api.example.test/path#fragment",
+        "safe\x00resource",
+    ],
+)
 def test_graph_v2_rejects_private_effect_resource_names(tmp_path: Path, private_resource: str) -> None:
     _prepare_project(tmp_path)
     source = """<?php
@@ -341,19 +438,20 @@ class Orders { public function show() { Cache::get('orders'); } }
         source.encode(), path="app/Http/Controllers/Orders.php", language="php"
     )
     result = assemble_graph_v2_adapter_result(_context(tmp_path), (parsed.syntax,))  # type: ignore[arg-type]
-    poisoned = replace(
-        result,
-        effects=tuple(
-            replace(effect, public_resource_name=private_resource) for effect in result.effects
-        ),
-    )
     valid_context = replace(
         _context(tmp_path),
         project_id="01KXJD0SV73EBGWKNE2EK3M4KD",
         workspace_binding_id="01KXJD1BDMQ2TFABMVJV6EFE8Q",
     )
 
-    with pytest.raises(GraphValidationError, match="private resource name"):
+    with pytest.raises((GraphValidationError, IRValidationError)):
+        poisoned = replace(
+            result,
+            effects=tuple(
+                replace(effect, public_resource_name=private_resource)
+                for effect in result.effects
+            ),
+        )
         GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
             valid_context, (poisoned,)
         )

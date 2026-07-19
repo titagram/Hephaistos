@@ -12,8 +12,8 @@ regex or raw-source fallback.
 | Family | Native v2 status | Evidence and safety boundary |
 | --- | --- | --- |
 | DB/query reads and writes | Supported | Exact Laravel `DB` facade/query-builder calls and source-proven `app/Models` classes; table identity is a strict static identifier correlated to its own fluent receiver chain. |
-| Cache reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Cache` facade (or an exact import alias); only a static, non-secret, non-path key is public. |
-| Storage reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Storage` facade (or an exact import alias); only a static, relative, sanitised path is public. |
+| Cache reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Cache` facade (or an exact import alias); only a static, non-secret, non-path key is public. Ordinary dot-prefixed keys (for example `.well-known`) are allowed; sensitive names such as `.env` are not. |
+| Storage reads and writes | Supported | The canonical `Illuminate\\Support\\Facades\\Storage` facade (or an exact import alias); only a static, relative, sanitised path is public. Public dot segments such as `.well-known` are allowed; traversal (`.`/`..`) and sensitive names (`.env`, `.ssh`, `.git`, `.aws`) are not. |
 | Outbound HTTP | Supported | `Http` facade; endpoint is scheme/host/safe-path only, or the privacy-safe `http` boundary when dynamic or unsafe. |
 | Mail and notifications | Supported | `Mail`/`Notification` send paths with a static mailable/notification class; recipients and payloads are never emitted. |
 | Events | Supported | `event(new Type)` and `Event::dispatch` with an exact `app/Events` declaration; a dynamic target becomes an `ASYNC_TARGET` boundary uncertainty. |
@@ -31,8 +31,10 @@ The producer records partial coverage and a typed unresolved boundary when a
 recognised target is dynamic. Dynamic event/job/queue calls use
 `ASYNC_TARGET` with `EMITS`/`DISPATCHES` and `ASYNC` flow. It never preserves
 source bytes, query strings, credentials, tokens, absolute/home or traversal
-paths, recipients, headers, or request/body payloads. Artifact validation
-independently rejects private resource names should a producer regress.
+paths, sensitive hidden paths, recipients, headers, or request/body payloads.
+Artifact validation independently rejects private resource names should a
+producer regress, while retaining public standardized paths such as
+`.well-known/acme-challenge`.
 
 ## Deliberately not reconstructed in this change
 
