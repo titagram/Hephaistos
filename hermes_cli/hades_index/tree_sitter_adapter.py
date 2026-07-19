@@ -21,6 +21,8 @@ from hermes_cli.hades_index.lifecycle.model import (
 
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_.$\\][A-Za-z0-9_.$\\/:@>~\-]*$")
+_SAFE_CALL_LITERAL_RE = re.compile(r"^[A-Za-z0-9._:/\-]{1,256}$")
+_SAFE_REFERENCE_RE = re.compile(r"^\\?[A-Za-z_][A-Za-z0-9_\\]*$")
 _SYMBOL_TYPES = {
     "typescript": {
         "function_declaration": "function",
@@ -165,6 +167,28 @@ class StructuralSymbol:
 class StructuralImport:
     target: str
     line: int
+    alias: str | None = None
+
+
+CallArgumentKind: TypeAlias = Literal["literal", "class_reference", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralCallArgument:
+    """A bounded argument fact which cannot retain raw source or secrets."""
+
+    kind: CallArgumentKind
+    value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"literal", "class_reference", "unknown"}:
+            raise ValueError("structural call argument kind is not supported")
+        if self.kind == "unknown" and self.value is not None:
+            raise ValueError("unknown structural argument cannot retain a value")
+        if self.kind != "unknown" and (
+            not isinstance(self.value, str) or not self.value or len(self.value) > 256
+        ):
+            raise ValueError("structural argument fact must be bounded and non-empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +197,11 @@ class StructuralCall:
     target: str
     line: int
     argument_count: int = 0
+    structural_path: str = "root"
+    call_form: Literal["function", "scoped", "member", "nullsafe_member"] = "function"
+    receiver: str | None = None
+    member: str | None = None
+    arguments: tuple[StructuralCallArgument, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +407,111 @@ def _field(node: Any, *names: str) -> Any | None:
     return None
 
 
+def _safe_reference(source: bytes, node: Any | None) -> str | None:
+    value = _bounded_node_text(source, node)
+    return value if value and _SAFE_REFERENCE_RE.fullmatch(value) else None
+
+
+def _safe_literal(source: bytes, node: Any | None) -> str | None:
+    """Return only a privacy-safe static literal retained in parse facts."""
+
+    if node is None or str(getattr(node, "type", "")) != "string":
+        return None
+    start = max(0, int(getattr(node, "start_byte", 0)))
+    end = min(len(source), int(getattr(node, "end_byte", start)))
+    if end <= start:
+        return None
+    raw = source[start:end].decode("utf-8", errors="replace").strip()
+    if len(raw) < 2 or raw[0] not in {"'", '"'} or raw[-1] != raw[0]:
+        return None
+    value = raw[1:-1]
+    if not _SAFE_CALL_LITERAL_RE.fullmatch(value):
+        return None
+    if value.startswith(("http://", "https://")) and any(
+        marker in value for marker in ("?", "#", "@")
+    ):
+        return None
+    return value
+
+
+def _argument_fact(
+    source: bytes, node: Any, *, retain_literal: bool
+) -> StructuralCallArgument:
+    value = next(iter(getattr(node, "named_children", ())), None)
+    if value is None:
+        return StructuralCallArgument("unknown")
+    literal = _safe_literal(source, value) if retain_literal else None
+    if literal is not None:
+        return StructuralCallArgument("literal", literal)
+    if str(getattr(value, "type", "")) == "object_creation_expression":
+        reference = _safe_reference(
+            source,
+            _field(value, "name", "class")
+            or next(iter(getattr(value, "named_children", ())), None),
+        )
+        if reference is not None:
+            return StructuralCallArgument("class_reference", reference)
+    if str(getattr(value, "type", "")) == "class_constant_access":
+        name = _bounded_node_text(source, _field(value, "name"))
+        reference = _safe_reference(source, _field(value, "scope", "class"))
+        if name == "class" and reference is not None:
+            return StructuralCallArgument("class_reference", reference)
+    return StructuralCallArgument("unknown")
+
+
+def _call_root_receiver(source: bytes, node: Any | None) -> str | None:
+    """Return the statically named root of a chained PHP call, if any."""
+
+    if node is None:
+        return None
+    node_type = str(getattr(node, "type", ""))
+    if node_type == "scoped_call_expression":
+        return _safe_reference(source, _field(node, "scope"))
+    if node_type in {"member_call_expression", "nullsafe_member_call_expression"}:
+        return _call_root_receiver(source, _field(node, "object"))
+    return _safe_reference(source, node)
+
+
+def _call_fields(
+    source: bytes, node: Any
+) -> tuple[
+    Literal["function", "scoped", "member", "nullsafe_member"],
+    str | None,
+    str | None,
+    tuple[StructuralCallArgument, ...],
+]:
+    """Translate a native call node into closed, source-free facts."""
+
+    node_type = str(getattr(node, "type", ""))
+    if node_type == "function_call_expression":
+        form: Literal["function", "scoped", "member", "nullsafe_member"] = "function"
+        receiver = None
+        member = _safe_reference(source, _field(node, "function", "name"))
+    elif node_type == "scoped_call_expression":
+        form = "scoped"
+        receiver = _safe_reference(source, _field(node, "scope"))
+        member = _safe_reference(source, _field(node, "name", "member"))
+    elif node_type == "nullsafe_member_call_expression":
+        form = "nullsafe_member"
+        receiver = _call_root_receiver(source, _field(node, "object"))
+        member = _safe_reference(source, _field(node, "name", "member"))
+    else:
+        form = "member"
+        receiver = _call_root_receiver(source, _field(node, "object"))
+        member = _safe_reference(source, _field(node, "name", "member"))
+    arguments = tuple(
+        _argument_fact(
+            source,
+            child,
+            retain_literal=index == 0 or (member in {"send", "request"} and index == 1),
+        )
+        for index, child in enumerate(
+            getattr(_field(node, "arguments"), "named_children", ())
+        )
+    )
+    return form, receiver, member, arguments
+
+
 def _load_parser(language: str) -> Any | None:
     module_spec = _GRAMMAR_FACTORIES.get(language)
     if module_spec is None:
@@ -567,15 +701,41 @@ class TreeSitterAdapter:
                         )
                         next_context = name
                 if node_type in _IMPORT_TYPES:
-                    target = _bounded_node_text(source, _field(node, "source", "name"))
-                    if target:
-                        imports.append(
-                            StructuralImport(
-                                target=target, line=_point_row(node.start_point) + 1
+                    if language == "php" and node_type == "namespace_use_declaration":
+                        for clause in getattr(node, "named_children", ()):
+                            if (
+                                str(getattr(clause, "type", ""))
+                                != "namespace_use_clause"
+                            ):
+                                continue
+                            parts = tuple(getattr(clause, "named_children", ()))
+                            target = _safe_reference(
+                                source, parts[0] if parts else None
                             )
+                            alias = _safe_reference(
+                                source, parts[-1] if len(parts) > 1 else None
+                            )
+                            if target:
+                                imports.append(
+                                    StructuralImport(
+                                        target=target,
+                                        line=_point_row(clause.start_point) + 1,
+                                        alias=alias,
+                                    )
+                                )
+                    else:
+                        target = _bounded_node_text(
+                            source, _field(node, "source", "name")
                         )
+                        if target:
+                            imports.append(
+                                StructuralImport(
+                                    target=target, line=_point_row(node.start_point) + 1
+                                )
+                            )
                 if node_type in _CALL_TYPES and context:
-                    target = _bounded_node_text(
+                    call_form, receiver, member, arguments = _call_fields(source, node)
+                    target = member or _bounded_node_text(
                         source, _field(node, "function", "name", "member")
                     )
                     if target:
@@ -584,14 +744,12 @@ class TreeSitterAdapter:
                                 caller=context,
                                 target=target,
                                 line=_point_row(node.start_point) + 1,
-                                argument_count=len(
-                                    tuple(
-                                        child
-                                        for child in getattr(
-                                            _field(node, "arguments"), "named_children", ()
-                                        )
-                                    )
-                                ),
+                                argument_count=len(arguments),
+                                structural_path=structural_path,
+                                call_form=call_form,
+                                receiver=receiver,
+                                member=member,
+                                arguments=arguments,
                             )
                         )
                 node_is_named = bool(getattr(node, "is_named", True))

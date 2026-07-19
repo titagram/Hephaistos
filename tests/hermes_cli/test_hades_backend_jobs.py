@@ -1940,6 +1940,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "use App\\Services\\OrderService;\n"
         "use Illuminate\\Support\\Facades\\DB;\n"
         "use Illuminate\\Support\\Facades\\Log;\n"
+        "use Illuminate\\Support\\Facades\\Queue;\n"
         "class OrderController extends Controller {\n"
         "    public function __construct(private OrderService $orders) {}\n"
         "    public function show(StoreOrderRequest $request, Order $order, \\App\\Contracts\\OrderFormatter $formatter) {\n"
@@ -1949,6 +1950,7 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         "        env('ORDER_DEBUG');\n"
         "        Log::warning('order payment gateway degraded');\n"
         "        SyncOrderJob::dispatch($order->id);\n"
+        "        Queue::push(new SyncOrderJob());\n"
         "        event(new OrderPlaced($order)); "
         "Mail::to($order->customer)->send(new \\App\\Mail\\OrderReceiptMail($order)); "
         "$order->customer->notify(new \\App\\Notifications\\OrderShippedNotification($order));\n"
@@ -2321,9 +2323,17 @@ def test_populate_backend_ast_extracts_laravel_php_graph_without_source(tmp_path
         item["kind"] in {"middleware", "authorization", "validator"}
         for item in artifact["nodes"]
     )
+    assert {"reads", "writes", "calls_external", "emits", "dispatches"} <= {
+        item["relation"] for item in artifact["edges"]
+    }
+    assert {"query", "cache", "storage", "external_boundary", "event", "job", "queue"} <= {
+        item["kind"] for item in artifact["nodes"]
+    }
     assert "return view('orders.show'" not in str(artifact)
     assert "Schema::create" not in str(artifact)
     assert "order payment gateway degraded" not in str(artifact)
+    assert "token=secret" not in str(artifact)
+    assert "secret csv payload" not in str(artifact)
 
 
 def test_populate_backend_ast_extracts_symfony_php_graph_without_source(tmp_path):

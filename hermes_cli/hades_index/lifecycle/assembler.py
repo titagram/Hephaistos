@@ -1409,6 +1409,9 @@ def assemble_graph_v2_adapter_result(
         context, base, extraction
     )
     result = aggregate_entrypoint_extraction(resolved_base, resolved_extraction)
+    from .laravel_effects import apply_laravel_effects
+
+    result = apply_laravel_effects(context, collected, result)
     result.validate()
     return result
 

@@ -241,6 +241,30 @@ def _framework_node_kind(role: str) -> NodeKind:
     return NodeKind.MIDDLEWARE
 
 
+_EFFECT_KIND_MAPPING: dict[EffectKind, tuple[NodeKind, Relation, EdgeFlow]] = {
+    EffectKind.DATA_READ: (NodeKind.QUERY, Relation.READS, EdgeFlow.ALWAYS),
+    EffectKind.DATA_WRITE: (NodeKind.QUERY, Relation.WRITES, EdgeFlow.ALWAYS),
+    EffectKind.CACHE_READ: (NodeKind.CACHE, Relation.READS, EdgeFlow.ALWAYS),
+    EffectKind.CACHE_WRITE: (NodeKind.CACHE, Relation.WRITES, EdgeFlow.ALWAYS),
+    EffectKind.STORAGE_READ: (NodeKind.STORAGE, Relation.READS, EdgeFlow.ALWAYS),
+    EffectKind.STORAGE_WRITE: (NodeKind.STORAGE, Relation.WRITES, EdgeFlow.ALWAYS),
+    EffectKind.EXTERNAL_CALL: (
+        NodeKind.EXTERNAL_BOUNDARY,
+        Relation.CALLS_EXTERNAL,
+        EdgeFlow.ALWAYS,
+    ),
+    EffectKind.EVENT_EMIT: (NodeKind.EVENT, Relation.EMITS, EdgeFlow.ASYNC),
+    EffectKind.JOB_DISPATCH: (NodeKind.JOB, Relation.DISPATCHES, EdgeFlow.ASYNC),
+    EffectKind.QUEUE_DISPATCH: (NodeKind.QUEUE, Relation.DISPATCHES, EdgeFlow.ASYNC),
+}
+
+
+def effect_kind_mapping(kind: EffectKind) -> tuple[NodeKind, Relation, EdgeFlow]:
+    """Return the frozen public graph mapping for one semantic effect."""
+
+    return _EFFECT_KIND_MAPPING[kind]
+
+
 def _default_generated_at() -> str:
     return (
         datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1670,38 +1694,6 @@ class GraphBuilder:
 
         effect_target_ids: dict[str, str] = {}
         resource_nodes: dict[str, Node] = {}
-        effect_kind_map = {
-            EffectKind.DATA_READ: (NodeKind.QUERY, Relation.READS, EdgeFlow.ALWAYS),
-            EffectKind.DATA_WRITE: (NodeKind.STORAGE, Relation.WRITES, EdgeFlow.ALWAYS),
-            EffectKind.CACHE_READ: (NodeKind.CACHE, Relation.READS, EdgeFlow.ALWAYS),
-            EffectKind.CACHE_WRITE: (NodeKind.CACHE, Relation.WRITES, EdgeFlow.ALWAYS),
-            EffectKind.STORAGE_READ: (
-                NodeKind.STORAGE,
-                Relation.READS,
-                EdgeFlow.ALWAYS,
-            ),
-            EffectKind.STORAGE_WRITE: (
-                NodeKind.STORAGE,
-                Relation.WRITES,
-                EdgeFlow.ALWAYS,
-            ),
-            EffectKind.EXTERNAL_CALL: (
-                NodeKind.EXTERNAL_BOUNDARY,
-                Relation.CALLS_EXTERNAL,
-                EdgeFlow.ALWAYS,
-            ),
-            EffectKind.EVENT_EMIT: (NodeKind.EVENT, Relation.EMITS, EdgeFlow.ASYNC),
-            EffectKind.JOB_DISPATCH: (
-                NodeKind.JOB,
-                Relation.DISPATCHES,
-                EdgeFlow.ASYNC,
-            ),
-            EffectKind.QUEUE_DISPATCH: (
-                NodeKind.QUEUE,
-                Relation.DISPATCHES,
-                EdgeFlow.ASYNC,
-            ),
-        }
         for effect in effects:
             if type(effect.source) is BlockEffectSource:
                 source_block = block_by_key[effect.source.local_key]
@@ -1709,31 +1701,56 @@ class GraphBuilder:
                 site = call_site_by_key[effect.source.local_key]
                 source_block = block_by_key[site.source_block_key]
             declaration = declaration_by_key[source_block.declaration_key]
-            kind, _relation, _flow = effect_kind_map[effect.kind]
-            identity = SemanticResourceIdentity(
-                "semantic_resource",
-                context.workspace_binding_id,
-                declaration.language,
-                kind,
-                None,
-                None,
-                None,
-                effect.public_resource_name,
-                effect.protocol,
-                effect.operation,
-            )
-            identity_payload = {
-                "variant": "semantic_resource",
-                "workspace_binding_id": context.workspace_binding_id,
-                "language": declaration.language,
-                "kind": kind.value,
-                "framework": None,
-                "namespace": None,
-                "qualified_name": None,
-                "public_resource_name": effect.public_resource_name,
-                "protocol": effect.protocol,
-                "operation": effect.operation,
-            }
+            kind, _relation, _flow = effect_kind_mapping(effect.kind)
+            if kind in {NodeKind.EVENT, NodeKind.JOB, NodeKind.QUEUE}:
+                # The frozen schema reserves semantic-resource identities for
+                # data/integration resources. Async effect targets therefore
+                # use the source declaration form anchored to the verified
+                # call occurrence, never an out-of-contract semantic kind.
+                qualified_name = f"{kind.value}:{effect.public_resource_name or effect.operation}"
+                identity = SourceDeclarationIdentity(
+                    "source_declaration",
+                    context.workspace_binding_id,
+                    declaration.language,
+                    kind,
+                    None,
+                    qualified_name,
+                    effect.locator.source_location.path,
+                )
+                identity_payload = {
+                    "variant": "source_declaration",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": declaration.language,
+                    "kind": kind.value,
+                    "namespace": None,
+                    "qualified_name": qualified_name,
+                    "path": effect.locator.source_location.path,
+                }
+            else:
+                identity = SemanticResourceIdentity(
+                    "semantic_resource",
+                    context.workspace_binding_id,
+                    declaration.language,
+                    kind,
+                    None,
+                    None,
+                    None,
+                    effect.public_resource_name,
+                    effect.protocol,
+                    effect.operation,
+                )
+                identity_payload = {
+                    "variant": "semantic_resource",
+                    "workspace_binding_id": context.workspace_binding_id,
+                    "language": declaration.language,
+                    "kind": kind.value,
+                    "framework": None,
+                    "namespace": None,
+                    "qualified_name": None,
+                    "public_resource_name": effect.public_resource_name,
+                    "protocol": effect.protocol,
+                    "operation": effect.operation,
+                }
             public_id = node_id(identity_payload)
             effect_target_ids[effect.local_key] = public_id
             if kind in {
@@ -1758,6 +1775,16 @@ class GraphBuilder:
                     channel_kind=effect.kind.value,
                     public_name=effect.public_resource_name,
                 )
+            is_async_effect_target = kind in {
+                NodeKind.EVENT,
+                NodeKind.JOB,
+                NodeKind.QUEUE,
+            }
+            node_name = (
+                identity.qualified_name
+                if is_async_effect_target
+                else effect.public_resource_name or effect.operation
+            )
             _insert_public_record(
                 resource_nodes,
                 Node(
@@ -1766,11 +1793,11 @@ class GraphBuilder:
                     kind,
                     declaration.language,
                     None,
-                    effect.public_resource_name or effect.operation,
+                    node_name,
+                    identity.qualified_name if is_async_effect_target else None,
                     None,
                     None,
-                    None,
-                    None,
+                    _source_location(effect.locator) if is_async_effect_target else None,
                     properties,
                     _synthetic_evidence(effect.locator),
                 ),
@@ -2522,7 +2549,7 @@ class GraphBuilder:
             else:
                 site = call_site_by_key[effect.source.local_key]
                 source_block = block_by_key[site.source_block_key]
-            kind, relation, flow = effect_kind_map[effect.kind]
+            kind, relation, flow = effect_kind_mapping(effect.kind)
             del kind
             append_edge(
                 source_id=local_node_ids[source_block.local_key],
