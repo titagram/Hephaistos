@@ -26,7 +26,12 @@ from hermes_cli.hades_graph_v2.model import (
     TriggerKind,
 )
 from hermes_cli.hades_graph_v2.schema import GraphContractError
-from hermes_cli.hades_index.lifecycle.frameworks import FrameworkDetection
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkDetection,
+    FrameworkPipelineFacts,
+    FrameworkTerminalSpec,
+    framework_pipeline_facts,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     AlwaysSuccessor,
     ConfigLocatorIR,
@@ -45,6 +50,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ReturnSuccessor,
     SourceLocationIR,
     Successor,
+    TerminalKind,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
@@ -1760,6 +1766,27 @@ class DjangoLifecycleAdapter:
                 )
             )
         return tuple(segments)
+
+    def pipeline_facts(
+        self, context: ExtractionContext, candidate: EntrypointCandidate
+    ) -> FrameworkPipelineFacts:
+        def terminal_spec(
+            segment: FrameworkPipelineSegment, _successor: ReturnSuccessor
+        ) -> FrameworkTerminalSpec:
+            if candidate.kind is not EntrypointKind.HTTP_ROUTE:
+                return FrameworkTerminalSpec(TerminalKind.EXIT)
+            status = next(
+                (
+                    value
+                    for value in (403, 404, 500)
+                    if str(value) in segment.framework_role
+                ),
+                None,
+            )
+            return FrameworkTerminalSpec(TerminalKind.RESPONSE, public_status=status)
+
+        pipeline = self.pipeline(context, candidate)
+        return framework_pipeline_facts(candidate, pipeline, terminal_spec)
 
 
 __all__ = ["DjangoLifecycleAdapter"]

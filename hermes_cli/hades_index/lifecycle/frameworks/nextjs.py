@@ -24,7 +24,12 @@ from hermes_cli.hades_graph_v2.model import (
     TriggerKind,
 )
 from hermes_cli.hades_graph_v2.schema import GraphContractError
-from hermes_cli.hades_index.lifecycle.frameworks import FrameworkDetection
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkDetection,
+    FrameworkPipelineFacts,
+    FrameworkTerminalSpec,
+    framework_pipeline_facts,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     AstLocatorIR,
     CoverageCapability,
@@ -40,6 +45,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     MatchConstraints,
     ReturnSuccessor,
     SourceLocationIR,
+    TerminalKind,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
@@ -1266,6 +1272,25 @@ class NextJSLifecycleAdapter:
 
     def coverage_events(self, context: ExtractionContext) -> tuple[CoverageEvent, ...]:
         return self._snapshot(context).coverage_events
+
+    def pipeline_facts(
+        self, context: ExtractionContext, candidate: EntrypointCandidate
+    ) -> FrameworkPipelineFacts:
+        def terminal_spec(
+            segment: FrameworkPipelineSegment, _successor: ReturnSuccessor
+        ) -> FrameworkTerminalSpec:
+            role = segment.framework_role
+            if role.startswith("redirect_"):
+                return FrameworkTerminalSpec(
+                    TerminalKind.REDIRECT,
+                    public_status=int(role.rsplit("_", 1)[-1]),
+                )
+            if role == "middleware_redirect":
+                return FrameworkTerminalSpec(TerminalKind.REDIRECT)
+            return FrameworkTerminalSpec(TerminalKind.RESPONSE)
+
+        pipeline = self.pipeline(context, candidate)
+        return framework_pipeline_facts(candidate, pipeline, terminal_spec)
 
 
 __all__ = ["NextJSLifecycleAdapter"]

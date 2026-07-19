@@ -144,6 +144,7 @@ class CanonicalTopology:
     capabilities: Capabilities
     normal_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
     exception_exits_by_callable: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    exception_call_sites_by_edge: tuple[tuple[str, str], ...] = ()
 
 
 def _node_owner(node: Node) -> str:
@@ -194,10 +195,14 @@ def _stage_to(
     return stage_from
 
 
-def _strong_components(adjacency: Mapping[str, set[str]]) -> tuple[tuple[str, ...], ...]:
+def _strong_components(
+    adjacency: Mapping[str, set[str]],
+) -> tuple[tuple[str, ...], ...]:
     """Kosaraju SCCs with iterative stacks and canonical component ordering."""
 
-    nodes = sorted(set(adjacency) | {target for values in adjacency.values() for target in values})
+    nodes = sorted(
+        set(adjacency) | {target for values in adjacency.values() for target in values}
+    )
     reverse: dict[str, set[str]] = defaultdict(set)
     for source, targets in adjacency.items():
         for target in targets:
@@ -252,8 +257,10 @@ def build_callable_summaries(
     """
 
     nodes = {node.id: node for node in graph.nodes}
+    edges_by_id = {edge.id: edge for edge in graph.edges}
     declared_normal_exits = dict(graph.normal_exits_by_callable)
     declared_exception_exits = dict(graph.exception_exits_by_callable)
+    exception_call_sites = dict(graph.exception_call_sites_by_edge)
     callables = sorted({
         _node_owner(node)
         for node in graph.nodes
@@ -285,12 +292,29 @@ def build_callable_summaries(
         )
         for callable_id in callables
     }
+    summary_outgoing: dict[str, list[Edge]] = defaultdict(list)
+    summary_returns_by_call_site: dict[str, list[Edge]] = defaultdict(list)
+    summary_exceptions_by_call_site: dict[str, list[Edge]] = defaultdict(list)
+    for edge in graph.edges:
+        if edge.relation in _STRUCTURAL_RELATIONS:
+            continue
+        if edge.relation is Relation.RETURNS_TO and edge.call_site_id is not None:
+            summary_returns_by_call_site[edge.call_site_id].append(edge)
+        elif (call_site_id := exception_call_sites.get(edge.id)) is not None:
+            summary_exceptions_by_call_site[call_site_id].append(edge)
+        else:
+            summary_outgoing[edge.source_id].append(edge)
+    for values in summary_outgoing.values():
+        values.sort(key=lambda item: item.id)
     call_graph: dict[str, set[str]] = {item: set() for item in callables}
     for callable_id, edges in direct_edges.items():
         call_graph[callable_id].update(
             edge.target_id
             for edge in edges
-            if edge.relation is Relation.INVOKES and edge.target_id in call_graph
+            if edge.target_id in call_graph
+            and edge.target_id != callable_id
+            and edge.relation not in {Relation.RETURNS_TO, Relation.THROWS_TO}
+            and edge.uncertainty_id is None
         )
     components = _strong_components(call_graph)
     component_by_node = {
@@ -326,16 +350,26 @@ def build_callable_summaries(
                 if target not in seen_components
             )
 
-    empty = CallableSummary(frozenset(), frozenset(), frozenset(), frozenset(), frozenset(), frozenset(), frozenset())
+    empty = CallableSummary(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset(),
+    )
     summaries: dict[tuple[str, Stage], CallableSummary] = {
         (callable_id, stage): empty for callable_id in callables for stage in Stage
     }
 
     def union(left: CallableSummary, right: CallableSummary) -> CallableSummary:
-        return CallableSummary(*(
-            getattr(left, item.name) | getattr(right, item.name)
-            for item in fields(CallableSummary)
-        ))
+        return CallableSummary(
+            *(
+                getattr(left, item.name) | getattr(right, item.name)
+                for item in fields(CallableSummary)
+            )
+        )
 
     def direct_summary(callable_id: str, stage: Stage) -> CallableSummary:
         invocation_stages: dict[str, Stage] = {}
@@ -358,15 +392,6 @@ def build_callable_summaries(
         effects: set[str] = set()
         async_edges: set[str] = set()
         uncertainty_ids: set[str] = set()
-        outgoing: dict[str, list[Edge]] = defaultdict(list)
-        returns_by_call_site: dict[str, list[Edge]] = defaultdict(list)
-        for edge in direct_edges[callable_id]:
-            if edge.relation is Relation.RETURNS_TO and edge.call_site_id is not None:
-                returns_by_call_site[edge.call_site_id].append(edge)
-            else:
-                outgoing[edge.source_id].append(edge)
-        for values in outgoing.values():
-            values.sort(key=lambda item: item.id)
         aggregate = empty
         pending = deque([(callable_id, stage)])
         visited: set[tuple[str, Stage]] = set()
@@ -396,29 +421,80 @@ def build_callable_summaries(
             if edge.uncertainty_id is not None:
                 uncertainty_ids.add(edge.uncertainty_id)
 
+        def exit_stages(
+            summary: CallableSummary,
+            exit_node_id: str,
+            fallback: Stage,
+        ) -> tuple[Stage, ...]:
+            values = {
+                state.stage_to
+                for state in summary.reachable_edge_stage_states
+                if edges_by_id[state.edge_id].target_id == exit_node_id
+            }
+            values.update(
+                state.stage_from
+                for state in summary.reachable_edge_stage_states
+                if edges_by_id[state.edge_id].source_id == exit_node_id
+            )
+            return tuple(sorted(values or {fallback}, key=_STAGE_ORDER.index))
+
         while pending:
             node_id_value, stage_from = pending.popleft()
             if (node_id_value, stage_from) in visited:
                 continue
             visited.add((node_id_value, stage_from))
-            for edge in outgoing.get(node_id_value, ()):
+            source_owner_id = _node_owner(nodes[node_id_value])
+            for edge in summary_outgoing.get(node_id_value, ()):
+                if edge.occurrence.owner_node_id not in {
+                    callable_id,
+                    source_owner_id,
+                }:
+                    continue
                 stage_to = _stage_to(edge, stage_from, nodes, invocation_stages)
                 remember(edge, stage_from, stage_to)
                 if edge.relation is Relation.INVOKES and edge.call_site_id is not None:
                     invocation_stages.setdefault(edge.call_site_id, stage_from)
                     if edge.uncertainty_id is None and edge.target_id in call_graph:
+                        callee_summary = summaries[(edge.target_id, stage_to)]
                         aggregate = union(
                             aggregate,
-                            summaries[(edge.target_id, stage_to)],
+                            callee_summary,
                         )
-                        for return_edge in sorted(
-                            returns_by_call_site.get(edge.call_site_id, ()),
-                            key=lambda item: item.id,
-                        ):
-                            remember(return_edge, stage_from, stage_from)
-                            normal.add(return_edge.target_id)
-                            pending.append((return_edge.target_id, stage_from))
+                        if callee_summary.normal_exit_node_ids:
+                            for return_edge in sorted(
+                                summary_returns_by_call_site.get(edge.call_site_id, ()),
+                                key=lambda item: item.id,
+                            ):
+                                for exit_stage in exit_stages(
+                                    callee_summary,
+                                    return_edge.source_id,
+                                    stage_to,
+                                ):
+                                    remember(return_edge, exit_stage, stage_from)
+                                normal.add(return_edge.target_id)
+                                pending.append((return_edge.target_id, stage_from))
+                        if callee_summary.exception_exit_node_ids:
+                            for exception_edge in sorted(
+                                summary_exceptions_by_call_site.get(
+                                    edge.call_site_id, ()
+                                ),
+                                key=lambda item: item.id,
+                            ):
+                                for exit_stage in exit_stages(
+                                    callee_summary,
+                                    exception_edge.source_id,
+                                    Stage.ERROR,
+                                ):
+                                    remember(exception_edge, exit_stage, Stage.ERROR)
+                                exceptional.add(exception_edge.source_id)
+                                pending.append((exception_edge.target_id, Stage.ERROR))
                     continue
+                if (
+                    edge.uncertainty_id is None
+                    and edge.target_id in call_graph
+                    and edge.target_id != callable_id
+                ):
+                    aggregate = union(aggregate, summaries[(edge.target_id, stage_to)])
                 if (
                     edge.flow is EdgeFlow.ASYNC
                     or edge.uncertainty_id is not None
@@ -458,7 +534,9 @@ def _count(represented: int, capabilities: Sequence[Capability]) -> CountKnowled
         for capability in capabilities
         if capability.status in {CapabilityStatus.PARTIAL, CapabilityStatus.UNSUPPORTED}
     )
-    reasons = tuple(reason.code for capability in partial for reason in capability.reasons)
+    reasons = tuple(
+        reason.code for capability in partial for reason in capability.reasons
+    )
     return count_knowledge(
         represented,
         0,
@@ -497,13 +575,18 @@ def _flow_capabilities(
             or frontier_reasons[reason.code]
         )
         status = capability.status
-        if not reasons and status in {CapabilityStatus.PARTIAL, CapabilityStatus.UNSUPPORTED}:
+        if not reasons and status in {
+            CapabilityStatus.PARTIAL,
+            CapabilityStatus.UNSUPPORTED,
+        }:
             status = CapabilityStatus.FULL
         values[name] = Capability(status, reasons)
     return Capabilities(**values)
 
 
-def _recursive_invocations(steps: Sequence[FlowStep], edges: Mapping[str, Edge]) -> set[str]:
+def _recursive_invocations(
+    steps: Sequence[FlowStep], edges: Mapping[str, Edge]
+) -> set[str]:
     invocation_edges = [
         edges[step.edge_id]
         for step in steps
@@ -533,10 +616,14 @@ def _assign_backbone_roles(
     nodes: Mapping[str, Node],
     root_node_id: str,
 ) -> tuple[FlowStep, ...]:
-    non_async = [step for step in steps if edges[step.edge_id].flow is not EdgeFlow.ASYNC]
+    non_async = [
+        step for step in steps if edges[step.edge_id].flow is not EdgeFlow.ASYNC
+    ]
     root_state = (root_node_id, Stage.ENTRY)
     reachable_states = {root_state}
-    predecessors: dict[tuple[str, Stage], list[tuple[tuple[str, Stage], str]]] = defaultdict(list)
+    predecessors: dict[tuple[str, Stage], list[tuple[tuple[str, Stage], str]]] = (
+        defaultdict(list)
+    )
     terminal_states: set[tuple[str, Stage]] = set()
     for step in non_async:
         edge = edges[step.edge_id]
@@ -544,13 +631,11 @@ def _assign_backbone_roles(
         target = (edge.target_id, step.stage_to)
         reachable_states.add(target)
         predecessors[target].append((source, step.id))
-        if (
-            edge.uncertainty_id is not None
-            or nodes[edge.target_id].kind in _STOP_KINDS
-        ):
+        if edge.uncertainty_id is not None or nodes[edge.target_id].kind in _STOP_KINDS:
             terminal_states.add(target)
     step_bits = {
-        step.id: 1 << ordinal for ordinal, step in enumerate(sorted(non_async, key=lambda item: item.id))
+        step.id: 1 << ordinal
+        for ordinal, step in enumerate(sorted(non_async, key=lambda item: item.id))
     }
     all_bits = (1 << len(step_bits)) - 1
     dominators = {
@@ -559,7 +644,9 @@ def _assign_backbone_roles(
     changed = True
     while changed:
         changed = False
-        for state in sorted(reachable_states, key=lambda item: (item[0], item[1].value)):
+        for state in sorted(
+            reachable_states, key=lambda item: (item[0], item[1].value)
+        ):
             if state == root_state or not predecessors[state]:
                 continue
             updated = all_bits
@@ -605,6 +692,7 @@ def build_lifecycle_flows(
     edges = {edge.id: edge for edge in graph.edges}
     uncertainties = {item.id: item for item in graph.uncertainties}
     callable_summaries = summaries or build_callable_summaries(graph)
+    exception_call_sites = dict(graph.exception_call_sites_by_edge)
     uncertain_call_sites = {
         edge.call_site_id
         for edge in graph.edges
@@ -639,12 +727,24 @@ def build_lifecycle_flows(
             else AsyncContext.SYNCHRONOUS
         )
         root_state = (root_node_id, Stage.ENTRY, context)
+        root_summary = callable_summaries.get((root_node_id, Stage.ENTRY))
+        admitted_states = (
+            {
+                (item.edge_id, item.stage_from, item.stage_to)
+                for item in root_summary.reachable_edge_stage_states
+            }
+            if root_summary is not None
+            else set()
+        )
         depths: dict[tuple[str, Stage, AsyncContext], int] = {root_state: 0}
         invocation_stages: dict[str, Stage] = {}
         returnable_call_sites: set[str] = set()
+        throwable_call_sites: set[str] = set()
         expanded_generation: dict[tuple[str, Stage, AsyncContext], int] = {}
         queue = deque([root_state])
-        step_values: dict[tuple[str, Stage, Stage, AsyncContext], dict[str, object]] = {}
+        step_values: dict[
+            tuple[str, Stage, Stage, AsyncContext], dict[str, object]
+        ] = {}
         while queue:
             state = queue.popleft()
             generation = len(invocation_stages)
@@ -654,25 +754,42 @@ def build_lifecycle_flows(
             source_id, stage_from, async_context = state
             source_depth = depths[state]
             for edge in outgoing.get(source_id, ()):
-                if edge.relation is Relation.RETURNS_TO and (
-                    edge.call_site_id not in invocation_stages
-                    or edge.call_site_id in uncertain_call_sites
-                    or edge.call_site_id not in returnable_call_sites
+                if edge.call_site_id is not None:
+                    if edge.relation is Relation.RETURNS_TO and (
+                        edge.call_site_id not in invocation_stages
+                        or edge.call_site_id in uncertain_call_sites
+                        or edge.call_site_id not in returnable_call_sites
+                    ):
+                        continue
+                    if edge.relation is Relation.THROWS_TO and (
+                        edge.call_site_id not in invocation_stages
+                        or edge.call_site_id in uncertain_call_sites
+                        or edge.call_site_id not in throwable_call_sites
+                    ):
+                        continue
+                exception_call_site = exception_call_sites.get(edge.id)
+                if exception_call_site is not None and (
+                    exception_call_site not in invocation_stages
+                    or exception_call_site in uncertain_call_sites
+                    or exception_call_site not in throwable_call_sites
                 ):
                     continue
                 if edge.uncertainty_id is not None:
                     uncertainty = uncertainties[edge.uncertainty_id]
                     if uncertainty.candidate_set_knowledge.value != "complete":
-                        allowed = (
-                            getattr(uncertainty.subject, "edge_id", None) == edge.id
-                            or (
-                                getattr(uncertainty.subject, "call_site_id", None)
-                                == edge.call_site_id
-                                and edge.evidence.primary.origin is EvidenceOrigin.UNRESOLVED
-                            )
+                        allowed = getattr(
+                            uncertainty.subject, "edge_id", None
+                        ) == edge.id or (
+                            getattr(uncertainty.subject, "call_site_id", None)
+                            == edge.call_site_id
+                            and edge.evidence.primary.origin
+                            is EvidenceOrigin.UNRESOLVED
                         )
                         if not allowed:
                             continue
+                stage_to = _stage_to(edge, stage_from, nodes, invocation_stages)
+                if (edge.id, stage_from, stage_to) not in admitted_states:
+                    continue
                 if edge.relation is Relation.INVOKES and edge.call_site_id is not None:
                     previous = invocation_stages.get(edge.call_site_id)
                     if previous is not None and previous is not stage_from:
@@ -685,22 +802,39 @@ def build_lifecycle_flows(
                         # Demand the callee summary for this exact input stage.
                         # Return edges remain call-site scoped below; this lookup
                         # deliberately never enables a companion uncertain return.
-                        callee_summary = callable_summaries.get(
-                            (edge.target_id, stage_to)
-                        )
+                        callee_summary = callable_summaries.get((
+                            edge.target_id,
+                            stage_to,
+                        ))
                         if (
                             edge.uncertainty_id is None
                             and callee_summary is not None
                             and callee_summary.normal_exit_node_ids
                         ):
                             returnable_call_sites.add(edge.call_site_id)
-                        queue.extend(sorted(depths, key=lambda item: (item[0], item[1].value, item[2].value)))
-                stage_to = _stage_to(edge, stage_from, nodes, invocation_stages)
+                        if (
+                            edge.uncertainty_id is None
+                            and callee_summary is not None
+                            and callee_summary.exception_exit_node_ids
+                        ):
+                            throwable_call_sites.add(edge.call_site_id)
+                        queue.extend(
+                            sorted(
+                                depths,
+                                key=lambda item: (
+                                    item[0],
+                                    item[1].value,
+                                    item[2].value,
+                                ),
+                            )
+                        )
                 key = (edge.id, stage_from, stage_to, async_context)
                 child_id: str | None = None
                 async_cycle = False
                 if edge.flow is EdgeFlow.ASYNC and edge.uncertainty_id is None:
-                    child_id = flow_id(entrypoint.id, edge.target_id, FlowKind.ASYNC_FLOW.value)
+                    child_id = flow_id(
+                        entrypoint.id, edge.target_id, FlowKind.ASYNC_FLOW.value
+                    )
                     async_cycle = child_id in (*ancestors, public_flow_id)
                     if not async_cycle:
                         build_one(
@@ -771,7 +905,9 @@ def build_lifecycle_flows(
             if edges[step.edge_id].uncertainty_id is not None
         }
         frontier_reasons = Counter(
-            uncertainties[item].reason_code for item in uncertainty_ids if item is not None
+            uncertainties[item].reason_code
+            for item in uncertainty_ids
+            if item is not None
         )
         capabilities = _flow_capabilities(graph.capabilities, frontier_reasons)
         terminal_ids = {
@@ -779,7 +915,9 @@ def build_lifecycle_flows(
             for step in steps
             if nodes[edges[step.edge_id].target_id].kind in _TERMINAL_OUTCOME_KINDS
         }
-        linked_ids = {step.async_child_flow_id for step in steps if step.async_child_flow_id}
+        linked_ids = {
+            step.async_child_flow_id for step in steps if step.async_child_flow_id
+        }
         stage_members: dict[Stage, set[str]] = defaultdict(set)
         stage_members[Stage.ENTRY].add(root_node_id)
         for step in steps:
@@ -789,7 +927,10 @@ def build_lifecycle_flows(
         stage_counts: dict[str, CountKnowledge | None] = {}
         stage_capabilities = {
             Stage.ENTRY: (capabilities.entrypoint_discovery,),
-            Stage.ROUTING: (capabilities.entrypoint_discovery, capabilities.framework_lifecycle),
+            Stage.ROUTING: (
+                capabilities.entrypoint_discovery,
+                capabilities.framework_lifecycle,
+            ),
             Stage.MIDDLEWARE: (capabilities.framework_lifecycle,),
             Stage.SECURITY: (capabilities.framework_lifecycle,),
             Stage.INPUT: (capabilities.framework_lifecycle,),
@@ -816,7 +957,12 @@ def build_lifecycle_flows(
             len(steps),
             _count(
                 len(terminal_ids),
-                (capabilities.inventory, capabilities.call_graph, capabilities.control_flow, capabilities.exceptions),
+                (
+                    capabilities.inventory,
+                    capabilities.call_graph,
+                    capabilities.control_flow,
+                    capabilities.exceptions,
+                ),
             ),
             _count(
                 len(linked_ids),
@@ -844,8 +990,15 @@ def build_lifecycle_flows(
             ),
             (),
         )
-    flows = tuple(sorted((item[0] for item in materialized.values()), key=lambda item: item.id))
-    steps = tuple(sorted((step for item in materialized.values() for step in item[1]), key=lambda item: item.id))
+    flows = tuple(
+        sorted((item[0] for item in materialized.values()), key=lambda item: item.id)
+    )
+    steps = tuple(
+        sorted(
+            (step for item in materialized.values() for step in item[1]),
+            key=lambda item: item.id,
+        )
+    )
     return flows, steps
 
 

@@ -1622,10 +1622,7 @@ def _recursive_invocation_edge_ids(
         == component_by_node[edge.target_id]
         and (
             edge.occurrence.owner_node_id == edge.target_id
-            or component_sizes[
-                component_by_node[edge.occurrence.owner_node_id]
-            ]
-            > 1
+            or component_sizes[component_by_node[edge.occurrence.owner_node_id]] > 1
         )
     }
 
@@ -1782,6 +1779,22 @@ def _validate_flow_edge_closure(
         and edge.uncertainty_id is None
         and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
     }
+    serialized_invocation_structures = tuple(
+        index.structures[call_site_id_value]
+        for call_site_id_value in serialized_verified_invocation_call_sites
+        if call_site_id_value is not None
+    )
+
+    def is_active_interprocedural_throw(edge: Edge) -> bool:
+        occurrence_path = getattr(edge.occurrence, "structural_path", None)
+        if occurrence_path is None:
+            return False
+        return any(
+            call_site.owner_node_id == edge.occurrence.owner_node_id
+            and occurrence_path.startswith(f"{call_site.structural_path}/exception/")
+            for call_site in serialized_invocation_structures
+        )
+
     steps_by_source: dict[str, list[FlowStep]] = defaultdict(list)
     for step in flow_steps:
         edge = index.edges[step.edge_id]
@@ -1807,8 +1820,23 @@ def _validate_flow_edge_closure(
         and edge.uncertainty_id is None
         and edge.evidence.primary.origin is EvidenceOrigin.VERIFIED_FROM_CODE
         and (
-            edge.relation is not Relation.RETURNS_TO
-            or edge.call_site_id in serialized_verified_invocation_call_sites
+            (
+                edge.relation is Relation.RETURNS_TO
+                and edge.call_site_id in serialized_verified_invocation_call_sites
+            )
+            or (
+                edge.relation is Relation.THROWS_TO
+                and (
+                    edge.occurrence.owner_node_id
+                    == getattr(
+                        index.nodes[edge.source_id].identity,
+                        "owner_node_id",
+                        edge.source_id,
+                    )
+                    or is_active_interprocedural_throw(edge)
+                )
+            )
+            or edge.relation not in {Relation.RETURNS_TO, Relation.THROWS_TO}
         )
     }
     if not required_edge_ids.issubset(serialized_edge_ids):
@@ -2504,9 +2532,9 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         and node.identity.language is not None
         and cast(FileProperties, node.properties).analysis_status.value == "analyzed"
     )
-    if not set(file_language_counts).issubset(
-        {item.name for item in artifact.languages}
-    ):
+    if not set(file_language_counts).issubset({
+        item.name for item in artifact.languages
+    }):
         _fail(
             "language_coverage_mismatch",
             "file inventory language is missing its language record",

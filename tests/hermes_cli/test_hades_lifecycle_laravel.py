@@ -10,6 +10,10 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
+from tests.hermes_cli.test_hades_lifecycle_framework_adapter import (
+    _assert_framework_pipeline_closes_adapter_result,
+)
+
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
     EntrypointKind,
@@ -27,6 +31,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageOutcome,
     ExceptionSuccessor,
     ExtractionContext,
+    InventoryFile,
     ReturnSuccessor,
     SourceLocationIR,
 )
@@ -89,6 +94,17 @@ def _context(
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=file_accessor or (lambda path: (root / path).read_bytes()),
+        inventory_files=tuple(
+            InventoryFile(
+                path.relative_to(root).as_posix(),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                None,
+                True,
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -148,6 +164,10 @@ Route::middleware(['web', 'auth'])->prefix('api')->name('api.')->domain('api.tes
     assert routes[0].methods == ("GET",)
     assert routes[0].match_constraints.host == "api.test"
     assert all(route.handler_local_key is not None for route in routes)
+    pipeline = adapter.pipeline(context, routes[0])
+    _assert_framework_pipeline_closes_adapter_result(
+        (routes[0],), pipeline, adapter.pipeline_facts(context, routes[0])
+    )
 
 
 def test_resource_routes_expand_to_explicit_methods_in_declaration_order(

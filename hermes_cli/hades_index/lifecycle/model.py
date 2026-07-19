@@ -992,7 +992,7 @@ class EdgeFactIR:
 class ExceptionScope:
     local_key: str
     declaration_key: str
-    locator: AstLocatorIR
+    locator: OccurrenceLocatorIR
     caught_type_names: tuple[str, ...]
     catch_block_keys: tuple[str, ...]
     finally_block_key: str | None
@@ -1001,8 +1001,8 @@ class ExceptionScope:
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="exception_scope.local_key")
         _key(self.declaration_key, field_name="exception_scope.declaration_key")
-        if type(self.locator) is not AstLocatorIR:
-            _fail("invalid_locator", "exception scope locator must be AST")
+        if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
+            _fail("invalid_locator", "exception scope locator must be AST or config")
         caught = _tuple(self.caught_type_names, field_name="caught_type_names")
         if any(not isinstance(item, str) for item in caught):
             _fail("invalid_scalar", "caught_type_names must contain strings")
@@ -1026,7 +1026,7 @@ class Terminal:
     kind: TerminalKind
     public_status: int | None
     exception_type: str | None
-    locator: AstLocatorIR
+    locator: OccurrenceLocatorIR
 
     def __post_init__(self) -> None:
         _key(self.local_key, field_name="terminal.local_key")
@@ -1048,8 +1048,8 @@ class Terminal:
                 "invalid_nullability",
                 "only exception terminal can carry exception_type",
             )
-        if type(self.locator) is not AstLocatorIR:
-            _fail("invalid_locator", "terminal locator must be AST")
+        if type(self.locator) not in {AstLocatorIR, ConfigLocatorIR}:
+            _fail("invalid_locator", "terminal locator must be AST or config")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1505,18 +1505,14 @@ class InventoryFile:
         _safe_path(self.path, field_name="inventory.path")
         _digest(self.file_sha256, field_name="inventory.file_sha256")
         if self.language is not None:
-            language = _nfc(
-                self.language, field_name="inventory.language", limit=32
-            )
+            language = _nfc(self.language, field_name="inventory.language", limit=32)
             if not _IDENTIFIER_RE.fullmatch(language):
                 _fail(
                     "invalid_identifier",
                     "inventory.language must be a lower identifier",
                 )
         if type(self.parser_candidate) is not bool:
-            _fail(
-                "invalid_scalar", "inventory.parser_candidate must be boolean"
-            )
+            _fail("invalid_scalar", "inventory.parser_candidate must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1533,7 +1529,8 @@ class ExtractionContext:
     package_metadata: tuple[ConfigLocatorIR, ...]
     tsconfig_metadata: tuple[ConfigLocatorIR, ...]
     file_accessor: ReadOnlyFileAccessor
-    inventory_files: tuple[InventoryFile, ...] = ()
+    inventory_files: tuple[InventoryFile, ...]
+    excluded_path_count: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace_root, Path):
@@ -1603,6 +1600,10 @@ class ExtractionContext:
             _fail("not_sorted", "inventory_files must be sorted by path")
         if len({item.path for item in inventory}) != len(inventory):
             _fail("duplicate_record", "inventory_files paths must be unique")
+        _nonnegative(
+            self.excluded_path_count,
+            field_name="excluded_path_count",
+        )
 
 
 def local_record_key(
@@ -1889,6 +1890,7 @@ class AdapterResult:
             **declarations,
             **blocks,
             **terminals,
+            **segments,
         }
         node_kinds: dict[str, NodeKind] = {
             **{
@@ -2034,9 +2036,12 @@ class AdapterResult:
         for scope in self.exception_scopes:
             need(declarations, scope.declaration_key, "exception scope declaration")
             for block_key in scope.catch_block_keys:
-                need_local_block(
-                    block_key, scope.declaration_key, "exception catch block"
-                )
+                if block_key in blocks:
+                    need_local_block(
+                        block_key, scope.declaration_key, "exception catch block"
+                    )
+                else:
+                    need(segments, block_key, "framework exception catch segment")
             if scope.finally_block_key is not None:
                 need_local_block(
                     scope.finally_block_key,
@@ -2057,7 +2062,12 @@ class AdapterResult:
                 for structure in self.structures
                 if structure.kind is StructureKind.EXCEPTION_SCOPE
                 and structure.owner_declaration_key == scope.declaration_key
-                and structure.structural_path == scope.locator.structural_path
+                and structure.structural_path
+                == (
+                    scope.locator.structural_path
+                    if type(scope.locator) is AstLocatorIR
+                    else scope.locator.structural_pointer
+                )
                 and structure.ordinal == scope.locator.ordinal
             ]
             if len(matching) != 1:
@@ -2299,7 +2309,11 @@ class AdapterResult:
                     )
 
         for terminal in self.terminals:
-            need(blocks, terminal.source_block_key, "terminal source block")
+            if terminal.source_block_key in blocks:
+                continue
+            need(
+                segments, terminal.source_block_key, "terminal source block or segment"
+            )
         for effect in self.effects:
             if type(effect.source) is BlockEffectSource:
                 need(blocks, effect.source.local_key, "effect source block")
@@ -2329,21 +2343,47 @@ class AdapterResult:
                             successor.target_block_key,
                             "framework successor block or segment",
                         )
-                    if type(successor) is ExceptionSuccessor and (
-                        successor.exception_scope_key not in structures
-                    ):
-                        _key(
-                            successor.exception_scope_key,
-                            field_name="framework exception scope key",
+                    if type(successor) is BranchSuccessor:
+                        structure = need(
+                            structures,
+                            successor.branch_arm_key,
+                            "framework branch structure",
                         )
+                        if structure.kind is not StructureKind.BRANCH_GROUP:
+                            _fail(
+                                "invalid_structure",
+                                "framework branch successor requires branch_group structure",
+                            )
+                        matching_arms = [
+                            arm
+                            for arm in self.branch_arms
+                            if arm.branch_local_key == successor.branch_arm_key
+                            and arm.target_block_key == successor.target_block_key
+                        ]
+                        if len(matching_arms) != 1:
+                            _fail(
+                                "invalid_branch_successor",
+                                "framework branch successor must resolve to one exact branch arm",
+                            )
+                    if type(successor) is ExceptionSuccessor:
+                        structure = need(
+                            structures,
+                            successor.exception_scope_key,
+                            "framework exception scope structure",
+                        )
+                        if structure.kind is not StructureKind.EXCEPTION_SCOPE:
+                            _fail(
+                                "invalid_structure",
+                                "framework exception successor requires exception_scope structure",
+                            )
                 elif type(successor) is AsyncSuccessor:
                     need_node(successor.target_local_key, "framework async target")
                 else:
-                    if successor.terminal_local_key not in terminals:
-                        _key(
-                            successor.terminal_local_key,
-                            field_name="framework return terminal key",
-                        )
+                    need(
+                        terminals,
+                        successor.terminal_local_key,
+                        "framework return terminal",
+                    )
 
         entrypoints_by_unresolved: dict[str, EntrypointCandidate] = {}
         for entrypoint in self.entrypoints:

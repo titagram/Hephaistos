@@ -6,6 +6,10 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
+from tests.hermes_cli.test_hades_lifecycle_framework_adapter import (
+    _assert_framework_pipeline_closes_adapter_result,
+)
+
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
     FrameworkKnowledge,
@@ -20,6 +24,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageOutcome,
     ExceptionSuccessor,
     ExtractionContext,
+    InventoryFile,
     SourceLocationIR,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import (
@@ -71,6 +76,22 @@ def _context(
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=file_accessor or (lambda path: (root / path).read_bytes()),
+        inventory_files=tuple(
+            sorted(
+                (
+                    InventoryFile(
+                        path.relative_to(root).as_posix(),
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                        None,
+                        True,
+                    )
+                    for path in root.rglob("*")
+                    if path.is_file()
+                ),
+                key=lambda item: item.path,
+            )
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -171,6 +192,10 @@ final class UserController {
     assert all(item.match_constraints.host == "api.example.test" for item in routes)
     assert all(item.match_constraints.condition_hash is not None for item in routes)
     assert all(item.handler_local_key is not None for item in routes)
+    pipeline = adapter.pipeline(context, routes[0])
+    _assert_framework_pipeline_closes_adapter_result(
+        (routes[0],), pipeline, adapter.pipeline_facts(context, routes[0])
+    )
 
 
 def test_pipeline_uses_explicit_listener_and_security_order_with_short_circuits(

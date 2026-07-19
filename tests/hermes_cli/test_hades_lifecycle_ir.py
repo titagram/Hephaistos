@@ -825,6 +825,8 @@ def test_extraction_context_is_runtime_typed_and_deterministically_ordered() -> 
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=lambda path: path.read_bytes(),
+        inventory_files=(),
+        excluded_path_count=0,
     )
     assert context.source_identity is source_identity
     with pytest.raises(IRValidationError, match="source_identity"):

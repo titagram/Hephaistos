@@ -25,7 +25,12 @@ from hermes_cli.hades_graph_v2.model import (
     TriggerKind,
 )
 from hermes_cli.hades_graph_v2.schema import GraphContractError
-from hermes_cli.hades_index.lifecycle.frameworks import FrameworkDetection
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkDetection,
+    FrameworkPipelineFacts,
+    FrameworkTerminalSpec,
+    framework_pipeline_facts,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     AlwaysSuccessor,
     AsyncDispatchKind,
@@ -46,6 +51,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ReturnSuccessor,
     SourceLocationIR,
     Successor,
+    TerminalKind,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
@@ -2006,6 +2012,31 @@ class LaravelLifecycleAdapter:
                 )
             )
         return tuple(segments)
+
+    def pipeline_facts(
+        self, context: ExtractionContext, candidate: EntrypointCandidate
+    ) -> FrameworkPipelineFacts:
+        def terminal_spec(
+            segment: FrameworkPipelineSegment, _successor: ReturnSuccessor
+        ) -> FrameworkTerminalSpec:
+            role = segment.framework_role
+            if candidate.kind is not EntrypointKind.HTTP_ROUTE:
+                return FrameworkTerminalSpec(TerminalKind.EXIT)
+            if "exception" in role:
+                return FrameworkTerminalSpec(
+                    TerminalKind.EXCEPTION, exception_type="Exception"
+                )
+            if "redirect" in role:
+                return FrameworkTerminalSpec(TerminalKind.REDIRECT)
+            if "abort" in role or role in {
+                "authentication",
+                "authorization",
+            }:
+                return FrameworkTerminalSpec(TerminalKind.ABORT)
+            return FrameworkTerminalSpec(TerminalKind.RESPONSE)
+
+        pipeline = self.pipeline(context, candidate)
+        return framework_pipeline_facts(candidate, pipeline, terminal_spec)
 
 
 __all__ = ["LaravelLifecycleAdapter"]

@@ -12,6 +12,10 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
+from tests.hermes_cli.test_hades_lifecycle_framework_adapter import (
+    _assert_framework_pipeline_closes_adapter_result,
+)
+
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
     EntrypointKind,
@@ -31,6 +35,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageOutcome,
     ExceptionSuccessor,
     ExtractionContext,
+    InventoryFile,
     FrameworkLocalTarget,
     ReturnSuccessor,
     SourceLocationIR,
@@ -101,6 +106,17 @@ def _context(
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=file_accessor or (lambda path: (root / path).read_bytes()),
+        inventory_files=tuple(
+            InventoryFile(
+                path.relative_to(root).as_posix(),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                None,
+                True,
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -525,6 +541,15 @@ app.include_router(router, prefix="/v2")
     assert len(result.framework_segments) == len({
         item.local_key for item in result.framework_segments
     })
+    selected_pipeline = tuple(
+        item
+        for item in result.framework_segments
+        if item.local_key in routes[0].framework_segment_keys
+    )
+    selected_facts = registry.adapters[0].pipeline_facts(context, routes[0])
+    _assert_framework_pipeline_closes_adapter_result(
+        (routes[0],), selected_pipeline, selected_facts
+    )
 
 
 def test_apirouter_absent_prefix_is_the_static_empty_prefix(tmp_path: Path) -> None:

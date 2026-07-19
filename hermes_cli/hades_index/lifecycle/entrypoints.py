@@ -33,12 +33,16 @@ from hermes_cli.hades_index.lifecycle.model import (
     CoverageEvent,
     CoverageOutcome,
     EntrypointCandidate,
+    ExceptionScope,
     EvidenceOrigin,
     ExtractionContext,
     FrameworkPipelineSegment,
+    BranchArm,
     IREvidence,
     MatchConstraints,
     SourceLocationIR,
+    StructureIR,
+    Terminal,
     local_record_key,
 )
 from hermes_cli.hades_index.tree_sitter_adapter import StructuralSymbol, SyntaxIR
@@ -57,6 +61,10 @@ class EntrypointExtraction:
     candidates: tuple[EntrypointCandidate, ...]
     framework_segments: tuple[FrameworkPipelineSegment, ...]
     coverage_events: tuple[CoverageEvent, ...]
+    structures: tuple[StructureIR, ...] = ()
+    branch_arms: tuple[BranchArm, ...] = ()
+    exception_scopes: tuple[ExceptionScope, ...] = ()
+    terminals: tuple[Terminal, ...] = ()
 
 
 def _candidate_key(candidate: EntrypointCandidate) -> tuple[object, ...]:
@@ -131,7 +139,49 @@ def merge_entrypoint_extractions(
     )
     if len({_coverage_key(event) for event in coverage}) != len(coverage):
         raise ValueError("duplicate entrypoint coverage event")
-    return EntrypointExtraction(candidates, segments, coverage)
+
+    def merge_records(
+        family: str,
+        records: Sequence[object],
+        key,
+    ) -> tuple[object, ...]:
+        values: dict[object, object] = {}
+        for record in records:
+            identity = key(record)
+            previous = values.setdefault(identity, record)
+            if previous != record:
+                raise ValueError(f"conflicting {family} identity")
+        return tuple(values[item] for item in sorted(values, key=repr))
+
+    structures = merge_records(
+        "framework structure",
+        [item for extraction in extractions for item in extraction.structures],
+        lambda item: item.local_key,
+    )
+    branch_arms = merge_records(
+        "framework branch arm",
+        [item for extraction in extractions for item in extraction.branch_arms],
+        lambda item: (item.branch_local_key, item.arm_ordinal),
+    )
+    exception_scopes = merge_records(
+        "framework exception scope",
+        [item for extraction in extractions for item in extraction.exception_scopes],
+        lambda item: item.local_key,
+    )
+    terminals = merge_records(
+        "framework terminal",
+        [item for extraction in extractions for item in extraction.terminals],
+        lambda item: item.local_key,
+    )
+    return EntrypointExtraction(
+        candidates,
+        segments,
+        coverage,
+        structures,
+        branch_arms,
+        exception_scopes,
+        terminals,
+    )
 
 
 def _symbol_entrypoint_kind(symbol: StructuralSymbol) -> EntrypointKind | None:
@@ -393,6 +443,10 @@ def extract_languages_entrypoints(
             framework_run.candidates,
             framework_run.framework_segments,
             framework_run.coverage_events,
+            framework_run.pipeline_facts.structures,
+            framework_run.pipeline_facts.branch_arms,
+            framework_run.pipeline_facts.exception_scopes,
+            framework_run.pipeline_facts.terminals,
         )
     else:
         framework = EntrypointExtraction((), (), ())

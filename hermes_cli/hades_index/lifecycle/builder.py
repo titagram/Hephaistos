@@ -130,6 +130,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     Effect,
     EffectKind,
     EntrypointCandidate,
+    ExceptionScope,
     ExecutableDeclaration,
     ExtractionContext,
     FileLocatorIR,
@@ -228,12 +229,14 @@ def _framework_node_kind(role: str) -> NodeKind:
 
 
 def _default_generated_at() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
 
 
-def _deduplicate(records: Iterable[_T], *, key: Callable[[_T], object]) -> tuple[_T, ...]:
+def _deduplicate(
+    records: Iterable[_T], *, key: Callable[[_T], object]
+) -> tuple[_T, ...]:
     """Deduplicate identical facts and reject one local identity with two values."""
 
     by_key: dict[object, _T] = {}
@@ -277,28 +280,46 @@ def _merge_evidence(
     return EvidenceEnvelope(ordered[0], supporting, omitted)
 
 
-def _deduplicate_edges(records: Iterable[Edge]) -> tuple[Edge, ...]:
-    """Merge compatible evidence and reject every semantic public-ID collision."""
+def _insert_public_record(
+    by_id: dict[str, _T],
+    record: _T,
+    *,
+    record_name: str,
+) -> None:
+    """Apply the normative public-ID collision rule to one evidenced record."""
 
-    by_id: dict[str, Edge] = {}
-    for record in records:
-        previous = by_id.get(record.id)
-        if previous is None:
-            by_id[record.id] = record
-            continue
-        if previous == record:
-            continue
-        if replace(record, evidence=previous.evidence) == previous:
-            by_id[record.id] = replace(
-                previous,
-                evidence=_merge_evidence(previous.evidence, record.evidence),
-            )
-            continue
-        raise IRValidationError(
-            "semantic_collision",
-            "one canonical edge identity maps to different semantic values",
+    public_id = getattr(record, "id")
+    previous = by_id.get(public_id)
+    if previous is None:
+        by_id[public_id] = record
+        return
+    if previous == record:
+        return
+    previous_evidence = getattr(previous, "evidence")
+    record_evidence = getattr(record, "evidence")
+    if replace(record, evidence=previous_evidence) == previous:
+        by_id[public_id] = replace(
+            previous,
+            evidence=_merge_evidence(previous_evidence, record_evidence),
         )
+        return
+    raise IRValidationError(
+        "semantic_collision",
+        f"one canonical {record_name} identity maps to different semantic values",
+    )
+
+
+def _deduplicate_public_records(
+    records: Iterable[_T], *, record_name: str
+) -> tuple[_T, ...]:
+    by_id: dict[str, _T] = {}
+    for record in records:
+        _insert_public_record(by_id, record, record_name=record_name)
     return tuple(by_id[key] for key in sorted(by_id))
+
+
+def _deduplicate_edges(records: Iterable[Edge]) -> tuple[Edge, ...]:
+    return _deduplicate_public_records(records, record_name="edge")
 
 
 def _locator_path(locator: FileLocatorIR | AstLocatorIR | ConfigLocatorIR) -> str:
@@ -355,9 +376,7 @@ def _evidence(
             "invalid_file_locator", "semantic graph facts require AST/config evidence"
         )
     selected_origin = evidence.origin if origin is None else origin
-    selected_rule = (
-        evidence.inference_rule if origin is None else inference_rule
-    )
+    selected_rule = evidence.inference_rule if origin is None else inference_rule
     return EvidenceEnvelope(
         EvidenceItem(
             selected_origin,
@@ -422,7 +441,12 @@ def _entrypoint_identity(
     context: ExtractionContext, candidate: EntrypointCandidate, language: str
 ) -> tuple[EntrypointIdentity, EntrypointNodeIdentity, str]:
     label = _entrypoint_label(candidate)
-    trigger = Trigger(candidate.trigger, label if candidate.kind is EntrypointKind.HTTP_ROUTE else candidate.trigger_value)
+    trigger = Trigger(
+        candidate.trigger,
+        label
+        if candidate.kind is EntrypointKind.HTTP_ROUTE
+        else candidate.trigger_value,
+    )
     constraints = MatchConstraints(
         candidate.match_constraints.host,
         candidate.match_constraints.schemes,
@@ -494,7 +518,37 @@ def _reason_code(value: str) -> ReasonCode:
         return ReasonCode.INVALID_SOURCE_FACT
 
 
-def _all_locators(results: Sequence[AdapterResult]) -> tuple[FileLocatorIR | AstLocatorIR | ConfigLocatorIR, ...]:
+_CATCH_ALL_EXCEPTION_TYPES = frozenset({
+    "BaseException",
+    "Exception",
+    "Throwable",
+    "Error",
+    "System.Exception",
+    "java.lang.Exception",
+})
+
+
+def _exception_type_matches(thrown: str | None, caught: str) -> bool:
+    """Apply only explicit equality and the IR's portable catch-all roots."""
+
+    caught_tail = caught.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
+    if (
+        caught in _CATCH_ALL_EXCEPTION_TYPES
+        or caught_tail in _CATCH_ALL_EXCEPTION_TYPES
+    ):
+        return True
+    if thrown is None:
+        # Without a statically known thrown type, every lexical catch remains
+        # a possible match.  Preserve nearest-scope semantics instead of
+        # incorrectly skipping to a parent scope.
+        return True
+    thrown_tail = thrown.rsplit(".", 1)[-1].rsplit("\\", 1)[-1]
+    return caught == thrown or caught_tail == thrown_tail
+
+
+def _all_locators(
+    results: Sequence[AdapterResult],
+) -> tuple[FileLocatorIR | AstLocatorIR | ConfigLocatorIR, ...]:
     values: list[FileLocatorIR | AstLocatorIR | ConfigLocatorIR] = []
     for result in results:
         for declaration in result.declarations:
@@ -508,9 +562,10 @@ def _all_locators(results: Sequence[AdapterResult]) -> tuple[FileLocatorIR | Ast
         for edge in result.edge_facts:
             values.extend((edge.locator, edge.evidence.locator))
             if type(edge.target) is BoundaryTarget:
-                values.extend(
-                    (edge.target.descriptor.locator, edge.target.descriptor.evidence.locator)
-                )
+                values.extend((
+                    edge.target.descriptor.locator,
+                    edge.target.descriptor.evidence.locator,
+                ))
         for scope in result.exception_scopes:
             values.append(scope.locator)
         for terminal in result.terminals:
@@ -520,12 +575,10 @@ def _all_locators(results: Sequence[AdapterResult]) -> tuple[FileLocatorIR | Ast
         for segment in result.framework_segments:
             values.append(segment.evidence.locator)
             if type(segment.target) is FrameworkBoundaryTarget:
-                values.extend(
-                    (
-                        segment.target.descriptor.locator,
-                        segment.target.descriptor.evidence.locator,
-                    )
-                )
+                values.extend((
+                    segment.target.descriptor.locator,
+                    segment.target.descriptor.evidence.locator,
+                ))
         for candidate in result.entrypoints:
             values.extend((candidate.registration_locator, candidate.evidence.locator))
         for fact in result.unresolved_facts:
@@ -626,24 +679,24 @@ class GraphBuilder:
         call_site_by_key = {item.local_key: item for item in call_sites}
         edge_fact_by_key = {item.local_key: item for item in edge_facts}
 
+        inventory_by_path = {item.path: item for item in context.inventory_files}
+        digest_by_path = {
+            item.path: item.file_sha256 for item in context.inventory_files
+        }
         locators = _all_locators(collected)
-        digest_by_path: dict[str, str] = {}
         for locator in locators:
             path = _locator_path(locator)
             digest = _locator_digest(locator)
-            previous = digest_by_path.setdefault(path, digest)
-            if previous != digest:
+            inventory = inventory_by_path.get(path)
+            if inventory is None:
+                raise IRValidationError(
+                    "semantic_path_outside_inventory",
+                    "semantic and evidence locators must belong to inventory_files",
+                )
+            if inventory.file_sha256 != digest:
                 raise IRValidationError(
                     "conflicting_file_digest",
                     "one represented source path has conflicting file digests",
-                )
-        inventory_by_path = {item.path: item for item in context.inventory_files}
-        for item in context.inventory_files:
-            previous = digest_by_path.setdefault(item.path, item.file_sha256)
-            if previous != item.file_sha256:
-                raise IRValidationError(
-                    "conflicting_file_digest",
-                    "inventory and semantic locators disagree about a file digest",
                 )
         path_languages: dict[str, set[str]] = defaultdict(set)
         for item in context.inventory_files:
@@ -726,8 +779,7 @@ class GraphBuilder:
                     (
                         _reason_code(event.reason_code)
                         for event in path_events
-                        if event.reason_code
-                        in {"parser_failed", "file_read_failed"}
+                        if event.reason_code in {"parser_failed", "file_read_failed"}
                     ),
                     None,
                 )
@@ -823,7 +875,9 @@ class GraphBuilder:
                     qualified_name = declaration.qualified_name
                     namespace = declaration.namespace
                 else:
-                    from hermes_cli.hades_graph_v2.model import AnonymousCallableIdentity
+                    from hermes_cli.hades_graph_v2.model import (
+                        AnonymousCallableIdentity,
+                    )
 
                     owner_id = local_node_ids[declaration.owner_declaration_key or ""]
                     identity = AnonymousCallableIdentity(
@@ -849,13 +903,49 @@ class GraphBuilder:
                     namespace = declaration.namespace
                 public_id = node_id(identity_payload)
                 if declaration.identity_kind is DeclarationIdentityKind.ANONYMOUS:
-                    owner = next(node for node in nodes if node.id == identity.owner_node_id)
+                    owner = next(
+                        node for node in nodes if node.id == identity.owner_node_id
+                    )
                     qualified_name = (
                         f"{owner.qualified_name}::<anonymous:{public_id[-64:-52]}>"
                     )
                     namespace = owner.namespace
                 local_node_ids[declaration.local_key] = public_id
                 modifier_values = tuple(item.value for item in declaration.modifiers)
+                declaration_properties = (
+                    AsyncProperties(
+                        channel_kind=declaration.declaration_kind.value,
+                        public_name=qualified_name or name,
+                    )
+                    if declaration.declaration_kind
+                    in {
+                        NodeKind.EVENT,
+                        NodeKind.LISTENER,
+                        NodeKind.JOB,
+                        NodeKind.QUEUE,
+                        NodeKind.ASYNC_BOUNDARY,
+                    }
+                    else CallableProperties(
+                        visibility=next(
+                            (
+                                item.value
+                                for item in declaration.modifiers
+                                if item
+                                in {
+                                    Modifier.PUBLIC,
+                                    Modifier.PROTECTED,
+                                    Modifier.PRIVATE,
+                                }
+                            ),
+                            None,
+                        ),
+                        static=Modifier.STATIC in declaration.modifiers,
+                        async_=Modifier.ASYNC in declaration.modifiers,
+                        parameter_count=len(declaration.parameters),
+                        return_type=declaration.return_type,
+                        modifiers=modifier_values,
+                    )
+                )
                 nodes.append(
                     Node(
                         public_id,
@@ -868,22 +958,7 @@ class GraphBuilder:
                         namespace,
                         None,
                         _source_location(declaration.locator),
-                        CallableProperties(
-                            visibility=next(
-                                (
-                                    item.value
-                                    for item in declaration.modifiers
-                                    if item
-                                    in {Modifier.PUBLIC, Modifier.PROTECTED, Modifier.PRIVATE}
-                                ),
-                                None,
-                            ),
-                            static=Modifier.STATIC in declaration.modifiers,
-                            async_=Modifier.ASYNC in declaration.modifiers,
-                            parameter_count=len(declaration.parameters),
-                            return_type=declaration.return_type,
-                            modifiers=modifier_values,
-                        ),
+                        declaration_properties,
                         _synthetic_evidence(declaration.locator),
                     )
                 )
@@ -937,17 +1012,24 @@ class GraphBuilder:
             )
 
         for terminal in terminals:
+            if terminal.source_block_key not in block_by_key:
+                continue
             source_block = block_by_key[terminal.source_block_key]
             declaration = declaration_by_key[source_block.declaration_key]
             owner_id = local_node_ids[declaration.local_key]
             kind = _TERMINAL_NODE_KIND[terminal.kind]
+            terminal_structural = (
+                terminal.locator.structural_path
+                if type(terminal.locator) is AstLocatorIR
+                else terminal.locator.structural_pointer
+            )
             identity = SourceOccurrenceIdentity(
                 "source_occurrence",
                 context.workspace_binding_id,
                 declaration.language,
                 kind,
                 owner_id,
-                terminal.locator.structural_path,
+                terminal_structural,
                 terminal.locator.ordinal,
                 terminal.kind.value,
             )
@@ -957,7 +1039,7 @@ class GraphBuilder:
                 "language": declaration.language,
                 "kind": kind.value,
                 "owner_node_id": owner_id,
-                "structural_path": terminal.locator.structural_path,
+                "structural_path": terminal_structural,
                 "ordinal": terminal.locator.ordinal,
                 "semantic_role": terminal.kind.value,
             })
@@ -983,7 +1065,9 @@ class GraphBuilder:
                 )
             )
 
-        entrypoint_data: list[tuple[EntrypointCandidate, EntrypointIdentity, str, str]] = []
+        entrypoint_data: list[
+            tuple[EntrypointCandidate, EntrypointIdentity, str, str]
+        ] = []
         for candidate in entrypoint_candidates:
             if candidate.handler_local_key in declaration_by_key:
                 language = declaration_by_key[candidate.handler_local_key].language
@@ -1019,7 +1103,6 @@ class GraphBuilder:
         framework_segment_node_ids: dict[str, str] = {}
         framework_segment_owner_ids: dict[str, str] = {}
         framework_segment_language: dict[str, str] = {}
-        framework_terminal_node_ids: dict[str, str] = {}
         entrypoint_data_by_segment = {
             segment_key: data
             for data in entrypoint_data
@@ -1040,7 +1123,11 @@ class GraphBuilder:
                 else None
             )
             kind = _framework_node_kind(segment.framework_role)
-            locator = descriptor.locator if descriptor is not None else segment.evidence.locator
+            locator = (
+                descriptor.locator
+                if descriptor is not None
+                else segment.evidence.locator
+            )
             structural = (
                 locator.structural_path
                 if type(locator) is AstLocatorIR
@@ -1079,7 +1166,9 @@ class GraphBuilder:
                     identity,
                     kind,
                     language,
-                    descriptor.framework if descriptor is not None else candidate.framework,
+                    descriptor.framework
+                    if descriptor is not None
+                    else candidate.framework,
                     (
                         descriptor.public_name
                         if descriptor is not None and descriptor.public_name is not None
@@ -1098,81 +1187,65 @@ class GraphBuilder:
                 )
             )
 
-        def framework_terminal_id(
-            segment: FrameworkPipelineSegment,
-            successor: ReturnSuccessor,
-        ) -> str:
-            existing = local_node_ids.get(successor.terminal_local_key)
-            if existing is not None:
-                return existing
-            cached = framework_terminal_node_ids.get(successor.terminal_local_key)
-            if cached is not None:
-                return cached
-            owner_id = framework_segment_owner_ids[segment.local_key]
-            language = framework_segment_language[segment.local_key]
-            terminal_kind = (
-                NodeKind.EXCEPTION
-                if "exception" in segment.framework_role
-                else (
-                    NodeKind.EXIT
-                    if "lifespan" in segment.framework_role
-                    or "shutdown" in segment.framework_role
-                    else NodeKind.RESPONSE
-                )
+        for terminal in terminals:
+            if terminal.source_block_key not in framework_segment_node_ids:
+                continue
+            owner_id = framework_segment_owner_ids[terminal.source_block_key]
+            language = framework_segment_language[terminal.source_block_key]
+            kind = _TERMINAL_NODE_KIND[terminal.kind]
+            terminal_structural = (
+                terminal.locator.structural_path
+                if type(terminal.locator) is AstLocatorIR
+                else terminal.locator.structural_pointer
             )
-            locator = segment.evidence.locator
-            structural = (
-                locator.structural_path
-                if type(locator) is AstLocatorIR
-                else locator.structural_pointer
-            )
-            structural_path = (
-                f"{structural}/pipeline_terminal/"
-                f"{successor.terminal_local_key[:16]}"
-            )
-            semantic_role = f"framework_{terminal_kind.value}"
             identity = SourceOccurrenceIdentity(
                 "source_occurrence",
                 context.workspace_binding_id,
                 language,
-                terminal_kind,
+                kind,
                 owner_id,
-                structural_path,
-                successor.order,
-                semantic_role,
+                terminal_structural,
+                terminal.locator.ordinal,
+                terminal.kind.value,
             )
             public_id = node_id({
                 "variant": "source_occurrence",
                 "workspace_binding_id": context.workspace_binding_id,
                 "language": language,
-                "kind": terminal_kind.value,
+                "kind": kind.value,
                 "owner_node_id": owner_id,
-                "structural_path": structural_path,
-                "ordinal": successor.order,
-                "semantic_role": semantic_role,
+                "structural_path": terminal_structural,
+                "ordinal": terminal.locator.ordinal,
+                "semantic_role": terminal.kind.value,
             })
-            framework_terminal_node_ids[successor.terminal_local_key] = public_id
+            local_node_ids[terminal.local_key] = public_id
             nodes.append(
                 Node(
                     public_id,
                     identity,
-                    terminal_kind,
+                    kind,
                     language,
                     None,
-                    terminal_kind.value,
+                    terminal.kind.value,
                     None,
                     None,
                     None,
-                    _source_location(locator),
+                    _source_location(terminal.locator),
                     TerminalProperties(
-                        None,
-                        "exception" if terminal_kind is NodeKind.EXCEPTION else None,
-                        terminal_kind.value,
+                        terminal.public_status,
+                        terminal.exception_type,
+                        terminal.kind.value,
                     ),
-                    _evidence(segment.evidence),
+                    _synthetic_evidence(terminal.locator),
                 )
             )
-            return public_id
+
+        def framework_terminal_id(
+            segment: FrameworkPipelineSegment,
+            successor: ReturnSuccessor,
+        ) -> str:
+            del segment
+            return local_node_ids[successor.terminal_local_key]
 
         structure_ids: dict[str, str] = {}
         for structure in structures_ir:
@@ -1202,7 +1275,9 @@ class GraphBuilder:
                 and structure.structural_path == site.locator.structural_path
                 and structure.ordinal == site.locator.ordinal
             )
-            call_site_structure_by_local[site.local_key] = structure_ids[match.local_key]
+            call_site_structure_by_local[site.local_key] = structure_ids[
+                match.local_key
+            ]
             call_site_ir_by_structure[match.local_key] = site
 
         structures: list[Structure] = []
@@ -1357,10 +1432,19 @@ class GraphBuilder:
             if key in declaration_by_key:
                 edge_owner_local[key] = public_id
             elif key in block_by_key:
-                edge_owner_local[key] = local_node_ids[block_by_key[key].declaration_key]
+                edge_owner_local[key] = local_node_ids[
+                    block_by_key[key].declaration_key
+                ]
         for terminal in terminals:
-            block = block_by_key[terminal.source_block_key]
-            edge_owner_local[terminal.local_key] = local_node_ids[block.declaration_key]
+            if terminal.source_block_key in block_by_key:
+                block = block_by_key[terminal.source_block_key]
+                edge_owner_local[terminal.local_key] = local_node_ids[
+                    block.declaration_key
+                ]
+            else:
+                edge_owner_local[terminal.local_key] = framework_segment_owner_ids[
+                    terminal.source_block_key
+                ]
 
         effect_target_ids: dict[str, str] = {}
         resource_nodes: dict[str, Node] = {}
@@ -1369,16 +1453,32 @@ class GraphBuilder:
             EffectKind.DATA_WRITE: (NodeKind.STORAGE, Relation.WRITES, EdgeFlow.ALWAYS),
             EffectKind.CACHE_READ: (NodeKind.CACHE, Relation.READS, EdgeFlow.ALWAYS),
             EffectKind.CACHE_WRITE: (NodeKind.CACHE, Relation.WRITES, EdgeFlow.ALWAYS),
-            EffectKind.STORAGE_READ: (NodeKind.STORAGE, Relation.READS, EdgeFlow.ALWAYS),
-            EffectKind.STORAGE_WRITE: (NodeKind.STORAGE, Relation.WRITES, EdgeFlow.ALWAYS),
+            EffectKind.STORAGE_READ: (
+                NodeKind.STORAGE,
+                Relation.READS,
+                EdgeFlow.ALWAYS,
+            ),
+            EffectKind.STORAGE_WRITE: (
+                NodeKind.STORAGE,
+                Relation.WRITES,
+                EdgeFlow.ALWAYS,
+            ),
             EffectKind.EXTERNAL_CALL: (
                 NodeKind.EXTERNAL_BOUNDARY,
                 Relation.CALLS_EXTERNAL,
                 EdgeFlow.ALWAYS,
             ),
             EffectKind.EVENT_EMIT: (NodeKind.EVENT, Relation.EMITS, EdgeFlow.ASYNC),
-            EffectKind.JOB_DISPATCH: (NodeKind.JOB, Relation.DISPATCHES, EdgeFlow.ASYNC),
-            EffectKind.QUEUE_DISPATCH: (NodeKind.QUEUE, Relation.DISPATCHES, EdgeFlow.ASYNC),
+            EffectKind.JOB_DISPATCH: (
+                NodeKind.JOB,
+                Relation.DISPATCHES,
+                EdgeFlow.ASYNC,
+            ),
+            EffectKind.QUEUE_DISPATCH: (
+                NodeKind.QUEUE,
+                Relation.DISPATCHES,
+                EdgeFlow.ASYNC,
+            ),
         }
         for effect in effects:
             if type(effect.source) is BlockEffectSource:
@@ -1436,8 +1536,8 @@ class GraphBuilder:
                     channel_kind=effect.kind.value,
                     public_name=effect.public_resource_name,
                 )
-            resource_nodes.setdefault(
-                public_id,
+            _insert_public_record(
+                resource_nodes,
                 Node(
                     public_id,
                     identity,
@@ -1448,10 +1548,11 @@ class GraphBuilder:
                     None,
                     None,
                     None,
-                    _source_location(effect.locator),
+                    None,
                     properties,
                     _synthetic_evidence(effect.locator),
                 ),
+                record_name="node",
             )
         nodes.extend(resource_nodes.values())
 
@@ -1500,8 +1601,8 @@ class GraphBuilder:
             }
             public_id = node_id(identity_payload)
             boundary_target_ids[edge_ir.local_key] = public_id
-            boundary_nodes.setdefault(
-                public_id,
+            _insert_public_record(
+                boundary_nodes,
                 Node(
                     public_id,
                     identity,
@@ -1519,6 +1620,7 @@ class GraphBuilder:
                     ),
                     _evidence(descriptor.evidence),
                 ),
+                record_name="node",
             )
         nodes.extend(boundary_nodes.values())
 
@@ -1608,7 +1710,9 @@ class GraphBuilder:
             if isinstance(fact.subject, EdgeSubjectIR):
                 subject_ir = edge_fact_by_key[fact.subject.local_key]
             else:
-                call_site_id_value = call_site_structure_by_local[fact.subject.local_key]
+                call_site_id_value = call_site_structure_by_local[
+                    fact.subject.local_key
+                ]
                 subject_ir = next(
                     edge
                     for edge in edge_facts
@@ -1631,9 +1735,7 @@ class GraphBuilder:
             )
             language = next(
                 node.language for node in nodes if node.id == owner_id
-            ) or next(
-                node.language for node in nodes if node.id == source_id
-            )
+            ) or next(node.language for node in nodes if node.id == source_id)
             boundary_identity = SourceOccurrenceIdentity(
                 "source_occurrence",
                 context.workspace_binding_id,
@@ -1799,13 +1901,16 @@ class GraphBuilder:
                     fact.question,
                     fact.evidence_requirements,
                     tuple(
-                        sorted({
-                            SourceRef(
-                                locator.source_location.path,
-                                locator.source_location.start_line,
-                            )
-                            for locator in fact.source_locators
-                        }, key=lambda item: (item.path, item.line))
+                        sorted(
+                            {
+                                SourceRef(
+                                    locator.source_location.path,
+                                    locator.source_location.start_line,
+                                )
+                                for locator in fact.source_locators
+                            },
+                            key=lambda item: (item.path, item.line),
+                        )
                     ),
                     (),
                     (),
@@ -1835,7 +1940,9 @@ class GraphBuilder:
             local_key: str | None = None,
             uncertainty_id_value: str | None = None,
         ) -> Edge:
-            ordinal = locator.ordinal if occurrence_ordinal is None else occurrence_ordinal
+            ordinal = (
+                locator.ordinal if occurrence_ordinal is None else occurrence_ordinal
+            )
             if type(locator) is AstLocatorIR:
                 ast_path = occurrence_path or locator.structural_path
                 occurrence = EdgeAstOccurrence("ast", owner_id, ast_path, ordinal)
@@ -1919,7 +2026,9 @@ class GraphBuilder:
                 complete_entrypoint[1]
                 if complete_entrypoint is not None
                 else (
-                    local_node_ids[structure_ir_by_key[edge_ir.call_site_key].owner_declaration_key]
+                    local_node_ids[
+                        structure_ir_by_key[edge_ir.call_site_key].owner_declaration_key
+                    ]
                     if edge_ir.call_site_key is not None
                     else edge_owner_local[edge_ir.source_node_local_key]
                 )
@@ -1931,9 +2040,10 @@ class GraphBuilder:
                 if edge_ir.branch_group_key is None
                 else structure_ids[edge_ir.branch_group_key]
             )
-            if complete_fact is not None and len(
-                complete_fact.candidate_edge_local_keys
-            ) > 1:
+            if (
+                complete_fact is not None
+                and len(complete_fact.candidate_edge_local_keys) > 1
+            ):
                 effective_branch_id = complete_dynamic_group_by_fact[
                     complete_fact.local_key
                 ]
@@ -2034,7 +2144,10 @@ class GraphBuilder:
                 if edge.id not in ir_by_public_id:
                     continue
                 edge_ir = ir_by_public_id[edge.id]
-                if isinstance(fact.subject, EdgeSubjectIR) and edge.id == candidate_ids[0]:
+                if (
+                    isinstance(fact.subject, EdgeSubjectIR)
+                    and edge.id == candidate_ids[0]
+                ):
                     evidence = _evidence(
                         edge_ir.evidence,
                         origin=EvidenceOrigin.UNRESOLVED,
@@ -2045,8 +2158,7 @@ class GraphBuilder:
                         edge_ir.evidence,
                         origin=EvidenceOrigin.INFERRED,
                         inference_rule=(
-                            edge_ir.evidence.inference_rule
-                            or "complete_candidate"
+                            edge_ir.evidence.inference_rule or "complete_candidate"
                         ),
                     )
                 edges[index] = replace(
@@ -2064,13 +2176,16 @@ class GraphBuilder:
                     fact.question,
                     fact.evidence_requirements,
                     tuple(
-                        sorted({
-                            SourceRef(
-                                locator.source_location.path,
-                                locator.source_location.start_line,
-                            )
-                            for locator in fact.source_locators
-                        }, key=lambda item: (item.path, item.line))
+                        sorted(
+                            {
+                                SourceRef(
+                                    locator.source_location.path,
+                                    locator.source_location.start_line,
+                                )
+                                for locator in fact.source_locators
+                            },
+                            key=lambda item: (item.path, item.line),
+                        )
                     ),
                     target_ids,
                     candidate_ids,
@@ -2092,10 +2207,14 @@ class GraphBuilder:
             uncertainties[index] = replace(
                 uncertainties[index],
                 candidate_target_node_ids=tuple(
-                    sorted(local_node_ids[key] for key in fact.candidate_target_local_keys)
+                    sorted(
+                        local_node_ids[key] for key in fact.candidate_target_local_keys
+                    )
                 ),
                 candidate_edge_ids=tuple(
-                    sorted(edge_ids_by_local[key] for key in fact.candidate_edge_local_keys)
+                    sorted(
+                        edge_ids_by_local[key] for key in fact.candidate_edge_local_keys
+                    )
                 ),
             )
 
@@ -2122,7 +2241,7 @@ class GraphBuilder:
                 local_key=effect.local_key,
             )
 
-        framework_branch_ids: dict[tuple[str, int, str], str] = {}
+        framework_branch_ids: dict[tuple[str, str], str] = {}
 
         def framework_target_id(key: str) -> str:
             if key in local_node_ids:
@@ -2132,19 +2251,19 @@ class GraphBuilder:
         for segment in framework_segments:
             source_id = framework_segment_node_ids[segment.local_key]
             owner_id = framework_segment_owner_ids[segment.local_key]
+            successor_source_id = source_id
             if type(segment.target) is FrameworkLocalTarget:
+                successor_source_id = local_node_ids[segment.target.local_key]
                 append_edge(
                     source_id=source_id,
-                    target_id=local_node_ids[segment.target.local_key],
+                    target_id=successor_source_id,
                     relation=Relation.ROUTES_TO,
                     flow=EdgeFlow.ALWAYS,
                     locator=segment.evidence.locator,
                     owner_id=owner_id,
                     evidence=_evidence(segment.evidence),
                     order=0,
-                    occurrence_path=(
-                        f"pipeline/{segment.pipeline_order}/target"
-                    ),
+                    occurrence_path=(f"pipeline/{segment.pipeline_order}/target"),
                 )
             for successor in (
                 segment.success_successor,
@@ -2155,6 +2274,7 @@ class GraphBuilder:
                 condition: Condition | None = None
                 branch_id: str | None = None
                 exception_id_value: str | None = None
+                successor_owner_id = owner_id
                 if type(successor) is ReturnSuccessor:
                     target_id = framework_terminal_id(segment, successor)
                     target_kind = next(
@@ -2184,13 +2304,23 @@ class GraphBuilder:
                     if type(successor) is BranchSuccessor:
                         relation = Relation.BRANCHES_TO
                         flow = EdgeFlow.CONDITIONAL
-                        normalized = f"framework_{segment.framework_role}"
-                        condition = Condition(
-                            "predicate",
-                            normalized,
-                            condition_hash(normalized),
-                            ConditionPolarity.TRUE,
+                        matching_arm = next(
+                            arm
+                            for arm in branch_arms
+                            if arm.branch_local_key == successor.branch_arm_key
+                            and arm.target_block_key == successor.target_block_key
                         )
+                        condition = Condition(
+                            matching_arm.condition.kind,
+                            matching_arm.condition.normalized,
+                            matching_arm.condition.hash,
+                            matching_arm.condition.polarity,
+                        )
+                        branch_structure = structure_ir_by_key[successor.branch_arm_key]
+                        branch_id = structure_ids[successor.branch_arm_key]
+                        successor_owner_id = local_node_ids[
+                            branch_structure.owner_declaration_key
+                        ]
                     elif type(successor) is ExceptionSuccessor:
                         relation = Relation.THROWS_TO
                         flow = EdgeFlow.EXCEPTION
@@ -2204,18 +2334,42 @@ class GraphBuilder:
                         exception_id_value = framework_exception_scope_ids[
                             successor.exception_scope_key
                         ]
+                        exception_structure = structure_ir_by_key[
+                            successor.exception_scope_key
+                        ]
+                        successor_owner_id = local_node_ids[
+                            exception_structure.owner_declaration_key
+                        ]
                     elif type(successor) is LoopSuccessor:
                         relation = Relation.BRANCHES_TO
-                        flow = EdgeFlow.LOOP
-                    if type(successor) in {BranchSuccessor, LoopSuccessor}:
+                        flow = {
+                            LoopRole.BACK: EdgeFlow.LOOP,
+                            LoopRole.BODY: EdgeFlow.CONDITIONAL,
+                            LoopRole.EXIT: EdgeFlow.CONDITIONAL,
+                        }[successor.loop_role]
+                        if successor.loop_role is not LoopRole.BACK:
+                            normalized = (
+                                "loop_body"
+                                if successor.loop_role is LoopRole.BODY
+                                else "loop_exit"
+                            )
+                            condition = Condition(
+                                "predicate",
+                                normalized,
+                                condition_hash(normalized),
+                                (
+                                    ConditionPolarity.LOOP_BODY
+                                    if successor.loop_role is LoopRole.BODY
+                                    else ConditionPolarity.LOOP_EXIT
+                                ),
+                            )
+                    if type(successor) is LoopSuccessor:
                         branch_key = (
                             segment.local_key,
-                            successor.order,
                             successor.kind,
                         )
                         structural_path = (
-                            f"pipeline/{segment.pipeline_order}/"
-                            f"{successor.kind}/{successor.order}"
+                            f"pipeline/{segment.pipeline_order}/{successor.kind}"
                         )
                         identity = {
                             "kind": StructureKind.BRANCH_GROUP.value,
@@ -2242,12 +2396,12 @@ class GraphBuilder:
                                 )
                             )
                 append_edge(
-                    source_id=source_id,
+                    source_id=successor_source_id,
                     target_id=target_id,
                     relation=relation,
                     flow=flow,
                     locator=segment.evidence.locator,
-                    owner_id=owner_id,
+                    owner_id=successor_owner_id,
                     evidence=_evidence(segment.evidence),
                     condition=condition,
                     branch_id=branch_id,
@@ -2320,8 +2474,9 @@ class GraphBuilder:
             for item in branch_arms
         }
         merge_group_by_edge = {
-            (arm.target_block_key, structure.continuation_block_key):
-                structure_ids[structure.local_key]
+            (arm.target_block_key, structure.continuation_block_key): structure_ids[
+                structure.local_key
+            ]
             for structure in structures_ir
             if structure.kind is StructureKind.BRANCH_GROUP
             and structure.continuation_block_key is not None
@@ -2340,9 +2495,10 @@ class GraphBuilder:
                 exception_id: str | None = None
                 if type(successor) is AlwaysSuccessor:
                     target_id = local_node_ids[successor.target_block_key]
-                    branch_id = merge_group_by_edge.get(
-                        (block.local_key, successor.target_block_key)
-                    )
+                    branch_id = merge_group_by_edge.get((
+                        block.local_key,
+                        successor.target_block_key,
+                    ))
                     relation = (
                         Relation.MERGES_AT
                         if branch_id is not None
@@ -2350,11 +2506,13 @@ class GraphBuilder:
                     )
                     flow = EdgeFlow.ALWAYS
                 elif type(successor) is BranchSuccessor:
-                    arm = arm_by_key[(
-                        successor.branch_arm_key,
-                        block.local_key,
-                        successor.target_block_key,
-                    )]
+                    arm = arm_by_key[
+                        (
+                            successor.branch_arm_key,
+                            block.local_key,
+                            successor.target_block_key,
+                        )
+                    ]
                     target_id = local_node_ids[successor.target_block_key]
                     relation = Relation.BRANCHES_TO
                     flow = EdgeFlow.CONDITIONAL
@@ -2462,6 +2620,7 @@ class GraphBuilder:
 
         # Normal returns are generated only for the invocation's exact call
         # site and continuation.  They are never shared across callers.
+        exception_continuation_call_sites: dict[str, str] = {}
         for invocation, edge_ir in invocation_ir:
             if type(edge_ir.target) is not LocalNodeTarget:
                 continue
@@ -2499,27 +2658,61 @@ class GraphBuilder:
                     occurrence_ordinal=ordinal,
                 )
 
+            exception_terminal_by_block = {
+                terminal.source_block_key: terminal
+                for terminal in terminals
+                if terminal.kind is TerminalKind.EXCEPTION
+            }
+            scope_by_structure_key: dict[str, ExceptionScope] = {}
+            for scope_ir in exception_scopes:
+                matching_structure = next(
+                    (
+                        item
+                        for item in structures_ir
+                        if item.kind is StructureKind.EXCEPTION_SCOPE
+                        and item.owner_declaration_key == scope_ir.declaration_key
+                        and item.structural_path == scope_ir.locator.structural_path
+                        and item.ordinal == scope_ir.locator.ordinal
+                    ),
+                    None,
+                )
+                if matching_structure is not None:
+                    scope_by_structure_key[matching_structure.local_key] = scope_ir
+
             for ordinal, exit_key in enumerate(callee.exception_exit_block_keys):
                 source_id = local_node_ids[exit_key]
+                thrown_type = (
+                    exception_terminal_by_block[exit_key].exception_type
+                    if exit_key in exception_terminal_by_block
+                    else None
+                )
                 exception_structure_key = site.exception_scope_key
                 exception_id_value: str | None = None
                 target_id: str | None = None
                 if exception_structure_key is not None:
-                    scope_structure = structure_ir_by_key[exception_structure_key]
-                    scope_ir = next(
-                        (
-                            item
-                            for item in exception_scopes
-                            if item.declaration_key == site.caller_declaration_key
-                            and item.locator.structural_path
-                            == scope_structure.structural_path
-                            and item.locator.ordinal == scope_structure.ordinal
-                        ),
-                        None,
-                    )
+                    scope_ir = scope_by_structure_key.get(exception_structure_key)
                     while scope_ir is not None:
-                        if scope_ir.catch_block_keys:
-                            target_id = local_node_ids[scope_ir.catch_block_keys[0]]
+                        matching_catch_index = next(
+                            (
+                                index
+                                for index, caught in enumerate(
+                                    scope_ir.caught_type_names
+                                )
+                                if _exception_type_matches(thrown_type, caught)
+                            ),
+                            None,
+                        )
+                        if scope_ir.catch_block_keys and (
+                            not scope_ir.caught_type_names
+                            or matching_catch_index is not None
+                        ):
+                            catch_index = min(
+                                matching_catch_index or 0,
+                                len(scope_ir.catch_block_keys) - 1,
+                            )
+                            target_id = local_node_ids[
+                                scope_ir.catch_block_keys[catch_index]
+                            ]
                             matching_structure = next(
                                 (
                                     item
@@ -2585,12 +2778,16 @@ class GraphBuilder:
                                 None,
                                 None,
                                 _source_location(site.locator),
-                                TerminalProperties(None, "exception", "exception"),
+                                TerminalProperties(
+                                    None,
+                                    thrown_type or "exception",
+                                    "exception",
+                                ),
                                 _synthetic_evidence(site.locator),
                             )
                         )
-                normalized = "exception"
-                append_edge(
+                normalized = thrown_type or "exception"
+                propagated = append_edge(
                     source_id=source_id,
                     target_id=target_id,
                     relation=Relation.THROWS_TO,
@@ -2610,10 +2807,17 @@ class GraphBuilder:
                     ),
                     occurrence_ordinal=ordinal,
                 )
+                exception_continuation_call_sites[propagated.id] = (
+                    invocation.call_site_id or ""
+                )
 
         edges = list(_deduplicate_edges(edges))
 
         nodes.extend(unknown_nodes)
+        nodes = list(_deduplicate_public_records(nodes, record_name="node"))
+        structures = list(
+            _deduplicate_public_records(structures, record_name="structure")
+        )
         entrypoints: list[Entrypoint] = []
         for candidate, identity, public_id, _ in entrypoint_data:
             uncertainty_id_value = (
@@ -2704,6 +2908,7 @@ class GraphBuilder:
                     for item in declarations
                 )
             ),
+            tuple(sorted(exception_continuation_call_sites.items())),
         )
         # Summaries are computed before entrypoint traversal so recursive
         # callable components converge independently of public-flow order.
@@ -2740,19 +2945,12 @@ class GraphBuilder:
             CoverageScope(
                 (".",),
                 sha256_jcs(list(context.graph_config.excluded_paths)),
-                0,
+                context.excluded_path_count,
             ),
             FileCoverage(
                 len(file_node_ids),
                 len(file_node_ids),
-                sum(
-                    (
-                        inventory_by_path[path].parser_candidate
-                        if path in inventory_by_path
-                        else True
-                    )
-                    for path in file_node_ids
-                ),
+                sum(inventory_by_path[path].parser_candidate for path in file_node_ids),
                 file_status_counts[AnalysisStatus.ANALYZED],
                 file_status_counts[AnalysisStatus.UNSUPPORTED],
                 file_status_counts[AnalysisStatus.FAILED],
@@ -2807,7 +3005,9 @@ class GraphBuilder:
             for name in language_names
         )
         frameworks = tuple(
-            sorted(context.detected_frameworks, key=lambda item: (item.language, item.name))
+            sorted(
+                context.detected_frameworks, key=lambda item: (item.language, item.name)
+            )
         )
         artifact = GraphArtifactV2(
             "hades.code_graph.v2",
@@ -2876,9 +3076,7 @@ class GraphBuilder:
     @staticmethod
     def _count(represented: int, capabilities: Sequence[Capability]) -> CountKnowledge:
         reasons = tuple(
-            reason.code
-            for capability in capabilities
-            for reason in capability.reasons
+            reason.code for capability in capabilities for reason in capability.reasons
         )
         status = (
             CapabilityStatus.PARTIAL
@@ -2950,9 +3148,8 @@ class GraphBuilder:
             values: dict[str, Capability] = {}
             for name in _CAPABILITY_FIELDS:
                 scoped_languages = tuple(languages) if language is None else (language,)
-                framework_not_applicable = (
-                    name == "framework_lifecycle"
-                    and not any(item.framework for item in entrypoints)
+                framework_not_applicable = name == "framework_lifecycle" and not any(
+                    item.framework for item in entrypoints
                 )
                 missing_languages = (
                     ()

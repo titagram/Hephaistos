@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hermes_cli.hades_index.lifecycle.model import (
+    AstLocatorIR,
+    BranchArm,
+    ConfigLocatorIR,
     CoverageEvent,
     EntrypointCandidate,
+    ExceptionScope,
     ExtractionContext,
     FrameworkPipelineSegment,
+    BranchSuccessor,
+    ExceptionSuccessor,
+    ReturnSuccessor,
+    StructureIR,
+    Terminal,
+    TerminalKind,
+    local_record_key,
 )
+from hermes_cli.hades_graph_v2.model import StructureKind, StructureSubtype
 from hermes_cli.hades_index.tree_sitter_adapter import SyntaxIR
 
 
@@ -39,6 +51,12 @@ class FrameworkAdapter(Protocol):
         candidate: EntrypointCandidate,
     ) -> tuple[FrameworkPipelineSegment, ...]: ...
 
+    def pipeline_facts(
+        self,
+        context: ExtractionContext,
+        candidate: EntrypointCandidate,
+    ) -> "FrameworkPipelineFacts": ...
+
     def coverage_events(
         self, context: ExtractionContext
     ) -> tuple[CoverageEvent, ...]: ...
@@ -64,10 +82,240 @@ class FrameworkDetection:
 
 
 @dataclass(frozen=True, slots=True)
+class FrameworkTerminalSpec:
+    kind: TerminalKind
+    public_status: int | None = None
+    exception_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, TerminalKind):
+            raise FrameworkAdapterError("framework terminal kind is invalid")
+        if self.kind is TerminalKind.EXCEPTION and self.exception_type is None:
+            raise FrameworkAdapterError("framework exception terminal requires a type")
+        if self.kind is not TerminalKind.EXCEPTION and self.exception_type is not None:
+            raise FrameworkAdapterError(
+                "non-exception framework terminal carries a type"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkPipelineFacts:
+    """Closed typed facts referenced by one framework pipeline."""
+
+    terminals: tuple[Terminal, ...] = ()
+    structures: tuple[StructureIR, ...] = ()
+    branch_arms: tuple[BranchArm, ...] = ()
+    exception_scopes: tuple[ExceptionScope, ...] = ()
+
+    def __post_init__(self) -> None:
+        for values, expected, label in (
+            (self.terminals, Terminal, "terminals"),
+            (self.structures, StructureIR, "structures"),
+            (self.branch_arms, BranchArm, "branch_arms"),
+            (self.exception_scopes, ExceptionScope, "exception_scopes"),
+        ):
+            if type(values) is not tuple or any(
+                type(item) is not expected for item in values
+            ):
+                raise FrameworkAdapterError(f"framework pipeline {label} are invalid")
+
+
+def _framework_fact_locator(
+    candidate: EntrypointCandidate,
+    suffix: str,
+) -> AstLocatorIR | ConfigLocatorIR:
+    locator = candidate.registration_locator
+    if type(locator) is AstLocatorIR:
+        return replace(locator, structural_path=f"{locator.structural_path}/{suffix}")
+    return replace(
+        locator,
+        structural_pointer=f"{locator.structural_pointer}/{suffix}",
+    )
+
+
+def framework_pipeline_facts(
+    candidate: EntrypointCandidate,
+    pipeline: Sequence[FrameworkPipelineSegment],
+    terminal_spec: Callable[
+        [FrameworkPipelineSegment, ReturnSuccessor], FrameworkTerminalSpec
+    ],
+) -> FrameworkPipelineFacts:
+    """Materialize exact typed facts at the adapter boundary, never in the builder."""
+
+    terminals: dict[str, Terminal] = {}
+    exception_successors: dict[
+        str, list[tuple[FrameworkPipelineSegment, ExceptionSuccessor]]
+    ] = {}
+    for segment in pipeline:
+        for successor in (segment.success_successor, *segment.short_circuit_successors):
+            if type(successor) is ReturnSuccessor:
+                spec = terminal_spec(segment, successor)
+                locator = _framework_fact_locator(
+                    candidate,
+                    (
+                        f"framework_terminal/{segment.pipeline_order}/"
+                        f"{successor.order}/{spec.kind.value}"
+                    ),
+                )
+                value = Terminal(
+                    successor.terminal_local_key,
+                    segment.local_key,
+                    spec.kind,
+                    spec.public_status,
+                    spec.exception_type,
+                    locator,
+                )
+                previous = terminals.setdefault(value.local_key, value)
+                if previous != value:
+                    raise FrameworkAdapterError(
+                        "framework terminal key has conflicting typed facts"
+                    )
+            elif type(successor) is ExceptionSuccessor:
+                exception_successors.setdefault(
+                    successor.exception_scope_key, []
+                ).append((segment, successor))
+
+    structures: list[StructureIR] = []
+    scopes: list[ExceptionScope] = []
+    if exception_successors and candidate.handler_local_key is None:
+        raise FrameworkAdapterError(
+            "framework exception facts require a resolved handler declaration"
+        )
+    for ordinal, (structure_key, values) in enumerate(
+        sorted(exception_successors.items())
+    ):
+        locator = _framework_fact_locator(candidate, f"framework_exception/{ordinal}")
+        evidence = replace(candidate.evidence, locator=locator)
+        structural = (
+            locator.structural_path
+            if type(locator) is AstLocatorIR
+            else locator.structural_pointer
+        )
+        caught = tuple(
+            sorted({
+                successor.caught_type_name
+                for _segment, successor in values
+                if successor.caught_type_name is not None
+            })
+        )
+        catch_targets = tuple(
+            sorted({successor.target_block_key for _segment, successor in values})
+        )
+        structures.append(
+            StructureIR(
+                structure_key,
+                StructureKind.EXCEPTION_SCOPE,
+                candidate.handler_local_key or "",
+                structural,
+                ordinal,
+                StructureSubtype.FRAMEWORK_EXCEPTION_HANDLER,
+                None,
+                None,
+                evidence,
+            )
+        )
+        scope_key = local_record_key(
+            "framework",
+            locator.source_location.path,
+            "exception_scope_fact",
+            "ast" if type(locator) is AstLocatorIR else "config",
+            structural,
+            ordinal,
+        )
+        scopes.append(
+            ExceptionScope(
+                scope_key,
+                candidate.handler_local_key or "",
+                locator,
+                caught,
+                catch_targets,
+                None,
+                None,
+            )
+        )
+    return FrameworkPipelineFacts(
+        tuple(terminals[key] for key in sorted(terminals)),
+        tuple(sorted(structures, key=lambda item: item.local_key)),
+        (),
+        tuple(sorted(scopes, key=lambda item: item.local_key)),
+    )
+
+
+def _validate_pipeline_fact_references(
+    candidate: EntrypointCandidate,
+    pipeline: Sequence[FrameworkPipelineSegment],
+    facts: FrameworkPipelineFacts,
+) -> None:
+    terminals = {item.local_key: item for item in facts.terminals}
+    structures = {item.local_key: item for item in facts.structures}
+    arms = {
+        (item.branch_local_key, item.target_block_key): item
+        for item in facts.branch_arms
+    }
+    referenced_terminals: set[str] = set()
+    referenced_structures: set[str] = set()
+    for segment in pipeline:
+        for successor in (segment.success_successor, *segment.short_circuit_successors):
+            if type(successor) is ReturnSuccessor:
+                terminal = terminals.get(successor.terminal_local_key)
+                if terminal is None or terminal.source_block_key != segment.local_key:
+                    raise FrameworkAdapterError(
+                        "framework return successor lacks its exact typed terminal"
+                    )
+                referenced_terminals.add(terminal.local_key)
+            elif type(successor) is ExceptionSuccessor:
+                structure = structures.get(successor.exception_scope_key)
+                if (
+                    structure is None
+                    or structure.kind is not StructureKind.EXCEPTION_SCOPE
+                    or structure.owner_declaration_key != candidate.handler_local_key
+                ):
+                    raise FrameworkAdapterError(
+                        "framework exception successor lacks its exact typed scope"
+                    )
+                referenced_structures.add(structure.local_key)
+            elif type(successor) is BranchSuccessor:
+                structure = structures.get(successor.branch_arm_key)
+                if (
+                    structure is None
+                    or structure.kind is not StructureKind.BRANCH_GROUP
+                    or (successor.branch_arm_key, successor.target_block_key)
+                    not in arms
+                ):
+                    raise FrameworkAdapterError(
+                        "framework branch successor lacks its exact typed arm"
+                    )
+                referenced_structures.add(structure.local_key)
+    if referenced_terminals != set(terminals):
+        raise FrameworkAdapterError("framework pipeline emitted orphan terminals")
+    if referenced_structures != set(structures):
+        raise FrameworkAdapterError("framework pipeline emitted orphan structures")
+    if any(
+        not any(
+            item.owner_declaration_key == scope.declaration_key
+            and item.structural_path
+            == (
+                scope.locator.structural_path
+                if type(scope.locator) is AstLocatorIR
+                else scope.locator.structural_pointer
+            )
+            and item.ordinal == scope.locator.ordinal
+            for item in facts.structures
+            if item.kind is StructureKind.EXCEPTION_SCOPE
+        )
+        for scope in facts.exception_scopes
+    ):
+        raise FrameworkAdapterError(
+            "framework exception scope lacks its exact StructureIR"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FrameworkAdapterRun:
     detections: tuple[FrameworkDetection, ...]
     candidates: tuple[EntrypointCandidate, ...]
     framework_segments: tuple[FrameworkPipelineSegment, ...]
+    pipeline_facts: FrameworkPipelineFacts = FrameworkPipelineFacts()
     coverage_events: tuple[CoverageEvent, ...] = ()
 
 
@@ -95,6 +343,8 @@ class FrameworkAdapterRegistry:
             )
         if not callable(getattr(adapter, "coverage_events", None)):
             raise FrameworkAdapterError("framework adapter requires coverage_events")
+        if not callable(getattr(adapter, "pipeline_facts", None)):
+            raise FrameworkAdapterError("framework adapter requires pipeline_facts")
         key = (language, framework)
         if any((item.language, item.framework) == key for item in self._adapters):
             raise FrameworkAdapterError(
@@ -117,6 +367,15 @@ def run_framework_adapters(
     segments: list[FrameworkPipelineSegment] = []
     coverage_events: list[CoverageEvent] = []
     seen_segments: set[str] = set()
+    fact_records: dict[tuple[str, object], object] = {}
+
+    def insert_fact(family: str, key: object, value: object) -> None:
+        identity = (family, key)
+        previous = fact_records.setdefault(identity, value)
+        if previous != value:
+            raise FrameworkAdapterError(
+                "framework pipeline fact has conflicting deterministic identity"
+            )
 
     for adapter in registry.adapters:
         if languages is not None and adapter.language not in languages:
@@ -177,12 +436,58 @@ def run_framework_adapters(
                     raise FrameworkAdapterError("duplicate framework pipeline segment")
                 seen_segments.add(segment.local_key)
                 segments.append(segment)
+            facts = adapter.pipeline_facts(context, candidate)
+            if type(facts) is not FrameworkPipelineFacts:
+                raise FrameworkAdapterError(
+                    "framework adapter must return FrameworkPipelineFacts"
+                )
+            _validate_pipeline_fact_references(candidate, pipeline, facts)
+            for value in facts.terminals:
+                insert_fact("terminal", value.local_key, value)
+            for value in facts.structures:
+                insert_fact("structure", value.local_key, value)
+            for value in facts.branch_arms:
+                insert_fact(
+                    "branch_arm", (value.branch_local_key, value.arm_ordinal), value
+                )
+            for value in facts.exception_scopes:
+                insert_fact("exception_scope", value.local_key, value)
             candidates.append(candidate)
 
     return FrameworkAdapterRun(
         tuple(detections),
         tuple(candidates),
         tuple(segments),
+        FrameworkPipelineFacts(
+            tuple(
+                value
+                for (family, _key), value in sorted(
+                    fact_records.items(), key=lambda item: repr(item[0])
+                )
+                if family == "terminal"
+            ),
+            tuple(
+                value
+                for (family, _key), value in sorted(
+                    fact_records.items(), key=lambda item: repr(item[0])
+                )
+                if family == "structure"
+            ),
+            tuple(
+                value
+                for (family, _key), value in sorted(
+                    fact_records.items(), key=lambda item: repr(item[0])
+                )
+                if family == "branch_arm"
+            ),
+            tuple(
+                value
+                for (family, _key), value in sorted(
+                    fact_records.items(), key=lambda item: repr(item[0])
+                )
+                if family == "exception_scope"
+            ),
+        ),
         tuple(coverage_events),
     )
 
@@ -193,5 +498,8 @@ __all__ = [
     "FrameworkAdapterRegistry",
     "FrameworkAdapterRun",
     "FrameworkDetection",
+    "FrameworkPipelineFacts",
+    "FrameworkTerminalSpec",
+    "framework_pipeline_facts",
     "run_framework_adapters",
 ]

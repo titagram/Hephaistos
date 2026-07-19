@@ -30,7 +30,12 @@ from hermes_cli.hades_graph_v2.model import (
     MethodSemantics,
     TriggerKind,
 )
-from hermes_cli.hades_index.lifecycle.frameworks import FrameworkDetection
+from hermes_cli.hades_index.lifecycle.frameworks import (
+    FrameworkDetection,
+    FrameworkPipelineFacts,
+    FrameworkTerminalSpec,
+    framework_pipeline_facts,
+)
 from hermes_cli.hades_index.lifecycle.model import (
     AlwaysSuccessor,
     ConfigLocatorIR,
@@ -48,6 +53,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     MatchConstraints,
     ReturnSuccessor,
     Successor,
+    TerminalKind,
     SourceLocationIR,
     local_record_key,
 )
@@ -2254,7 +2260,11 @@ class SymfonyLifecycleAdapter:
                     framework_role=role,
                     pipeline_order=ordinal,
                     target=target,
-                    success_successor=AlwaysSuccessor(next_key, ordinal),
+                    success_successor=(
+                        AlwaysSuccessor(next_key, ordinal)
+                        if next_key in keys
+                        else ReturnSuccessor(next_key, ordinal)
+                    ),
                     short_circuit_successors=tuple(
                         sorted(
                             shortcuts,
@@ -2268,6 +2278,24 @@ class SymfonyLifecycleAdapter:
                 )
             )
         return tuple(segments)
+
+    def pipeline_facts(
+        self, context: ExtractionContext, candidate: EntrypointCandidate
+    ) -> FrameworkPipelineFacts:
+        def terminal_spec(
+            segment: FrameworkPipelineSegment, _successor: ReturnSuccessor
+        ) -> FrameworkTerminalSpec:
+            role = segment.framework_role
+            if role == "unhandled_exception":
+                return FrameworkTerminalSpec(
+                    TerminalKind.EXCEPTION, exception_type="Exception"
+                )
+            if role == "access_control_deny":
+                return FrameworkTerminalSpec(TerminalKind.ABORT, public_status=403)
+            return FrameworkTerminalSpec(TerminalKind.RESPONSE)
+
+        pipeline = self.pipeline(context, candidate)
+        return framework_pipeline_facts(candidate, pipeline, terminal_spec)
 
 
 __all__ = ["SymfonyLifecycleAdapter"]

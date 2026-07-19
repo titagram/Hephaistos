@@ -40,6 +40,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     FrameworkLocalTarget,
     FrameworkPipelineSegment,
     IRValidationError,
+    InventoryFile,
     LoopSuccessor,
     MatchConstraints,
     ReturnSuccessor,
@@ -69,6 +70,8 @@ def _context(tmp_path: Path) -> ExtractionContext:
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=lambda _path: b"",
+        inventory_files=(InventoryFile("src/app.py", "a" * 64, "python", True),),
+        excluded_path_count=0,
     )
 
 
@@ -225,9 +228,7 @@ def _recursive_result(*, mutual: bool):
         item for item in result.structures if item.kind is StructureKind.CALL_SITE
     )
     first_site = replace(result.call_sites[0], continuation_block_key=merge.local_key)
-    first_structure = replace(
-        call_structure, continuation_block_key=merge.local_key
-    )
+    first_structure = replace(call_structure, continuation_block_key=merge.local_key)
     first_edge = replace(
         result.edge_facts[0],
         source_node_local_key=first_site.source_block_key,
@@ -292,12 +293,12 @@ def _recursive_result(*, mutual: bool):
     )
     recursive = replace(
         result,
-        call_sites=tuple(sorted((first_site, second_site), key=lambda item: item.local_key)),
+        call_sites=tuple(
+            sorted((first_site, second_site), key=lambda item: item.local_key)
+        ),
         structures=_sort(
             [
-                first_structure
-                if item.local_key == first_structure.local_key
-                else item
+                first_structure if item.local_key == first_structure.local_key else item
                 for item in result.structures
             ]
             + [second_structure]
@@ -323,7 +324,9 @@ def test_graph_builder_maps_valid_ir_to_a_closed_valid_v2_artifact(tmp_path):
     assert artifact.graph_contract.version == "hades.graph_artifact.v2"
     assert artifact.graph_contract.artifact_graph_version != "0" * 64
     assert len(artifact.entrypoints) == 1
-    assert len([flow for flow in artifact.flows if flow.kind.value != "async_flow"]) == 1
+    assert (
+        len([flow for flow in artifact.flows if flow.kind.value != "async_flow"]) == 1
+    )
     assert artifact.flows[0].represented_step_count == len(artifact.flow_steps)
     assert any(edge.relation is Relation.READS for edge in artifact.edges)
     validate_artifact(artifact)
@@ -397,12 +400,10 @@ def test_branches_exceptions_and_matching_call_site_returns_are_explicit(tmp_pat
         and edges[step.edge_id].condition.polarity.value in {"true", "false"}
     ]
     assert {edge.condition.polarity.value for edge in branch_edges} == {"true", "false"}
-    invocation = next(edge for edge in edges.values() if edge.relation is Relation.INVOKES)
-    returns = [
-        edge
-        for edge in edges.values()
-        if edge.relation is Relation.RETURNS_TO
-    ]
+    invocation = next(
+        edge for edge in edges.values() if edge.relation is Relation.INVOKES
+    )
+    returns = [edge for edge in edges.values() if edge.relation is Relation.RETURNS_TO]
     assert returns
     assert {edge.call_site_id for edge in returns} == {invocation.call_site_id}
     exception = next(
@@ -411,11 +412,14 @@ def test_branches_exceptions_and_matching_call_site_returns_are_explicit(tmp_pat
         if edges[step.edge_id].flow is EdgeFlow.EXCEPTION
     )
     assert exception.exception_scope_id is not None
-    assert next(
-        structure.id
-        for structure in artifact.structures
-        if structure.kind is StructureKind.EXCEPTION_SCOPE
-    ) == exception.exception_scope_id
+    assert (
+        next(
+            structure.id
+            for structure in artifact.structures
+            if structure.kind is StructureKind.EXCEPTION_SCOPE
+        )
+        == exception.exception_scope_id
+    )
 
 
 def test_uncertainty_is_a_hard_frontier_and_omits_hint_returns(tmp_path):
@@ -429,8 +433,13 @@ def test_uncertainty_is_a_hard_frontier_and_omits_hint_returns(tmp_path):
 
     assert len(frontier_steps) == 1
     frontier_target = edges[frontier_steps[0].edge_id].target_id
-    assert next(node for node in artifact.nodes if node.id == frontier_target).kind is NodeKind.UNKNOWN_BOUNDARY
-    assert all(edges[step.edge_id].source_id != frontier_target for step in artifact.flow_steps)
+    assert (
+        next(node for node in artifact.nodes if node.id == frontier_target).kind
+        is NodeKind.UNKNOWN_BOUNDARY
+    )
+    assert all(
+        edges[step.edge_id].source_id != frontier_target for step in artifact.flow_steps
+    )
     assert not any(
         edges[step.edge_id].relation is Relation.RETURNS_TO
         and edges[step.edge_id].call_site_id
@@ -509,8 +518,12 @@ def test_complete_call_candidates_are_closed_dynamic_frontiers(tmp_path):
         step.edge_id in uncertainty.candidate_edge_ids
         and any(
             other.flow_id == step.flow_id
-            and next(edge for edge in artifact.edges if edge.id == other.edge_id).source_id
-            == next(edge for edge in artifact.edges if edge.id == step.edge_id).target_id
+            and next(
+                edge for edge in artifact.edges if edge.id == other.edge_id
+            ).source_id
+            == next(
+                edge for edge in artifact.edges if edge.id == step.edge_id
+            ).target_id
             for other in artifact.flow_steps
         )
         for step in artifact.flow_steps
@@ -551,9 +564,7 @@ def test_self_and_mutual_recursion_reach_finite_fixed_points(tmp_path):
     for mutual in (False, True):
         artifact = _build(tmp_path, _recursive_result(mutual=mutual))
         edges = {edge.id: edge for edge in artifact.edges}
-        sync = next(
-            flow for flow in artifact.flows if flow.kind.value != "async_flow"
-        )
+        sync = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
         recursion = [
             step
             for step in artifact.flow_steps
@@ -562,7 +573,9 @@ def test_self_and_mutual_recursion_reach_finite_fixed_points(tmp_path):
             and step.backbone_role is BackboneRole.LOOP
         ]
         assert len(recursion) == (2 if mutual else 1)
-        assert len(artifact.flow_steps) <= len(artifact.edges) * len(Stage) * len(artifact.flows)
+        assert len(artifact.flow_steps) <= len(artifact.edges) * len(Stage) * len(
+            artifact.flows
+        )
         validate_artifact(artifact)
 
 
@@ -600,18 +613,17 @@ def test_framework_pipeline_segments_are_ordered_and_short_circuits_are_reachabl
     }
     sync = next(flow for flow in artifact.flows if flow.kind.value != "async_flow")
     steps = [step for step in artifact.flow_steps if step.flow_id == sync.id]
-    reached = {
-        edges[step.edge_id].target_id: step.min_depth for step in steps
-    }
+    reached = {edges[step.edge_id].target_id: step.min_depth for step in steps}
 
-    assert {node.properties.pipeline_order for node in framework_nodes.values()} == {0, 1}
+    assert {node.properties.pipeline_order for node in framework_nodes.values()} == {
+        0,
+        1,
+    }
     middleware = next(
         node for node in framework_nodes.values() if node.kind is NodeKind.MIDDLEWARE
     )
     authorization = next(
-        node
-        for node in framework_nodes.values()
-        if node.kind is NodeKind.AUTHORIZATION
+        node for node in framework_nodes.values() if node.kind is NodeKind.AUTHORIZATION
     )
     assert reached[middleware.id] < reached[authorization.id]
     assert any(
@@ -641,10 +653,71 @@ def test_framework_pipeline_rejects_dangling_segment_successor():
 
 
 def test_framework_pipeline_materializes_every_successor_union(tmp_path):
+    from hermes_cli.hades_graph_v2.model import ConditionPolarity
+    from hermes_cli.hades_index.lifecycle.model import (
+        BasicBlock,
+        BranchArm,
+        ConditionIR,
+        ControlKind,
+        StructureIR,
+    )
+
     result = _valid_result()
     base = result.framework_segments[0]
     declaration = result.declarations[0]
     terminal = result.terminals[0]
+    entry = next(
+        item for item in result.blocks if item.local_key == declaration.entry_block_key
+    )
+    body = next(
+        item
+        for item in result.blocks
+        if item.local_key in declaration.normal_exit_block_keys
+    )
+    catch = next(item for item in result.blocks if item.control_kind.value == "catch")
+    exception_structure = next(
+        item for item in result.structures if item.kind is StructureKind.EXCEPTION_SCOPE
+    )
+    branch_key = _complex_key("structure", "framework/union")
+    branch = StructureIR(
+        branch_key,
+        StructureKind.BRANCH_GROUP,
+        declaration.local_key,
+        "framework/union",
+        0,
+        StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+        body.local_key,
+        None,
+        base.evidence,
+    )
+    arm = BranchArm(
+        branch_key,
+        entry.local_key,
+        body.local_key,
+        ConditionPolarity.TRUE,
+        ConditionIR("predicate", "framework_union", "b" * 64, ConditionPolarity.TRUE),
+        0,
+    )
+    job_block_key = _complex_key("basic_block", "framework/union/job")
+    job = replace(
+        declaration,
+        local_key=_complex_key("declaration", "framework/union/job"),
+        declaration_kind=NodeKind.JOB,
+        name="framework_union_job",
+        qualified_name="app.framework_union_job",
+        locator=_complex_ast("framework/union/job"),
+        entry_block_key=job_block_key,
+        normal_exit_block_keys=(job_block_key,),
+        exception_exit_block_keys=(),
+    )
+    job_block = BasicBlock(
+        job_block_key,
+        job.local_key,
+        ControlKind.RETURN,
+        0,
+        _complex_ast("framework/union/job/entry"),
+        (),
+    )
     keys = tuple(
         _complex_key("framework_segment", f"union/{index}") for index in range(4)
     )
@@ -675,12 +748,15 @@ def test_framework_pipeline_materializes_every_successor_union(tmp_path):
         FrameworkLocalTarget(declaration.local_key),
         AlwaysSuccessor(keys[1], 0),
         (
-            BranchSuccessor(keys[2], _complex_key("arm", "framework"), 0),
+            BranchSuccessor(body.local_key, branch_key, 0),
             ExceptionSuccessor(
-                keys[3], _complex_key("scope", "framework"), "RuntimeError", 1
+                catch.local_key,
+                exception_structure.local_key,
+                "RuntimeError",
+                1,
             ),
-            LoopSuccessor(keys[0], "back", 2),
-            AsyncSuccessor(declaration.local_key, "task", 3),
+            LoopSuccessor(entry.local_key, "back", 2),
+            AsyncSuccessor(job.local_key, "task", 3),
             ReturnSuccessor(terminal.local_key, 4),
         ),
         base.evidence,
@@ -699,9 +775,21 @@ def test_framework_pipeline_materializes_every_successor_union(tmp_path):
     )
     all_successors = replace(
         result,
+        branch_arms=tuple(
+            sorted(
+                (*result.branch_arms, arm),
+                key=lambda item: (
+                    item.branch_local_key,
+                    item.arm_ordinal,
+                ),
+            )
+        ),
+        blocks=_sort((*result.blocks, job_block)),
+        declarations=_sort((*result.declarations, job)),
         edge_facts=(),
         framework_segments=_sort(segments),
         entrypoints=(candidate,),
+        structures=_sort((*result.structures, branch)),
         unresolved_facts=(),
     )
     all_successors.validate()
@@ -731,7 +819,9 @@ def test_callable_summary_contains_declared_normal_exit(tmp_path):
     worker = next(node for node in artifact.nodes if node.name == "worker")
     worker_ir = next(item for item in result.declarations if item.name == "worker")
     exit_ir = next(
-        block for block in result.blocks if block.local_key in worker_ir.normal_exit_block_keys
+        block
+        for block in result.blocks
+        if block.local_key in worker_ir.normal_exit_block_keys
     )
     exit_node = next(
         node
@@ -753,10 +843,50 @@ def test_callable_summary_contains_declared_normal_exit(tmp_path):
     assert exit_node.id in summary.normal_exit_node_ids
 
 
+def test_root_callable_summary_is_the_flow_membership_source(tmp_path):
+    from hermes_cli.hades_index.lifecycle.traversal import (
+        CanonicalTopology,
+        build_callable_summaries,
+        build_lifecycle_flows,
+    )
+
+    artifact = _build(tmp_path, _complex_result())
+    topology = CanonicalTopology(
+        artifact.nodes,
+        artifact.structures,
+        artifact.edges,
+        artifact.uncertainties,
+        artifact.graph_contract.completeness.capabilities,
+    )
+    summaries = dict(build_callable_summaries(topology))
+    entrypoint = artifact.entrypoints[0]
+    root_key = (entrypoint.id, Stage.ENTRY)
+    admitted = next(
+        item
+        for item in summaries[root_key].reachable_edge_stage_states
+        if next(edge for edge in artifact.edges if edge.id == item.edge_id).source_id
+        == entrypoint.id
+        and item.stage_from is Stage.ENTRY
+    )
+    summaries[root_key] = replace(
+        summaries[root_key],
+        reachable_edge_stage_states=frozenset({admitted}),
+    )
+
+    flows, steps = build_lifecycle_flows(topology, artifact.entrypoints, summaries)
+    root_flow = next(item for item in flows if item.root_node_id == entrypoint.id)
+
+    assert {item.edge_id for item in steps if item.flow_id == root_flow.id} == {
+        admitted.edge_id
+    }
+
+
 def test_source_block_self_recursion_is_classified_as_loop(tmp_path):
     result = _recursive_result(mutual=False)
     site = result.call_sites[0]
-    invocation = replace(result.edge_facts[0], source_node_local_key=site.source_block_key)
+    invocation = replace(
+        result.edge_facts[0], source_node_local_key=site.source_block_key
+    )
     source_block_result = replace(result, edge_facts=(invocation,))
     source_block_result.validate()
 
@@ -893,9 +1023,11 @@ def test_same_semantic_edge_merges_compatible_evidence(tmp_path):
 
     assert len(matching) == 1
     evidence = matching[0].evidence
-    assert {
-        item.extractor for item in (evidence.primary, *evidence.supporting)
-    } == {"hades.builder.v2", "resolver.static", "tree-sitter.python"}
+    assert {item.extractor for item in (evidence.primary, *evidence.supporting)} == {
+        "hades.builder.v2",
+        "resolver.static",
+        "tree-sitter.python",
+    }
 
 
 def test_callee_exception_exit_propagates_to_call_site_scope(tmp_path):
@@ -930,13 +1062,14 @@ def test_callee_exception_exit_propagates_to_call_site_scope(tmp_path):
     propagated = next(
         edge
         for edge in artifact.edges
-        if edge.source_id == worker_exit.id
-        and edge.relation is Relation.THROWS_TO
+        if edge.source_id == worker_exit.id and edge.relation is Relation.THROWS_TO
     )
 
     assert propagated.flow is EdgeFlow.EXCEPTION
     assert propagated.exception_scope_id == expected_scope
-    assert next(node for node in artifact.nodes if node.id == propagated.target_id).kind in {
+    assert next(
+        node for node in artifact.nodes if node.id == propagated.target_id
+    ).kind in {
         NodeKind.BASIC_BLOCK,
         NodeKind.MERGE,
     }
@@ -988,9 +1121,7 @@ def test_callee_exception_uses_nearest_nested_lexical_scope(tmp_path):
         None,
         outer_scope.local_key,
     )
-    site = replace(
-        result.call_sites[0], exception_scope_key=inner_structure.local_key
-    )
+    site = replace(result.call_sites[0], exception_scope_key=inner_structure.local_key)
     exceptional_worker = replace(
         worker,
         normal_exit_block_keys=(),
@@ -1067,12 +1198,14 @@ def test_unhandled_callee_exception_exit_reaches_exception_terminal(tmp_path):
     propagated = next(
         edge
         for edge in artifact.edges
-        if edge.source_id == worker_exit.id
-        and edge.relation is Relation.THROWS_TO
+        if edge.source_id == worker_exit.id and edge.relation is Relation.THROWS_TO
     )
 
     assert propagated.exception_scope_id is None
-    assert next(node for node in artifact.nodes if node.id == propagated.target_id).kind is NodeKind.EXCEPTION
+    assert (
+        next(node for node in artifact.nodes if node.id == propagated.target_id).kind
+        is NodeKind.EXCEPTION
+    )
 
 
 def test_complete_candidate_call_does_not_leak_shared_callee_return(tmp_path):
@@ -1190,3 +1323,629 @@ def test_complete_candidate_call_does_not_leak_shared_callee_return(tmp_path):
         and edges[step.edge_id].call_site_id == uncertain_call_site_id
         for step in artifact.flow_steps
     )
+
+
+def test_framework_terminal_paths_execute_local_target_before_continuation(tmp_path):
+    artifact = _build(tmp_path, _segment_rich_result())
+    flow = next(item for item in artifact.flows if item.kind.value != "async_flow")
+    edges = {item.id: item for item in artifact.edges}
+    nodes = {item.id: item for item in artifact.nodes}
+    adjacency = defaultdict(list)
+    for step in artifact.flow_steps:
+        if step.flow_id == flow.id:
+            edge = edges[step.edge_id]
+            adjacency[edge.source_id].append(edge.target_id)
+    terminal_kinds = {
+        NodeKind.RESPONSE,
+        NodeKind.REDIRECT,
+        NodeKind.ABORT,
+        NodeKind.EXCEPTION,
+        NodeKind.EXIT,
+    }
+    terminal_paths: list[tuple[str, ...]] = []
+    pending = [(flow.root_node_id, (flow.root_node_id,))]
+    while pending:
+        current, path = pending.pop()
+        if nodes[current].kind in terminal_kinds:
+            terminal_paths.append(path)
+            continue
+        for target in adjacency[current]:
+            if target not in path:
+                pending.append((target, (*path, target)))
+
+    handler_id = artifact.entrypoints[0].handler_node_id
+    assert handler_id is not None
+    assert terminal_paths
+    assert all(handler_id in path for path in terminal_paths)
+
+
+def test_framework_return_and_exception_references_are_closed() -> None:
+    result = _valid_result()
+    segment = result.framework_segments[0]
+    missing_terminal = _complex_key("terminal", "missing/framework")
+    missing_scope = _complex_key("structure", "missing/framework")
+
+    with pytest.raises(IRValidationError, match="unresolved_reference"):
+        replace(
+            result,
+            framework_segments=(
+                replace(
+                    segment,
+                    success_successor=ReturnSuccessor(missing_terminal, 0),
+                ),
+            ),
+        ).validate()
+    with pytest.raises(IRValidationError, match="unresolved_reference"):
+        replace(
+            result,
+            framework_segments=(
+                replace(
+                    segment,
+                    success_successor=ExceptionSuccessor(
+                        result.blocks[0].local_key,
+                        missing_scope,
+                        "RuntimeError",
+                        0,
+                    ),
+                ),
+            ),
+        ).validate()
+
+
+def test_framework_branch_and_loop_successors_preserve_exact_semantics(tmp_path):
+    from hermes_cli.hades_graph_v2.model import ConditionPolarity
+    from hermes_cli.hades_index.lifecycle.model import (
+        BranchArm,
+        ConditionIR,
+        StructureIR,
+    )
+
+    result = _valid_result()
+    segment = result.framework_segments[0]
+    declaration = result.declarations[0]
+    entry = next(
+        item for item in result.blocks if item.local_key == declaration.entry_block_key
+    )
+    body = next(
+        item
+        for item in result.blocks
+        if item.local_key in declaration.normal_exit_block_keys
+    )
+    catch = next(item for item in result.blocks if item.control_kind.value == "catch")
+    branch_key = _complex_key("structure", "framework/branch")
+    branch = StructureIR(
+        branch_key,
+        StructureKind.BRANCH_GROUP,
+        declaration.local_key,
+        "framework/branch",
+        0,
+        StructureSubtype.FRAMEWORK_SHORT_CIRCUIT,
+        body.local_key,
+        None,
+        segment.evidence,
+    )
+    arms = (
+        BranchArm(
+            branch_key,
+            entry.local_key,
+            body.local_key,
+            ConditionPolarity.TRUE,
+            ConditionIR("predicate", "authorized", "b" * 64, ConditionPolarity.TRUE),
+            0,
+        ),
+        BranchArm(
+            branch_key,
+            entry.local_key,
+            catch.local_key,
+            ConditionPolarity.FALSE,
+            ConditionIR("predicate", "authorized", "b" * 64, ConditionPolarity.FALSE),
+            1,
+        ),
+    )
+    exact = replace(
+        result,
+        branch_arms=tuple(
+            sorted(
+                (*result.branch_arms, *arms),
+                key=lambda item: (item.branch_local_key, item.arm_ordinal),
+            )
+        ),
+        structures=_sort((*result.structures, branch)),
+        framework_segments=(
+            replace(
+                segment,
+                short_circuit_successors=(
+                    BranchSuccessor(body.local_key, branch_key, 0),
+                    BranchSuccessor(catch.local_key, branch_key, 1),
+                    LoopSuccessor(body.local_key, "body", 2),
+                    LoopSuccessor(entry.local_key, "back", 3),
+                    LoopSuccessor(catch.local_key, "exit", 4),
+                ),
+            ),
+        ),
+        edge_facts=(),
+        entrypoints=(
+            replace(
+                result.entrypoints[0],
+                handler_local_key=declaration.local_key,
+                unresolved_fact_local_key=None,
+            ),
+        ),
+        unresolved_facts=(),
+    )
+    exact.validate()
+
+    artifact = _build(tmp_path, exact)
+    edges = {item.id: item for item in artifact.edges}
+    reached = [edges[item.edge_id] for item in artifact.flow_steps]
+    branches = [
+        item
+        for item in reached
+        if item.relation is Relation.BRANCHES_TO
+        and item.condition is not None
+        and item.condition.polarity in {ConditionPolarity.TRUE, ConditionPolarity.FALSE}
+    ]
+    loop_body = next(
+        item
+        for item in reached
+        if item.condition is not None
+        and item.condition.polarity is ConditionPolarity.LOOP_BODY
+    )
+    loop_back = next(
+        item
+        for item in reached
+        if item.relation is Relation.BRANCHES_TO
+        and item.flow is EdgeFlow.LOOP
+        and item.condition is None
+    )
+    loop_exit = next(
+        item
+        for item in reached
+        if item.condition is not None
+        and item.condition.polarity is ConditionPolarity.LOOP_EXIT
+    )
+
+    assert len({item.branch_group_id for item in branches}) == 1
+    assert {item.condition.polarity for item in branches} == {
+        ConditionPolarity.TRUE,
+        ConditionPolarity.FALSE,
+    }
+    assert loop_body.flow is EdgeFlow.CONDITIONAL
+    assert loop_back.flow is EdgeFlow.LOOP
+    assert loop_exit.flow is EdgeFlow.CONDITIONAL
+
+
+def _shared_exception_callee_result():
+    from hermes_cli.hades_index.lifecycle.model import (
+        BasicBlock,
+        CallSite,
+        ControlKind,
+        EdgeFactIR,
+        ExceptionScope,
+        LocalNodeTarget,
+        StructureIR,
+        TargetExpressionKind,
+    )
+
+    result = _complex_result()
+    worker = next(item for item in result.declarations if item.name == "worker")
+    handler = next(item for item in result.declarations if item.name == "handler")
+    worker = replace(
+        worker,
+        normal_exit_block_keys=(),
+        exception_exit_block_keys=(worker.entry_block_key,),
+    )
+    declaration_key = _complex_key("declaration", "disconnected")
+    entry_key = _complex_key("basic_block", "disconnected/entry")
+    continuation_key = _complex_key("basic_block", "disconnected/continuation")
+    catch_key = _complex_key("basic_block", "disconnected/catch")
+    disconnected = replace(
+        handler,
+        local_key=declaration_key,
+        name="disconnected",
+        qualified_name="app.disconnected",
+        locator=_complex_ast("disconnected"),
+        entry_block_key=entry_key,
+        normal_exit_block_keys=(continuation_key,),
+        exception_exit_block_keys=(),
+    )
+    disconnected_blocks = (
+        BasicBlock(
+            entry_key,
+            declaration_key,
+            ControlKind.ENTRY,
+            0,
+            _complex_ast("disconnected/entry"),
+            (),
+        ),
+        BasicBlock(
+            continuation_key,
+            declaration_key,
+            ControlKind.RETURN,
+            1,
+            _complex_ast("disconnected/continuation"),
+            (),
+        ),
+        BasicBlock(
+            catch_key,
+            declaration_key,
+            ControlKind.CATCH,
+            2,
+            _complex_ast("disconnected/catch"),
+            (),
+        ),
+    )
+    scope_structure_key = _complex_key("structure", "disconnected/try")
+    scope_structure = StructureIR(
+        scope_structure_key,
+        StructureKind.EXCEPTION_SCOPE,
+        declaration_key,
+        "disconnected/try",
+        0,
+        StructureSubtype.TRY_CATCH,
+        continuation_key,
+        None,
+        _complex_evidence(_complex_ast("disconnected/try")),
+    )
+    scope = ExceptionScope(
+        _complex_key("exception_scope", "disconnected/try"),
+        declaration_key,
+        _complex_ast("disconnected/try"),
+        ("RuntimeError",),
+        (catch_key,),
+        None,
+        None,
+    )
+    call_path = "disconnected/call"
+    call_structure_key = _complex_key("structure", call_path)
+    call_site_key = _complex_key("call_site", call_path)
+    call_structure = StructureIR(
+        call_structure_key,
+        StructureKind.CALL_SITE,
+        declaration_key,
+        call_path,
+        0,
+        StructureSubtype.CALL,
+        continuation_key,
+        scope_structure_key,
+        _complex_evidence(_complex_ast(call_path)),
+    )
+    call_site = CallSite(
+        call_site_key,
+        declaration_key,
+        entry_key,
+        _complex_ast(call_path),
+        TargetExpressionKind.DIRECT_FUNCTION,
+        worker.qualified_name,
+        worker.qualified_name,
+        None,
+        0,
+        continuation_key,
+        scope_structure_key,
+    )
+    invocation = EdgeFactIR(
+        _complex_key("edge_fact", call_path),
+        entry_key,
+        LocalNodeTarget(worker.local_key),
+        Relation.INVOKES,
+        EdgeFlow.ALWAYS,
+        None,
+        None,
+        call_structure_key,
+        None,
+        0,
+        _complex_ast(call_path),
+        _complex_evidence(_complex_ast(call_path)),
+    )
+    shared = replace(
+        result,
+        declarations=_sort((
+            disconnected,
+            *(
+                worker if item.local_key == worker.local_key else item
+                for item in result.declarations
+            ),
+        )),
+        blocks=_sort((*result.blocks, *disconnected_blocks)),
+        structures=_sort((*result.structures, scope_structure, call_structure)),
+        call_sites=_sort((*result.call_sites, call_site)),
+        edge_facts=_sort((*result.edge_facts, invocation)),
+        exception_scopes=_sort((*result.exception_scopes, scope)),
+    )
+    shared.validate()
+    return shared, catch_key
+
+
+def test_shared_exception_callee_does_not_reach_disconnected_caller_catch(tmp_path):
+    result, disconnected_catch_key = _shared_exception_callee_result()
+    artifact = _build(tmp_path, result)
+    catch_path = next(
+        item.locator.structural_path
+        for item in result.blocks
+        if item.local_key == disconnected_catch_key
+    )
+    disconnected_catch_id = next(
+        item.id
+        for item in artifact.nodes
+        if getattr(item.identity, "structural_path", None) == catch_path
+    )
+    edges = {item.id: item for item in artifact.edges}
+
+    assert not any(
+        edges[item.edge_id].target_id == disconnected_catch_id
+        for item in artifact.flow_steps
+    )
+
+
+def test_inactive_same_caller_call_site_does_not_require_exception_continuation(
+    tmp_path,
+):
+    result, disconnected_catch_key = _shared_exception_callee_result()
+    disconnected = next(
+        item for item in result.declarations if item.name == "disconnected"
+    )
+    handler = next(item for item in result.declarations if item.name == "handler")
+    same_caller = replace(
+        result,
+        declarations=tuple(
+            item
+            for item in result.declarations
+            if item.local_key != disconnected.local_key
+        ),
+        blocks=_sort(
+            replace(item, declaration_key=handler.local_key)
+            if item.declaration_key == disconnected.local_key
+            else item
+            for item in result.blocks
+        ),
+        structures=_sort(
+            replace(item, owner_declaration_key=handler.local_key)
+            if item.owner_declaration_key == disconnected.local_key
+            else item
+            for item in result.structures
+        ),
+        call_sites=tuple(
+            replace(item, caller_declaration_key=handler.local_key)
+            if item.caller_declaration_key == disconnected.local_key
+            else item
+            for item in result.call_sites
+        ),
+        exception_scopes=_sort(
+            replace(item, declaration_key=handler.local_key)
+            if item.declaration_key == disconnected.local_key
+            else item
+            for item in result.exception_scopes
+        ),
+    )
+    same_caller.validate()
+
+    artifact = _build(tmp_path, same_caller)
+    catch_path = next(
+        item.locator.structural_path
+        for item in same_caller.blocks
+        if item.local_key == disconnected_catch_key
+    )
+    disconnected_catch_id = next(
+        item.id
+        for item in artifact.nodes
+        if getattr(item.identity, "structural_path", None) == catch_path
+    )
+    edges = {item.id: item for item in artifact.edges}
+
+    assert not any(
+        edges[item.edge_id].target_id == disconnected_catch_id
+        for item in artifact.flow_steps
+    )
+
+
+def test_exception_propagation_skips_inner_nonmatching_catch_and_preserves_type(
+    tmp_path,
+):
+    from hermes_cli.hades_index.lifecycle.model import (
+        BasicBlock,
+        ControlKind,
+        ExceptionScope,
+        StructureIR,
+        Terminal,
+        TerminalKind,
+    )
+
+    result = _complex_result()
+    handler = next(item for item in result.declarations if item.name == "handler")
+    worker = next(item for item in result.declarations if item.name == "worker")
+    worker_entry = next(
+        item for item in result.blocks if item.local_key == worker.entry_block_key
+    )
+    outer_structure = next(
+        item for item in result.structures if item.kind is StructureKind.EXCEPTION_SCOPE
+    )
+    outer_scope = result.exception_scopes[0]
+    outer_scope = replace(outer_scope, caught_type_names=("RuntimeError",))
+    final_block = outer_scope.finally_block_key
+    assert final_block is not None
+    inner_path = "body/try/nonmatching"
+    inner_structure = StructureIR(
+        _complex_key("structure", inner_path),
+        StructureKind.EXCEPTION_SCOPE,
+        handler.local_key,
+        inner_path,
+        0,
+        StructureSubtype.TRY_CATCH,
+        final_block,
+        outer_structure.local_key,
+        _complex_evidence(_complex_ast(inner_path)),
+    )
+    inner_catch = BasicBlock(
+        _complex_key("basic_block", f"{inner_path}/catch"),
+        handler.local_key,
+        ControlKind.CATCH,
+        9,
+        _complex_ast(f"{inner_path}/catch"),
+        (AlwaysSuccessor(final_block, 0),),
+    )
+    inner_scope = ExceptionScope(
+        _complex_key("exception_scope", inner_path),
+        handler.local_key,
+        _complex_ast(inner_path),
+        ("ValueError",),
+        (inner_catch.local_key,),
+        None,
+        outer_scope.local_key,
+    )
+    terminal = Terminal(
+        _complex_key("terminal", "worker/runtime_error"),
+        worker_entry.local_key,
+        TerminalKind.EXCEPTION,
+        None,
+        "RuntimeError",
+        _complex_ast("worker/runtime_error"),
+    )
+    exceptional_worker = replace(
+        worker,
+        normal_exit_block_keys=(),
+        exception_exit_block_keys=(worker_entry.local_key,),
+    )
+    exceptional_entry = replace(
+        worker_entry,
+        control_kind=ControlKind.THROW,
+        successors=(ReturnSuccessor(terminal.local_key, 0),),
+    )
+    site = replace(result.call_sites[0], exception_scope_key=inner_structure.local_key)
+    typed = replace(
+        result,
+        declarations=_sort(
+            exceptional_worker if item.local_key == worker.local_key else item
+            for item in result.declarations
+        ),
+        blocks=_sort((
+            inner_catch,
+            *(
+                exceptional_entry if item.local_key == worker_entry.local_key else item
+                for item in result.blocks
+            ),
+        )),
+        structures=_sort((*result.structures, inner_structure)),
+        call_sites=(site,),
+        exception_scopes=_sort((outer_scope, inner_scope)),
+        terminals=_sort((*result.terminals, terminal)),
+    )
+    typed.validate()
+
+    artifact = _build(tmp_path, typed)
+    outer_target = next(
+        item.id
+        for item in artifact.nodes
+        if getattr(item.identity, "structural_path", None)
+        == next(
+            block.locator.structural_path
+            for block in result.blocks
+            if block.local_key == outer_scope.catch_block_keys[0]
+        )
+    )
+    propagated = next(
+        item
+        for item in artifact.edges
+        if item.relation is Relation.THROWS_TO
+        and item.exception_scope_id is not None
+        and item.condition is not None
+        and getattr(
+            next(node for node in artifact.nodes if node.id == item.source_id).identity,
+            "owner_node_id",
+            None,
+        )
+        == next(node.id for node in artifact.nodes if node.name == "worker")
+    )
+
+    assert propagated.target_id == outer_target
+    assert propagated.condition.normalized == "RuntimeError"
+
+
+def test_semantic_locator_outside_authoritative_inventory_is_rejected(tmp_path):
+    from hermes_cli.hades_index.lifecycle.model import InventoryFile
+
+    context = replace(
+        _context(tmp_path),
+        inventory_files=(InventoryFile("only/inventory.py", "c" * 64, "python", True),),
+    )
+
+    with pytest.raises(IRValidationError, match="outside_inventory"):
+        from hermes_cli.hades_index.lifecycle.builder import GraphBuilder
+
+        GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+            context, (_valid_result(),)
+        )
+
+
+def test_excluded_path_count_is_carried_from_typed_inventory_context(tmp_path):
+    from hermes_cli.hades_index.lifecycle.model import InventoryFile
+
+    result = _empty_result()
+    context = replace(
+        _context(tmp_path),
+        inventory_files=(InventoryFile("kept.py", "d" * 64, "python", True),),
+        excluded_path_count=3,
+    )
+    from hermes_cli.hades_index.lifecycle.builder import GraphBuilder
+
+    artifact = GraphBuilder(generated_at=lambda: "2026-07-19T12:00:00Z").build(
+        context, (result,)
+    )
+
+    assert artifact.graph_contract.coverage.scope.excluded_path_count == 3
+
+
+def test_semantic_resource_merges_all_occurrence_evidence_under_permutation(tmp_path):
+    result = _resolved_result()
+    first = result.effects[0]
+    second = replace(
+        first,
+        local_key=_complex_key("effect", "second/resource/occurrence"),
+        locator=replace(first.locator, structural_path="body/effect/second"),
+    )
+    variants = (
+        replace(result, effects=_sort((first, second))),
+        replace(result, effects=_sort((second, first))),
+    )
+    artifacts = [_build(tmp_path, item) for item in variants]
+    resources = [
+        next(node for node in artifact.nodes if node.kind is NodeKind.QUERY)
+        for artifact in artifacts
+    ]
+
+    assert artifact_to_payload(artifacts[0]) == artifact_to_payload(artifacts[1])
+    assert len(resources[0].evidence.supporting) == 1
+
+
+def test_conflicting_boundary_node_is_fatal_under_every_input_permutation(tmp_path):
+    from hermes_cli.hades_index.lifecycle.model import BoundaryTarget, EdgeFactIR
+
+    result = _resolved_result()
+    declaration = result.declarations[0]
+    locator = declaration.locator
+    descriptor = FrameworkBoundaryDescriptor(
+        "fastapi", "middleware", "first", locator, _complex_evidence(locator)
+    )
+    first = EdgeFactIR(
+        _complex_key("edge_fact", "boundary/first"),
+        declaration.local_key,
+        BoundaryTarget(descriptor),
+        Relation.ROUTES_TO,
+        EdgeFlow.ALWAYS,
+        None,
+        None,
+        None,
+        None,
+        0,
+        locator,
+        _complex_evidence(locator),
+    )
+    second = replace(
+        first,
+        local_key=_complex_key("edge_fact", "boundary/second"),
+        target=BoundaryTarget(replace(descriptor, public_name="second")),
+    )
+    for values in ((first, second), (second, first)):
+        conflicting = replace(result, edge_facts=_sort(values))
+        conflicting.validate()
+        with pytest.raises(IRValidationError, match="semantic_collision"):
+            _build(tmp_path, conflicting)

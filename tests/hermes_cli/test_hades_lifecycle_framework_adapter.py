@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -23,15 +24,23 @@ from hermes_cli.hades_index.lifecycle.frameworks import (
     FrameworkAdapterError,
     FrameworkAdapterRegistry,
     FrameworkDetection,
+    FrameworkPipelineFacts,
     run_framework_adapters,
 )
 from hermes_cli.hades_index.lifecycle.model import (
+    AdapterResult,
+    AsyncSuccessor,
+    BasicBlock,
+    ControlKind,
     CoverageEvent,
     EntrypointCandidate,
     ExtractionContext,
+    InventoryFile,
     FrameworkPipelineSegment,
+    FrameworkLocalTarget,
     local_record_key,
 )
+from tests.hermes_cli.test_hades_lifecycle_ir import _valid_result
 from hermes_cli.hades_index.php import extract_lifecycle_entrypoints as php_entrypoints
 from hermes_cli.hades_index.python import (
     extract_lifecycle_entrypoints as python_entrypoints,
@@ -69,6 +78,15 @@ def _context(
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=lambda path: (root / path).read_bytes(),
+        inventory_files=(
+            InventoryFile(
+                "src/app.py",
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                languages[0],
+                True,
+            ),
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -151,6 +169,102 @@ class _Adapter:
     def coverage_events(self, context: ExtractionContext) -> tuple[CoverageEvent, ...]:
         return ()
 
+    def pipeline_facts(
+        self, context: ExtractionContext, candidate: EntrypointCandidate
+    ) -> FrameworkPipelineFacts:
+        self.calls.append("pipeline_facts")
+        return FrameworkPipelineFacts()
+
+
+def _assert_framework_pipeline_closes_adapter_result(
+    candidates: tuple[EntrypointCandidate, ...],
+    segments: tuple[FrameworkPipelineSegment, ...],
+    facts: FrameworkPipelineFacts,
+) -> None:
+    """Prove concrete adapter output closes at the frozen AdapterResult seam."""
+
+    base = _valid_result()
+    declaration_template = base.declarations[0]
+    block_template = base.blocks[0]
+    required_declaration_keys = {
+        key
+        for key in (
+            *(candidate.handler_local_key for candidate in candidates),
+            *(structure.owner_declaration_key for structure in facts.structures),
+            *(scope.declaration_key for scope in facts.exception_scopes),
+            *(
+                segment.target.local_key
+                for segment in segments
+                if type(segment.target) is FrameworkLocalTarget
+            ),
+            *(
+                successor.target_local_key
+                for segment in segments
+                for successor in (
+                    segment.success_successor,
+                    *segment.short_circuit_successors,
+                )
+                if type(successor) is AsyncSuccessor
+            ),
+        )
+        if key is not None
+    }
+    declarations = []
+    blocks = []
+    for ordinal, local_key in enumerate(sorted(required_declaration_keys)):
+        block_key = local_record_key(
+            "framework",
+            declaration_template.locator.source_location.path,
+            "adapter_result_stub_block",
+            "ast",
+            f"framework_adapter_stub/{ordinal}",
+            ordinal,
+        )
+        locator = replace(
+            declaration_template.locator,
+            structural_path=f"framework_adapter_stub/{ordinal}",
+            ordinal=ordinal,
+        )
+        declaration = replace(
+            declaration_template,
+            local_key=local_key,
+            owner_declaration_key=None,
+            name=f"framework_stub_{ordinal}",
+            qualified_name=f"framework.stub_{ordinal}",
+            locator=locator,
+            entry_block_key=block_key,
+            normal_exit_block_keys=(block_key,),
+            exception_exit_block_keys=(),
+        )
+        declarations.append(declaration)
+        blocks.append(
+            BasicBlock(
+                block_key,
+                local_key,
+                ControlKind.RETURN,
+                0,
+                replace(locator, structural_path=f"{locator.structural_path}/entry"),
+                (),
+            )
+        )
+    result = AdapterResult(
+        tuple(sorted(declarations, key=lambda item: item.local_key)),
+        tuple(sorted(blocks, key=lambda item: item.local_key)),
+        facts.branch_arms,
+        facts.structures,
+        (),
+        (),
+        facts.exception_scopes,
+        facts.terminals,
+        (),
+        tuple(sorted(segments, key=lambda item: item.local_key)),
+        candidates,
+        (),
+        (),
+        (),
+    )
+    result.validate()
+
 
 @dataclass
 class _LegacyAdapterWithoutCoverage:
@@ -205,8 +319,8 @@ def test_all_detected_framework_adapters_run_in_registration_order(
         "fastapi-main",
         "symfony-main",
     )
-    assert first.calls == ["detect", "entrypoints", "pipeline"]
-    assert second.calls == ["detect", "entrypoints", "pipeline"]
+    assert first.calls == ["detect", "entrypoints", "pipeline", "pipeline_facts"]
+    assert second.calls == ["detect", "entrypoints", "pipeline", "pipeline_facts"]
 
 
 def test_language_module_delegates_its_syntax_to_registered_frameworks(
@@ -224,7 +338,7 @@ def test_language_module_delegates_its_syntax_to_registered_frameworks(
     )
 
     assert any(candidate.framework == "fastapi" for candidate in result.candidates)
-    assert adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert adapter.calls == ["detect", "entrypoints", "pipeline", "pipeline_facts"]
 
 
 def test_language_delegates_never_run_foreign_or_unknown_registry_adapters(
@@ -240,14 +354,29 @@ def test_language_delegates_never_run_foreign_or_unknown_registry_adapters(
     python_entrypoints(
         context, (_syntax(language="python", names=("main",)),), registry=registry
     )
-    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert python_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
     assert php_adapter.calls == []
 
     php_entrypoints(
         context, (_syntax(language="php", names=("main",)),), registry=registry
     )
-    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
-    assert php_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert python_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
+    assert php_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
 
     unknown_context = _context(tmp_path, languages=("rust",))
     unknown = python_entrypoints(
@@ -256,8 +385,18 @@ def test_language_delegates_never_run_foreign_or_unknown_registry_adapters(
         registry=registry,
     )
     assert unknown.candidates == ()
-    assert python_adapter.calls == ["detect", "entrypoints", "pipeline"]
-    assert php_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert python_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
+    assert php_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
 
 
 def test_composite_language_delegate_skips_registered_adapter_without_syntax(
@@ -277,7 +416,12 @@ def test_composite_language_delegate_skips_registered_adapter_without_syntax(
     )
 
     assert any(candidate.framework == "nextjs" for candidate in result.candidates)
-    assert typescript_adapter.calls == ["detect", "entrypoints", "pipeline"]
+    assert typescript_adapter.calls == [
+        "detect",
+        "entrypoints",
+        "pipeline",
+        "pipeline_facts",
+    ]
     assert javascript_adapter.calls == []
 
 

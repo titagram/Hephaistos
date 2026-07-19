@@ -11,6 +11,10 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
+from tests.hermes_cli.test_hades_lifecycle_framework_adapter import (
+    _assert_framework_pipeline_closes_adapter_result,
+)
+
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
     EntrypointKind,
@@ -24,6 +28,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
     CoverageOutcome,
     ExtractionContext,
+    InventoryFile,
     FrameworkLocalTarget,
     SourceLocationIR,
 )
@@ -76,6 +81,17 @@ def _context(
         package_metadata=(),
         tsconfig_metadata=(),
         file_accessor=file_accessor or (lambda path: (root / path).read_bytes()),
+        inventory_files=tuple(
+            InventoryFile(
+                path.relative_to(root).as_posix(),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                None,
+                True,
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -205,6 +221,9 @@ class Second:
         (_syntax(tmp_path, "project/views.py", _function("secure", 2)),),
     )[0]
     pipeline = adapter.pipeline(context, candidate)
+    _assert_framework_pipeline_closes_adapter_result(
+        (candidate,), pipeline, adapter.pipeline_facts(context, candidate)
+    )
 
     assert [segment.framework_role for segment in pipeline] == [
         "url_resolver",

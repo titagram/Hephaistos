@@ -88,9 +88,7 @@ def test_inventory_ledger_materializes_failure_only_file_and_counts_it(tmp_path)
     )
     context = replace(
         _context(tmp_path),
-        inventory_files=(
-            InventoryFile("src/unreadable.py", "b" * 64, "python", True),
-        ),
+        inventory_files=(InventoryFile("src/unreadable.py", "b" * 64, "python", True),),
         file_accessor=lambda _path: (_ for _ in ()).throw(OSError("denied")),
     )
 
@@ -120,9 +118,7 @@ def test_distinct_polyglot_adapter_results_are_permutation_invariant(tmp_path):
             1,
         )
     )
-    context = replace(
-        _context(tmp_path), detected_languages=("python", "typescript")
-    )
+    context = replace(_context(tmp_path), detected_languages=("python", "typescript"))
 
     first = build_canonical_graph(
         context,
@@ -190,6 +186,7 @@ async def items():
     adapter_context = fastapi_context(tmp_path)
     candidate = _candidate(adapter, adapter_context, "items")
     actual_segments = adapter.pipeline(adapter_context, candidate)
+    pipeline_facts = adapter.pipeline_facts(adapter_context, candidate)
     base = _valid_result()
     declaration = base.declarations[0]
     transformed = tuple(
@@ -211,7 +208,25 @@ async def items():
     )
     result = replace(
         base,
+        branch_arms=tuple(
+            sorted(
+                (*base.branch_arms, *pipeline_facts.branch_arms),
+                key=lambda item: (item.branch_local_key, item.arm_ordinal),
+            )
+        ),
         edge_facts=(),
+        exception_scopes=tuple(
+            sorted(
+                (
+                    *base.exception_scopes,
+                    *(
+                        replace(item, declaration_key=declaration.local_key)
+                        for item in pipeline_facts.exception_scopes
+                    ),
+                ),
+                key=lambda item: item.local_key,
+            )
+        ),
         framework_segments=tuple(sorted(transformed, key=lambda item: item.local_key)),
         entrypoints=(
             replace(
@@ -219,6 +234,24 @@ async def items():
                 handler_local_key=declaration.local_key,
                 unresolved_fact_local_key=None,
             ),
+        ),
+        structures=tuple(
+            sorted(
+                (
+                    *base.structures,
+                    *(
+                        replace(item, owner_declaration_key=declaration.local_key)
+                        for item in pipeline_facts.structures
+                    ),
+                ),
+                key=lambda item: item.local_key,
+            )
+        ),
+        terminals=tuple(
+            sorted(
+                (*base.terminals, *pipeline_facts.terminals),
+                key=lambda item: item.local_key,
+            )
         ),
         unresolved_facts=(),
     )
@@ -236,18 +269,14 @@ async def items():
             ),
             InventoryFile(
                 "pyproject.toml",
-                hashlib.sha256(
-                    (tmp_path / "pyproject.toml").read_bytes()
-                ).hexdigest(),
+                hashlib.sha256((tmp_path / "pyproject.toml").read_bytes()).hexdigest(),
                 None,
                 False,
             ),
             InventoryFile("src/app.py", "a" * 64, "python", True),
         ),
         file_accessor=lambda path: (
-            (tmp_path / path).read_bytes()
-            if (tmp_path / path).exists()
-            else b""
+            (tmp_path / path).read_bytes() if (tmp_path / path).exists() else b""
         ),
     )
 
@@ -257,9 +286,7 @@ async def items():
         generated_at=lambda: "2026-07-19T12:00:00Z",
     )
     framework_nodes = [
-        node
-        for node in artifact.nodes
-        if hasattr(node.properties, "pipeline_order")
+        node for node in artifact.nodes if hasattr(node.properties, "pipeline_order")
     ]
 
     assert len(actual_segments) >= 3

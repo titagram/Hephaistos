@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.hermes_cli.test_hades_lifecycle_framework_adapter import (
+    _assert_framework_pipeline_closes_adapter_result,
+)
+
 from hermes_cli.hades_graph_config import load_hades_graph_index_config
 from hermes_cli.hades_graph_v2.model import (
     EntrypointKind,
@@ -24,6 +28,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ConfigLocatorIR,
     CoverageOutcome,
     ExtractionContext,
+    InventoryFile,
     FrameworkLocalTarget,
     SourceLocationIR,
 )
@@ -91,6 +96,17 @@ def _context(
         package_metadata=(metadata,),
         tsconfig_metadata=(),
         file_accessor=lambda path: (root / path).read_bytes(),
+        inventory_files=tuple(
+            InventoryFile(
+                path.relative_to(root).as_posix(),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                None,
+                True,
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        ),
+        excluded_path_count=0,
     )
 
 
@@ -223,6 +239,10 @@ def test_app_route_static_get_and_post_exports_are_method_entrypoints(
     assert all(item.handler_local_key is not None for item in candidates)
     assert adapter.coverage_events(context) == ()
     _assert_candidates(adapter, context, candidates)
+    pipeline = adapter.pipeline(context, candidates[0])
+    _assert_framework_pipeline_closes_adapter_result(
+        (candidates[0],), pipeline, adapter.pipeline_facts(context, candidates[0])
+    )
 
 
 def test_app_route_reexport_with_unresolved_target_is_partial(tmp_path: Path) -> None:
