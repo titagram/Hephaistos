@@ -230,6 +230,12 @@ def _locator(row: _Registration) -> AstLocatorIR:
     )
 
 
+def _registration_identity(candidate: EntrypointCandidate) -> str:
+    """Keep every emitted pipeline fact scoped to one registration occurrence."""
+    locator = candidate.registration_locator
+    return f"{locator.structural_path}/registration/{locator.ordinal}"
+
+
 def _object_key(path: str, name: str) -> str:
     return f"{path}:{name}"
 
@@ -742,13 +748,14 @@ class ExpressLifecycleAdapter:
     def _segments(
         self, candidate: EntrypointCandidate, snap: _Snapshot, stages: list[_Stage]
     ) -> tuple[FrameworkPipelineSegment, ...]:
+        registration_identity = _registration_identity(candidate)
         keys = [
             local_record_key(
                 "javascript",
                 candidate.registration_locator.source_location.path,
                 "framework_pipeline",
                 "ast",
-                f"{candidate.registration_locator.structural_path}/pipeline/{stage.role}",
+                f"{registration_identity}/pipeline/{stage.role}",
                 index,
             )
             for index, stage in enumerate(stages)
@@ -789,7 +796,7 @@ class ExpressLifecycleAdapter:
                         candidate.registration_locator.source_location.path,
                         "framework_terminal",
                         "ast",
-                        f"{candidate.registration_locator.structural_path}/terminal/{stage.role}",
+                        f"{registration_identity}/terminal/{stage.role}",
                         index,
                     ),
                     index,
@@ -804,7 +811,7 @@ class ExpressLifecycleAdapter:
                             candidate.registration_locator.source_location.path,
                             "framework_terminal",
                             "ast",
-                            f"{candidate.registration_locator.structural_path}/terminal/response",
+                            f"{registration_identity}/terminal/response",
                             index,
                         ),
                         index,

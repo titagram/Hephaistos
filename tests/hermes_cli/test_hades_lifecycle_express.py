@@ -23,6 +23,7 @@ from hermes_cli.hades_index.lifecycle.model import (
     ExtractionContext,
     FrameworkLocalTarget,
     InventoryFile,
+    ReturnSuccessor,
     SourceLocationIR,
     TerminalKind,
     local_record_key,
@@ -145,7 +146,11 @@ def test_nested_router_mount_composes_literal_path_prefix_exactly(
 const express = require('express');
 const app = express(); const parent = express.Router(); const child = express.Router();
 function childHandler(req, res) { res.send('ok'); }
+function redirect(req, res) { res.redirect('/login'); }
+function thrown(req, res) { throw new TypeError('x'); }
+function nextError(req, res, next) { const err = new RangeError('y'); next(err); }
 child.get('/items/:id', childHandler); parent.use('/v1', child); app.use('/api', parent);
+app.get('/redirect', redirect); app.get('/throw', thrown); app.get('/next-error', nextError);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
@@ -169,13 +174,62 @@ child.get('/items/:id', childHandler); parent.use('/v1', child); app.use('/api',
     )
     registry = FrameworkAdapterRegistry()
     registry.register(adapter)
-    facts = adapter.pipeline_facts(context, route)
-    assert [(item.source_block_key, item.kind) for item in facts.terminals] == [
-        (pipeline[-1].local_key, TerminalKind.RESPONSE)
+    run = run_framework_adapters(registry, context, (_syntax(tmp_path),))
+    assert len(run.framework_segments) == len({
+        item.local_key for item in run.framework_segments
+    })
+    returned_terminal_keys = [
+        successor.terminal_local_key
+        for segment in run.framework_segments
+        for successor in (
+            segment.success_successor,
+            *segment.short_circuit_successors,
+        )
+        if type(successor) is ReturnSuccessor
     ]
+    assert len(returned_terminal_keys) == len(set(returned_terminal_keys))
+    terminals = {item.local_key: item for item in run.pipeline_facts.terminals}
+    assert set(terminals) == set(returned_terminal_keys)
+    assert all(
+        terminals[successor.terminal_local_key].source_block_key == segment.local_key
+        for segment in run.framework_segments
+        for successor in (
+            segment.success_successor,
+            *segment.short_circuit_successors,
+        )
+        if type(successor) is ReturnSuccessor
+    )
+    routes = {item.public_path: item for item in run.candidates}
+    segments = {item.local_key: item for item in run.framework_segments}
+    by_source = {item.source_block_key: item for item in terminals.values()}
+
+    def terminal_for(path: str):
+        return by_source[segments[routes[path].framework_segment_keys[-1]].local_key]
+
     assert (
-        run_framework_adapters(registry, context, (_syntax(tmp_path),)).pipeline_facts
-        == facts
+        terminal_for("/api/v1/items/:id").kind,
+        terminal_for("/api/v1/items/:id").exception_type,
+    ) == (
+        TerminalKind.RESPONSE,
+        None,
+    )
+    assert (
+        terminal_for("/redirect").kind,
+        terminal_for("/redirect").exception_type,
+    ) == (
+        TerminalKind.REDIRECT,
+        None,
+    )
+    assert (terminal_for("/throw").kind, terminal_for("/throw").exception_type) == (
+        TerminalKind.EXCEPTION,
+        "TypeError",
+    )
+    assert (
+        terminal_for("/next-error").kind,
+        terminal_for("/next-error").exception_type,
+    ) == (
+        TerminalKind.EXCEPTION,
+        "RangeError",
     )
 
 
