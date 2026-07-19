@@ -10,7 +10,10 @@ ledgers and the artifact digest, and validates the selected artifact before it
 can be written. The independent-review blockers C1 and I1 are repaired: the
 shared validator closes every derivable file/entrypoint gap against explicit
 omission provenance, and the bundle boundary distinguishes recoverable
-record-derived capacity from an irreducibly oversized required envelope.
+record-derived capacity from an irreducibly oversized required envelope. The
+round-two repair additionally closes omissions per authoritative language and
+preserves the union of semantic capability provenance across overlapping
+rejected units.
 
 ## TDD evidence
 
@@ -47,6 +50,15 @@ reason counts were accepted when a nonzero ledger existed. The repaired
 focused tranche is `5 passed`; the full Task 15 tranche below covers these
 cases through both public entrypoints.
 
+Round two added the missing PHP-language counterexample through those same two
+public boundaries plus total-capacity and record-derived-manifest regressions
+for overlapping rejected units. The focused RED run was `5 failed`: the
+validator accepted a missing detected PHP file while PHP remained `full`, and
+the pruner raised raw `coverage_omission_completeness` errors at total 5000 and
+manifest ceilings 4000, 4025, and 4050. The identical focused command is now
+`5 passed`; an expanded compatibility check including the round-one zero-ledger
+precedence is `6 passed`.
+
 ## Atomic selection
 
 `GraphBudgetPruner` implements the section 8.2 order and dependency rules:
@@ -70,6 +82,13 @@ every unit and avoids quadratic work for uncapped high-cardinality graphs. The
 chunk partitioner was likewise made linear by canonicalizing each record once
 and assembling the exact JCS wrapper once per chunk instead of reserializing
 the growing chunk after every record.
+
+Finalization now accumulates capability impact independently from reason
+precedence. Every rejected occurrence contributes its semantic capability set
+to the omitted token; a later `record_too_large` rejection may still win the
+reason code without discarding earlier/later impacts. Consequently, an omitted
+file that participates first in an entrypoint or structural unit still gains
+the required `inventory` provenance when its inventory unit is rejected.
 
 ## Coverage-contract resolution
 
@@ -100,6 +119,16 @@ and the global ledger must carry a budget reason. Budget reason counts remain
 exact when the omission ledger is zero; with pruning provenance they are
 bounded by observable events plus that explicit ledger, including a guard
 against double-counting both budget reason codes inside one capability.
+
+For every authoritative language record, the validator also derives the gap
+between `detected_file_count` and represented file nodes for that language and
+includes represented `budget_omitted` file statuses. A positive affected-file
+count requires the language row and its inventory capability to be partial,
+with a language-scoped budget/record-size reason whose count covers the gap and
+is bounded by the shared observable-plus-ledger reconciliation. A global
+language-null reason cannot substitute for evidence in a known affected
+language, and existing global/language scope reconciliation closes the two
+ledgers.
 
 The Task 14 builder now emits `entrypoints.analyzed == len(entrypoints)` so a
 represented partial flow does not falsely become “not analyzed.” The adjacent
@@ -168,8 +197,25 @@ reassembly, deterministic gzip, trailing/concatenated members, both digest
 mismatches, resume after chunk index 2, mutation after acknowledgements,
 private modes, locks, stale cleanup, and explicit terminal cleanup.
 
-Adjacent Task 14/contract/golden suite: `501 passed in 16.67s` across the 12
-modules listed by the Task 14 report.
+Round-two focused non-volumetric Task 15 verification:
+
+```text
+/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest \
+  tests/hermes_cli/test_hades_graph_budget_pruner.py \
+  tests/hermes_cli/test_hades_graph_bundle.py -q \
+  -k 'not more_than_5000 and not more_than_10000 and \
+      not more_than_500_routes and not manifest_envelope'
+```
+
+Result: `35 passed, 6 deselected in 7.58s`. This is intentionally reported as
+a focused run, not a new full-suite result. The three high-cardinality tests
+and three real-4 MiB tests were excluded because round two changes only
+validation, rejection-capability attribution, and the focused pruner tests;
+bundle planning and the 4 MiB fixture were untouched. The cumulative full
+result above remains the last executed complete Task 15 suite.
+
+Adjacent Task 14/contract/golden suite after round two: `501 passed in 16.68s`
+across the 12 modules listed by the Task 14 report.
 
 Fresh final static verification:
 
@@ -195,4 +241,4 @@ The shared Task 17 changes in `hermes_cli/hades_backend_client.py`,
 `.superpowers/sdd/progress.md` were neither modified for Task 15 nor staged.
 The original implementation commit is
 `84640d689 feat(hades): bundle graph v2 without silent truncation`; the review
-repair is recorded as a separate commit.
+repairs are recorded as separate commits.

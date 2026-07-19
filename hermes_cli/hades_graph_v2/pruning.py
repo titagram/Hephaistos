@@ -504,10 +504,13 @@ def _finalize_candidate(
         for token in rejection.unit.tokens:
             if token not in omitted_tokens:
                 continue
+            capability_by_token[token] = (
+                capability_by_token.get(token, frozenset())
+                | rejection.unit.capabilities
+            )
             previous = reason_by_token.get(token)
             if previous is None or rejection.reason is ReasonCode.RECORD_TOO_LARGE:
                 reason_by_token[token] = rejection.reason
-                capability_by_token[token] = rejection.unit.capabilities
     for token in omitted_tokens:
         reason_by_token.setdefault(token, ReasonCode.RESOURCE_BUDGET_REACHED)
         capability_by_token.setdefault(token, _reason_impacts(index, token))

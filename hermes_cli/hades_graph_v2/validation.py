@@ -2547,6 +2547,14 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         and node.identity.language is not None
         and cast(FileProperties, node.properties).analysis_status.value == "analyzed"
     )
+    budget_omitted_language_counts = Counter(
+        node.identity.language
+        for node in files
+        if isinstance(node.identity, FileIdentity)
+        and node.identity.language is not None
+        and cast(FileProperties, node.properties).analysis_status
+        is AnalysisStatus.BUDGET_OMITTED
+    )
     if not set(file_language_counts).issubset({
         item.name for item in artifact.languages
     }):
@@ -2571,6 +2579,9 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
         _fail(
             "language_coverage_mismatch", "language completeness records do not close"
         )
+    language_completeness = {
+        item.language: item for item in contract.completeness.languages
+    }
 
     edges_by_id = {edge.id: edge for edge in artifact.edges}
     node_kinds_by_id = {node.id: node.kind for node in artifact.nodes}
@@ -2704,6 +2715,32 @@ def validate_coverage_and_counts(artifact: GraphArtifactV2) -> None:
             "coverage_omission_completeness",
             "missing entrypoints require partial discovery budget evidence",
         )
+    for language in artifact.languages:
+        missing_language_files = (
+            language.detected_file_count - file_language_counts[language.name]
+        )
+        affected_language_files = (
+            missing_language_files + budget_omitted_language_counts[language.name]
+        )
+        if not affected_language_files:
+            continue
+        scoped = language_completeness[language.name]
+        inventory = scoped.capabilities.inventory
+        budget_reason_count = sum(
+            reason.count
+            for reason in inventory.reasons
+            if reason.code in _BUNDLE_BUDGET_REASON_CODES
+            and reason.language == language.name
+        )
+        if (
+            scoped.status is not CompletenessStatus.PARTIAL
+            or inventory.status is not CapabilityStatus.PARTIAL
+            or budget_reason_count < affected_language_files
+        ):
+            _fail(
+                "coverage_omission_completeness",
+                "language file omissions require scoped partial inventory evidence",
+            )
     _validate_reason_record_counts(artifact)
 
 

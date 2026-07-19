@@ -309,6 +309,45 @@ def test_validator_and_writer_reject_silent_missing_file_with_zero_omission_ledg
     )
 
 
+def test_validator_and_writer_reject_missing_php_file_with_full_language_scope(
+    tmp_path: Path,
+):
+    payload = copy.deepcopy(_valid_semantic_artifact())
+    completeness = payload["graph_contract"]["completeness"]
+    completeness["languages"][0]["capabilities"] = copy.deepcopy(
+        completeness["languages"][0]["capabilities"]
+    )
+    payload["nodes"] = []
+    coverage = payload["graph_contract"]["coverage"]
+    coverage["files"].update(analyzed=0, budget_omitted=1)
+    coverage["records"].update(nodes=0, omitted_by_bundle_budget=1)
+    payload["languages"][0]["analyzed_file_count"] = 0
+    completeness["status"] = "partial"
+    completeness["capabilities"]["inventory"] = {
+        "status": "partial",
+        "reasons": [
+            {
+                "code": "resource_budget_reached",
+                "count": 1,
+                "language": None,
+                "paths_sample": ["src/Example.php"],
+            }
+        ],
+    }
+    assert completeness["languages"][0]["status"] == "full"
+    assert completeness["languages"][0]["capabilities"]["inventory"] == {
+        "status": "full",
+        "reasons": [],
+    }
+    _rehash(payload)
+
+    _assert_validator_and_writer_reject(
+        payload,
+        tmp_path,
+        code="coverage_omission_completeness",
+    )
+
+
 def test_validator_and_writer_reject_silent_missing_entrypoint_with_zero_ledger(
     tmp_path: Path,
 ):
@@ -742,6 +781,95 @@ def test_empty_envelope_that_cannot_fit_is_a_hard_failure():
             artifact_from_payload(_valid_semantic_artifact()),
             _limits(chunk=512, total=32),
         )
+
+
+def test_overlapping_rejections_preserve_inventory_provenance_across_total_band():
+    from hermes_cli.hades_graph_v2.bundle import build_bundle_plan
+    from hermes_cli.hades_graph_v2.pruning import (
+        GraphBudgetPruner,
+        GraphBundleBudgetTooSmallError,
+    )
+
+    artifact = artifact_from_payload(_valid_flow_artifact())
+    selected_at_5000 = GraphBudgetPruner().select(
+        artifact,
+        _limits(chunk=2_048, total=5_000),
+    )
+    validate_artifact(selected_at_5000)
+    empty_payload = artifact_to_payload(selected_at_5000)
+    assert all(
+        not empty_payload[kind]
+        for kind in (
+            "entrypoints",
+            "nodes",
+            "structures",
+            "edges",
+            "flows",
+            "flow_steps",
+            "uncertainties",
+        )
+    )
+    empty_plan = build_bundle_plan(
+        selected_at_5000,
+        _limits(chunk=2_048, total=5_000),
+    )
+    exact_empty_total = empty_plan.logical_uncompressed_bytes
+    assert 3_000 < exact_empty_total < 5_000
+
+    ceilings = set(range(3_000, 5_001, 250))
+    ceilings.update({exact_empty_total - 1, exact_empty_total})
+    for ceiling in sorted(ceilings):
+        limits = _limits(chunk=2_048, total=ceiling)
+        if ceiling < exact_empty_total:
+            with pytest.raises(GraphBundleBudgetTooSmallError) as exc_info:
+                GraphBudgetPruner().select(artifact, limits)
+            assert exc_info.value.code == "graph_bundle_budget_too_small"
+            continue
+
+        selected = GraphBudgetPruner().select(artifact, limits)
+        validate_artifact(selected)
+        plan = build_bundle_plan(selected, limits)
+        assert plan.logical_uncompressed_bytes <= ceiling
+        assert selected.graph_contract.completeness.status.value == "partial"
+
+
+@pytest.mark.parametrize("manifest_ceiling", [4_000, 4_025, 4_050])
+def test_overlapping_rejections_preserve_inventory_in_record_derived_manifest_band(
+    monkeypatch,
+    manifest_ceiling: int,
+):
+    from hermes_cli.hades_graph_v2 import bundle as bundle_module
+    from hermes_cli.hades_graph_v2.pruning import GraphBudgetPruner
+
+    artifact = artifact_from_payload(_valid_flow_artifact())
+    limits = _limits(chunk=2_048, total=32 * 1024 * 1024)
+    full = bundle_module.build_bundle_plan(artifact, limits)
+    assert len(full.manifest_bytes) > manifest_ceiling
+    monkeypatch.setattr(bundle_module, "MAX_MANIFEST_BYTES", manifest_ceiling)
+
+    selected = GraphBudgetPruner().select(artifact, limits)
+    validate_artifact(selected)
+    payload = artifact_to_payload(selected)
+    assert all(
+        not payload[kind]
+        for kind in (
+            "entrypoints",
+            "nodes",
+            "structures",
+            "edges",
+            "flows",
+            "flow_steps",
+            "uncertainties",
+        )
+    )
+    plan = bundle_module.build_bundle_plan(selected, limits)
+    assert len(plan.manifest_bytes) <= manifest_ceiling
+    inventory = selected.graph_contract.completeness.capabilities.inventory
+    assert inventory.status.value == "partial"
+    assert {reason.code.value for reason in inventory.reasons} & {
+        "resource_budget_reached",
+        "record_too_large",
+    }
 
 
 @pytest.mark.parametrize("reverse", [False, True])
