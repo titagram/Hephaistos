@@ -123,7 +123,16 @@ child.get('/items/:id', childHandler); parent.use('/v1', child); app.use('/api',
     assert route.methods == ("GET",)
     assert route.handler_local_key is not None
     pipeline = adapter.pipeline(context, route)
-    assert "route_handler" in [segment.framework_role for segment in pipeline]
+    assert [segment.framework_role for segment in pipeline] == [
+        "router_mount",
+        "router_mount",
+        "route_handler",
+        "terminal_send",
+    ]
+    assert [segment.target.descriptor.public_name for segment in pipeline[:2]] == [
+        "app.js:parent@/api",
+        "app.js:child@/api/v1",
+    ]
     assert route.framework_segment_keys == tuple(
         segment.local_key for segment in pipeline
     )
@@ -136,13 +145,14 @@ def test_computed_router_mount_is_partial_with_explicit_mount_uncertainty(
         tmp_path,
         """
 const express = require('express'); const app = express(); const child = express.Router();
-app.use(prefix, getRouter());
+function handler(req,res) { res.end(); } child.get('/items/:id', handler); app.use(prefix, child);
 """,
     )
-    adapter, context, _ = _entries(tmp_path)
+    adapter, context, entries = _entries(tmp_path)
     assert {"mount_prefix_unresolved", "router_target_unresolved"} <= _coverage(
         adapter, context
     )
+    assert not entries
 
 
 def test_same_path_explicit_verbs_remain_distinct_and_ordered(tmp_path: Path) -> None:
@@ -157,7 +167,7 @@ app.get('/same', getHandler); app.post('/same', postHandler);
     _, _, entries = _entries(tmp_path)
     routes = [item for item in entries if item.public_path == "/same"]
     assert [item.methods for item in routes] == [("GET",), ("POST",)]
-    assert all(item.handler_local_key is not None for item in routes)
+    assert [item.public_name for item in routes] == ["getHandler", "postHandler"]
 
 
 def test_computed_verb_registration_is_unresolved_without_an_invented_method(
@@ -211,7 +221,8 @@ def test_use_and_route_handlers_preserve_registration_order(tmp_path: Path) -> N
 const express = require('express'); const app = express();
 function first(req,res,next) { next(); } function second(req,res,next) { next(); }
 function routeFirst(req,res,next) { next(); } function routeSecond(req,res) { res.end(); }
-app.use(first); app.use('/ordered', second); app.get('/ordered', routeFirst, routeSecond);
+function apiOnly(req,res,next) { next(); } function apiary(req,res) { res.end(); }
+app.use(first); app.use('/ordered', second); app.use('/api', apiOnly); app.get('/ordered', routeFirst, routeSecond); app.get('/apiary', apiary);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
@@ -226,6 +237,8 @@ app.use(first); app.use('/ordered', second); app.get('/ordered', routeFirst, rou
         "route_handler",
         "route_handler",
     ]
+    apiary = next(item for item in entries if item.public_path == "/apiary")
+    assert _roles(adapter, context, apiary).count("middleware") == 1
 
 
 def test_computed_handler_collection_is_partial_with_explicit_order_uncertainty(
@@ -250,7 +263,7 @@ def test_proven_next_forms_select_the_correct_continuation(tmp_path: Path) -> No
         """
 const express = require('express'); const app = express();
 function one(req,res,next) { next(); } function two(req,res,next) { next('route'); }
-function skipped(req,res) { res.end(); } function later(req,res,next) { next(new Error('x')); }
+function skipped(req,res) { res.end(); } function later(req,res,next) { const err = new TypeError('x'); next(err); }
 function normal(req,res) { res.end(); } function error(err,req,res,next) { res.send('error'); }
 app.get('/next', one, two, skipped); app.all('/next', later); app.use(normal); app.use(error);
 """,
@@ -262,6 +275,18 @@ app.get('/next', one, two, skipped); app.all('/next', later); app.use(normal); a
     assert "continuation_next_route" in roles
     assert "error_middleware" in roles
     assert roles.index("error_middleware") > roles.index("continuation_next_route")
+    assert "skipped" not in [
+        segment.target.descriptor.public_name
+        if hasattr(segment.target, "descriptor")
+        else None
+        for segment in adapter.pipeline(context, first)
+    ]
+    transition = next(
+        segment
+        for segment in adapter.pipeline(context, first)
+        if segment.framework_role == "continuation_next_error"
+    )
+    assert transition.target.descriptor.public_name == "TypeError"
 
 
 def test_computed_next_argument_is_partial_without_an_invented_continuation(
@@ -286,8 +311,8 @@ def test_send_json_end_and_redirect_are_terminal_outcomes(tmp_path: Path) -> Non
         """
 const express = require('express'); const app = express();
 function send(req,res) { res.send('x'); } function json(req,res) { res.json({}); }
-function end(req,res) { res.end(); } function redirect(req,res) { res.redirect('/login'); }
-app.get('/send', send); app.get('/json', json); app.get('/end', end); app.get('/redirect', redirect);
+function end(req,res) { res.end(); } function redirect(req,res) { res.redirect('/login'); } function unreachable(req,res) { res.end(); }
+app.get('/send', send, unreachable); app.get('/json', json); app.get('/end', end); app.get('/redirect', redirect);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
@@ -298,7 +323,17 @@ app.get('/send', send); app.get('/json', json); app.get('/end', end); app.get('/
         ("/redirect", "redirect"),
     ):
         entry = next(item for item in entries if item.public_path == path)
-        assert f"terminal_{terminal}" in _roles(adapter, context, entry)
+        pipeline = adapter.pipeline(context, entry)
+        terminal_segment = next(
+            item for item in pipeline if item.framework_role == f"terminal_{terminal}"
+        )
+        assert terminal_segment.success_successor.kind == "return"
+        assert "unreachable" not in [
+            item.target.descriptor.public_name
+            if hasattr(item.target, "descriptor")
+            else None
+            for item in pipeline
+        ]
 
 
 def test_computed_response_terminal_is_partial_without_an_invented_outcome(
@@ -322,10 +357,11 @@ def test_direct_throw_and_returned_async_rejection_enter_error_flow(
         tmp_path,
         """
 const express = require('express'); const app = express();
-function thrown(req,res) { throw new Error('x'); }
-function rejected(req,res) { return Promise.reject(new Error('y')); }
+function thrown(req,res) { throw new TypeError('x'); }
+function rejected(req,res) { return Promise.reject(new RangeError('y')); }
 function ordinary(req,res) { res.end(); } function error(err,req,res,next) { res.send('error'); }
-app.get('/throw', thrown); app.get('/reject', rejected); app.use(ordinary); app.use(error);
+function pre(req,res,next) { next(); } function unreachable(req,res) { res.end(); }
+app.use(pre); app.get('/throw', thrown, unreachable); app.get('/reject', rejected, unreachable); app.use(ordinary); app.use(error);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
@@ -333,7 +369,21 @@ app.get('/throw', thrown); app.get('/reject', rejected); app.use(ordinary); app.
         route = next(item for item in entries if item.public_path == path)
         roles = _roles(adapter, context, route)
         assert "error_middleware" in roles
-        assert "middleware" not in roles
+        assert "middleware" in roles
+        assert "unreachable" not in [
+            segment.target.descriptor.public_name
+            if hasattr(segment.target, "descriptor")
+            else None
+            for segment in adapter.pipeline(context, route)
+        ]
+        transition = next(
+            segment
+            for segment in adapter.pipeline(context, route)
+            if segment.framework_role == "error_transition"
+        )
+        assert transition.target.descriptor.public_name == (
+            "TypeError" if path == "/throw" else "RangeError"
+        )
 
 
 def test_detached_async_rejection_is_partial_with_explicit_error_flow_uncertainty(
@@ -354,17 +404,22 @@ def test_four_parameter_error_middleware_is_selected_by_arity(tmp_path: Path) ->
     _write(
         tmp_path,
         """
-const express = require('express'); const app = express();
+const express = require('express'); const app = express(); const other = express.Router();
 function boom(req,res) { throw new Error('x'); } function ordinary(req,res,next) { next(); }
-function error(err,req,res,next) { res.send('error'); }
-app.get('/x', boom); app.use(ordinary); app.use(error);
+function error(err,req,res,next) { res.send('error'); } function otherError(err,req,res,next) { res.end(); }
+app.get('/x', boom); app.use(ordinary); other.use('/other', otherError); app.use('/x', error);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
     route = next(item for item in entries if item.public_path == "/x")
-    roles = _roles(adapter, context, route)
-    assert roles.count("error_middleware") == 1
-    assert "middleware" not in roles
+    selected = [
+        segment.target.descriptor.public_name
+        if hasattr(segment.target, "descriptor")
+        else None
+        for segment in adapter.pipeline(context, route)
+        if segment.framework_role == "error_middleware"
+    ]
+    assert selected == ["error"]
 
 
 def test_computed_error_middleware_target_is_partial_with_explicit_arity_uncertainty(
@@ -390,11 +445,13 @@ def test_computed_registration_target_is_unresolved_without_an_invented_route(
         tmp_path,
         """
 const express = require('express'); const app = express(); function handler() {}
-target.get('/x', handler);
+// app.get('/phantom', handler);
+function maybe(req,res,next) { res.send('next()'); }
+app.get('/real', maybe); target.get('/x', handler);
 """,
     )
     adapter, context, entries = _entries(tmp_path)
-    assert not entries
+    assert [item.public_path for item in entries] == ["/real"]
     assert {
         "registration_target_unresolved",
         "route_method_unresolved",
