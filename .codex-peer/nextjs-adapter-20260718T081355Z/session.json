@@ -1,0 +1,28 @@
+{
+  "session_id": "nextjs-adapter-20260718T081355Z",
+  "target": "ubuntu@162.19.229.31",
+  "local_workspace": "/Users/gabriele/Dev/Hephaistos",
+  "remote_workspace": "/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2",
+  "runtime_provider": "tmux",
+  "runtime_session": "codex-peer-nextjs-adapter-20260718T081355Z",
+  "resolved_codex": "/usr/local/bin/codex",
+  "resolution_method": "noninteractive_path",
+  "codex_version": "codex-cli 0.144.5",
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "high",
+  "flags": [
+    "exec",
+    "--model",
+    "gpt-5.6-terra",
+    "--config",
+    "model_reasoning_effort=high",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--json"
+  ],
+  "guardrails": "manifest-and-brief",
+  "created_at": "2026-07-18T08:13:55Z",
+  "compact_resume": true,
+  "last_seq": 5,
+  "last_ack": 4
+}

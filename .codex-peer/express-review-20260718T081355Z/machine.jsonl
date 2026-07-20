@@ -1,0 +1,6 @@
+["H",1,0,[],{"side":"local","mode":"human-facing"},{"codec":"ipc-ast-v1","session":"express-review-20260718T081355Z"}]
+["H",1,1,[],{"side":"remote","mode":"reviewer-peer","role":"reviewer"},{"codec":"ipc-ast-v1","session":"express-review-20260718T081355Z"}]
+["C",2,1,[],["contract","read_only_review","single_report"],{"workspace":"/home/ubuntu/.worktrees/hephaistos-express-lifecycle-v2","autonomy":"read-only","guardrails":"review-brief"}]
+["K",3,2,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]
+["D",4,3,[],{"b":"task-2-brief.md","d":"review-cd5100374..44ec20c13.diff","r":"task-12-report.md","o":"task-12-review.md"},{"scope":"session"}]
+["A",5,4,[],["review","express","spec","quality","complete_batch"],{"want":"verdict", "budget":0}]

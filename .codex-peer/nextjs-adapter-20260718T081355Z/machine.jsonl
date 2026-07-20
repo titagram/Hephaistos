@@ -1,0 +1,6 @@
+["H",1,0,[],{"side":"local","mode":"human-facing"},{"codec":"ipc-ast-v1","session":"nextjs-adapter-20260718T081355Z"}]
+["H",1,1,[],{"side":"remote","mode":"worker-peer","role":"implementer"},{"codec":"ipc-ast-v1","session":"nextjs-adapter-20260718T081355Z"}]
+["C",2,1,[],["contract","isolated_worktree","controller_git"],{"workspace":"/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2","autonomy":"workspace","guardrails":"manifest"}]
+["K",3,2,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]
+["D",4,3,[],{"b":"task-3-brief.md","m":"manifest.json","r":"task-13-report.md","t":"nextjs"},{"scope":"session"}]
+["A",5,4,[["F","b",1,430,"05d8a9b2b5879a0eb571b9c206127e8e9f5ce281c3c949273e70441c2d629a37"]],["implement","nextjs","tdd","commit","self_review"],{"want":"DONE_status","budget":0}]

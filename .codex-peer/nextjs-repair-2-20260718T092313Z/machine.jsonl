@@ -1,0 +1,9 @@
+{"ok":true,"frame":["H",1,0,[],{"side":"local","mode":"human-facing"},{"codec":"ipc-ast-v1","session":"nextjs-repair-2-20260718T092313Z"}]}
+{"ok":true,"frame":["H",2,1,[],{"side":"remote","mode":"worker-peer"},{"codec":"ipc-ast-v1","session":"nextjs-repair-2-20260718T092313Z"}]}
+{"ok":true,"frame":["C",3,2,[],["contract","nextjs_repair_2","two_file_scope"],{"workspace":"/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2","autonomy":"workspace_only","subagents":false}]}
+{"ok":true,"frame":["K",4,3,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]}
+{"ok":true,"frame":["D",5,4,[],{"f1":"hermes_cli/hades_index/lifecycle/frameworks/nextjs.py","f2":"tests/hermes_cli/test_hades_lifecycle_nextjs.py","finding":"T13-NEXT-005-R1","base":"0b412baa45626d39b51f6243c9537ab78fa49725"},{"scope":"session"}]}
+{"ok":true,"frame":["S",6,5,[["ART","review","0926b56378622a7cc2a5e1a8a0ee2668884193e89ea59ae967a607223c693f43"]],["checkpoint","root_cause_confirmed","nested_return_scope"],{"phase":"repair_authorized","resume":"fresh_compact"}]}
+{"ok":true,"frame":["A",7,6,[["F","f1",524,565,"bounded"],["F","f2",453,475,"regression"]],["repair","finding","red_green_verify"],{"want":"commit_and_report","scope":"two_files","subagents":false}]}
+{"ok":true,"frame":["S",8,7,[],["checkpoint","red_invalid","production_edited_before_red"],{"action":"restore_production_keep_test","commit":false}]}
+{"ok":true,"frame":["A",9,8,[["F","f1",524,565,"restore_head"],["F","f2",453,500,"keep_regression"]],["recover","observe_red","reimplement_verify"],{"want":"valid_red_green_commit","scope":"two_files","subagents":false}]}

@@ -1,0 +1,7 @@
+{"ok":true,"frame":["H",1,0,[],{"side":"local","mode":"human-facing"},{"codec":"ipc-ast-v1","session":"nextjs-rereview-2-20260718T094022Z"}]}
+{"ok":true,"frame":["H",2,1,[],{"side":"remote","mode":"reviewer-peer"},{"codec":"ipc-ast-v1","session":"nextjs-rereview-2-20260718T094022Z"}]}
+{"ok":true,"frame":["C",3,2,[],["contract","final_scoped_rereview","read_only"],{"workspace":"/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2","write":".superpowers/sdd/task-13-rereview-2.md"}]}
+{"ok":true,"frame":["K",4,3,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]}
+{"ok":true,"frame":["D",5,4,[],{"finding":"T13-NEXT-005-R1","head":"4ddf8dbba5564a55b667be742f614696b1d581b4","package":"rereview2-cd5100374..4ddf8dbba.diff"},{"scope":"session"}]}
+{"ok":true,"frame":["S",6,5,[["ART","package","6477f5c0f8598b1c9dba377c3728b3be4a7ed904660fa6918518215f746daee7"]],["checkpoint","controller_gates_green","21_passed"],{"phase":"final_rereview"}]}
+{"ok":true,"frame":["A",7,6,[],["review","finding_closure","direct_regressions"],{"want":"approved_or_terminal","scope":"T13-NEXT-005-R1"}]}

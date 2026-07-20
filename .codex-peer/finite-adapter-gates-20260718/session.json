@@ -1,0 +1,24 @@
+{
+  "session_id": "finite-adapter-gates-20260718",
+  "target": "ubuntu@162.19.229.31",
+  "local_workspace": "/Users/gabriele/Dev/Hephaistos",
+  "remote_workspace": "/home/ubuntu/hephaistos-graph-lifecycle-v2",
+  "runtime_provider": "tmux",
+  "runtime_session": "codex-peer-finite-adapter-gates-20260718",
+  "codex_command": "/usr/local/bin/codex",
+  "codex_version": "0.144.5",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh",
+  "flags": ["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
+  "guardrails": [
+    "workspace-only changes",
+    "no sudo or global runtime changes",
+    "no database or service mutations",
+    "preserve pre-existing progress.md modification",
+    "execute finite review policy"
+  ],
+  "compact_resume": true,
+  "created_at": "2026-07-17T22:38:18Z",
+  "last_seq": 5,
+  "last_ack": 0
+}

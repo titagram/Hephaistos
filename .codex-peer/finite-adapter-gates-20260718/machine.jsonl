@@ -1,0 +1,5 @@
+["H",1,0,[],{"mode":"human-facing","side":"local"},{"codec":"ipc-ast-v1","session":"finite-adapter-gates-20260718"}]
+["C",2,0,[],["contract","execute_plan","subagent_driven"],{"autonomy":"workspace","guardrails":"no_sudo_no_global_no_db","workspace":"/home/ubuntu/hephaistos-graph-lifecycle-v2"}]
+["K",3,0,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]
+["D",4,0,[],{"ledger":".superpowers/sdd/progress.md","plan":"docs/superpowers/plans/2026-07-17-finite-adapter-acceptance-gates-implementation.md","spec":"docs/superpowers/specs/2026-07-17-finite-adapter-acceptance-gates-design.md"},{"scope":"session"}]
+["A",5,0,[],["execute","plan","continuous"],{"review":"finite","strategy":"subagent-driven","want":"verified_task7_handoff"}]

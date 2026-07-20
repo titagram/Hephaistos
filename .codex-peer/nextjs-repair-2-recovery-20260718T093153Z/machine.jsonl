@@ -1,0 +1,6 @@
+{"ok":true,"frame":["H",1,0,[],{"side":"local","mode":"human-facing"},{"codec":"ipc-ast-v1","session":"nextjs-repair-2-recovery-20260718T093153Z"}]}
+{"ok":true,"frame":["H",2,1,[],{"side":"remote","mode":"worker-peer"},{"codec":"ipc-ast-v1","session":"nextjs-repair-2-recovery-20260718T093153Z"}]}
+{"ok":true,"frame":["C",3,2,[],["contract","tdd_recovery","two_file_scope"],{"workspace":"/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2","autonomy":"workspace_only","subagents":false}]}
+{"ok":true,"frame":["K",4,3,[],["max_len",4096,"max_depth",32,"max_nodes",512],{"dict":true,"fallback":"ipc-ast-v1"}]}
+{"ok":true,"frame":["S",8,7,[],["checkpoint","red_invalid","production_edited_before_red"],{"action":"restore_production_keep_test","commit":false}]}
+{"ok":true,"frame":["A",9,8,[["F","f1",524,565,"restore_head"],["F","f2",453,500,"keep_regression"]],["recover","observe_red","reimplement_verify"],{"want":"valid_red_green_commit","scope":"two_files","subagents":false}]}

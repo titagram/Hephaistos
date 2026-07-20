@@ -1,0 +1,18 @@
+{
+  "session_id": "nextjs-repair-2-recovery-20260718T093153Z",
+  "ssh_target": "ubuntu@162.19.229.31",
+  "local_workspace": "/Users/gabriele/Dev/Hephaistos",
+  "remote_workspace": "/home/ubuntu/.worktrees/hephaistos-nextjs-lifecycle-v2",
+  "runtime_provider": "tmux",
+  "runtime_session": "codex-peer-nextjs-repair-2-recovery-20260718T093153Z",
+  "codex_command": "/usr/local/bin/codex",
+  "command_resolution": "existing verified absolute path",
+  "codec": "ipc-ast-v1",
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "high",
+  "guardrails": "restore production to HEAD first; preserve regression; valid RED required; two files; no subagents",
+  "compact_resume": true,
+  "created_at": "2026-07-18T09:31:53Z",
+  "last_seq": 9,
+  "last_ack": 8
+}

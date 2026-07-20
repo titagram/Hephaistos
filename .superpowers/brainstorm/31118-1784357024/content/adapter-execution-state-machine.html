@@ -1,0 +1,97 @@
+<h2>Task 12 + 13: esecuzione parallela senza deadlock</h2>
+<p class="subtitle">Due lane indipendenti; una sola autorità Git; integrazione seriale e stati monotoni.</p>
+
+<div class="section">
+  <div class="label">0 · Preparazione controllata</div>
+  <div class="mockup">
+    <div class="mockup-body" style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:12px;align-items:center;text-align:center">
+      <div style="padding:16px;border:1px solid var(--border);border-radius:10px"><strong>main verificata</strong><br><small>merge locale già verde</small></div>
+      <div style="font-size:24px">→</div>
+      <div style="padding:16px;border:1px solid var(--border);border-radius:10px"><strong>push origin/main</strong><br><small>SHA remoto immutabile</small></div>
+      <div style="font-size:24px">→</div>
+      <div style="padding:16px;border:2px solid #7c5cff;border-radius:10px"><strong>integration branch</strong><br><small>manifest con anchor + digest</small></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">1 · Il controller crea entrambi i worktree una sola volta</div>
+  <div class="split">
+    <div class="mockup">
+      <div class="mockup-header">Lane Express · Task 12</div>
+      <div class="mockup-body">
+        <p><strong>terra/high</strong> · nessun subagent</p>
+        <p>Scrive soltanto <code>express.py</code> e il relativo test.</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">RED</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">GREEN</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">REVIEW</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid #34a853;border-radius:6px">APPROVED</span>
+        </div>
+        <p style="margin-top:12px"><small>Al massimo un repair e una re-review. Altrimenti: ESCALATED.</small></p>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">Lane Next.js · Task 13</div>
+      <div class="mockup-body">
+        <p><strong>terra/high</strong> · nessun subagent</p>
+        <p>Scrive soltanto <code>nextjs.py</code> e il relativo test.</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">RED</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">GREEN</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid var(--border);border-radius:6px">REVIEW</span><span>→</span>
+          <span style="padding:5px 8px;border:1px solid #34a853;border-radius:6px">APPROVED</span>
+        </div>
+        <p style="margin-top:12px"><small>Può arrivare a READY prima di Express: non aspetta un agente, aspetta solo un evento del controller.</small></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">2 · Barrier di integrazione posseduta soltanto dall'orchestrator</div>
+  <div class="mockup">
+    <div class="mockup-body" style="display:grid;grid-template-columns:1fr auto 1.2fr auto 1fr auto 1.2fr;gap:10px;align-items:center;text-align:center">
+      <div style="padding:14px;border:1px solid #34a853;border-radius:10px"><strong>Express APPROVED</strong></div>
+      <div>→</div>
+      <div style="padding:14px;border:2px solid #7c5cff;border-radius:10px"><strong>cherry-pick Express</strong><br><small>gate parziale</small></div>
+      <div>→</div>
+      <div style="padding:14px;border:1px solid #34a853;border-radius:10px"><strong>Next.js APPROVED</strong></div>
+      <div>→</div>
+      <div style="padding:14px;border:2px solid #7c5cff;border-radius:10px"><strong>cherry-pick Next.js</strong><br><small>aggregate completo</small></div>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>Perché non può deadlockare</h4>
+    <ul>
+      <li>Nessun implementer crea worktree, integra o attende l'altro.</li>
+      <li>Le quattro ownership di file sono disgiunte.</li>
+      <li>Gli stati avanzano soltanto in avanti: nessun lock reciproco.</li>
+      <li>Un'escalation congela una lane, non cancella né blocca l'altra.</li>
+      <li>Next.js dipende dall'evento <code>EXPRESS_INTEGRATED</code>, non dal processo Express.</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>Condizioni di arresto</h4>
+    <ul>
+      <li>Anchor o digest diversi dal manifest.</li>
+      <li>Necessità di modificare file condivisi o registry.</li>
+      <li>Review non chiusa dopo un repair.</li>
+      <li>Gate post-cherry-pick rosso: stop ed escalation, mai attesa indefinita.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Architettura approvata</h3><p>Passiamo a error handling, timeout e recovery.</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>Da rivedere</h3><p>Indica in chat quale passaggio vuoi cambiare.</p></div>
+  </div>
+</div>
