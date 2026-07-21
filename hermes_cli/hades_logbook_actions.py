@@ -195,18 +195,24 @@ def enqueue_logbook_entry(
     )
 
 
-def _response_identity(response: Any) -> tuple[str | None, str | None]:
-    pending = [response]
-    while pending:
-        value = pending.pop()
-        if not isinstance(value, dict):
-            continue
-        key = value.get("idempotency_key")
-        if isinstance(key, str) and key:
-            entry_id = value.get("id") or value.get("entry_id")
-            return (str(entry_id) if entry_id else None, key)
-        pending.extend(item for item in value.values() if isinstance(item, dict))
-    return None, None
+def _response_identity(response: Any) -> str | None:
+    """Read only the documented success envelope; never search nested records."""
+
+    if not isinstance(response, dict):
+        return None
+    entry = response.get("entry")
+    if entry is None:
+        data = response.get("data")
+        entry = data.get("entry") if isinstance(data, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    entry_id = entry.get("id") or entry.get("entry_id")
+    if not isinstance(entry_id, str):
+        return None
+    clean = entry_id.strip()
+    if not clean or len(clean) > 255 or _CONTROL.search(clean):
+        return None
+    return clean
 
 
 def _conflict_existing_entry_identity(details: Any) -> tuple[str | None, str | None]:
@@ -255,6 +261,7 @@ def _conflict_dead_letter_message() -> str:
 
 
 _IDEMPOTENCY_CONFLICT_ERROR = "backend idempotency conflict does not match the persisted request"
+_INVALID_LOGBOOK_RESPONSE_ERROR = "backend logbook response missing entry id"
 
 
 def flush_due_logbook_entries(
@@ -300,7 +307,22 @@ def flush_due_logbook_entries(
                 )
                 summary["retry"] += 1
             continue
-        response_id, _response_key = _response_identity(response)
+        response_id = _response_identity(response)
+        if response_id is None:
+            if entry.attempts >= MAX_RETRY_ATTEMPTS:
+                db.resolve_logbook_outbox_entry(
+                    conn, entry_id=entry.id, lease_token=entry.lease_token or "", state="dead_letter",
+                    now=timestamp, last_error=_INVALID_LOGBOOK_RESPONSE_ERROR,
+                )
+                summary["dead_letter"] += 1
+            else:
+                db.resolve_logbook_outbox_entry(
+                    conn, entry_id=entry.id, lease_token=entry.lease_token or "", state="pending",
+                    now=timestamp, next_attempt_at=_retry_at(entry, timestamp),
+                    last_error=_INVALID_LOGBOOK_RESPONSE_ERROR,
+                )
+                summary["retry"] += 1
+            continue
         db.resolve_logbook_outbox_entry(
             conn, entry_id=entry.id, lease_token=entry.lease_token or "", state="sent",
             now=timestamp, response_id=response_id,

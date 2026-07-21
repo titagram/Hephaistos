@@ -46,11 +46,14 @@ def test_immediate_logbook_write_materializes_complete_backend_request(tmp_path)
         def create_logbook_entry(self, project_id, **payload):
             assert project_id == "project_1"
             self.payloads.append(payload)
-            return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
+            return {"entry": {"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, "replayed": False}
 
     conn = db.connect(tmp_path / "backend.db")
     client = Client()
-    assert run_logbook_write(conn, command=_command(), binding=_binding(), client=client, now=1000).state == "sent"
+    result = run_logbook_write(conn, command=_command(), binding=_binding(), client=client, now=1000)
+    assert result.state == "sent"
+    assert result.payload == {"entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    assert db.list_logbook_outbox_entries(conn)[0].response_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV"
     assert client.payloads == [_expected_wire_request()]
 
 
@@ -65,7 +68,7 @@ def test_replayed_logbook_write_materializes_same_complete_backend_request_after
         def create_logbook_entry(self, project_id, **payload):
             assert project_id == "project_1"
             self.payloads.append(payload)
-            return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
+            return {"entry": {"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, "replayed": False}
 
     path = tmp_path / "backend.db"
     conn = db.connect(path)
@@ -76,6 +79,26 @@ def test_replayed_logbook_write_materializes_same_complete_backend_request_after
     client = Client()
     assert flush_due_logbook_entries(reopened, client, now=1000)["sent"] == 1
     assert client.payloads == [_expected_wire_request()]
+    assert db.list_logbook_outbox_entries(reopened)[0].response_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def test_malformed_success_response_retries_without_marking_logbook_entry_sent(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry, flush_due_logbook_entries
+
+    class Client:
+        def create_logbook_entry(self, _project_id, **_payload):
+            return {"entry": {"actor": {"id": "not-an-entry-id"}}, "replayed": False}
+
+    conn = db.connect(tmp_path / "backend.db")
+    enqueue_logbook_entry(conn, command=_command(), binding=_binding(), now=999)
+    assert flush_due_logbook_entries(conn, Client(), now=1000) == {
+        "pending": 1, "sent": 0, "retry": 1, "dead_letter": 0,
+    }
+    current = db.list_logbook_outbox_entries(conn)[0]
+    assert current.state == "pending"
+    assert current.response_id is None
+    assert current.last_error == "backend logbook response missing entry id"
 
 
 def test_write_persists_before_network_and_replays_once_after_restart(tmp_path):
