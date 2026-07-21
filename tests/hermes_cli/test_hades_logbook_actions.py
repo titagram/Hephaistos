@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,33 @@ def test_narrative_file_must_be_regular_utf8_and_at_most_8000_code_points(tmp_pa
     directory.mkdir()
     with pytest.raises(ValueError, match="regular"):
         read_narrative_file(directory)
+
+
+def test_narrative_file_is_read_through_one_nofollow_file_descriptor(monkeypatch, tmp_path):
+    """The validation must describe the same file descriptor that is read."""
+
+    from hermes_cli import hades_logbook_actions as actions
+
+    narrative = tmp_path / "narrative.md"
+    narrative.write_text("done", encoding="utf-8")
+    opened: list[int] = []
+    real_open = os.open
+
+    def tracking_open(path, flags, *args):
+        opened.append(flags)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(
+        actions.Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must read the opened descriptor")),
+    )
+
+    assert actions.read_narrative_file(narrative) == "done"
+    assert opened
+    if hasattr(os, "O_NOFOLLOW"):
+        assert opened[0] & os.O_NOFOLLOW
 
 
 def test_parser_accepts_bounded_logbook_commands_and_advertises_capability():

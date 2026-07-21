@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -55,19 +56,30 @@ def read_narrative_file(path_value: str | Path) -> str:
     if not clean or clean == "-":
         raise ValueError("narrative file must be a regular UTF-8 file, not standard input")
     path = Path(clean).expanduser()
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, flags)
     except OSError:
         raise ValueError("narrative file could not be read") from None
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("narrative file must be a regular file")
-    if metadata.st_size > MAX_NARRATIVE_BYTES:
-        raise ValueError("narrative file exceeds 8,000 code points")
     try:
-        raw = path.read_bytes()
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("narrative file must be a regular file")
+        raw = bytearray()
+        while len(raw) <= MAX_NARRATIVE_BYTES:
+            chunk = os.read(descriptor, MAX_NARRATIVE_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) > MAX_NARRATIVE_BYTES:
+            raise ValueError("narrative file exceeds 8,000 code points")
         narrative = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         raise ValueError("narrative file must be valid UTF-8") from None
+    finally:
+        os.close(descriptor)
     if len(narrative) > MAX_NARRATIVE_CODE_POINTS:
         raise ValueError("narrative file exceeds 8,000 code points")
     return narrative
@@ -171,6 +183,21 @@ def _response_identity(response: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _conflict_existing_entry_identity(details: Any) -> tuple[str | None, str | None]:
+    """Trust a 409 only when its explicit existing-entry contract proves identity."""
+
+    if not isinstance(details, dict):
+        return None, None
+    existing_entry = details.get("existing_entry")
+    if not isinstance(existing_entry, dict):
+        return None, None
+    key = existing_entry.get("idempotency_key")
+    if not isinstance(key, str) or not key:
+        return None, None
+    entry_id = existing_entry.get("id") or existing_entry.get("entry_id")
+    return (str(entry_id) if entry_id else None, key)
+
+
 def _error_text(exc: BaseException) -> str:
     message = redact_secret(str(exc)).replace("\n", " ").strip()
     return message[:1_000] or "backend logbook request failed"
@@ -194,6 +221,16 @@ def _dead_letter_message() -> str:
     )
 
 
+def _conflict_dead_letter_message() -> str:
+    return (
+        "logbook write conflicts with a different existing backend entry; inspect that entry "
+        "and retry with the correct idempotency key"
+    )
+
+
+_IDEMPOTENCY_CONFLICT_ERROR = "backend idempotency conflict does not match the persisted request"
+
+
 def flush_due_logbook_entries(
     conn: Any, client: Any, *, now: int | None = None, limit: int = 20,
     project_id: str | None = None, workspace_binding_id: str | None = None,
@@ -210,7 +247,7 @@ def flush_due_logbook_entries(
             response = client.create_logbook_entry(entry.project_id, **entry.request)
         except Exception as exc:
             if isinstance(exc, HadesBackendError) and exc.status_code == 409:
-                response_id, response_key = _response_identity(exc.details)
+                response_id, response_key = _conflict_existing_entry_identity(exc.details)
                 if response_key == entry.idempotency_key:
                     db.resolve_logbook_outbox_entry(
                         conn, entry_id=entry.id, lease_token=entry.lease_token or "", state="sent",
@@ -220,7 +257,7 @@ def flush_due_logbook_entries(
                     continue
                 db.resolve_logbook_outbox_entry(
                     conn, entry_id=entry.id, lease_token=entry.lease_token or "", state="dead_letter",
-                    now=timestamp, last_error="backend idempotency conflict does not match the persisted request",
+                    now=timestamp, last_error=_IDEMPOTENCY_CONFLICT_ERROR,
                 )
                 summary["dead_letter"] += 1
                 continue
@@ -271,6 +308,8 @@ def run_logbook_write(
     if current.state == "sent":
         return LogbookActionResult(0, "sent", "logbook entry recorded", {"entry_id": current.response_id})
     if current.state == "dead_letter":
+        if current.last_error == _IDEMPOTENCY_CONFLICT_ERROR:
+            return LogbookActionResult(1, "dead_letter", _conflict_dead_letter_message())
         return LogbookActionResult(1, "dead_letter", _dead_letter_message())
     return LogbookActionResult(
         1,

@@ -252,7 +252,7 @@ CREATE TABLE IF NOT EXISTS logbook_outbox (
     last_error            TEXT,
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
-    UNIQUE(project_id, idempotency_key)
+    UNIQUE(project_id, workspace_binding_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_logbook_outbox_due
     ON logbook_outbox(state, next_attempt_at, created_at, id);
@@ -616,6 +616,52 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
         )
 
 
+def _has_binding_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
+    """Return whether the durable outbox has its intended three-column key."""
+
+    for index in conn.execute("PRAGMA index_list(logbook_outbox)").fetchall():
+        if not bool(index[2]):
+            continue
+        columns = [
+            str(column[2])
+            for column in conn.execute(f"PRAGMA index_info({index[1]})").fetchall()
+        ]
+        if columns == ["project_id", "workspace_binding_id", "idempotency_key"]:
+            return True
+    return False
+
+
+def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
+    """Rebuild only legacy logbook outboxes whose old key crossed bindings."""
+
+    if _has_binding_scoped_logbook_idempotency(conn):
+        return
+    with write_txn(conn):
+        conn.execute(
+            "CREATE TABLE logbook_outbox_replacement ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, "
+            "workspace_binding_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, "
+            "request_json TEXT NOT NULL, request_digest TEXT NOT NULL, "
+            "state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'sent', 'dead_letter')), "
+            "lease_token TEXT, lease_expires_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, "
+            "next_attempt_at INTEGER NOT NULL, response_id TEXT, last_error TEXT, "
+            "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+            "UNIQUE(project_id, workspace_binding_id, idempotency_key))"
+        )
+        conn.execute(
+            "INSERT INTO logbook_outbox_replacement "
+            "SELECT id, project_id, workspace_binding_id, idempotency_key, request_json, "
+            "request_digest, state, lease_token, lease_expires_at, attempts, next_attempt_at, "
+            "response_id, last_error, created_at, updated_at FROM logbook_outbox"
+        )
+        conn.execute("DROP TABLE logbook_outbox")
+        conn.execute("ALTER TABLE logbook_outbox_replacement RENAME TO logbook_outbox")
+        conn.execute(
+            "CREATE INDEX idx_logbook_outbox_due "
+            "ON logbook_outbox(state, next_attempt_at, created_at, id)"
+        )
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -649,6 +695,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
             # schema pass so partially-created legacy stores migrate safely too.
             _migrate_agent_coordination_schema(conn)
             conn.executescript(SCHEMA_SQL)
+            _migrate_logbook_outbox_idempotency(conn)
             _migrate_persephone_message_identities(conn)
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
@@ -1773,8 +1820,9 @@ def enqueue_logbook_outbox_entry(
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT * FROM logbook_outbox WHERE project_id = ? AND idempotency_key = ?",
-            (project_id, idempotency_key),
+            "SELECT * FROM logbook_outbox WHERE project_id = ? AND workspace_binding_id = ? "
+            "AND idempotency_key = ?",
+            (project_id, workspace_binding_id, idempotency_key),
         ).fetchone()
         if existing is not None:
             loaded = _logbook_outbox_from_row(existing)

@@ -59,6 +59,81 @@ def test_sync_flushes_durable_logbook_entries_before_passive_reads(monkeypatch, 
     assert calls[0] == "write"
 
 
+def test_sync_logbook_summary_counts_current_scoped_pending_leased_and_dead_letters(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn, agent_id="agent_1", project_id="project_1", base_url="https://backend.example",
+            label="dev", token_env_key="TOKEN_TEST", capabilities={},
+        )
+        binding = hdb.upsert_workspace_binding(
+            conn, project_id="project_1", agent_id="agent_1", local_project_id="local_1",
+            workspace_fingerprint="fingerprint_1", display_path=str(workspace), repo_root=str(workspace),
+            git_remote_display="", git_remote_hash="", head_commit="", backend_workspace_binding_id="binding_1",
+        )
+        pending = enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "pending", "idempotency_key": "pending", "references": []}, binding=binding, now=2000)
+        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "leased", "idempotency_key": "leased", "references": []}, binding=binding, now=999)
+        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "dead", "idempotency_key": "dead", "references": []}, binding=binding, now=999)
+        leased_entry, dead_entry = hdb.lease_due_logbook_outbox_entries(conn, now=1000, limit=20)
+        hdb.resolve_logbook_outbox_entry(conn, entry_id=dead_entry.id, lease_token=dead_entry.lease_token or "", state="dead_letter", now=1000, last_error="rejected")
+        assert pending.id and leased_entry.id
+
+    class Client:
+        def capabilities(self): return {}
+        def memory_snapshot(self, **payload): return {"items": []}
+        def list_inbox(self, **payload): return {"events": []}
+        def pull_jobs(self, **payload): return {"jobs": []}
+
+    result = run_backend_sync(client_factory=Client, now=1000, quiet=True)
+    assert result.exit_code == 1
+    assert result.summary["logbook_pending"] == 2
+    assert result.summary["logbook_dead_letter"] == 1
+
+
+def test_sync_uses_one_total_logbook_budget_across_workspace_bindings(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(conn, agent_id="agent_1", project_id="project_1", base_url="https://backend.example", label="dev", token_env_key="TOKEN_TEST", capabilities={})
+        for number in range(2):
+            workspace = tmp_path / f"repo-{number}"
+            workspace.mkdir()
+            binding = hdb.upsert_workspace_binding(
+                conn, project_id="project_1", agent_id="agent_1", local_project_id=f"local_{number}",
+                workspace_fingerprint=f"fingerprint_{number}", display_path=str(workspace), repo_root=str(workspace),
+                git_remote_display="", git_remote_hash="", head_commit="", backend_workspace_binding_id=f"binding_{number}",
+            )
+            for index in range(11):
+                enqueue_logbook_entry(conn, command={"event_type": "change", "summary": f"entry {number}-{index}", "idempotency_key": f"key-{number}-{index}", "references": []}, binding=binding, now=999)
+
+    calls: list[str] = []
+
+    class Client:
+        def create_logbook_entry(self, project_id, **payload):
+            calls.append(payload["idempotency_key"])
+            return {"entry": {"id": payload["idempotency_key"], "idempotency_key": payload["idempotency_key"]}}
+        def capabilities(self): return {}
+        def memory_snapshot(self, **payload): return {"items": []}
+        def list_inbox(self, **payload): return {"events": []}
+        def pull_jobs(self, **payload): return {"jobs": []}
+
+    result = run_backend_sync(client_factory=Client, now=1000, quiet=True)
+    assert len(calls) == 20
+    assert result.summary["logbook_sent"] == 20
+    assert result.summary["logbook_pending"] == 2
+
+
 def test_sync_path_executes_information_request_once(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

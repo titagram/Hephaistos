@@ -277,6 +277,7 @@ def run_backend_sync(
     sync_errors = 0
     expired = 0
     logbook_sent = logbook_retry = logbook_dead_letter = 0
+    logbook_budget = 20
 
     for job in expired_jobs:
         with db.connect_closing() as conn:
@@ -346,28 +347,30 @@ def run_backend_sync(
         # A logbook append is a durable consequence of a prior mutation.  Do
         # not let later passive reads make the sync look fully healthy while a
         # persisted append is still unsent or permanently rejected.
-        try:
-            with db.connect_closing() as conn:
-                logbook = flush_due_logbook_entries(
-                    conn,
-                    client,
-                    now=now,
-                    limit=20,
-                    project_id=binding.project_id,
-                    workspace_binding_id=binding.backend_workspace_binding_id,
-                )
-            logbook_sent += logbook["sent"]
-            logbook_retry += logbook["retry"]
-            logbook_dead_letter += logbook["dead_letter"]
-            sync_errors += logbook["retry"] + logbook["dead_letter"]
-        except Exception as exc:
-            sync_errors += 1
-            _record_sync_error(binding, str(exc))
-            if not quiet:
-                print(
-                    f"backend sync: failed to flush logbook for "
-                    f"{binding.display_path}: {redact_secret(str(exc))}"
-                )
+        if logbook_budget > 0:
+            try:
+                with db.connect_closing() as conn:
+                    logbook = flush_due_logbook_entries(
+                        conn,
+                        client,
+                        now=now,
+                        limit=logbook_budget,
+                        project_id=binding.project_id,
+                        workspace_binding_id=binding.backend_workspace_binding_id,
+                    )
+                delivered = logbook["sent"] + logbook["retry"] + logbook["dead_letter"]
+                logbook_budget = max(0, logbook_budget - delivered)
+                logbook_sent += logbook["sent"]
+                logbook_retry += logbook["retry"]
+                logbook_dead_letter += logbook["dead_letter"]
+            except Exception as exc:
+                sync_errors += 1
+                _record_sync_error(binding, str(exc))
+                if not quiet:
+                    print(
+                        f"backend sync: failed to flush logbook for "
+                        f"{binding.display_path}: {redact_secret(str(exc))}"
+                    )
 
         if binding_agent.agent_id not in queue_capabilities:
             try:
@@ -648,8 +651,23 @@ def run_backend_sync(
             if outcome["quarantined"]:
                 auth_quarantined_routes += 1
 
+    selected_logbook_scopes = {
+        (binding.project_id, binding.backend_workspace_binding_id) for binding in bindings
+    }
     with db.connect_closing() as conn:
-        logbook_pending = len(db.list_logbook_outbox_entries(conn, states=("pending", "leased")))
+        current_logbook_entries = [
+            entry for entry in db.list_logbook_outbox_entries(conn)
+            if (entry.project_id, entry.workspace_binding_id) in selected_logbook_scopes
+        ]
+    logbook_pending = sum(entry.state in {"pending", "leased"} for entry in current_logbook_entries)
+    logbook_sent = sum(entry.state == "sent" for entry in current_logbook_entries)
+    logbook_dead_letter = sum(entry.state == "dead_letter" for entry in current_logbook_entries)
+    logbook_retry = sum(
+        entry.state == "pending" and entry.last_error is not None
+        for entry in current_logbook_entries
+    )
+    if logbook_pending or logbook_dead_letter:
+        sync_errors += 1
 
     summary = {
         "pulled": pulled,
