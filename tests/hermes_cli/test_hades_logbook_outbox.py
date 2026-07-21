@@ -11,7 +11,7 @@ def _binding():
     )
 
 
-def _command(key: str = "stable-key") -> dict[str, object]:
+def _command(key: str = "stable-idempotency-0001") -> dict[str, object]:
     return {
         "event_type": "change",
         "summary": "Persisted before the network call.",
@@ -44,7 +44,7 @@ def test_write_persists_before_network_and_replays_once_after_restart(tmp_path):
     reopened = db.connect(tmp_path / "backend.db")
     client = RecordingLogbookClient()
     assert flush_due_logbook_entries(reopened, client, now=1000)["sent"] == 1
-    assert client.idempotency_keys == ["stable-key"]
+    assert client.idempotency_keys == ["stable-idempotency-0001"]
     assert flush_due_logbook_entries(reopened, client, now=1001)["sent"] == 0
     assert db.list_logbook_outbox_entries(reopened)[0].state == "sent"
 
@@ -106,7 +106,7 @@ def test_conflict_with_different_idempotency_key_is_dead_letter(tmp_path):
             raise HadesBackendError(
                 "conflict",
                 status_code=409,
-                details={"existing_entry": {"id": "entry_1", "idempotency_key": "other-key"}},
+                details={"existing_entry": {"id": "entry_1", "idempotency_key": "different-idempotency-0001"}},
             )
 
     conn = db.connect(tmp_path / "backend.db")
@@ -129,7 +129,7 @@ def test_conflict_request_key_cannot_substitute_for_a_different_existing_entry(t
                 status_code=409,
                 details={
                     "request": {"idempotency_key": payload["idempotency_key"]},
-                    "existing_entry": {"id": "entry_1", "idempotency_key": "other-key"},
+                    "existing_entry": {"id": "entry_1", "idempotency_key": "different-idempotency-0001"},
                 },
             )
 
@@ -168,7 +168,7 @@ def test_conflict_dead_letter_uses_conflict_remedy_not_capability_remedy(tmp_pat
         def create_logbook_entry(self, project_id, **payload):
             raise HadesBackendError(
                 "conflict", status_code=409,
-                details={"existing_entry": {"id": "entry_1", "idempotency_key": "other-key"}},
+                details={"existing_entry": {"id": "entry_1", "idempotency_key": "different-idempotency-0001"}},
             )
 
     conn = db.connect(tmp_path / "backend.db")
@@ -195,8 +195,8 @@ def test_idempotency_key_is_independent_for_each_workspace_binding_of_one_projec
     first = _binding()
     second = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2")
     conn = db.connect(tmp_path / "backend.db")
-    enqueue_logbook_entry(conn, command=_command("shared-key"), binding=first, now=999)
-    enqueue_logbook_entry(conn, command=_command("shared-key"), binding=second, now=999)
+    enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=first, now=999)
+    enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=second, now=999)
     client = Client()
     result = flush_due_logbook_entries(
         conn, client, now=1000, project_id="project_1", workspace_binding_id="binding_1",
@@ -226,10 +226,10 @@ def test_existing_outbox_schema_migrates_to_binding_scoped_idempotency(tmp_path)
     legacy.close()
 
     conn = db.connect(path)
-    enqueue_logbook_entry(conn, command=_command("shared-key"), binding=_binding(), now=999)
+    enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=_binding(), now=999)
     enqueue_logbook_entry(
         conn,
-        command=_command("shared-key"),
+        command=_command("shared-idempotency-0001"),
         binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
         now=999,
     )
@@ -250,9 +250,9 @@ def test_immediate_write_flush_is_scoped_to_its_workspace_binding(tmp_path):
 
     foreign = SimpleNamespace(project_id="project_2", backend_workspace_binding_id="binding_2")
     conn = db.connect(tmp_path / "backend.db")
-    enqueue_logbook_entry(conn, command=_command("foreign-key"), binding=foreign, now=999)
+    enqueue_logbook_entry(conn, command=_command("foreign-idempotency-0001"), binding=foreign, now=999)
     client = Client()
-    result = run_logbook_write(conn, command=_command("current-key"), binding=_binding(), client=client, now=1000)
+    result = run_logbook_write(conn, command=_command("current-idempotency-0001"), binding=_binding(), client=client, now=1000)
     assert result.state == "sent"
     assert client.projects == ["project_1"]
     assert [entry.state for entry in db.list_logbook_outbox_entries(conn)] == ["pending", "sent"]

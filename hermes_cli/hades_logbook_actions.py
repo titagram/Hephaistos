@@ -26,14 +26,19 @@ LOGBOOK_EVENT_TYPES = frozenset({
     "decision", "failure", "rollback", "note",
 })
 LOGBOOK_SEVERITIES = frozenset({"info", "warning", "error"})
+LOGBOOK_REFERENCE_KINDS = frozenset({
+    "wiki_page", "wiki_revision", "graph_import", "verification_work",
+    "kanban_task", "run", "repository", "commit", "file",
+})
 MAX_NARRATIVE_CODE_POINTS = 8_000
 MAX_NARRATIVE_BYTES = MAX_NARRATIVE_CODE_POINTS * 4
 MAX_SUMMARY_CODE_POINTS = 240
-MAX_REFERENCE_COUNT = 40
+MAX_REFERENCE_COUNT = 20
 MAX_RETRY_ATTEMPTS = 5
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 3_600
 _REFERENCE_KIND = re.compile(r"\A[a-z][a-z0-9_-]{0,63}\Z")
+_IDEMPOTENCY_KEY = re.compile(r"\A[ -~]{16,128}\Z")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -115,10 +120,22 @@ def _parse_references(value: Any) -> list[dict[str, str]]:
             reference_id = reference_id.strip()
         else:
             raise ValueError("logbook reference must use KIND:ID")
-        if _REFERENCE_KIND.fullmatch(kind) is None or not reference_id or len(reference_id) > 255 or _CONTROL.search(reference_id):
+        if (
+            _REFERENCE_KIND.fullmatch(kind) is None
+            or kind not in LOGBOOK_REFERENCE_KINDS
+            or not reference_id
+            or len(reference_id) > 255
+            or _CONTROL.search(reference_id)
+        ):
             raise ValueError("logbook reference must use a safe KIND:ID")
         references.append({"kind": kind, "id": reference_id})
     return references
+
+
+def _validate_idempotency_key(value: Any) -> str:
+    if not isinstance(value, str) or _IDEMPOTENCY_KEY.fullmatch(value) is None:
+        raise ValueError("logbook idempotency key must be 16-128 printable ASCII characters")
+    return value
 
 
 def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str, Any]:
@@ -129,7 +146,7 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     severity = _clean_text(command.get("severity") or "info", field="severity", maximum=16, required=True)
     if severity not in LOGBOOK_SEVERITIES:
         raise ValueError("logbook severity must be info, warning, or error")
-    idempotency_key = _clean_text(command.get("idempotency_key"), field="idempotency key", maximum=255, required=True)
+    idempotency_key = _validate_idempotency_key(command.get("idempotency_key"))
     correlation_id = _clean_text(command.get("correlation_id"), field="correlation id", maximum=255)
     narrative = command.get("narrative_markdown")
     if narrative is not None:

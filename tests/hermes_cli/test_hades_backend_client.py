@@ -264,7 +264,7 @@ CLIENT_ROUTE_CASES = [
             "event_type": "change",
             "summary": "Done",
             "severity": "info",
-            "idempotency_key": "key_1",
+            "idempotency_key": "client-idempotency-0001",
             "references": [],
         },
         "json_body": {
@@ -273,7 +273,7 @@ CLIENT_ROUTE_CASES = [
             "event_type": "change",
             "summary": "Done",
             "severity": "info",
-            "idempotency_key": "key_1",
+            "idempotency_key": "client-idempotency-0001",
             "references": [],
         },
     },
@@ -1003,7 +1003,7 @@ def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201
     assert client.get_logbook_entry("project_1", "entry_1", workspace_binding_id="binding_1") == {"items": []}
     assert client.create_logbook_entry(
         "project_1", workspace_binding_id="binding_1", event_type="change",
-        summary="Done", severity="info", idempotency_key="key_1", references=[],
+        summary="Done", severity="info", idempotency_key="client-idempotency-0001", references=[],
     ) == {"entry": {"id": "entry_1"}}
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/hades/v1/logbook/entries"),
@@ -1022,7 +1022,7 @@ def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201
         "event_type": "change",
         "summary": "Done",
         "severity": "info",
-        "idempotency_key": "key_1",
+        "idempotency_key": "client-idempotency-0001",
         "references": [],
     }
 

@@ -61,7 +61,7 @@ def test_parser_accepts_bounded_logbook_commands_and_advertises_capability():
     args = parser.parse_args(
         [
             "backend", "logbook", "write", "--type", "change", "--summary", "Done",
-            "--idempotency-key", "key_1", "--reference", "commit:abc123",
+            "--idempotency-key", "cli-idempotency-key-0001", "--reference", "commit:abc123",
         ]
     )
     assert args.backend_action == "logbook"
@@ -90,3 +90,50 @@ def test_run_logbook_list_forwards_only_bound_workspace_filters(monkeypatch):
         "project_id": "project_1", "workspace_binding_id": "binding_1", "types": "change",
         "actor": "agent_1", "severity": "info", "cursor": "cursor_1", "limit": 10,
     }]
+
+
+@pytest.mark.parametrize("key", [
+    "too-short",
+    "unicode-idempotency-é",
+    "control-idempotency\x01-key",
+    "x" * 129,
+])
+def test_logbook_write_rejects_noncanonical_idempotency_key_before_outbox_persistence(key, tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import run_logbook_write
+
+    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    conn = db.connect(tmp_path / "backend.db")
+
+    class Client:
+        calls = 0
+
+        def create_logbook_entry(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("invalid logbook input must not reach the network")
+
+    client = Client()
+    with pytest.raises(ValueError, match="idempotency key"):
+        run_logbook_write(conn, command={
+            "event_type": "change", "summary": "Done", "idempotency_key": key, "references": [],
+        }, binding=binding, client=client, now=1000)
+    assert db.list_logbook_outbox_entries(conn) == []
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize("references", [
+    [{"kind": "commit", "id": str(index)} for index in range(21)],
+    [{"kind": "graph_projection", "id": "projection_1"}],
+])
+def test_logbook_write_rejects_noncanonical_references_before_outbox_persistence(references, tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
+
+    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    conn = db.connect(tmp_path / "backend.db")
+    with pytest.raises(ValueError, match="reference"):
+        enqueue_logbook_entry(conn, command={
+            "event_type": "change", "summary": "Done", "idempotency_key": "action-idempotency-0001",
+            "references": references,
+        }, binding=binding, now=1000)
+    assert db.list_logbook_outbox_entries(conn) == []

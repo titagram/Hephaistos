@@ -26,7 +26,7 @@ def test_sync_flushes_durable_logbook_entries_before_passive_reads(monkeypatch, 
         )
         enqueue_logbook_entry(
             conn,
-            command={"event_type": "change", "summary": "Durable mutation complete.", "idempotency_key": "sync-key", "references": []},
+            command={"event_type": "change", "summary": "Durable mutation complete.", "idempotency_key": "sync-idempotency-0001", "references": []},
             binding=binding,
             now=999,
         )
@@ -78,9 +78,9 @@ def test_sync_logbook_summary_counts_current_scoped_pending_leased_and_dead_lett
             workspace_fingerprint="fingerprint_1", display_path=str(workspace), repo_root=str(workspace),
             git_remote_display="", git_remote_hash="", head_commit="", backend_workspace_binding_id="binding_1",
         )
-        pending = enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "pending", "idempotency_key": "pending", "references": []}, binding=binding, now=2000)
-        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "leased", "idempotency_key": "leased", "references": []}, binding=binding, now=999)
-        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "dead", "idempotency_key": "dead", "references": []}, binding=binding, now=999)
+        pending = enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "pending", "idempotency_key": "pending-idempotency-0001", "references": []}, binding=binding, now=2000)
+        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "leased", "idempotency_key": "leased-idempotency-0001", "references": []}, binding=binding, now=999)
+        enqueue_logbook_entry(conn, command={"event_type": "change", "summary": "dead", "idempotency_key": "dead-idempotency-0001", "references": []}, binding=binding, now=999)
         leased_entry, dead_entry = hdb.lease_due_logbook_outbox_entries(conn, now=1000, limit=20)
         hdb.resolve_logbook_outbox_entry(conn, entry_id=dead_entry.id, lease_token=dead_entry.lease_token or "", state="dead_letter", now=1000, last_error="rejected")
         assert pending.id and leased_entry.id
@@ -115,7 +115,7 @@ def test_sync_uses_one_total_logbook_budget_across_workspace_bindings(monkeypatc
                 git_remote_display="", git_remote_hash="", head_commit="", backend_workspace_binding_id=f"binding_{number}",
             )
             for index in range(11):
-                enqueue_logbook_entry(conn, command={"event_type": "change", "summary": f"entry {number}-{index}", "idempotency_key": f"key-{number}-{index}", "references": []}, binding=binding, now=999)
+                enqueue_logbook_entry(conn, command={"event_type": "change", "summary": f"entry {number}-{index}", "idempotency_key": f"budget-idempotency-{number}-{index:02d}", "references": []}, binding=binding, now=999)
 
     calls: list[str] = []
 
