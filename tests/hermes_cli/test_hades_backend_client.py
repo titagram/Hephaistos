@@ -1038,6 +1038,40 @@ def test_logbook_route_ids_match_backend_191_character_boundary():
         validate_logbook_route_id("a" * 192, field="project id")
 
 
+def test_logbook_client_preserves_nested_backend_error_code():
+    from hermes_cli.hades_backend_client import HadesBackendClient, HadesBackendError
+
+    client = HadesBackendClient(
+        "https://backend.example",
+        "agent-token",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": "logbook_capability_not_allowed",
+                        "message": "The token cannot write the project logbook.",
+                    }
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(HadesBackendError) as raised:
+        client.create_logbook_entry(
+            "project_1",
+            workspace_binding_id="binding_1",
+            event_type="change",
+            summary="Done",
+            severity="info",
+            idempotency_key="client-error-idempotency-0001",
+            references=[],
+        )
+
+    assert raised.value.status_code == 403
+    assert raised.value.code == "logbook_capability_not_allowed"
+
+
 def test_graph_import_create_is_idempotent_for_200_and_201():
     from hermes_cli.hades_backend_client import HadesBackendClient, GraphImportState
 

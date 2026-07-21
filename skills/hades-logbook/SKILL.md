@@ -1,6 +1,6 @@
 ---
 name: hades-logbook
-description: Record one concise, factual Hades project-logbook entry after a durable mutation outcome.
+description: Record factual outcomes in the Hades project logbook.
 ---
 
 # Hades project logbook
@@ -24,9 +24,11 @@ have. Put an optional short narrative in a regular UTF-8 file; never use stdin
 or construct it through shell interpolation.
 
 Use a lowercase 40-hex SHA for a `commit` reference and a safe project-relative
-path for a `file` reference. The CLI performs only static validation; the
-backend verifies that every referenced resource exists and belongs to the
-linked project. Summary and narrative accept Markdown but not raw HTML tags.
+path for a `file` reference. The CLI and backend validate those two identifier
+shapes but do not prove that the commit or file exists. For resource-ID
+references, the backend verifies existence and ownership in the linked project.
+The summary is plain text displayed literally. The narrative accepts Markdown;
+raw HTML tags are rejected in both fields.
 
 ```bash
 hades backend logbook write \

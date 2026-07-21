@@ -104,6 +104,17 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     assert entries["post"]["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
     assert entries["post"]["responses"]["503"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/LogbookRecordingFailedResponse"
 
+    responses = spec["components"]["responses"]
+    logbook_validation_ref = "#/components/responses/LogbookValidationError"
+    assert entries["get"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    assert entries["post"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    assert entry["get"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    validation_schema = responses["LogbookValidationError"]["content"]["application/json"]["schema"]
+    assert validation_schema["oneOf"] == [
+        {"$ref": "#/components/schemas/ValidationErrorResponse"},
+        {"$ref": "#/components/schemas/ErrorResponse"},
+    ]
+
     schemas = spec["components"]["schemas"]
     create_request = schemas["ProjectLogbookEntryCreateRequest"]
     assert create_request["additionalProperties"] is False
@@ -140,6 +151,8 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     }
     assert create_request["properties"]["correlation_id"] == {"type": ["string", "null"], "maxLength": 191}
     assert create_request["properties"]["supersedes_entry_id"]["maxLength"] == 191
+    assert "displayed literally" in create_request["properties"]["summary"]["description"]
+    assert "Markdown" in create_request["properties"]["narrative_markdown"]["description"]
     assert schemas["ProjectLogbookActor"]["required"] == [
         "kind", "label", "user_id", "agent_id", "device_id", "role", "model",
     ]
@@ -210,6 +223,16 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
             "components": {"schemas": schemas},
         }).validate(envelope)
     assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
+    validation_contract = {
+        **validation_schema,
+        "components": {"schemas": schemas},
+    }
+    Draft202012Validator(validation_contract).validate(
+        {"message": "The summary field is required.", "errors": {"summary": ["Required."]}}
+    )
+    Draft202012Validator(validation_contract).validate(
+        {"error": {"code": "logbook_request_invalid", "message": "Invalid request."}}
+    )
 
 
 def test_hades_openapi_refs_and_launch_examples_are_resolved():

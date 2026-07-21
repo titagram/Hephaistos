@@ -128,12 +128,14 @@ The v1 API contract is deliberately small:
   update or delete operation.
 
 Every agent write includes `project_id`, its linked `workspace_binding_id`, an
-event type, severity, plain-language summary, project-local typed references,
-and a stable `idempotency_key`; a correlation ID groups one durable workflow.
-Summaries and optional narratives may use Markdown but not raw HTML tags. The
-CLI statically validates the reference shape (a `commit` is a lowercase 40-hex
-SHA and a `file` is a safe project-relative path); the backend additionally
-verifies resource existence and ownership within the linked project.
+event type, severity, plain-text summary, project-local typed references, and a
+stable `idempotency_key`; a correlation ID groups one durable workflow. The
+summary is displayed literally; only the optional narrative is Markdown. Raw
+HTML tags are rejected in both fields. The CLI and backend validate identifier
+shape (`commit` is a lowercase 40-hex SHA and `file` is a safe project-relative
+path), but do not prove that those commits or files exist. For resource-ID
+references, the backend verifies existence and ownership within the linked
+project.
 The backend derives the actor from the authenticated agent/device rather than
 accepting an impersonated actor. It authorizes the project and binding before
 deduplicating, so an idempotency key cannot disclose an entry from another

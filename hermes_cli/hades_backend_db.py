@@ -2002,6 +2002,50 @@ def list_logbook_outbox_entries(
     return [_logbook_outbox_from_row(row) for row in rows]
 
 
+def summarize_logbook_outbox_entries(
+    conn: sqlite3.Connection,
+    *,
+    actor_scopes: Iterable[tuple[str, str]],
+    legacy_binding_scopes: Iterable[tuple[str, str]] = (),
+) -> dict[str, int]:
+    """Count durable obligations without loading the append history into memory."""
+
+    clauses: list[str] = []
+    parameters: list[str] = []
+    for project_id, actor_agent_id in sorted(set(actor_scopes)):
+        clauses.append("(project_id = ? AND actor_agent_id = ?)")
+        parameters.extend((project_id, actor_agent_id))
+    for project_id, workspace_binding_id in sorted(set(legacy_binding_scopes)):
+        clauses.append(
+            "(project_id = ? AND actor_agent_id IS NULL AND workspace_binding_id = ?)"
+        )
+        parameters.extend((project_id, workspace_binding_id))
+    if not clauses:
+        return {
+            "logbook_pending": 0,
+            "logbook_sent": 0,
+            "logbook_retry": 0,
+            "logbook_dead_letter": 0,
+        }
+
+    row = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN state IN ('pending', 'leased') THEN 1 ELSE 0 END) AS pending, "
+        "SUM(CASE WHEN state = 'sent' THEN 1 ELSE 0 END) AS sent, "
+        "SUM(CASE WHEN state = 'pending' AND last_error IS NOT NULL THEN 1 ELSE 0 END) AS retry, "
+        "SUM(CASE WHEN state = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letter "
+        f"FROM logbook_outbox WHERE {' OR '.join(clauses)}",
+        parameters,
+    ).fetchone()
+    assert row is not None
+    return {
+        "logbook_pending": int(row["pending"] or 0),
+        "logbook_sent": int(row["sent"] or 0),
+        "logbook_retry": int(row["retry"] or 0),
+        "logbook_dead_letter": int(row["dead_letter"] or 0),
+    }
+
+
 def lease_due_logbook_outbox_entries(
     conn: sqlite3.Connection,
     *,

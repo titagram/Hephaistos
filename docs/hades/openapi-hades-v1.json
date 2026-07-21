@@ -209,7 +209,7 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "$ref": "#/components/responses/LogbookValidationError"
           }
         }
       },
@@ -262,7 +262,7 @@
             "$ref": "#/components/responses/Error"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "$ref": "#/components/responses/LogbookValidationError"
           },
           "503": {
             "description": "Domain mutation completed but its required Logbook record remains a durable degraded obligation",
@@ -336,6 +336,9 @@
           },
           "404": {
             "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/LogbookValidationError"
           }
         }
       }
@@ -2623,6 +2626,23 @@
             }
           }
         }
+      },
+      "LogbookValidationError": {
+        "description": "Laravel field validation or a typed Logbook domain validation error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              ]
+            }
+          }
+        }
       }
     },
     "examples": {
@@ -4463,7 +4483,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 240,
-            "description": "Plain-language text; raw HTML tags are rejected, while Markdown is allowed."
+            "description": "Plain text displayed literally; raw HTML tags are rejected."
           },
           "narrative_markdown": {
             "type": [
@@ -4555,7 +4575,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 240,
-            "description": "Plain-language text; raw HTML tags are rejected, while Markdown is allowed."
+            "description": "Plain text displayed literally; raw HTML tags are rejected."
           },
           "narrative_markdown": {
             "type": [
