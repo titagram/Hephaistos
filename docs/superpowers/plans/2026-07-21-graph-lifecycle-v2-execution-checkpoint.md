@@ -56,9 +56,9 @@ severity.
 | Repository | `/Users/gabriele/Dev/Hephaistos` |
 | Branch | `codex/graph-v2-lifecycle-validation-performance` |
 | Tested C1 implementation HEAD | `74c27506639195bb4ddff595821b312f4f1fdd6f` |
+| C1 evidence commit | `f41b72525684eaf9a98a16dae31baac4af00e3eb` |
 | `main` | `9f226f29269f270b0e4bd2e377d5dee6177a7902` |
 | `origin/main` | `9f226f29269f270b0e4bd2e377d5dee6177a7902` |
-| Evidence commit | the commit containing the C1 evidence pack; its SHA is intentionally not embedded in itself |
 | Branch-specific implementation | indexed `AdapterResult.validate()` plus deterministic direct operation-count regressions |
 
 The old branch `codex/graph-lifecycle-v2-agent` stops at
@@ -92,15 +92,13 @@ fresh tested-SHA evidence rather than reconstructing missing old reports.
 |---|---|
 | Workspace | `/home/ubuntu/dev-sandbox` |
 | Backend | `/home/ubuntu/dev-sandbox/backend` |
-| Branch | `main` |
-| HEAD | `148da33c897d38c76b3778c923f743498f2daa7a` |
-| `origin/main` | same SHA, verified with `git ls-remote` |
-| Worktree | clean |
-| Runtime | app, frontend, PostgreSQL, Neo4j, scheduler, and worker healthy |
-| Graph-v2 imports | zero rows at checkpoint time |
-| Queue | zero pending, delayed, or reserved jobs at checkpoint time |
+| Branch | `codex/graph-lifecycle-v2-backend-task-5` |
+| HEAD | `1735eacd01f03cbe559a7aee9631404e4b05643a` |
+| Branch base | `148da33c897d38c76b3778c923f743498f2daa7a` (`main` and `origin/main` at Task 5 start) |
+| Worktree | not clean: only `.superpowers/sdd/progress.md` and `ai-sandbox/logbooks/LOGBOOK_PROJECT.md` are modified evidence files; preserve them |
+| Live runtime | not re-audited after Task 5; no live operation was authorized or reported by the Task 5 session |
 
-Plan 2 implementation present on `main`:
+Plan 2 implementation state across `main` and the active Task 5 branch:
 
 | Task | Commit | Snapshot evidence | Status |
 |---:|---|---|---|
@@ -108,9 +106,11 @@ Plan 2 implementation present on `main`:
 | 2 — storage migrations | `31262c22` | five graph-v2 migrations `000100`–`000350` are `Ran`, batch 3 | implemented; L-gates open |
 | 3 — resumable import | `eaa0ea58` | create/show/chunk/complete routes registered | implemented; L-gates open |
 | 4 — two-pass leased validation | `148da33c` | four-run constants, leases, retry policy, encrypted single-try job, and reconcile schedule present | implemented; L-gates open |
-| 5–12 | — | normative sentinel classes/tests/artifact absent | not started |
+| 5 — Neo4j schema and projection | `1735eacd` | 20 focused tests / 222 assertions and 182 regression tests / 1,111 assertions passed; Pint, PHP lint, and PHPStan passed | implemented but **not verified**: quality review has 1 Important and 1 Minor |
+| 6–12 | — | not started by the bounded Task 5 session | not started |
 
-The live services being healthy proves operational availability, not L01–L15.
+No current live-availability conclusion is drawn from the Task 5 code/test
+session; operational checks and L01–L15 remain separate later gates.
 
 ### 3.3 Backup evidence
 
@@ -132,14 +132,14 @@ the separate backup/restore gate required by Plan 5.
 | Plan | Implementation status | Exit-gate status |
 |---|---|---|
 | Plan 1 — producer | all 18 tasks implemented | **C1 verified** at `74c27506639195bb4ddff595821b312f4f1fdd6f`; current evidence pack persisted |
-| Plan 2 — backend | Tasks 1–4 implemented; Tasks 5–12 not started | C2/L01–L15 open |
+| Plan 2 — backend | Tasks 1–4 implemented; Task 5 implemented but quality-blocked; Tasks 6–12 not started | C2/L01–L15 open; Task 5 has 1 Important and 1 Minor |
 | Plan 3 — verification/Wiki | v2 plan not started | C3/V01–V18 open |
 | Plan 4 — React Explorer | v2 plan not started | C4/U01–U12 open |
 | Plan 5 — DR/cutover | v2 plan not started | C5 open |
 | Plan 6 — live acceptance | not started | C6 and user acceptance open |
 
-Therefore P0 is not closeable yet. Its remaining deliverables are backend Tasks
-5–12 and C2.
+Therefore P0 is not closeable yet. Its remaining deliverables are the bounded
+Task 5 repair, backend Tasks 6–12, and C2.
 
 ## 5. P0 Blocker Closure: Producer Validation Scalability
 
@@ -149,7 +149,7 @@ the earlier synthetic green gates and opened a P0 blocker. The deterministic
 C1 repair and evidence below close the producer validation blocker without
 claiming that Carnovali itself has been rerun.
 
-Confirmed repeated full scans exist inside
+The investigation confirmed these repeated full scans in the pre-repair
 `hermes_cli/hades_index/lifecycle/model.py::AdapterResult.validate()`:
 
 - call sites scan all structures around line 2197: `O(C * S)`;
@@ -158,10 +158,11 @@ Confirmed repeated full scans exist inside
   `O(E^2)` case;
 - unresolved facts scan all edges: `O(U * E)`.
 
-The exact repair is not pre-authorized by this observation. The repair session
-must first add deterministic operation-count/lookup regressions, then replace
-repeated scans with indexes while preserving validation order, error codes, and
-error messages. Wall-clock-only tests are insufficient.
+Commit `74c27506639195bb4ddff595821b312f4f1fdd6f` added deterministic direct
+operation-count regressions and replaced the repeated scans with indexed
+lookups while preserving validation order, error codes, and error messages.
+The closure therefore rests on behavioral/complexity evidence, not only on
+wall-clock measurements.
 
 After synthetic C1 closure and before any future Carnovali attempt:
 
@@ -184,13 +185,31 @@ regression: G01-G14 exit 0; broad Agent command 1,795 passed, 1 deselected, 1 un
 gate IDs covered: G01-G14, with G13 limited to the normative Python side
 review verdict: spec Approved and code quality Approved; 0 Critical / 0 Important / 0 Minor after exactly two bounded repair cycles
 residual risk: no Carnovali run and no live peak-RSS measurement; the unrelated Persephone/OpenAPI test remains outside C1
-next unblocked task: backend Plan 2 Task 5; P0 remains open through backend Tasks 5-12 and C2
+next unblocked task: bounded backend Plan 2 Task 5 quality repair; P0 remains open through backend Tasks 5-12 and C2
 ```
 
 The complete machine-readable record is
 `.codex-artifacts/graph-v2/c1-evidence.json`. C1 closure does not authorize a
 Carnovali run: use a bounded real fixture and explicit RSS/elapsed monitoring
 before any future production-scale attempt.
+
+### 5.2 Backend Task 5 checkpoint — 2026-07-21
+
+```text
+plan/task: Plan 2 Task 5 Neo4j schema and Graph Lifecycle v2 projection
+repository and branch: /home/ubuntu/dev-sandbox; codex/graph-lifecycle-v2-backend-task-5
+implementation commit SHA: 1735eacd01f03cbe559a7aee9631404e4b05643a
+base SHA: 148da33c897d38c76b3778c923f743498f2daa7a
+GREEN: 20 focused tests / 222 assertions
+regression: 182 tests / 1,111 assertions; Pint, PHP lint, and PHPStan pass
+review verdict: specification Approved; code quality has 0 Critical / 1 Important / 1 Minor
+Important: each artifact batch queries staged keys by an unindexed record_ordinal range and ORDER BY, which may repeatedly scan/sort the same kind and approach O(N^2/B)
+bounded repair: look up the current artifact batch by its public IDs through the existing composite primary key, map rows by public_id, then validate ID, expected ordinal, and chunk index in original artifact order
+Minor residual: schema verification checks expected Neo4j object names but not their complete definitions; allowed by the explicit Task 5 contract, deferred as pre-production hardening
+worktree note: preserve the modified .superpowers/sdd/progress.md and ai-sandbox/logbooks/LOGBOOK_PROJECT.md evidence files; they were not part of implementation commit 1735eacd
+live safety: no migration, schema initialization, projection, purge, restart, deploy, restore, or destructive Docker operation was run
+next unblocked task: Task 5 Important repair only; Task 6 remains blocked
+```
 
 ## 6. Plan Defects Found During Reconciliation
 
@@ -216,19 +235,34 @@ Plan 1 and backend Plan 2 Tasks 1–4 are already on `main`. Do not rewrite or
 revert published history; continue from current `main` on fresh feature
 branches and record the deviation.
 
-Immediate sessions may execute the Agent C1 repair and backend Task 5 because
-neither depends on the open forward dependencies. **Do not start backend Task
-6 until a reviewed plan amendment resolves them.**
+The Agent C1 session is closed. The initial backend Task 5 session is also
+closed, but Task 5 itself remains quality-blocked by the Important recorded in
+Section 5.2. The only authorized implementation session is its bounded repair.
+**Do not start backend Task 6 until the Task 5 Important is closed and a
+reviewed plan amendment resolves both forward dependencies.**
 
-Recommended amendment, pending explicit design approval: emit a generic
-projection-activated domain event in Plan 2 and define a concrete reachability
-provider interface with current Plan 2 consumers; Plan 3 supplies the
-verification/Wiki listener and provider.
+Recommended amendment, pending explicit design approval:
+
+1. Plan 2 Task 6 emits one generic
+   `CanonicalGraphV2ProjectionActivated` domain event after a successful CAS
+   commit; it never imports or resolves the future verification service.
+2. Plan 2 Task 11 defines a read-only
+   `GraphArtifactReachabilityProvider` seam plus an aggregator and the concrete
+   Plan 2 provider for projection/head, attempts, and contexts.
+3. Plan 3 supplies the event listener and concrete reachability providers for
+   verification requests/results/overlays and Wiki ledgers. Every listener
+   rereads the current head; cleanup rechecks reachability under its locks.
+
+This is deliberately not a generic hook or plugin surface: the event and
+provider have named consumers in Plans 2 and 3. The lower-surface alternative
+is to defer all integration to Plan 3 and modify projection/cleanup directly,
+but that couples the Graph core to verification and Wiki internals.
 
 ## 7. Safe Parallel Session Layout
 
-Only two implementation writers are safe now because they own different
-repositories and have no shared mutable runtime dependency.
+Only one implementation writer is safe now: the bounded backend Task 5 repair.
+This local session remains the read-only coordination/control plane except for
+checkpoint and plan-document maintenance. C1 needs no further code repair.
 
 ### Bounded review protocol
 
@@ -287,34 +321,20 @@ Additional stop rules:
   status`, diff scope, last command, failure, and next action without claiming
   completion.
 
-### Wave 1 — may run in parallel
-
-#### Session A: Agent C1 performance and evidence closure
-
-- Repository: `/Users/gabriele/Dev/Hephaistos`.
-- Branch: existing `codex/graph-v2-lifecycle-validation-performance`.
-- Owns only Agent files/tests/evidence.
-- Diagnose and repair the validation complexity with TDD.
-- Run focused lifecycle suites before the complete G01–G14 and broad Agent
-  regression.
-- Produce one current-HEAD C1 evidence pack and fresh spec/code review. Do not
-  recreate fictional per-task history.
-- Do not run Carnovali until bounded and Symfony Demo gates are safe.
-
-#### Session B: Backend Plan 2 Task 5 only
+### Current wave — Task 5 bounded quality repair
 
 - Repository: `/home/ubuntu/dev-sandbox`.
-- Create `codex/graph-lifecycle-v2-backend-task-5` from
-  `148da33c897d38c76b3778c923f743498f2daa7a`.
-- Execute exactly Plan 2 Task 5, with RED/GREEN, focused regression, review, and
-  one scoped commit.
-- Test against isolated/test namespaces. Do not run the live schema initializer,
-  migration, projection, purge, restart, or deploy.
-- Stop after Task 5 and report commit, commands, results, review findings, and
-  residual risk. Do not continue into Task 6 because of the amendment gate.
+- Existing branch: `codex/graph-lifecycle-v2-backend-task-5`.
+- Preserve the two known modified evidence documents; do not clean, reset, or
+  overwrite them.
+- Repair only the unindexed staged-record lookup described in Section 5.2.
+- Test against isolated/test storage and namespaces. Do not run the live schema
+  initializer, migration, projection, purge, restart, deploy, or restore.
+- Stop after focused/regression checks and fresh reviews. Do not continue into
+  Task 6 even if Task 5 becomes verified.
 
-A third simultaneous session may be read-only reviewer only. It must not edit
-either repository, database, Neo4j, deployment, or this checkpoint.
+A simultaneous session may be read-only reviewer only. It must not edit either
+repository, database, Neo4j, deployment, or this checkpoint.
 
 ### Later waves — sequential after the amendment gate
 
@@ -328,58 +348,59 @@ This is approximately five dependency waves. Opening more backend writer
 sessions does not shorten the chain; it creates branch, database, and Neo4j
 contention.
 
-## 8. Exact Prompts for New Sessions
+## 8. Exact Prompt for the Next Session
 
-### Prompt A — local Agent repair
-
-```text
-Work only in /Users/gabriele/Dev/Hephaistos on the existing branch
-codex/graph-v2-lifecycle-validation-performance.
-
-Read completely, in this order:
-1. docs/superpowers/plans/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md
-2. docs/superpowers/plans/2026-07-16-graph-lifecycle-v2-master.md
-3. Plan 1 Tasks 17, 18 and the Plan 1 exit gate.
-
-Use systematic debugging and TDD before implementation, then work
-subagent-driven with a fresh spec reviewer and code-quality reviewer. Scope is
-only C1: reproduce the AdapterResult.validate scalability class with a
-deterministic operation-count/lookup regression; identify every sibling
-repeated full scan; implement indexed validation without changing error order,
-codes or messages; run focused suites; run G01-G14 and the broad Agent
-regression; create a current-HEAD evidence pack and close the missing Task 18
-evidence honestly. Do not fabricate old reports. Do not run Carnovali, start
-Docker, modify backend code, or push/merge until tests and reviews are clean.
-Keep me updated at each RED, GREEN, review and final-gate boundary.
-The checkpoint temporal/retry guardrails are mandatory. Stop and hand off at
-150 minutes even if C1 is not yet complete.
-```
-
-### Prompt B — remote backend Task 5
+### Prompt C — remote backend Task 5 bounded repair
 
 ```text
-Work only in /home/ubuntu/dev-sandbox. Read these handoff files completely:
+Work only in /home/ubuntu/dev-sandbox on the existing branch
+codex/graph-lifecycle-v2-backend-task-5. Read these handoff files completely:
 1. /home/ubuntu/graph-lifecycle-v2-handoff/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md
 2. /home/ubuntu/graph-lifecycle-v2-handoff/2026-07-16-graph-lifecycle-v2-master.md
 3. /home/ubuntu/graph-lifecycle-v2-handoff/2026-07-16-graph-lifecycle-v2-02-backend-import-projection-api.md, especially Task 5.
 
-Verify main and origin/main are exactly
-148da33c897d38c76b3778c923f743498f2daa7a and the worktree is clean. Create a
-fresh branch named codex/graph-lifecycle-v2-backend-task-5. Execute only Plan 2
-Task 5 using TDD and subagent-driven development, with separate spec and
-code-quality reviews.
-Use isolated/test Neo4j namespaces. Do not run live migrations, the live schema
-initializer, projection, purge, restart, deploy, restore or destructive Docker
-commands. Stop after one scoped Task 5 commit. Report exact RED/GREEN/regression
-commands and results, review findings, commit SHA and residual risks. Do not
-start Task 6: the checkpoint records a required plan-amendment gate.
+Verify HEAD is exactly 1735eacd01f03cbe559a7aee9631404e4b05643a before
+editing. Verify git status contains only the two known modified evidence files:
+.superpowers/sdd/progress.md and ai-sandbox/logbooks/LOGBOOK_PROJECT.md. Preserve
+their contents; do not clean, reset, restore, or overwrite unrelated changes.
+
+Scope is only the remaining Task 5 Important. Do not start Task 6. Use
+receiving-code-review, TDD, and subagent-driven development with bounded fresh
+specification and code-quality reviews.
+
+First add RED regressions for the query shape and for duplicate IDs across
+batches, swapped batches, omitted records, and incorrect chunk indices. Then
+replace the record_ordinal range/ORDER BY staged-window query with a lookup of
+the current artifact batch's public IDs, scoped by graph_import_id and
+record_kind, using the existing composite primary key. Chunk the ID list
+internally only if needed for bind limits. Map returned rows by public_id, then
+iterate in original artifact order and require exactly one row with the exact
+public_id, expected record_ordinal, and expected chunk_index. Preserve the final
+per-kind consumed-versus-staged count.
+
+Do not sort by public_id, add a migration/index, change the artifact order, or
+touch live data. A deterministic query-shape regression that proves public_id
+lookup and excludes ordinal range/order is required; EXPLAIN is optional only
+against an isolated representative PostgreSQL database.
+
+Run focused Task 5 tests, the prescribed regression, Pint, PHP lint, and
+PHPStan. Use one spec reviewer and one quality reviewer, with at most two repair
+cycles. Task 5 may be declared verified only with zero Critical/Important; the
+existing schema-definition verification Minor may remain explicitly recorded.
+Commit the scoped code/test repair, then update and commit the two evidence
+documents separately so their prior content is preserved.
+
+Do not run live migrations, the live schema initializer, projection, purge,
+restart, deploy, restore, or destructive Docker commands. Do not push or merge.
+Report exact RED/GREEN/regression commands and results, both review verdicts,
+commit SHAs, git status, and residual risks.
 The checkpoint temporal/retry guardrails are mandatory. Stop and hand off at
-150 minutes even if Task 5 is not yet complete.
+150 minutes even if the Important is not yet closed.
 ```
 
-Recommended coordinator model for both sessions: GPT-5.6-sol. Delegated
-bounded implementation/review work may use GPT-5.6-terra, but the root session
-must retain contract and final-review ownership.
+Recommended coordinator model: GPT-5.6-sol. Delegated bounded
+implementation/review work may use GPT-5.6-terra, but the root session must
+retain contract and final-review ownership.
 
 ## 9. Checkpoint Update Protocol
 
@@ -412,5 +433,6 @@ same repository or checkpoint concurrently.
 - End of P3 + P4: disaster recovery, deployment, mobile/desktop live acceptance,
   and v1 retirement decision can be accepted.
 
-Agent Session A is closed. The next safe implementation action is backend Plan
-2 Task 5 only; do not start backend Task 6 before the plan-amendment gate.
+C1 is closed. The next safe implementation action is the bounded backend Task
+5 Important repair in Prompt C. Do not start backend Task 6 before both the
+Task 5 quality gate and the plan-amendment gate are closed.
