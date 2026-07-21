@@ -223,6 +223,43 @@ matrices or reopen already accepted unrelated components without a concrete
 current-HEAD reproducer. This bounds execution while preserving the rule that
 no Critical/Important finding may cross a milestone gate.
 
+### Temporal and retry guardrails
+
+Every implementation session has a hard wall-clock budget of **150 minutes**.
+Reaching the limit means checkpoint and handoff, not permission to weaken a
+test or expand scope.
+
+| Elapsed time | Required outcome |
+|---:|---|
+| 0–15 min | Read required documents, verify repository/branch/status/SHA, identify the exact test and production files; no implementation yet |
+| 15–45 min | Produce a deterministic reproducer or the prescribed RED test and record the observed failure |
+| 45–105 min | Implement the smallest scoped change and obtain the targeted GREEN result |
+| 105–135 min | Run prescribed regressions and the two bounded reviews |
+| 135–150 min | Apply only bounded repairs, record evidence, commit if the task is coherent, and write the handoff |
+
+Additional stop rules:
+
+- Send a progress update at every RED, GREEN, review, and commit boundary, and
+  at least once every 20 minutes while work is active.
+- Never run the same failing command more than three times. Every retry after
+  the first must follow a stated new hypothesis or a code/environment change.
+- If 30 minutes pass without a new artifact — reproducer, test result, diff,
+  profile, review finding, or commit — stop and checkpoint the blocker.
+- Poll a command or subagent after 10 minutes without useful output. Interrupt
+  it at 20 minutes unless it is producing measurable progress.
+- A focused test command has a 15-minute hard limit. Split it if it exceeds
+  that limit.
+- A prescribed gate/regression batch has a 45-minute hard limit. Split it into
+  deterministic shards and record every shard; do not replace it with a
+  smaller assertion set.
+- Do not start an unrelated repair to make a broad suite green. Prove whether
+  it reproduces on the task parent and record it separately.
+- At the session limit, terminate background processes and subagents. Leave a
+  clean commit only when the scoped deliverable is coherent and its targeted
+  tests pass; otherwise preserve the working tree and record exact `git
+  status`, diff scope, last command, failure, and next action without claiming
+  completion.
+
 ### Wave 1 — may run in parallel
 
 #### Session A: Agent C1 performance and evidence closure
@@ -287,6 +324,8 @@ regression; create a current-HEAD evidence pack and close the missing Task 18
 evidence honestly. Do not fabricate old reports. Do not run Carnovali, start
 Docker, modify backend code, or push/merge until tests and reviews are clean.
 Keep me updated at each RED, GREEN, review and final-gate boundary.
+The checkpoint temporal/retry guardrails are mandatory. Stop and hand off at
+150 minutes even if C1 is not yet complete.
 ```
 
 ### Prompt B — remote backend Task 5
@@ -299,13 +338,16 @@ Work only in /home/ubuntu/dev-sandbox. Read these handoff files completely:
 
 Verify main and origin/main are exactly
 148da33c897d38c76b3778c923f743498f2daa7a and the worktree is clean. Create a
-fresh branch named codex/graph-lifecycle-v2-backend-task-5. Execute only Plan 2 Task 5 using TDD and
-subagent-driven development, with separate spec and code-quality reviews.
+fresh branch named codex/graph-lifecycle-v2-backend-task-5. Execute only Plan 2
+Task 5 using TDD and subagent-driven development, with separate spec and
+code-quality reviews.
 Use isolated/test Neo4j namespaces. Do not run live migrations, the live schema
 initializer, projection, purge, restart, deploy, restore or destructive Docker
 commands. Stop after one scoped Task 5 commit. Report exact RED/GREEN/regression
 commands and results, review findings, commit SHA and residual risks. Do not
 start Task 6: the checkpoint records a required plan-amendment gate.
+The checkpoint temporal/retry guardrails are mandatory. Stop and hand off at
+150 minutes even if Task 5 is not yet complete.
 ```
 
 Recommended coordinator model for both sessions: GPT-5.6-sol. Delegated
