@@ -252,7 +252,7 @@ CREATE TABLE IF NOT EXISTS logbook_outbox (
     last_error            TEXT,
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
-    UNIQUE(project_id, workspace_binding_id, idempotency_key)
+    UNIQUE(project_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_logbook_outbox_due
     ON logbook_outbox(state, next_attempt_at, created_at, id);
@@ -616,8 +616,8 @@ def _migrate_persephone_message_identities(conn: sqlite3.Connection) -> None:
         )
 
 
-def _has_binding_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
-    """Return whether the durable outbox has its intended three-column key."""
+def _has_project_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
+    """Return whether the outbox matches the backend's project-wide key."""
 
     for index in conn.execute("PRAGMA index_list(logbook_outbox)").fetchall():
         if not bool(index[2]):
@@ -626,16 +626,30 @@ def _has_binding_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
             str(column[2])
             for column in conn.execute(f"PRAGMA index_info({index[1]})").fetchall()
         ]
-        if columns == ["project_id", "workspace_binding_id", "idempotency_key"]:
+        if columns == ["project_id", "idempotency_key"]:
             return True
     return False
 
 
 def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
-    """Rebuild only legacy logbook outboxes whose old key crossed bindings."""
+    """Move branch-era binding-scoped outboxes to the backend's identity.
 
-    if _has_binding_scoped_logbook_idempotency(conn):
+    A collision represents two different durable obligations that the backend
+    can never accept under one key.  Refuse to guess which one to discard and
+    leave the original table untouched for explicit operator resolution.
+    """
+
+    if _has_project_scoped_logbook_idempotency(conn):
         return
+    collision = conn.execute(
+        "SELECT project_id, idempotency_key FROM logbook_outbox "
+        "GROUP BY project_id, idempotency_key HAVING COUNT(*) > 1 LIMIT 1"
+    ).fetchone()
+    if collision is not None:
+        raise ValueError(
+            "logbook outbox has project-scoped idempotency collisions; "
+            "resolve the duplicate durable records before retrying"
+        )
     with write_txn(conn):
         conn.execute(
             "CREATE TABLE logbook_outbox_replacement ("
@@ -646,7 +660,7 @@ def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
             "lease_token TEXT, lease_expires_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, "
             "next_attempt_at INTEGER NOT NULL, response_id TEXT, last_error TEXT, "
             "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
-            "UNIQUE(project_id, workspace_binding_id, idempotency_key))"
+            "UNIQUE(project_id, idempotency_key))"
         )
         conn.execute(
             "INSERT INTO logbook_outbox_replacement "
@@ -1820,14 +1834,25 @@ def enqueue_logbook_outbox_entry(
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT * FROM logbook_outbox WHERE project_id = ? AND workspace_binding_id = ? "
-            "AND idempotency_key = ?",
-            (project_id, workspace_binding_id, idempotency_key),
+            "SELECT * FROM logbook_outbox WHERE project_id = ? AND idempotency_key = ?",
+            (project_id, idempotency_key),
         ).fetchone()
         if existing is not None:
             loaded = _logbook_outbox_from_row(existing)
             if loaded.request_digest != digest:
                 raise ValueError("logbook idempotency key is already bound to a different request")
+            if loaded.state == "dead_letter":
+                conn.execute(
+                    "UPDATE logbook_outbox SET state = 'pending', lease_token = NULL, "
+                    "lease_expires_at = NULL, attempts = 0, next_attempt_at = ?, "
+                    "response_id = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
+                    (timestamp, timestamp, loaded.id),
+                )
+                existing = conn.execute(
+                    "SELECT * FROM logbook_outbox WHERE id = ?", (loaded.id,)
+                ).fetchone()
+                assert existing is not None
+                return _logbook_outbox_from_row(existing)
             return loaded
         cursor = conn.execute(
             "INSERT INTO logbook_outbox "
