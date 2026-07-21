@@ -287,7 +287,8 @@ def _retry_at(entry: db.LogbookOutboxEntry, now: int) -> int:
 def _dead_letter_message() -> str:
     return (
         "logbook write was persisted but rejected permanently; ask a project administrator "
-        "to grant write_project_logbook, then re-register with `hades backend setup`"
+        "to grant write_project_logbook, re-register with `hades backend setup`, then re-run "
+        "the exact original write command; sync alone does not reopen a dead letter"
     )
 
 

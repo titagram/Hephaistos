@@ -85,7 +85,10 @@ Recovery state is visible and actionable:
   the error and preserve the idempotency key. For a capability denial, ask a
   project administrator to grant `write_project_logbook`, then **re-register**
   with `hades backend setup`; this re-registration is required before the
-  derived token can receive the capability.
+  derived token can receive the capability. Then re-run exactly the original
+  write command with the same key and payload: this explicit action requeues
+  the row with a fresh bounded retry budget. `hades backend sync` alone never
+  reopens a dead-letter entry.
 - A conflict only counts as delivered when the backend returns the existing
   entry with the same idempotency key. A different key is not a retry target;
   inspect the existing event and record a new factual correction only when

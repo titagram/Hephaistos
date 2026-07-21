@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 
 def _binding():
     return SimpleNamespace(
@@ -173,6 +175,8 @@ def test_capability_denial_is_visible_dead_letter_not_success(tmp_path):
     assert result.exit_code != 0
     assert result.state == "dead_letter"
     assert "re-register" in result.message
+    assert "exact original write command" in result.message
+    assert "sync alone" in result.message
     assert db.list_logbook_outbox_entries(conn)[0].state == "dead_letter"
 
 
@@ -280,35 +284,24 @@ def test_conflict_dead_letter_uses_conflict_remedy_not_capability_remedy(tmp_pat
     assert "re-register" not in result.message
 
 
-def test_idempotency_key_is_independent_for_each_workspace_binding_of_one_project(tmp_path):
+def test_idempotency_key_cannot_be_rebound_within_one_project(tmp_path):
     from hermes_cli import hades_backend_db as db
-    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry, flush_due_logbook_entries
-
-    class Client:
-        def __init__(self):
-            self.bindings: list[str] = []
-
-        def create_logbook_entry(self, project_id, **payload):
-            self.bindings.append(payload["workspace_binding_id"])
-            return {"entry": {"id": payload["workspace_binding_id"], "idempotency_key": payload["idempotency_key"]}}
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
 
     first = _binding()
     second = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2")
     conn = db.connect(tmp_path / "backend.db")
     enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=first, now=999)
-    enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=second, now=999)
-    client = Client()
-    result = flush_due_logbook_entries(
-        conn, client, now=1000, project_id="project_1", workspace_binding_id="binding_1",
-    )
-    assert result["sent"] == 1
-    assert client.bindings == ["binding_1"]
+    with pytest.raises(ValueError, match="already bound to a different request"):
+        enqueue_logbook_entry(
+            conn, command=_command("shared-idempotency-0001"), binding=second, now=999,
+        )
     assert [(entry.workspace_binding_id, entry.state) for entry in db.list_logbook_outbox_entries(conn)] == [
-        ("binding_1", "sent"), ("binding_2", "pending"),
+        ("binding_1", "pending"),
     ]
 
 
-def test_existing_outbox_schema_migrates_to_binding_scoped_idempotency(tmp_path):
+def test_existing_project_scoped_outbox_schema_stays_project_scoped(tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
 
@@ -327,13 +320,14 @@ def test_existing_outbox_schema_migrates_to_binding_scoped_idempotency(tmp_path)
 
     conn = db.connect(path)
     enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=_binding(), now=999)
-    enqueue_logbook_entry(
-        conn,
-        command=_command("shared-idempotency-0001"),
-        binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
-        now=999,
-    )
-    assert len(db.list_logbook_outbox_entries(conn)) == 2
+    with pytest.raises(ValueError, match="already bound to a different request"):
+        enqueue_logbook_entry(
+            conn,
+            command=_command("shared-idempotency-0001"),
+            binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
+            now=999,
+        )
+    assert len(db.list_logbook_outbox_entries(conn)) == 1
 
 
 def test_immediate_write_flush_is_scoped_to_its_workspace_binding(tmp_path):
