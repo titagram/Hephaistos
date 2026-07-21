@@ -24,7 +24,7 @@
             "description": "Bootstrap token is valid"
           },
           "401": {
-            "$ref": "#/components/responses/Error"
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -63,6 +63,282 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/hades/v1/logbook/entries": {
+      "get": {
+        "summary": "List immutable project Logbook entries",
+        "description": "Returns authorized entries newest first. Technical payload remains an entry detail, not a free-text search index.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 191
+            }
+          },
+          {
+            "name": "workspace_binding_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 191
+            }
+          },
+          {
+            "name": "types[]",
+            "in": "query",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "change",
+                  "creation",
+                  "import",
+                  "projection",
+                  "verification",
+                  "wiki",
+                  "decision",
+                  "failure",
+                  "rollback",
+                  "note"
+                ]
+              }
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "user",
+                "agent",
+                "subagent",
+                "system"
+              ]
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cursor page of project-scoped Logbook entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectLogbookEntryPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/LogbookValidationError"
+          }
+        }
+      },
+      "post": {
+        "summary": "Append one immutable project Logbook entry",
+        "description": "Requires the explicit authenticated-agent capability `write_project_logbook`; no legacy grant or role fallback authorizes this operation. An idempotent replay returns the original entry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectLogbookEntryCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing identical idempotent entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectLogbookEntryResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Logbook entry appended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectLogbookEntryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/LogbookValidationError"
+          },
+          "503": {
+            "description": "Domain mutation completed but its required Logbook record remains a durable degraded obligation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogbookRecordingFailedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hades/v1/logbook/entries/{entry}": {
+      "get": {
+        "summary": "Read one immutable project Logbook entry",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entry",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 191
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 191
+            }
+          },
+          {
+            "name": "workspace_binding_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 191
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized immutable Logbook entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectLogbookEntryDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/LogbookValidationError"
           }
         }
       }
@@ -2254,6 +2530,40 @@
       }
     }
   },
+  "$defs": {
+    "capabilities": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/capabilities"},
+    "capability": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/capability"},
+    "capabilityFull": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/capabilityFull"},
+    "capabilityIncomplete": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/capabilityIncomplete"},
+    "capabilityReason": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/capabilityReason"},
+    "chunkDescriptor": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/chunkDescriptor"},
+    "chunkKind": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/chunkKind"},
+    "completeness": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/completeness"},
+    "counts": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/counts"},
+    "coverage": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/coverage"},
+    "coverageScope": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/coverageScope"},
+    "digest": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/digest"},
+    "entrypointCoverage": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/entrypointCoverage"},
+    "entrypointKindCounts": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/entrypointKindCounts"},
+    "fileCoverage": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/fileCoverage"},
+    "framework": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/framework"},
+    "frameworkName": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/frameworkName"},
+    "gitCommit": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/gitCommit"},
+    "graphContract": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/graphContract"},
+    "identifier": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/identifier"},
+    "language": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/language"},
+    "languageCompleteness": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/languageCompleteness"},
+    "languageName": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/languageName"},
+    "positiveLine": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/positiveLine"},
+    "project": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/project"},
+    "reasonCode": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/reasonCode"},
+    "recordCoverage": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/recordCoverage"},
+    "safeInteger": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/safeInteger"},
+    "safePath": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/safePath"},
+    "source": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/source"},
+    "ulid": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/ulid"},
+    "utcTimestamp": {"$ref": "#/components/schemas/GraphBundleManifest/$defs/utcTimestamp"}
+  },
   "components": {
     "securitySchemes": {
       "bearerAuth": {
@@ -2313,6 +2623,23 @@
               "validation": {
                 "$ref": "#/components/examples/ValidationError"
               }
+            }
+          }
+        }
+      },
+      "LogbookValidationError": {
+        "description": "Laravel field validation or a typed Logbook domain validation error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              ]
             }
           }
         }
@@ -3964,6 +4291,443 @@
                 }
               }
             }
+          }
+        }
+      },
+      "ProjectLogbookActor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "label",
+          "user_id",
+          "agent_id",
+          "device_id",
+          "role",
+          "model"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user",
+              "agent",
+              "subagent",
+              "system"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "user_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          }
+        }
+      },
+      "ProjectLogbookReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "wiki_page",
+              "wiki_revision",
+              "graph_import",
+              "verification_work",
+              "kanban_task",
+              "run",
+              "repository",
+              "commit",
+              "file"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "kind": { "const": "commit" },
+              "id": { "pattern": "^[0-9a-f]{40}$" }
+            }
+          },
+          {
+            "properties": {
+              "kind": { "const": "file" },
+              "id": {
+                "maxLength": 2048,
+                "description": "Safe project-relative path: no absolute, drive, empty, dot, or dot-dot segments."
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "wiki_page",
+                  "wiki_revision",
+                  "graph_import",
+                  "verification_work",
+                  "kanban_task",
+                  "run",
+                  "repository"
+                ]
+              },
+              "id": { "maxLength": 255 }
+            }
+          }
+        ]
+      },
+      "ProjectLogbookEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "project_id",
+          "occurred_at",
+          "recorded_at",
+          "actor",
+          "event_type",
+          "severity",
+          "summary",
+          "narrative_markdown",
+          "references",
+          "correlation_id",
+          "payload",
+          "supersedes_entry_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/ProjectLogbookActor"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "change",
+              "creation",
+              "import",
+              "projection",
+              "verification",
+              "wiki",
+              "decision",
+              "failure",
+              "rollback",
+              "note"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "description": "Plain text displayed literally; raw HTML tags are rejected."
+          },
+          "narrative_markdown": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 8000,
+            "description": "Optional Markdown narrative; raw HTML tags are rejected."
+          },
+          "references": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/ProjectLogbookReference"
+            }
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Bounded structured technical facts; not indexed by free-text search."
+          },
+          "supersedes_entry_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          }
+        }
+      },
+      "ProjectLogbookEntryCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "workspace_binding_id",
+          "event_type",
+          "severity",
+          "summary",
+          "correlation_id",
+          "idempotency_key",
+          "references",
+          "narrative_markdown",
+          "payload",
+          "supersedes_entry_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "workspace_binding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "change",
+              "creation",
+              "import",
+              "projection",
+              "verification",
+              "wiki",
+              "decision",
+              "failure",
+              "rollback",
+              "note"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "description": "Plain text displayed literally; raw HTML tags are rejected."
+          },
+          "narrative_markdown": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 8000,
+            "description": "Optional Markdown narrative; raw HTML tags are rejected."
+          },
+          "references": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/ProjectLogbookReference"
+            }
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 128,
+            "pattern": "^[!-~]+$"
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "supersedes_entry_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
+          }
+        }
+      },
+      "ProjectLogbookEntryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entry",
+          "replayed"
+        ],
+        "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/ProjectLogbookEntry"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProjectLogbookEntryDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "project_id",
+          "workspace_binding_id",
+          "entry"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": "v1"
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "workspace_binding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "entry": {
+            "$ref": "#/components/schemas/ProjectLogbookEntry"
+          }
+        }
+      },
+      "ProjectLogbookEntryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "project_id",
+          "workspace_binding_id",
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": "v1"
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "workspace_binding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/ProjectLogbookEntry"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LogbookRecordingFailedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "recording_obligation_id"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "const": "logbook_recording_failed"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          },
+          "recording_obligation_id": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

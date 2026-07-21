@@ -949,7 +949,7 @@ git commit -m "feat(hades): upload and sync graph lifecycle v2"
   "G09": "tests/hermes_cli/test_hades_lifecycle_framework_adapter.py::test_all_required_framework_golden_suites_are_registered",
   "G10": "tests/hermes_cli/test_hades_lifecycle_traversal.py::test_async_terminal_semantics",
   "G11": "tests/hermes_cli/test_hades_backend_indexer_golden.py::test_polyglot",
-  "G12": "tests/hermes_cli/test_hades_lifecycle_control_flow.py::test_missing_parser_partial",
+  "G12": "tests/hermes_cli/test_hades_index_enrichment.py::test_required_canary_failure_escapes_the_real_graph_publication_boundary",
   "G13": "tests/hermes_cli/test_hades_graph_v2_golden.py::test_python_vectors_match_locked_contract",
   "G14": "tests/hermes_cli/test_hades_graph_contract.py::test_base_provenance_and_candidate_ownership"
 }
@@ -973,6 +973,7 @@ Run:
   tests/hermes_cli/test_hades_lifecycle_express.py \
   tests/hermes_cli/test_hades_lifecycle_nextjs.py \
   tests/hermes_cli/test_hades_lifecycle_traversal.py \
+  tests/hermes_cli/test_hades_index_enrichment.py \
   tests/hermes_cli/test_hades_graph_budget_pruner.py \
   tests/hermes_cli/test_hades_graph_bundle.py \
   tests/hermes_cli/test_hades_backend_indexer_golden.py -q
@@ -1001,4 +1002,4 @@ git commit -m "test(hades): close graph v2 producer gates"
 - Contract manifest, contract lock, and golden vectors are committed.
 - The large benchmark has no silent cap.
 - A clean v2 bundle validates after round-trip spool readback.
-- Fresh spec-compliance review contains no unresolved P0/P1 finding.
+- Fresh spec-compliance review contains no unresolved Critical/Important finding.

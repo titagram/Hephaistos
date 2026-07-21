@@ -1,5 +1,11 @@
 # Hades Graph Lifecycle v2 Master Implementation Plan
 
+> **Current execution status:** read
+> `docs/superpowers/plans/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md`
+> before selecting a task. This master remains normative for behavior and task
+> order; the checkpoint is authoritative for SHAs, completed evidence,
+> blockers, and session ownership.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current inferred/partial graph pipeline with the clean v2 canonical graph, bounded lifecycle exploration, verification queue, human-readable Wiki workflow, React Graph Explorer, and verified disaster-recovery path defined by the approved specification.
@@ -55,9 +61,9 @@ Execute these files in the listed order. A later plan may start only when its `S
 | 1 | `2026-07-16-graph-lifecycle-v2-01-contract-indexer-agent.md` | Root schemas, golden vectors, typed v2 artifact package, polyglot lifecycle producer, bundle/chunk spool | Clean agent feature branch | G01–G12/G14 plus Python side of G13 green |
 | 2 | `2026-07-16-graph-lifecycle-v2-02-backend-import-projection-api.md` | Backend vendored contracts, resumable validation, atomic projection, closed dashboard API | Plan 1 contract commit pinned by SHA | L01–L15 green in backend |
 | 3 | `2026-07-16-graph-lifecycle-v2-03-verification-wiki.md` | Graph/Wiki verification queue, overlays, CLI/worker/skills, empty-project Wiki bootstrap | Plans 1–2 DTOs and storage migrations green | V01–V18 green end-to-end |
-| 4 | `2026-07-16-graph-lifecycle-v2-04-react-graph-explorer.md` | Explainable lifecycle-first Graph Explorer and element analysis | Backend dashboard response golden fixture frozen | U01–U12 green; production frontend build green |
+| 4 | `2026-07-16-graph-lifecycle-v2-04-react-graph-explorer.md` | Explainable lifecycle-first Graph Explorer and element analysis | Plan 2 dashboard response golden fixture frozen and Plan 3 verification badge/status DTOs available | U01–U12 green; production frontend build green |
 | 5 | `2026-07-16-graph-lifecycle-v2-05-backup-cutover.md` | DR scripts/timers, maintenance, scoped v1 export/retire/restore, maintenance deployment | Backend/agent feature branches pass their suites | Restore rehearsal green; cutover prerequisites recorded |
-| 6 | `2026-07-16-graph-lifecycle-v2-06-live-acceptance.md` | Carnovali import, deployed browser/API/queue acceptance, review, merge/push | Plans 1–5 completed without unresolved P0/P1 findings | All G/L/V/U and 12 live gates green; user acceptance before v1 retirement |
+| 6 | `2026-07-16-graph-lifecycle-v2-06-live-acceptance.md` | Carnovali import, deployed browser/API/queue acceptance, review, merge/push | Plans 1–5 completed without unresolved Critical/Important findings | All G/L/V/U and 12 live gates green; user acceptance before v1 retirement |
 
 ## Cross-Repository Contract Lock
 
@@ -166,4 +172,4 @@ Do not treat a test failure as permission to weaken the assertion, use a v1 fall
 
 ## Completion Rule
 
-The program is complete only when every component plan is committed on its feature branch, all automated gates are green, the live Carnovali gate passes on desktop and mobile, backups and scoped rollback are verified, unrelated data counts are unchanged, final reviews contain no unresolved P0/P1 finding, and the user explicitly accepts the deployment. Only then merge backend and agent branches to `main` and push.
+The program is complete only when every component plan is committed on its feature branch, all automated gates are green, the live Carnovali gate passes on desktop and mobile, backups and scoped rollback are verified, unrelated data counts are unchanged, final reviews contain no unresolved Critical/Important finding, and the user explicitly accepts the deployment. Only then merge backend and agent branches to `main` and push.

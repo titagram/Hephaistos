@@ -47,6 +47,36 @@ _BACKGROUND_SYNC_LOCK = threading.Lock()
 _BACKGROUND_SYNC_RUNNING = False
 
 
+def _logbook_summary_for_sync(
+    conn,
+    *,
+    agent: db.BackendAgent,
+    bindings: list[db.WorkspaceBinding],
+    project_id: str | None,
+) -> dict[str, int]:
+    """Count every durable logbook obligation owned by the selected actors.
+
+    Workspace bindings are delivery routes, not the identity of the durable
+    obligation.  Keep entries visible when a route is unlinked or replaced;
+    an explicit re-emission can safely reroute them later.
+    """
+
+    actor_scopes = {(binding.project_id, binding.agent_id) for binding in bindings}
+    if project_id is None or project_id == agent.project_id:
+        actor_scopes.add((agent.project_id, agent.agent_id))
+
+    legacy_binding_scopes = {
+        (binding.project_id, binding.backend_workspace_binding_id)
+        for binding in db.list_workspace_bindings(conn)
+        if (binding.project_id, binding.agent_id) in actor_scopes
+    }
+    return db.summarize_logbook_outbox_entries(
+        conn,
+        actor_scopes=actor_scopes,
+        legacy_binding_scopes=legacy_binding_scopes,
+    )
+
+
 def _credential_fingerprint(secret: str) -> str | None:
     value = str(secret or "")
     return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
@@ -185,10 +215,12 @@ def run_backend_sync(
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
     from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_logbook_actions import flush_due_logbook_entries
     from hermes_cli.hades_persephone_messages import BACKEND_CAPABILITY
     from hermes_cli.hades_persephone_receiver import PersephoneReceiver
     from hermes_cli.hades_persephone_store import get_cursor
 
+    started_monotonic = time.monotonic()
     with db.connect_closing() as conn:
         agent = db.get_default_agent(conn)
         bindings = db.list_workspace_bindings(conn, status="linked") if agent else []
@@ -208,6 +240,21 @@ def run_backend_sync(
             project_id=project_id,
             workspace_binding_ids=[binding.backend_workspace_binding_id for binding in bindings],
         ) if agent and bindings else []
+        initial_logbook_summary = (
+            _logbook_summary_for_sync(
+                conn,
+                agent=agent,
+                bindings=bindings,
+                project_id=project_id,
+            )
+            if agent is not None
+            else {
+                "logbook_pending": 0,
+                "logbook_sent": 0,
+                "logbook_retry": 0,
+                "logbook_dead_letter": 0,
+            }
+        )
 
     if agent is None:
         logger.info(
@@ -226,7 +273,22 @@ def run_backend_sync(
                 "hades_expired_jobs": len(expired_jobs),
             },
         )
-        return SyncResult({"pulled": 0, "completed": 0, "waiting": 0, "failed": 0, "skipped": 0, "expired": len(expired_jobs)}, 0)
+        summary = {
+            "pulled": 0,
+            "completed": 0,
+            "waiting": 0,
+            "failed": 0,
+            "skipped": 0,
+            "expired": len(expired_jobs),
+            **initial_logbook_summary,
+            "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
+        }
+        unresolved = bool(
+            summary["logbook_pending"] or summary["logbook_dead_letter"]
+        )
+        with db.connect_closing() as conn:
+            db.record_sync_state(conn, "last_sync_summary", summary)
+        return SyncResult(summary, 1 if unresolved else 0)
 
     logger.info(
         "hades_backend.sync.start",
@@ -238,8 +300,6 @@ def run_backend_sync(
             "hades_expired_jobs": len(expired_jobs),
         },
     )
-    started_monotonic = time.monotonic()
-
     clients: dict[str, object] = {}
     queue_capabilities: dict[str, bool] = {}
     advertised_capabilities: dict[str, dict[str, object]] = {}
@@ -275,6 +335,8 @@ def run_backend_sync(
     source_slice_candidates = source_slice_jobs_waiting = 0
     sync_errors = 0
     expired = 0
+    logbook_sent = logbook_retry = logbook_dead_letter = 0
+    logbook_budget = 20
 
     for job in expired_jobs:
         with db.connect_closing() as conn:
@@ -340,6 +402,34 @@ def run_backend_sync(
                     f"{binding.display_path}: {redact_secret(str(exc))}"
                 )
             continue
+
+        # A logbook append is a durable consequence of a prior mutation.  Do
+        # not let later passive reads make the sync look fully healthy while a
+        # persisted append is still unsent or permanently rejected.
+        if logbook_budget > 0:
+            try:
+                with db.connect_closing() as conn:
+                    logbook = flush_due_logbook_entries(
+                        conn,
+                        client,
+                        now=now,
+                        limit=logbook_budget,
+                        project_id=binding.project_id,
+                        workspace_binding_id=binding.backend_workspace_binding_id,
+                    )
+                delivered = logbook["sent"] + logbook["retry"] + logbook["dead_letter"]
+                logbook_budget = max(0, logbook_budget - delivered)
+                logbook_sent += logbook["sent"]
+                logbook_retry += logbook["retry"]
+                logbook_dead_letter += logbook["dead_letter"]
+            except Exception as exc:
+                sync_errors += 1
+                _record_sync_error(binding, str(exc))
+                if not quiet:
+                    print(
+                        f"backend sync: failed to flush logbook for "
+                        f"{binding.display_path}: {redact_secret(str(exc))}"
+                    )
 
         if binding_agent.agent_id not in queue_capabilities:
             try:
@@ -620,6 +710,20 @@ def run_backend_sync(
             if outcome["quarantined"]:
                 auth_quarantined_routes += 1
 
+    with db.connect_closing() as conn:
+        current_logbook_summary = _logbook_summary_for_sync(
+            conn,
+            agent=agent,
+            bindings=bindings,
+            project_id=project_id,
+        )
+    logbook_pending = current_logbook_summary["logbook_pending"]
+    logbook_sent = current_logbook_summary["logbook_sent"]
+    logbook_dead_letter = current_logbook_summary["logbook_dead_letter"]
+    logbook_retry = current_logbook_summary["logbook_retry"]
+    if logbook_pending or logbook_dead_letter:
+        sync_errors += 1
+
     summary = {
         "pulled": pulled,
         "completed": completed,
@@ -641,6 +745,10 @@ def run_backend_sync(
         "auth_failed_routes": auth_failed_routes,
         "auth_quarantined_routes": auth_quarantined_routes,
         "stale_auth_routes": stale_auth_routes,
+        "logbook_pending": logbook_pending,
+        "logbook_sent": logbook_sent,
+        "logbook_retry": logbook_retry,
+        "logbook_dead_letter": logbook_dead_letter,
         "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }
     with db.connect_closing() as conn:

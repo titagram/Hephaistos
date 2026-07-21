@@ -217,6 +217,33 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     wiki_verify.add_argument("--evidence-file", required=True, help="Path to a bounded evidence-ref JSON list")
     wiki_verify.add_argument("--note", default=None, help="Optional verification note")
     wiki_verify.add_argument("--json", action="store_true", help="Emit the backend wiki response as JSON")
+    logbook = sub.add_parser("logbook", help="Read or append durable project logbook entries")
+    logbook_sub = logbook.add_subparsers(dest="logbook_action")
+    logbook_list = logbook_sub.add_parser("list", help="List project logbook entries")
+    logbook_list.add_argument(
+        "--type", dest="event_type", action="append", default=None,
+        help="Filter by event type; repeat or separate types with commas",
+    )
+    logbook_list.add_argument(
+        "--actor", choices=("user", "agent", "subagent", "system"), default=None,
+        help="Filter by actor kind",
+    )
+    logbook_list.add_argument("--severity", choices=("info", "warning", "error"), default=None)
+    logbook_list.add_argument("--cursor", default=None, help="Opaque pagination cursor")
+    logbook_list.add_argument("--limit", type=int, default=20, help="Entries to show (1-50)")
+    logbook_list.add_argument("--json", action="store_true", help="Emit the backend response as JSON")
+    logbook_show = logbook_sub.add_parser("show", help="Show one project logbook entry")
+    logbook_show.add_argument("entry_id", help="Backend logbook entry id")
+    logbook_show.add_argument("--json", action="store_true", help="Emit the backend response as JSON")
+    logbook_write = logbook_sub.add_parser("write", help="Persist then append one factual project logbook entry")
+    logbook_write.add_argument("--type", dest="event_type", required=True, help="Event type")
+    logbook_write.add_argument("--summary", required=True, help="Plain-language summary (max 240 characters)")
+    logbook_write.add_argument("--idempotency-key", required=True, help="Stable deduplication key")
+    logbook_write.add_argument("--narrative-file", default=None, help="Regular UTF-8 narrative file (max 8,000 code points)")
+    logbook_write.add_argument("--reference", action="append", default=None, help="Project-local reference KIND:ID; repeatable")
+    logbook_write.add_argument("--correlation-id", default=None, help="Optional stable operation id")
+    logbook_write.add_argument("--severity", choices=("info", "warning", "error"), default="info")
+    logbook_write.add_argument("--json", action="store_true", help="Emit machine-readable write state")
     jobs = sub.add_parser("jobs", help="List local backend jobs needing review")
     jobs.add_argument("--status", action="append", default=None, help="Filter by job status; repeatable")
     jobs.add_argument("--all", action="store_true", help="Show all local backend jobs")
@@ -349,6 +376,7 @@ def _detect_default_capabilities() -> list[str]:
         "populate_backend_ast",
         "populate_project_wiki",
         "verify_project_wiki",
+        "write_project_logbook",
     ]
 
 
@@ -2601,6 +2629,10 @@ def hades_backend_command(args: argparse.Namespace) -> int:
         from hermes_cli.hades_wiki_actions import run_wiki_action
 
         return run_wiki_action(args)
+    if action == "logbook":
+        from hermes_cli.hades_logbook_actions import run_logbook_action
+
+        return run_logbook_action(args)
     if action == "jobs":
         return _cmd_jobs(args)
     if action == "approve-job":
@@ -2634,7 +2666,7 @@ def hades_backend_command(args: argparse.Namespace) -> int:
     if action == "sync":
         return _cmd_sync(args)
     print(
-        "usage: hades backend <setup|bootstrap|bootstrap-awareness|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|wiki|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
+        "usage: hades backend <setup|bootstrap|bootstrap-awareness|status|support-report|quality-report|schedule-quality|privacy-export|privacy-delete|retention-cleanup|profiles|worker|worker-setup|tasks|wiki|logbook|jobs|approve-job|approve-jobs|refuse-job|proposals|ack-proposal|promote-diagnosis|causal-pack|ingest-test|ingest-log|ingest-deploy|ingest-http|bug-intake|backfill-note|benchmark|sync>",
         file=sys.stderr,
     )
     return 0

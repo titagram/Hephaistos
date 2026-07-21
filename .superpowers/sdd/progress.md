@@ -1,3 +1,7 @@
+> **Historical ledger — not current execution state.** For Graph Lifecycle v2,
+> use `docs/superpowers/plans/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md`.
+> Entries below preserve evidence and must not be interpreted as the next task.
+
 # Blocco D Coordinamento — Progress Ledger
 
 ## Task Status

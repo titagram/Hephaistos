@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,6 +86,57 @@ from hermes_cli.hades_index.lifecycle.model import (
 
 
 _DIGEST = "a" * 64
+_ADAPTER_RESULT_VALIDATION_FIXTURE = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "hades"
+    / "graph_v2"
+    / "adapter_result_validation.json"
+)
+
+
+class _CountingTuple(tuple):
+    """Test-only tuple that records records consumed by iteration."""
+
+    def __new__(cls, values: tuple[object, ...], counter: list[int]) -> _CountingTuple:
+        instance = super().__new__(cls, values)
+        instance.counter = counter
+        return instance
+
+    def __iter__(self):
+        for value in super().__iter__():
+            self.counter[0] += 1
+            yield value
+
+
+class _CountingKey(str):
+    """Test-only local key that counts hash/equality lookup work."""
+
+    def __new__(cls, value: str, counter: list[int]) -> _CountingKey:
+        instance = super().__new__(cls, value)
+        instance.counter = counter
+        return instance
+
+    def __hash__(self) -> int:
+        self.counter[0] += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        self.counter[0] += 1
+        return super().__eq__(other)
+
+
+class _HashCountingKey(str):
+    """Test-only local key that isolates hash-based set construction work."""
+
+    def __new__(cls, value: str, counter: list[int]) -> _HashCountingKey:
+        instance = super().__new__(cls, value)
+        instance.counter = counter
+        return instance
+
+    def __hash__(self) -> int:
+        self.counter[0] += 1
+        return super().__hash__()
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +446,431 @@ def _valid_result() -> AdapterResult:
     })
 
 
+def _result_with_call_site_structures(call_site_count: int) -> AdapterResult:
+    """Scale only paired call-site records while retaining a valid IR result."""
+
+    result = _valid_result()
+    declaration = result.declarations[0]
+    structures = list(result.structures)
+    call_sites = list(result.call_sites)
+    for ordinal in range(1, call_site_count):
+        structural_path = f"body/scaled-call/{ordinal}"
+        locator = _ast(structural_path, ordinal)
+        structures.append(
+            StructureIR(
+                local_key=_key("structure", structural=structural_path, ordinal=ordinal),
+                kind=StructureKind.CALL_SITE,
+                owner_declaration_key=declaration.local_key,
+                structural_path=structural_path,
+                ordinal=ordinal,
+                subtype=StructureSubtype.CALL,
+                continuation_block_key=result.blocks[0].local_key,
+                parent_structure_key=None,
+                evidence=_evidence(locator),
+            )
+        )
+        call_sites.append(
+            CallSite(
+                local_key=_key("call_site", structural=structural_path, ordinal=ordinal),
+                caller_declaration_key=declaration.local_key,
+                source_block_key=declaration.entry_block_key,
+                locator=locator,
+                target_expression_kind=TargetExpressionKind.DIRECT_FUNCTION,
+                lexical_target="service.load",
+                fully_qualified_target="app.service.load",
+                receiver_type=None,
+                argument_count=1,
+                continuation_block_key=result.blocks[0].local_key,
+                exception_scope_key=None,
+            )
+        )
+    return replace(
+        result,
+        structures=tuple(sorted(structures, key=lambda structure: structure.local_key)),
+        call_sites=tuple(sorted(call_sites, key=lambda call_site: call_site.local_key)),
+    )
+
+
+def _result_with_unresolved_call_target_facts(fact_count: int) -> AdapterResult:
+    """Create one shared call-site bucket with a single native invocation."""
+
+    result = _valid_result()
+    declaration = result.declarations[0]
+    call_structure = next(
+        structure
+        for structure in result.structures
+        if structure.kind is StructureKind.CALL_SITE
+    )
+    locator = _ast("body/call")
+    edges = [result.edge_facts[0]]
+    for ordinal in range(fact_count):
+        evidence = (
+            _evidence(locator)
+            if ordinal == 0
+            else IREvidence(
+                origin=EvidenceOrigin.INFERRED,
+                extractor="tree-sitter.python",
+                locator=locator,
+                inference_rule="static_analysis",
+            )
+        )
+        edges.append(
+            replace(
+                result.edge_facts[0],
+                local_key=_key("edge_fact", structural=f"body/invoke/{ordinal}"),
+                source_node_local_key=declaration.local_key,
+                target=LocalNodeTarget(declaration.local_key),
+                relation=Relation.INVOKES,
+                flow=EdgeFlow.ALWAYS,
+                call_site_key=call_structure.local_key,
+                locator=locator,
+                evidence=evidence,
+            )
+        )
+    facts = tuple(
+        replace(
+            result.unresolved_facts[0],
+            local_key=_key(
+                "unresolved_fact",
+                locator_kind="config",
+                structural=f"routes/unresolved/{ordinal}",
+                ordinal=ordinal,
+            ),
+            subject=CallSiteSubjectIR(result.call_sites[0].local_key),
+            resolution_kind=ResolutionKind.CALL_TARGET,
+            candidate_set_knowledge=CandidateSetKnowledge.INCOMPLETE,
+            candidate_target_local_keys=(declaration.local_key,),
+            candidate_edge_local_keys=(),
+        )
+        for ordinal in range(fact_count)
+    )
+    return replace(
+        result,
+        edge_facts=tuple(sorted(edges, key=lambda edge: edge.local_key)),
+        entrypoints=(),
+        unresolved_facts=tuple(sorted(facts, key=lambda fact: fact.local_key)),
+    )
+
+
+def _result_with_branch_successors(
+    successor_count: int, *, framework: bool
+) -> AdapterResult:
+    result = _valid_result()
+    declaration = result.declarations[0]
+    target_block_key = result.call_sites[0].continuation_block_key
+    structures = list(result.structures)
+    branch_arms = list(result.branch_arms)
+    blocks = list(result.blocks)
+    segments = list(result.framework_segments)
+    for ordinal in range(successor_count):
+        structural_path = f"body/scaled-branch/{ordinal}"
+        structure_key = _key("structure", structural=structural_path)
+        successor = BranchSuccessor(
+            target_block_key=target_block_key,
+            branch_arm_key=structure_key,
+            arm_ordinal=0,
+            order=0,
+        )
+        structures.append(
+            StructureIR(
+                local_key=structure_key,
+                kind=StructureKind.BRANCH_GROUP,
+                owner_declaration_key=declaration.local_key,
+                structural_path=structural_path,
+                ordinal=0,
+                subtype=StructureSubtype.IF,
+                continuation_block_key=target_block_key,
+                parent_structure_key=None,
+                evidence=_evidence(_ast(structural_path)),
+            )
+        )
+        branch_arms.append(
+            BranchArm(
+                branch_local_key=structure_key,
+                source_block_key=(
+                    declaration.entry_block_key
+                    if framework
+                    else _key("basic_block", structural=f"body/scaled-source/{ordinal}")
+                ),
+                target_block_key=target_block_key,
+                polarity=ConditionPolarity.TRUE,
+                condition=ConditionIR(
+                    "predicate", "is_admin", _DIGEST, ConditionPolarity.TRUE
+                ),
+                arm_ordinal=0,
+            )
+        )
+        if framework:
+            segments.append(
+                FrameworkPipelineSegment(
+                    local_key=_key(
+                        "framework_pipeline_segment",
+                        locator_kind="config",
+                        structural=f"routes/scaled-branch/{ordinal}",
+                    ),
+                    framework_role="middleware",
+                    pipeline_order=ordinal + 1,
+                    target=FrameworkLocalTarget(declaration.local_key),
+                    success_successor=successor,
+                    short_circuit_successors=(),
+                    evidence=_evidence(_config(f"routes/scaled-branch/{ordinal}")),
+                )
+            )
+        else:
+            source_key = _key("basic_block", structural=f"body/scaled-source/{ordinal}")
+            blocks.append(
+                BasicBlock(
+                    local_key=source_key,
+                    declaration_key=declaration.local_key,
+                    control_kind=ControlKind.STRAIGHT_LINE,
+                    ordinal=ordinal + 10,
+                    locator=_ast(f"body/scaled-source/{ordinal}"),
+                    successors=(successor,),
+                )
+            )
+    return replace(
+        result,
+        blocks=tuple(sorted(blocks, key=lambda block: block.local_key)),
+        branch_arms=tuple(
+            sorted(
+                branch_arms,
+                key=lambda arm: (arm.branch_local_key, arm.arm_ordinal),
+            )
+        ),
+        structures=tuple(sorted(structures, key=lambda structure: structure.local_key)),
+        framework_segments=tuple(
+            sorted(segments, key=lambda segment: segment.local_key)
+        ),
+    )
+
+
+def _result_with_returns_and_invocations(edge_pair_count: int) -> AdapterResult:
+    result = _result_with_call_site_structures(edge_pair_count)
+    declaration = result.declarations[0]
+    structures_by_occurrence = {
+        (structure.owner_declaration_key, structure.structural_path, structure.ordinal): structure
+        for structure in result.structures
+    }
+    edges = list(result.edge_facts)
+    for ordinal, site in enumerate(result.call_sites):
+        call_structure = structures_by_occurrence[
+            (site.caller_declaration_key, site.locator.structural_path, site.locator.ordinal)
+        ]
+        edges.extend((
+            EdgeFactIR(
+                local_key=_key("edge_fact", structural=f"body/scaled-invoke/{ordinal}"),
+                source_node_local_key=declaration.local_key,
+                target=LocalNodeTarget(declaration.local_key),
+                relation=Relation.INVOKES,
+                flow=EdgeFlow.ALWAYS,
+                condition=None,
+                branch_group_key=None,
+                call_site_key=call_structure.local_key,
+                exception_scope_key=None,
+                order=0,
+                locator=site.locator,
+                evidence=_evidence(site.locator),
+            ),
+            EdgeFactIR(
+                local_key=_key("edge_fact", structural=f"body/scaled-return/{ordinal}"),
+                source_node_local_key=declaration.local_key,
+                target=LocalNodeTarget(site.continuation_block_key),
+                relation=Relation.RETURNS_TO,
+                flow=EdgeFlow.ALWAYS,
+                condition=None,
+                branch_group_key=None,
+                call_site_key=call_structure.local_key,
+                exception_scope_key=None,
+                order=0,
+                locator=site.locator,
+                evidence=_evidence(site.locator),
+            ),
+        ))
+    return replace(result, edge_facts=tuple(sorted(edges, key=lambda edge: edge.local_key)))
+
+
+def _result_with_handled_throws(throw_count: int) -> AdapterResult:
+    result = _valid_result()
+    declaration = result.declarations[0]
+    structures = list(result.structures)
+    scopes = list(result.exception_scopes)
+    edges = list(result.edge_facts)
+    for ordinal in range(throw_count):
+        structural_path = f"body/scaled-throw/{ordinal}"
+        structure_key = _key("structure", structural=structural_path)
+        locator = _ast(structural_path)
+        structures.append(
+            StructureIR(
+                local_key=structure_key,
+                kind=StructureKind.EXCEPTION_SCOPE,
+                owner_declaration_key=declaration.local_key,
+                structural_path=structural_path,
+                ordinal=0,
+                subtype=StructureSubtype.TRY_CATCH,
+                continuation_block_key=None,
+                parent_structure_key=None,
+                evidence=_evidence(locator),
+            )
+        )
+        scopes.append(
+            ExceptionScope(
+                local_key=_key("exception_scope", structural=structural_path),
+                structure_key=structure_key,
+                declaration_key=declaration.local_key,
+                locator=locator,
+                catch_arms=(),
+                finally_block_key=None,
+                parent_scope_key=None,
+            )
+        )
+        edges.append(
+            EdgeFactIR(
+                local_key=_key("edge_fact", structural=f"body/scaled-throw/{ordinal}"),
+                source_node_local_key=declaration.local_key,
+                target=LocalNodeTarget(declaration.local_key),
+                relation=Relation.THROWS_TO,
+                flow=EdgeFlow.EXCEPTION,
+                condition=ConditionIR(
+                    "predicate", "is_exception", _DIGEST, ConditionPolarity.EXCEPTION
+                ),
+                branch_group_key=None,
+                call_site_key=None,
+                exception_scope_key=structure_key,
+                order=0,
+                locator=locator,
+                evidence=_evidence(locator),
+            )
+        )
+    return replace(
+        result,
+        structures=tuple(sorted(structures, key=lambda structure: structure.local_key)),
+        exception_scopes=tuple(sorted(scopes, key=lambda scope: scope.local_key)),
+        edge_facts=tuple(sorted(edges, key=lambda edge: edge.local_key)),
+    )
+
+
+def _result_with_incomplete_candidate_edges(
+    candidate_edge_count: int, counter: list[int]
+) -> AdapterResult:
+    result = _result_with_unresolved_call_target_facts(1)
+    declaration = result.declarations[0]
+    call_structure = next(
+        structure
+        for structure in result.structures
+        if structure.kind is StructureKind.CALL_SITE
+    )
+    locator = _ast("body/call")
+    candidate_edges = tuple(
+        EdgeFactIR(
+            local_key=_key("edge_fact", structural=f"body/candidate/{ordinal}"),
+            source_node_local_key=declaration.local_key,
+            target=LocalNodeTarget(declaration.local_key),
+            relation=Relation.INVOKES,
+            flow=EdgeFlow.ALWAYS,
+            condition=None,
+            branch_group_key=None,
+            call_site_key=call_structure.local_key,
+            exception_scope_key=None,
+            order=0,
+            locator=locator,
+            evidence=IREvidence(
+                origin=EvidenceOrigin.INFERRED,
+                extractor="tree-sitter.python",
+                locator=locator,
+                inference_rule="static_analysis",
+            ),
+        )
+        for ordinal in range(candidate_edge_count)
+    )
+    fact = replace(
+        result.unresolved_facts[0],
+        candidate_target_local_keys=(
+            _HashCountingKey(declaration.local_key, counter),
+        ),
+        candidate_edge_local_keys=tuple(
+            sorted(edge.local_key for edge in candidate_edges)
+        ),
+    )
+    return replace(
+        result,
+        edge_facts=tuple(
+            sorted((*result.edge_facts, *candidate_edges), key=lambda edge: edge.local_key)
+        ),
+        unresolved_facts=(fact,),
+    )
+
+
+def _result_with_invalid_incomplete_candidate_target() -> AdapterResult:
+    result = _result_with_incomplete_candidate_edges(1, [0])
+    declaration = result.declarations[0]
+    alternate_declaration_key = _key(
+        "executable_declaration", structural="body/alternate"
+    )
+    alternate_block_key = _key("basic_block", structural="body/alternate-entry")
+    alternate_declaration = replace(
+        declaration,
+        local_key=alternate_declaration_key,
+        name="alternate",
+        qualified_name="app.alternate",
+        locator=_ast("body/alternate"),
+        entry_block_key=alternate_block_key,
+        normal_exit_block_keys=(alternate_block_key,),
+        exception_exit_block_keys=(),
+    )
+    alternate_block = BasicBlock(
+        local_key=alternate_block_key,
+        declaration_key=alternate_declaration_key,
+        control_kind=ControlKind.ENTRY,
+        ordinal=99,
+        locator=_ast("body/alternate-entry"),
+        successors=(),
+    )
+    return replace(
+        result,
+        declarations=tuple(
+            sorted(
+                (*result.declarations, alternate_declaration),
+                key=lambda candidate: candidate.local_key,
+            )
+        ),
+        blocks=tuple(
+            sorted(
+                (*result.blocks, alternate_block), key=lambda block: block.local_key
+            )
+        ),
+        unresolved_facts=(
+            replace(
+                result.unresolved_facts[0],
+                candidate_target_local_keys=(alternate_declaration_key,),
+            ),
+        ),
+    )
+
+
+def _count_collection_records(result: AdapterResult, field_name: str) -> int:
+    counter = [0]
+    records = getattr(result, field_name)
+    replace(result, **{field_name: _CountingTuple(records, counter)}).validate()
+    return counter[0]
+
+
+def _result_with_counting_structure_keys(
+    result: AdapterResult, kind: StructureKind, counter: list[int]
+) -> AdapterResult:
+    return replace(
+        result,
+        structures=tuple(
+            replace(
+                structure,
+                local_key=_CountingKey(structure.local_key, counter),
+            )
+            if structure.kind is kind
+            else structure
+            for structure in result.structures
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "successor",
     [
@@ -695,6 +1172,298 @@ def test_returns_to_requires_matching_invocation_and_its_exact_continuation() ->
     )
     with pytest.raises(IRValidationError, match="continuation"):
         replace(result, edge_facts=edges).validate()
+
+
+def test_indexed_validation_diagnostics_preserve_exact_codes_messages_and_order() -> None:
+    result = _valid_result()
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    expected = {item["case"]: item for item in fixture["diagnostics"]}
+    call_structure = next(
+        structure
+        for structure in result.structures
+        if structure.kind is StructureKind.CALL_SITE
+    )
+
+    cases = {
+        "call_site_structure": lambda: replace(
+            result,
+            call_sites=(replace(result.call_sites[0], locator=_ast("body/missing")),),
+        ),
+        "branch_successor": lambda: replace(
+            result,
+            blocks=tuple(
+                replace(
+                    block,
+                    successors=(
+                        BranchSuccessor(
+                            target_block_key=result.blocks[0].local_key,
+                            branch_arm_key=result.branch_arms[0].branch_local_key,
+                            arm_ordinal=result.branch_arms[0].arm_ordinal,
+                            order=0,
+                        ),
+                    ),
+                )
+                if block.local_key == result.declarations[0].entry_block_key
+                else block
+                for block in result.blocks
+            ),
+        ),
+        "semantic_order": lambda: replace(
+            result,
+            call_sites=(replace(result.call_sites[0], locator=_ast("body/missing")),),
+            blocks=tuple(
+                replace(
+                    block,
+                    successors=(
+                        BranchSuccessor(
+                            target_block_key=result.blocks[0].local_key,
+                            branch_arm_key=result.branch_arms[0].branch_local_key,
+                            arm_ordinal=result.branch_arms[0].arm_ordinal,
+                            order=0,
+                        ),
+                    ),
+                )
+                if block.local_key == result.declarations[0].entry_block_key
+                else block
+                for block in result.blocks
+            ),
+        ),
+        "invokes_call_site": lambda: replace(
+            result,
+            call_sites=(),
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.INVOKES,
+                    call_site_key=call_structure.local_key,
+                ),
+            ),
+        ),
+        "returns_to_missing_call_site": lambda: replace(
+            result,
+            call_sites=(),
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.RETURNS_TO,
+                    call_site_key=call_structure.local_key,
+                    target=LocalNodeTarget(
+                        result.call_sites[0].continuation_block_key
+                    ),
+                ),
+            ),
+        ),
+        "returns_to_continuation": lambda: replace(
+            result,
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.RETURNS_TO,
+                    call_site_key=call_structure.local_key,
+                    target=LocalNodeTarget(
+                        next(
+                            block.local_key
+                            for block in result.blocks
+                            if block.local_key
+                            != result.call_sites[0].continuation_block_key
+                        )
+                    ),
+                ),
+            ),
+        ),
+        "returns_to_call_site": lambda: replace(
+            result,
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.RETURNS_TO,
+                    call_site_key=call_structure.local_key,
+                    target=LocalNodeTarget(
+                        result.call_sites[0].continuation_block_key
+                    ),
+                ),
+            ),
+        ),
+        "handled_throws_scope": lambda: replace(
+            result,
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.THROWS_TO,
+                    flow=EdgeFlow.EXCEPTION,
+                    condition=ConditionIR(
+                        "predicate",
+                        "is_exception",
+                        _DIGEST,
+                        ConditionPolarity.EXCEPTION,
+                    ),
+                    exception_scope_key=next(
+                        structure.local_key
+                        for structure in result.structures
+                        if structure.kind is StructureKind.EXCEPTION_SCOPE
+                    ),
+                ),
+            ),
+            exception_scopes=(),
+        ),
+        "framework_branch_successor": lambda: replace(
+            result,
+            framework_segments=(
+                replace(
+                    result.framework_segments[0],
+                    success_successor=BranchSuccessor(
+                        target_block_key=next(
+                            block.local_key
+                            for block in result.blocks
+                            if block.local_key != result.branch_arms[0].target_block_key
+                        ),
+                        branch_arm_key=result.branch_arms[0].branch_local_key,
+                        arm_ordinal=result.branch_arms[0].arm_ordinal,
+                        order=0,
+                    ),
+                ),
+            ),
+        ),
+        "unresolved_call_target_subject": lambda: replace(
+            result,
+            entrypoints=(),
+            unresolved_facts=(
+                replace(
+                    result.unresolved_facts[0],
+                    subject=CallSiteSubjectIR(result.call_sites[0].local_key),
+                    resolution_kind=ResolutionKind.CALL_TARGET,
+                    candidate_set_knowledge=CandidateSetKnowledge.INCOMPLETE,
+                    candidate_target_local_keys=(result.declarations[0].local_key,),
+                ),
+            ),
+        ),
+        "incomplete_candidate_target_membership": (
+            _result_with_invalid_incomplete_candidate_target
+        ),
+        "edge_before_unresolved": lambda: replace(
+            result,
+            entrypoints=(),
+            edge_facts=(
+                replace(
+                    result.edge_facts[0],
+                    relation=Relation.RETURNS_TO,
+                    call_site_key=call_structure.local_key,
+                    target=LocalNodeTarget(
+                        next(
+                            block.local_key
+                            for block in result.blocks
+                            if block.local_key
+                            != result.call_sites[0].continuation_block_key
+                        )
+                    ),
+                ),
+            ),
+            unresolved_facts=(
+                replace(
+                    result.unresolved_facts[0],
+                    subject=CallSiteSubjectIR(result.call_sites[0].local_key),
+                    resolution_kind=ResolutionKind.CALL_TARGET,
+                    candidate_set_knowledge=CandidateSetKnowledge.INCOMPLETE,
+                    candidate_target_local_keys=(result.declarations[0].local_key,),
+                ),
+            ),
+        ),
+    }
+
+    for case, build_result in cases.items():
+        with pytest.raises(IRValidationError) as error:
+            build_result().validate()
+        assert error.value.code == expected[case]["code"]
+        assert error.value.message == expected[case]["message"]
+
+
+def test_adapter_result_validation_uses_bounded_structure_iterations_at_scale() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    budget = fixture["scale"]["max_structure_iterations_per_call_site"]
+    for call_site_count in fixture["scale"]["call_site_counts"]:
+        counter = [0]
+        result = _result_with_call_site_structures(call_site_count)
+        replace(
+            result,
+            structures=_CountingTuple(result.structures, counter),
+        ).validate()
+        assert counter[0] <= call_site_count * budget
+
+
+def test_unresolved_call_target_facts_consume_edges_linearly_at_scale() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts = tuple(
+        _count_collection_records(
+            _result_with_unresolved_call_target_facts(fact_count), "edge_facts"
+        )
+        for fact_count in fixture["scale"]["unresolved_fact_counts"]
+    )
+    assert counts[1] <= counts[0] * fixture["scale"]["max_growth_factor"]
+
+
+@pytest.mark.parametrize("framework", (False, True), ids=("ordinary", "framework"))
+def test_branch_successors_consume_branch_arms_linearly_at_scale(
+    framework: bool,
+) -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts = tuple(
+        _count_collection_records(
+            _result_with_branch_successors(count, framework=framework), "branch_arms"
+        )
+        for count in fixture["scale"]["lookup_family_counts"]
+    )
+    assert counts[1] <= counts[0] * fixture["scale"]["max_growth_factor"]
+
+
+def test_invokes_and_returns_consume_edges_linearly_at_scale() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts = tuple(
+        _count_collection_records(
+            _result_with_returns_and_invocations(count), "edge_facts"
+        )
+        for count in fixture["scale"]["lookup_family_counts"]
+    )
+    assert counts[1] <= counts[0] * fixture["scale"]["max_growth_factor"]
+
+
+def test_call_site_inverse_lookup_uses_linear_key_operations_at_scale() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts: list[int] = []
+    for count in fixture["scale"]["lookup_family_counts"]:
+        counter = [0]
+        _result_with_counting_structure_keys(
+            _result_with_returns_and_invocations(count),
+            StructureKind.CALL_SITE,
+            counter,
+        ).validate()
+        counts.append(counter[0])
+    assert counts[1] <= counts[0] * fixture["scale"]["max_growth_factor"]
+
+
+def test_handled_throws_use_linear_scope_key_operations_at_scale() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts: list[int] = []
+    for count in fixture["scale"]["lookup_family_counts"]:
+        counter = [0]
+        _result_with_counting_structure_keys(
+            _result_with_handled_throws(count),
+            StructureKind.EXCEPTION_SCOPE,
+            counter,
+        ).validate()
+        counts.append(counter[0])
+    assert counts[1] <= counts[0] * fixture["scale"]["max_growth_factor"]
+
+
+def test_incomplete_candidate_target_membership_builds_its_key_set_once() -> None:
+    fixture = json.loads(_ADAPTER_RESULT_VALIDATION_FIXTURE.read_text())
+    counts: list[int] = []
+    for candidate_edge_count in fixture["scale"]["candidate_edge_counts"]:
+        counter = [0]
+        result = _result_with_incomplete_candidate_edges(candidate_edge_count, counter)
+        counter[0] = 0
+        result.validate()
+        counts.append(counter[0])
+    assert max(counts) <= fixture["scale"]["max_candidate_target_key_operations"]
 
 
 def test_handled_throws_to_requires_a_matching_exception_scope_record() -> None:

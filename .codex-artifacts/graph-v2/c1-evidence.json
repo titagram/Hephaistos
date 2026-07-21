@@ -1,0 +1,147 @@
+{
+  "schema": "hades.graph_v2.c1_evidence.v1",
+  "generated_at": "2026-07-21T06:43:10Z",
+  "generated_at_timezone": "2026-07-21T08:43:10+0200",
+  "plan_task": "Plan 1 C1 validation scalability and Task 18 evidence closure",
+  "repository": "/Users/gabriele/Dev/Hephaistos",
+  "branch": "codex/graph-v2-lifecycle-validation-performance",
+  "task_base_sha": "d328860f47fde018ea6cf07b5f0faa3d27886c67",
+  "tested_commit_sha": "74c27506639195bb4ddff595821b312f4f1fdd6f",
+  "evidence_commit": "the commit containing this file; intentionally not self-referential",
+  "contract_lock": {
+    "path": "contracts/hades/graph-v2/contract-lock.json",
+    "manifest_sha256": "cfb469a60fd0c59a13ca254df5e60871c83ffa207f21e3d307ced6ade6233644",
+    "contract_lock_file_sha256": "669d01a554350a5f4e2985f64d3183d36a016650be172edeff4314d6c0277540"
+  },
+  "red": [
+    {
+      "class": "call_sites_times_structures",
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_ir.py::test_adapter_result_validation_uses_bounded_structure_iterations_at_scale -q",
+      "exit_status": 1,
+      "observed": "4686 structure records consumed at 64 call sites; original assertion 4686 <= 512 failed in 0.29s",
+      "final_frozen_budget": "at most 9 structure-record consumptions per call site"
+    },
+    {
+      "class": "unresolved_facts_times_edges",
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_ir.py::test_unresolved_call_target_validation_uses_bounded_operations_at_scale -q",
+      "exit_status": 1,
+      "observed": "6182 validation operations at 32 facts sharing a 32-edge invocation bucket; assertion 6182 <= 3200 failed in 0.20s",
+      "note": "This diagnosis exposed the remaining per-fact bucket filter. The final committed regression replaced the trace-based diagnostic oracle with direct edge tuple/key counters after code-quality review."
+    }
+  ],
+  "focused_green": [
+    {
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_ir.py -q",
+      "exit_status": 0,
+      "result": "59 passed in 0.43s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_control_flow.py tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_traversal.py -q",
+      "exit_status": 0,
+      "result": "105 passed in 4.83s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py -q",
+      "exit_status": 0,
+      "result": "90 passed in 0.76s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_express.py tests/hermes_cli/test_hades_lifecycle_nextjs.py -q",
+      "exit_status": 0,
+      "result": "150 passed in 1.31s"
+    }
+  ],
+  "direct_operation_counts": {
+    "unresolved_shared_call_site_edge_consumption": [297, 585],
+    "ordinary_branch_arm_consumption": [231, 455],
+    "framework_branch_arm_consumption": [231, 455],
+    "invokes_returns_edge_consumption": [585, 1161],
+    "call_site_inverse_key_operations": [616, 1224],
+    "handled_throws_scope_key_operations": [296, 584],
+    "candidate_membership_key_operations": [5, 5],
+    "doubled_workload_max_growth_factor": 3
+  },
+  "producer_gates": {
+    "report": ".codex-artifacts/graph-v2/agent-gates.json",
+    "report_sha256": "455c2edef7c91189009f901c2b6401aa9d16b89cc2f912807aae54b1ef4109be",
+    "gate_ids": [
+      "G01",
+      "G02",
+      "G03",
+      "G04",
+      "G05",
+      "G06",
+      "G07",
+      "G08",
+      "G09",
+      "G10",
+      "G11",
+      "G12",
+      "G13",
+      "G14"
+    ],
+    "all_passed": true,
+    "total_duration_seconds": 227.767795,
+    "g07_duration_seconds": 219.704411,
+    "g13_scope": "Python locked-contract vectors"
+  },
+  "broad_agent_regression": {
+    "command": ".venv/bin/python -m pytest tests/hermes_cli/test_hades_*.py tests/agent/test_hades_backend_*.py -q",
+    "exit_status": 1,
+    "result": "1795 passed, 1 deselected, 1 failed in 751.17s",
+    "failure_node": "tests/hermes_cli/test_hades_persephone_messages.py::test_openapi_freezes_queue_gate_envelope_and_targeted_cursors",
+    "failure_summary": "OpenAPI capability response uses a CapabilitiesResponse $ref while the test searches the response object JSON for the literal persephone_agent_queue_v1",
+    "task_parent_proof": {
+      "base_sha": "d328860f47fde018ea6cf07b5f0faa3d27886c67",
+      "test_blob_base_and_head": "0fa6a8c2808175cfbc679f661f484e6c207cb0f3",
+      "openapi_blob_base_and_head": "8e21068220dedc752a5bbee405c1cb71bd865c28",
+      "scoped_diff_exit_status": 0,
+      "isolated_reproduction": "1 failed in 0.21s with the same assertion"
+    },
+    "classification": "unrelated parent-identical baseline failure; not repaired and not claimed passing"
+  },
+  "static_checks": [
+    {
+      "command": ".venv/bin/python -m ruff check hermes_cli/hades_index/lifecycle/model.py tests/hermes_cli/test_hades_lifecycle_ir.py",
+      "exit_status": 0,
+      "result": "All checks passed"
+    },
+    {
+      "command": ".venv/bin/python -m py_compile hermes_cli/hades_index/lifecycle/model.py tests/hermes_cli/test_hades_lifecycle_ir.py",
+      "exit_status": 0,
+      "result": "no output"
+    },
+    {
+      "command": "git diff --check and git diff --check d328860f4..74c275066",
+      "exit_status": 0,
+      "result": "no output"
+    }
+  ],
+  "task_18_fixture_tree": {
+    "path": "tests/fixtures/hades/graph_v2/adapter_result_validation.json",
+    "sha256": "1903986800092028b7604d678fefa0c54e3a698439f884464be68122377a1f55",
+    "purpose": "frozen direct operation-count scales, growth bound, and exact validation diagnostics/order"
+  },
+  "exit_gate": {
+    "g01_g12_g14_and_python_g13": "passed",
+    "v1_pipeline_check": "No active graph-v2 reader or fallback. Matches are legacy producers or explicit v2-boundary rejection paths; G01 covers v2-only acceptance.",
+    "contract_manifest_lock_and_golden_vectors": "committed and G02/G13 green",
+    "large_benchmark_has_no_silent_cap": "G07 green above 5500 nodes, 10500 edges, and 500 entrypoints with zero bundle-budget omissions",
+    "round_trip_spool_readback": "G07 resumes and verifies the complete spool and deterministic chunk digests",
+    "spec_review": "approved with 0 Critical, 0 Important, 0 Minor",
+    "code_quality_review": "approved with 0 Critical, 0 Important, 0 Minor"
+  },
+  "review_reports": {
+    "spec": ".codex-artifacts/graph-v2/c1-spec-review.md",
+    "code_quality": ".codex-artifacts/graph-v2/c1-code-quality-review.md",
+    "repair_cycles_used": 2,
+    "repair_cycle_limit": 2
+  },
+  "task_18_evidence_status": "closed for tested implementation SHA with the unrelated parent-identical broad-suite exception recorded",
+  "residual_risk": [
+    "No Carnovali run was performed.",
+    "Live peak RSS and elapsed behavior remain unmeasured; use a bounded real fixture and explicit monitoring before Carnovali.",
+    "The unrelated Persephone/OpenAPI broad-suite failure remains outside C1."
+  ],
+  "next_unblocked_task": "Backend Plan 2 Task 5; P0 remains open until backend Tasks 5-12 and C2 are verified"
+}

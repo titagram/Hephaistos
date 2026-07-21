@@ -4,85 +4,85 @@
       "gate": "G01",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_v2_only -q",
       "passed": true,
-      "duration_seconds": 0.917943
+      "duration_seconds": 0.514501
     },
     {
       "gate": "G02",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_v2_golden.py::test_identity_vectors -q",
       "passed": true,
-      "duration_seconds": 0.371642
+      "duration_seconds": 0.352668
     },
     {
       "gate": "G03",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_reference_resolution -q",
       "passed": true,
-      "duration_seconds": 0.61745
+      "duration_seconds": 0.654699
     },
     {
       "gate": "G04",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_privacy_rejection -q",
       "passed": true,
-      "duration_seconds": 0.559317
+      "duration_seconds": 0.517828
     },
     {
       "gate": "G05",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_evidence_flow_completeness_orthogonal -q",
       "passed": true,
-      "duration_seconds": 0.666607
+      "duration_seconds": 0.616691
     },
     {
       "gate": "G06",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_omission_ledgers -q",
       "passed": true,
-      "duration_seconds": 0.717025
+      "duration_seconds": 0.654697
     },
     {
       "gate": "G07",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_bundle.py::test_large_bundle -q",
       "passed": true,
-      "duration_seconds": 228.969093
+      "duration_seconds": 219.704411
     },
     {
       "gate": "G08",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_control_flow.py::test_cfg_matrix -q",
       "passed": true,
-      "duration_seconds": 0.929307
+      "duration_seconds": 0.859648
     },
     {
       "gate": "G09",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_framework_adapter.py::test_all_required_framework_golden_suites_are_registered -q",
       "passed": true,
-      "duration_seconds": 0.73727
+      "duration_seconds": 0.47825
     },
     {
       "gate": "G10",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_traversal.py::test_async_terminal_semantics -q",
       "passed": true,
-      "duration_seconds": 0.626405
+      "duration_seconds": 0.573047
     },
     {
       "gate": "G11",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_backend_indexer_golden.py::test_polyglot -q",
       "passed": true,
-      "duration_seconds": 1.724752
+      "duration_seconds": 1.618107
     },
     {
       "gate": "G12",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_index_enrichment.py::test_required_canary_failure_escapes_the_real_graph_publication_boundary -q",
       "passed": true,
-      "duration_seconds": 0.455731
+      "duration_seconds": 0.411448
     },
     {
       "gate": "G13",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_v2_golden.py::test_python_vectors_match_locked_contract -q",
       "passed": true,
-      "duration_seconds": 0.317471
+      "duration_seconds": 0.2934
     },
     {
       "gate": "G14",
       "command": "/Users/gabriele/Dev/Hephaistos/.venv/bin/python -m pytest tests/hermes_cli/test_hades_graph_contract.py::test_base_provenance_and_candidate_ownership -q",
       "passed": true,
-      "duration_seconds": 0.543419
+      "duration_seconds": 0.5184
     }
   ]
 }

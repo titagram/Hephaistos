@@ -38,6 +38,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key[=:]\s*)[A-Za-z0-9._\-]{8,}"),
 )
 _WIKI_PAGE_ID = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
+_LOGBOOK_ROUTE_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,190}\Z")
 _ROUTE_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 _GRAPH_IMPORT_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -504,6 +505,15 @@ def validate_wiki_page_id(value: Any) -> str:
     return clean
 
 
+def validate_logbook_route_id(value: Any, *, field: str) -> str:
+    """Return one safe project-scoped logbook route identifier."""
+
+    clean = str(value or "").strip()
+    if _LOGBOOK_ROUTE_ID.fullmatch(clean) is None:
+        raise ValueError(f"{field} must be a safe opaque route identifier")
+    return clean
+
+
 def _string_param(value: Any) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
@@ -811,6 +821,30 @@ class HadesBackendClient:
     def verify_wiki_page(self, wiki_page_id: str, **payload: Any) -> dict[str, Any]:
         clean = validate_wiki_page_id(wiki_page_id)
         return self._request("POST", f"wiki/pages/{clean}/verify", json_body=payload)
+
+    def list_logbook_entries(self, project_id: str, **payload: Any) -> dict[str, Any]:
+        project = validate_logbook_route_id(project_id, field="project id")
+        return self._request(
+            "GET", "logbook/entries", params={**payload, "project_id": project}
+        )
+
+    def get_logbook_entry(
+        self, project_id: str, entry_id: str, **payload: Any
+    ) -> dict[str, Any]:
+        project = validate_logbook_route_id(project_id, field="project id")
+        entry = validate_logbook_route_id(entry_id, field="logbook entry id")
+        return self._request(
+            "GET",
+            f"logbook/entries/{entry}",
+            params={**payload, "project_id": project},
+        )
+
+    def create_logbook_entry(self, project_id: str, **payload: Any) -> dict[str, Any]:
+        project = validate_logbook_route_id(project_id, field="project id")
+        return self._request(
+            "POST", "logbook/entries", json_body={**payload, "project_id": project},
+            success_statuses=(200, 201),
+        )
 
     def memory_snapshot(self, **payload: Any) -> dict[str, Any]:
         return self._request("GET", "memory/snapshot", params=payload)

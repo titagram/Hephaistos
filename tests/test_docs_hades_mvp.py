@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HADES_DOCS = REPO_ROOT / "docs" / "hades"
@@ -60,6 +62,177 @@ def test_hades_openapi_contract_covers_client_routes():
     assert spec["components"]["schemas"]["ErrorResponse"]["required"] == ["error"]
     assert spec["components"]["schemas"]["ErrorResponse"]["properties"]["error"]["required"] == ["code", "message"]
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"]["$ref"] == "#/components/responses/Unauthorized"
+
+
+def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
+    backend = (HADES_DOCS / "backend.md").read_text(encoding="utf-8").lower()
+    operations = (HADES_DOCS / "operations.md").read_text(encoding="utf-8").lower()
+    documented = f"{backend}\n{operations}"
+
+    for topic in [
+        "hades backend logbook list",
+        "hades backend logbook show <entry-id>",
+        "hades backend logbook write",
+        "write_project_logbook",
+        "no legacy grant",
+        "re-registration",
+        "dead-letter",
+        "degraded sync",
+        "re-register",
+    ]:
+        assert topic in documented, f"missing logbook operational contract: {topic!r}"
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            assert key not in result, f"duplicate OpenAPI key: {key}"
+            result[key] = value
+        return result
+
+    spec = json.loads(
+        (HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"),
+        object_pairs_hook=unique_object,
+    )
+    paths = spec["paths"]
+    entries = paths["/api/hades/v1/logbook/entries"]
+    entry = paths["/api/hades/v1/logbook/entries/{entry}"]
+
+    assert set(entries) >= {"get", "post"}
+    assert entry["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryDetailResponse"
+    assert entries["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryPage"
+    assert entries["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryCreateRequest"
+    assert entries["post"]["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
+    assert entries["post"]["responses"]["503"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/LogbookRecordingFailedResponse"
+
+    responses = spec["components"]["responses"]
+    logbook_validation_ref = "#/components/responses/LogbookValidationError"
+    assert entries["get"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    assert entries["post"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    assert entry["get"]["responses"]["422"]["$ref"] == logbook_validation_ref
+    validation_schema = responses["LogbookValidationError"]["content"]["application/json"]["schema"]
+    assert validation_schema["oneOf"] == [
+        {"$ref": "#/components/schemas/ValidationErrorResponse"},
+        {"$ref": "#/components/schemas/ErrorResponse"},
+    ]
+
+    schemas = spec["components"]["schemas"]
+    create_request = schemas["ProjectLogbookEntryCreateRequest"]
+    assert create_request["additionalProperties"] is False
+    assert create_request["required"] == [
+        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "correlation_id", "idempotency_key", "references",
+        "narrative_markdown", "payload", "supersedes_entry_id",
+    ]
+    client_body = {
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "event_type": "change",
+        "severity": "info",
+        "summary": "Done",
+        "correlation_id": None,
+        "idempotency_key": "0123456789abcdef",
+        "references": [{"kind": "commit", "id": "a" * 40}],
+        "narrative_markdown": None,
+        "payload": {},
+        "supersedes_entry_id": None,
+    }
+    assert set(create_request["required"]) <= client_body.keys()
+    assert set(client_body) <= create_request["properties"].keys()
+    Draft202012Validator({
+        "$ref": "#/components/schemas/ProjectLogbookEntryCreateRequest",
+        "components": {"schemas": schemas},
+    }).validate(client_body)
+    assert create_request["properties"]["project_id"] == {
+        "type": "string", "minLength": 1, "maxLength": 191,
+    }
+    assert create_request["properties"]["workspace_binding_id"]["maxLength"] == 191
+    assert create_request["properties"]["references"]["maxItems"] == 20
+    assert create_request["properties"]["idempotency_key"] == {
+        "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[!-~]+$"
+    }
+    assert create_request["properties"]["correlation_id"] == {"type": ["string", "null"], "maxLength": 191}
+    assert create_request["properties"]["supersedes_entry_id"]["maxLength"] == 191
+    assert "displayed literally" in create_request["properties"]["summary"]["description"]
+    assert "Markdown" in create_request["properties"]["narrative_markdown"]["description"]
+    assert schemas["ProjectLogbookActor"]["required"] == [
+        "kind", "label", "user_id", "agent_id", "device_id", "role", "model",
+    ]
+    assert set(schemas["ProjectLogbookActor"]["properties"]) == {
+        "kind", "label", "user_id", "agent_id", "device_id", "role", "model",
+    }
+    assert schemas["ProjectLogbookEntryResponse"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["entry", "replayed"],
+        "properties": {
+            "entry": {"$ref": "#/components/schemas/ProjectLogbookEntry"},
+            "replayed": {"type": "boolean"},
+        },
+    }
+    assert schemas["ProjectLogbookReference"]["properties"]["kind"]["enum"] == [
+        "wiki_page", "wiki_revision", "graph_import", "verification_work", "kanban_task",
+        "run", "repository", "commit", "file",
+    ]
+    assert set(schemas["ProjectLogbookReference"]["properties"]) == {"kind", "id"}
+    types_parameter = next(parameter for parameter in entries["get"]["parameters"] if parameter["name"] == "types[]")
+    assert types_parameter["schema"] == {
+        "type": "array", "minItems": 1, "maxItems": 10,
+        "items": {"type": "string", "enum": [
+            "change", "creation", "import", "projection", "verification", "wiki", "decision", "failure", "rollback", "note",
+        ]},
+    }
+    assert entries["get"]["parameters"][-1]["schema"]["maximum"] == 50
+    parameters = {parameter["name"]: parameter["schema"] for parameter in entries["get"]["parameters"]}
+    assert parameters["actor"]["enum"] == ["user", "agent", "subagent", "system"]
+    assert parameters["project_id"]["maxLength"] == 191
+    assert parameters["workspace_binding_id"]["maxLength"] == 191
+    assert parameters["q"]["maxLength"] == 200
+    assert parameters["cursor"]["maxLength"] == 2048
+
+    actual_entry = {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "project_id": "proj_1",
+        "occurred_at": "2026-07-21T20:00:00Z",
+        "recorded_at": "2026-07-21T20:00:01Z",
+        "actor": {
+            "kind": "agent", "label": "Hades Agent", "user_id": None,
+            "agent_id": "agent_1", "device_id": None, "role": None, "model": None,
+        },
+        "event_type": "change", "severity": "info", "summary": "Done",
+        "narrative_markdown": None, "references": [], "correlation_id": None,
+        "payload": {}, "supersedes_entry_id": None,
+    }
+    assert set(schemas["ProjectLogbookEntry"]["required"]) == set(actual_entry)
+    assert "idempotency_key" not in schemas["ProjectLogbookEntry"]["properties"]
+    assert "workspace_binding_id" not in schemas["ProjectLogbookEntry"]["properties"]
+    assert "maxProperties" not in schemas["ProjectLogbookEntry"]["properties"]["payload"]
+    assert "maxProperties" not in create_request["properties"]["payload"]
+    assert schemas["ProjectLogbookActor"]["properties"]["label"]["maxLength"] == 191
+    for schema_name, envelope in {
+        "ProjectLogbookEntryResponse": {"entry": actual_entry, "replayed": False},
+        "ProjectLogbookEntryDetailResponse": {
+            "protocol_version": "v1", "project_id": "proj_1",
+            "workspace_binding_id": "binding_1", "entry": actual_entry,
+        },
+        "ProjectLogbookEntryPage": {
+            "protocol_version": "v1", "project_id": "proj_1",
+            "workspace_binding_id": "binding_1", "items": [actual_entry], "next_cursor": None,
+        },
+    }.items():
+        Draft202012Validator({
+            "$ref": f"#/components/schemas/{schema_name}",
+            "components": {"schemas": schemas},
+        }).validate(envelope)
+    assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
+    validation_contract = {
+        **validation_schema,
+        "components": {"schemas": schemas},
+    }
+    Draft202012Validator(validation_contract).validate(
+        {"message": "The summary field is required.", "errors": {"summary": ["Required."]}}
+    )
+    Draft202012Validator(validation_contract).validate(
+        {"error": {"code": "logbook_request_invalid", "message": "Invalid request."}}
+    )
 
 
 def test_hades_openapi_refs_and_launch_examples_are_resolved():
