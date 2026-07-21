@@ -55,11 +55,11 @@ severity.
 |---|---|
 | Repository | `/Users/gabriele/Dev/Hephaistos` |
 | Branch | `codex/graph-v2-lifecycle-validation-performance` |
-| HEAD | `9f226f29269f270b0e4bd2e377d5dee6177a7902` |
-| `main` | same SHA |
-| `origin/main` | same SHA |
-| Worktree | clean, including untracked files |
-| Branch-specific implementation | none; the branch currently points exactly at `main` |
+| Tested C1 implementation HEAD | `74c27506639195bb4ddff595821b312f4f1fdd6f` |
+| `main` | `9f226f29269f270b0e4bd2e377d5dee6177a7902` |
+| `origin/main` | `9f226f29269f270b0e4bd2e377d5dee6177a7902` |
+| Evidence commit | the commit containing the C1 evidence pack; its SHA is intentionally not embedded in itself |
+| Branch-specific implementation | indexed `AdapterResult.validate()` plus deterministic direct operation-count regressions |
 
 The old branch `codex/graph-lifecycle-v2-agent` stops at
 `001a5b8f91c19fd9f5ba1cafbb6cf14a732764ea` and is 81 commits behind the
@@ -73,14 +73,18 @@ status is more nuanced:
   evidence.
 - Tasks 12–14 and 16–17 are implemented, but their task-level final reports or
   complete executor-ledger evidence are incomplete.
-- `.codex-artifacts/graph-v2/agent-gates.json` records G01–G14 as passing at
-  the current code lineage. G07 took `228.969093s`.
-- Task 18 is not formally closed: the complete targeted and broad regression
-  commands, tested SHA, timestamp, final reviewer verdict, and required
-  `tests/fixtures/hades/graph_v2/` tree are not all persisted together.
+- `.codex-artifacts/graph-v2/agent-gates.json` records fresh G01–G14 passing
+  at tested SHA `74c27506639195bb4ddff595821b312f4f1fdd6f`. G07 took
+  `219.704411s`.
+- Task 18 evidence is closed for that tested SHA by
+  `.codex-artifacts/graph-v2/c1-evidence.json`, including the exact targeted
+  and broad commands, timestamp, contract digest, fixture tree, and clean
+  final spec/code-quality verdicts. The broad suite has one explicitly
+  recorded unrelated parent-identical Persephone/OpenAPI failure; it is not
+  claimed passing and was not repaired in C1.
 
-Do not fabricate historical reports. Close this debt with one fresh C1
-evidence pack and current-HEAD review.
+No historical report was fabricated. Future refreshes must continue to use
+fresh tested-SHA evidence rather than reconstructing missing old reports.
 
 ### 3.2 Backend on the server
 
@@ -127,21 +131,23 @@ the separate backup/restore gate required by Plan 5.
 
 | Plan | Implementation status | Exit-gate status |
 |---|---|---|
-| Plan 1 — producer | all 18 tasks implemented | **reopened / implemented-unverified** because of production-scale performance and incomplete C1 evidence |
+| Plan 1 — producer | all 18 tasks implemented | **C1 verified** at `74c27506639195bb4ddff595821b312f4f1fdd6f`; current evidence pack persisted |
 | Plan 2 — backend | Tasks 1–4 implemented; Tasks 5–12 not started | C2/L01–L15 open |
 | Plan 3 — verification/Wiki | v2 plan not started | C3/V01–V18 open |
 | Plan 4 — React Explorer | v2 plan not started | C4/U01–U12 open |
 | Plan 5 — DR/cutover | v2 plan not started | C5 open |
 | Plan 6 — live acceptance | not started | C6 and user acceptance open |
 
-Therefore P0 is not closeable yet. Its remaining deliverables are one Agent C1
-closure workstream plus backend Tasks 5–12 and C2.
+Therefore P0 is not closeable yet. Its remaining deliverables are backend Tasks
+5–12 and C2.
 
-## 5. P0 Blocker: Producer Validation Scalability
+## 5. P0 Blocker Closure: Producer Validation Scalability
 
 A real Carnovali sync ran for roughly twenty minutes and reached approximately
-7 GB before the Mac restarted. This runtime observation is not represented by
-the synthetic green gates and must be treated as a P0 blocker.
+7 GB before the Mac restarted. This runtime observation was not represented by
+the earlier synthetic green gates and opened a P0 blocker. The deterministic
+C1 repair and evidence below close the producer validation blocker without
+claiming that Carnovali itself has been rerun.
 
 Confirmed repeated full scans exist inside
 `hermes_cli/hades_index/lifecycle/model.py::AdapterResult.validate()`:
@@ -157,13 +163,34 @@ must first add deterministic operation-count/lookup regressions, then replace
 repeated scans with indexes while preserving validation order, error codes, and
 error messages. Wall-clock-only tests are insufficient.
 
-Until C1 is green:
+After synthetic C1 closure and before any future Carnovali attempt:
 
 - do not run a full Carnovali sync;
 - do not recreate the removed Carnovali Docker stack merely for this work;
 - use deterministic synthetic fixtures, then Symfony Demo as the bounded real
   fixture;
 - monitor peak RSS and elapsed time explicitly before attempting Carnovali.
+
+### 5.1 C1 closure evidence — 2026-07-21
+
+```text
+plan/task: Plan 1 C1 validation scalability and Task 18 evidence closure
+repository and branch: /Users/gabriele/Dev/Hephaistos; codex/graph-v2-lifecycle-validation-performance
+tested commit SHA: 74c27506639195bb4ddff595821b312f4f1fdd6f
+contract-lock manifest digest: cfb469a60fd0c59a13ca254df5e60871c83ffa207f21e3d307ced6ade6233644
+RED: 4,686 structure iterations at 64 call sites; remaining unresolved path reproduced 6,182 operations for 32 facts × 32-edge bucket
+GREEN: 59 IR, 105 control-flow/framework/traversal, 90 Symfony/Laravel/Django, 150 FastAPI/Express/Next.js; all exit 0
+regression: G01-G14 exit 0; broad Agent command 1,795 passed, 1 deselected, 1 unrelated parent-identical Persephone/OpenAPI failure
+gate IDs covered: G01-G14, with G13 limited to the normative Python side
+review verdict: spec Approved and code quality Approved; 0 Critical / 0 Important / 0 Minor after exactly two bounded repair cycles
+residual risk: no Carnovali run and no live peak-RSS measurement; the unrelated Persephone/OpenAPI test remains outside C1
+next unblocked task: backend Plan 2 Task 5; P0 remains open through backend Tasks 5-12 and C2
+```
+
+The complete machine-readable record is
+`.codex-artifacts/graph-v2/c1-evidence.json`. C1 closure does not authorize a
+Carnovali run: use a bounded real fixture and explicit RSS/elapsed monitoring
+before any future production-scale attempt.
 
 ## 6. Plan Defects Found During Reconciliation
 
@@ -385,5 +412,5 @@ same repository or checkpoint concurrently.
 - End of P3 + P4: disaster recovery, deployment, mobile/desktop live acceptance,
   and v1 retirement decision can be accepted.
 
-The next safe action is Wave 1: Session A and Session B in parallel, and no
-other implementation writer.
+Agent Session A is closed. The next safe implementation action is backend Plan
+2 Task 5 only; do not start backend Task 6 before the plan-amendment gate.
