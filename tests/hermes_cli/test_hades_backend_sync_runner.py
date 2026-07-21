@@ -5,6 +5,60 @@ import time
 from hermes_cli.hades_persephone_messages import AGENT_MESSAGE_SCHEMA
 
 
+def test_sync_flushes_durable_logbook_entries_before_passive_reads(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+    from hermes_cli import hades_backend_db as hdb
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
+    from hermes_cli.hades_backend_sync import run_backend_sync
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    with hdb.connect_closing() as conn:
+        hdb.save_agent(
+            conn, agent_id="agent_1", project_id="proj_1", base_url="https://backend.example",
+            label="dev", token_env_key="TOKEN_TEST", capabilities={"sync_git_tree": False, "populate_backend_ast": False},
+        )
+        binding = hdb.upsert_workspace_binding(
+            conn, project_id="proj_1", agent_id="agent_1", local_project_id="local_1",
+            workspace_fingerprint="fingerprint_1", display_path=str(workspace), repo_root=str(workspace),
+            git_remote_display="", git_remote_hash="", head_commit="", backend_workspace_binding_id="binding_1",
+        )
+        enqueue_logbook_entry(
+            conn,
+            command={"event_type": "change", "summary": "Durable mutation complete.", "idempotency_key": "sync-key", "references": []},
+            binding=binding,
+            now=999,
+        )
+
+    calls: list[str] = []
+
+    class Client:
+        def create_logbook_entry(self, project_id, **payload):
+            calls.append("write")
+            return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
+
+        def capabilities(self):
+            return {}
+
+        def memory_snapshot(self, **payload):
+            calls.append("memory")
+            assert calls[0] == "write"
+            return {"items": []}
+
+        def list_inbox(self, **payload):
+            return {"events": []}
+
+        def pull_jobs(self, **payload):
+            return {"jobs": []}
+
+    result = run_backend_sync(client_factory=Client, now=1000, quiet=True)
+    assert result.exit_code == 0
+    assert result.summary["logbook_sent"] == 1
+    assert result.summary["logbook_dead_letter"] == 0
+    assert calls[0] == "write"
+
+
 def test_sync_path_executes_information_request_once(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
 

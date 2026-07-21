@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -234,6 +235,27 @@ CREATE INDEX IF NOT EXISTS idx_persephone_outbox_target_state
     ON persephone_outbox(project_id, target_agent_id, state);
 CREATE INDEX IF NOT EXISTS idx_persephone_outbox_next_attempt
     ON persephone_outbox(next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS logbook_outbox (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id            TEXT NOT NULL,
+    workspace_binding_id  TEXT NOT NULL,
+    idempotency_key       TEXT NOT NULL,
+    request_json          TEXT NOT NULL,
+    request_digest        TEXT NOT NULL,
+    state                 TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'sent', 'dead_letter')),
+    lease_token           TEXT,
+    lease_expires_at      INTEGER,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       INTEGER NOT NULL,
+    response_id           TEXT,
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    UNIQUE(project_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_logbook_outbox_due
+    ON logbook_outbox(state, next_attempt_at, created_at, id);
 
 CREATE TABLE IF NOT EXISTS persephone_inbox (
     message_id       TEXT PRIMARY KEY,
@@ -722,6 +744,25 @@ class MemoryCache:
     workspace_binding_id: str
     version: str
     items: list[dict[str, Any]]
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class LogbookOutboxEntry:
+    id: int
+    project_id: str
+    workspace_binding_id: str
+    idempotency_key: str
+    request: dict[str, Any]
+    request_digest: str
+    state: str
+    lease_token: str | None
+    lease_expires_at: int | None
+    attempts: int
+    next_attempt_at: int
+    response_id: str | None
+    last_error: str | None
+    created_at: int
     updated_at: int
 
 
@@ -1691,3 +1732,166 @@ def count_inbox_events(conn: sqlite3.Connection) -> dict[str, int]:
         "SELECT COUNT(*) AS total, SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread FROM inbox_events"
     ).fetchone()
     return {"total": int(row["total"] or 0), "unread": int(row["unread"] or 0)}
+
+
+def _logbook_outbox_from_row(row: sqlite3.Row) -> LogbookOutboxEntry:
+    request = _json_loads(row["request_json"])
+    if not isinstance(request, dict):
+        raise ValueError(f"logbook outbox entry {row['id']} has invalid request JSON")
+    return LogbookOutboxEntry(
+        id=int(row["id"]),
+        project_id=str(row["project_id"]),
+        workspace_binding_id=str(row["workspace_binding_id"]),
+        idempotency_key=str(row["idempotency_key"]),
+        request=request,
+        request_digest=str(row["request_digest"]),
+        state=str(row["state"]),
+        lease_token=str(row["lease_token"]) if row["lease_token"] else None,
+        lease_expires_at=(int(row["lease_expires_at"]) if row["lease_expires_at"] is not None else None),
+        attempts=int(row["attempts"]),
+        next_attempt_at=int(row["next_attempt_at"]),
+        response_id=str(row["response_id"]) if row["response_id"] else None,
+        last_error=str(row["last_error"]) if row["last_error"] else None,
+        created_at=int(row["created_at"]),
+        updated_at=int(row["updated_at"]),
+    )
+
+
+def enqueue_logbook_outbox_entry(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    workspace_binding_id: str,
+    idempotency_key: str,
+    request: dict[str, Any],
+    now: int | None = None,
+) -> LogbookOutboxEntry:
+    """Persist one canonical request before any caller may start network I/O."""
+
+    timestamp = _now() if now is None else int(now)
+    encoded = _json_dumps(request)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    with write_txn(conn):
+        existing = conn.execute(
+            "SELECT * FROM logbook_outbox WHERE project_id = ? AND idempotency_key = ?",
+            (project_id, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            loaded = _logbook_outbox_from_row(existing)
+            if loaded.request_digest != digest:
+                raise ValueError("logbook idempotency key is already bound to a different request")
+            return loaded
+        cursor = conn.execute(
+            "INSERT INTO logbook_outbox "
+            "(project_id, workspace_binding_id, idempotency_key, request_json, request_digest, state, "
+            "attempts, next_attempt_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
+            (
+                project_id,
+                workspace_binding_id,
+                idempotency_key,
+                encoded,
+                digest,
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = conn.execute("SELECT * FROM logbook_outbox WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    assert row is not None
+    return _logbook_outbox_from_row(row)
+
+
+def get_logbook_outbox_entry(conn: sqlite3.Connection, entry_id: int) -> LogbookOutboxEntry | None:
+    row = conn.execute("SELECT * FROM logbook_outbox WHERE id = ?", (int(entry_id),)).fetchone()
+    return _logbook_outbox_from_row(row) if row is not None else None
+
+
+def list_logbook_outbox_entries(
+    conn: sqlite3.Connection, *, states: Iterable[str] | None = None
+) -> list[LogbookOutboxEntry]:
+    values = tuple(str(state) for state in states or ())
+    if values:
+        placeholders = ", ".join("?" for _ in values)
+        rows = conn.execute(
+            f"SELECT * FROM logbook_outbox WHERE state IN ({placeholders}) ORDER BY id ASC", values
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM logbook_outbox ORDER BY id ASC").fetchall()
+    return [_logbook_outbox_from_row(row) for row in rows]
+
+
+def lease_due_logbook_outbox_entries(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+    limit: int = 20,
+    lease_seconds: int = 60,
+    project_id: str | None = None,
+    workspace_binding_id: str | None = None,
+) -> list[LogbookOutboxEntry]:
+    """Atomically lease no more than the bounded number of due entries."""
+
+    timestamp = int(now)
+    bounded_limit = max(1, min(20, int(limit)))
+    filters: list[str] = []
+    parameters: list[Any] = [timestamp, timestamp]
+    if project_id:
+        filters.append("project_id = ?")
+        parameters.append(project_id)
+    if workspace_binding_id:
+        filters.append("workspace_binding_id = ?")
+        parameters.append(workspace_binding_id)
+    where = " AND ".join(filters)
+    scope = f" AND {where}" if where else ""
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT id FROM logbook_outbox WHERE ("
+            "(state = 'pending' AND next_attempt_at <= ?) OR "
+            "(state = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))"
+            f"{scope} ORDER BY next_attempt_at ASC, created_at ASC, id ASC LIMIT ?",
+            (*parameters, bounded_limit),
+        ).fetchall()
+        claimed: list[int] = []
+        for row in rows:
+            entry_id = int(row["id"])
+            token = secrets.token_urlsafe(18)
+            changed = conn.execute(
+                "UPDATE logbook_outbox SET state = 'leased', lease_token = ?, lease_expires_at = ?, "
+                "attempts = attempts + 1, updated_at = ? WHERE id = ? AND "
+                "(state = 'pending' OR (state = 'leased' AND lease_expires_at <= ?))",
+                (token, timestamp + max(1, int(lease_seconds)), timestamp, entry_id, timestamp),
+            ).rowcount
+            if changed:
+                claimed.append(entry_id)
+        leased_rows = [
+            conn.execute("SELECT * FROM logbook_outbox WHERE id = ?", (entry_id,)).fetchone()
+            for entry_id in claimed
+        ]
+    return [_logbook_outbox_from_row(row) for row in leased_rows if row is not None]
+
+
+def resolve_logbook_outbox_entry(
+    conn: sqlite3.Connection,
+    *,
+    entry_id: int,
+    lease_token: str,
+    state: str,
+    now: int,
+    next_attempt_at: int | None = None,
+    response_id: str | None = None,
+    last_error: str | None = None,
+) -> LogbookOutboxEntry | None:
+    if state not in {"pending", "sent", "dead_letter"}:
+        raise ValueError("logbook outbox resolution state is invalid")
+    timestamp = int(now)
+    due_at = timestamp if next_attempt_at is None else int(next_attempt_at)
+    with write_txn(conn):
+        changed = conn.execute(
+            "UPDATE logbook_outbox SET state = ?, lease_token = NULL, lease_expires_at = NULL, "
+            "next_attempt_at = ?, response_id = ?, last_error = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'leased' AND lease_token = ?",
+            (state, due_at, response_id, last_error, timestamp, int(entry_id), lease_token),
+        ).rowcount
+        row = conn.execute("SELECT * FROM logbook_outbox WHERE id = ?", (int(entry_id),)).fetchone()
+    return _logbook_outbox_from_row(row) if changed and row is not None else None

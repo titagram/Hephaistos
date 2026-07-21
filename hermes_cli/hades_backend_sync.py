@@ -185,6 +185,7 @@ def run_backend_sync(
     from hermes_cli.hades_backend_client import redact_secret
     from hermes_cli.hades_backend_jobs import execute_job
     from hermes_cli.hades_information_worker import execute_stored_information_request
+    from hermes_cli.hades_logbook_actions import flush_due_logbook_entries
     from hermes_cli.hades_persephone_messages import BACKEND_CAPABILITY
     from hermes_cli.hades_persephone_receiver import PersephoneReceiver
     from hermes_cli.hades_persephone_store import get_cursor
@@ -275,6 +276,7 @@ def run_backend_sync(
     source_slice_candidates = source_slice_jobs_waiting = 0
     sync_errors = 0
     expired = 0
+    logbook_sent = logbook_retry = logbook_dead_letter = 0
 
     for job in expired_jobs:
         with db.connect_closing() as conn:
@@ -340,6 +342,32 @@ def run_backend_sync(
                     f"{binding.display_path}: {redact_secret(str(exc))}"
                 )
             continue
+
+        # A logbook append is a durable consequence of a prior mutation.  Do
+        # not let later passive reads make the sync look fully healthy while a
+        # persisted append is still unsent or permanently rejected.
+        try:
+            with db.connect_closing() as conn:
+                logbook = flush_due_logbook_entries(
+                    conn,
+                    client,
+                    now=now,
+                    limit=20,
+                    project_id=binding.project_id,
+                    workspace_binding_id=binding.backend_workspace_binding_id,
+                )
+            logbook_sent += logbook["sent"]
+            logbook_retry += logbook["retry"]
+            logbook_dead_letter += logbook["dead_letter"]
+            sync_errors += logbook["retry"] + logbook["dead_letter"]
+        except Exception as exc:
+            sync_errors += 1
+            _record_sync_error(binding, str(exc))
+            if not quiet:
+                print(
+                    f"backend sync: failed to flush logbook for "
+                    f"{binding.display_path}: {redact_secret(str(exc))}"
+                )
 
         if binding_agent.agent_id not in queue_capabilities:
             try:
@@ -620,6 +648,9 @@ def run_backend_sync(
             if outcome["quarantined"]:
                 auth_quarantined_routes += 1
 
+    with db.connect_closing() as conn:
+        logbook_pending = len(db.list_logbook_outbox_entries(conn, states=("pending", "leased")))
+
     summary = {
         "pulled": pulled,
         "completed": completed,
@@ -641,6 +672,10 @@ def run_backend_sync(
         "auth_failed_routes": auth_failed_routes,
         "auth_quarantined_routes": auth_quarantined_routes,
         "stale_auth_routes": stale_auth_routes,
+        "logbook_pending": logbook_pending,
+        "logbook_sent": logbook_sent,
+        "logbook_retry": logbook_retry,
+        "logbook_dead_letter": logbook_dead_letter,
         "duration_ms": max(0, int((time.monotonic() - started_monotonic) * 1000)),
     }
     with db.connect_closing() as conn:

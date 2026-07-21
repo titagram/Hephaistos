@@ -940,7 +940,37 @@ INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
     "code_claim_create",
     "code_claim_release",
     "code_claim_detect_conflicts",
+    "list_logbook_entries",
+    "get_logbook_entry",
+    "create_logbook_entry",
 }
+
+
+def test_logbook_client_uses_project_scoped_routes_and_accepts_201():
+    from hermes_cli.hades_backend_client import HadesBackendClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"entry": {"id": "entry_1"}})
+        return httpx.Response(200, json={"items": []})
+
+    client = HadesBackendClient(
+        "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
+    )
+    assert client.list_logbook_entries("project_1", workspace_binding_id="binding_1") == {"items": []}
+    assert client.get_logbook_entry("project_1", "entry_1", workspace_binding_id="binding_1") == {"items": []}
+    assert client.create_logbook_entry(
+        "project_1", workspace_binding_id="binding_1", event_type="change",
+        summary="Done", severity="info", idempotency_key="key_1", references=[],
+    ) == {"entry": {"id": "entry_1"}}
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/hades/v1/projects/project_1/logbook"),
+        ("GET", "/api/hades/v1/projects/project_1/logbook/entry_1"),
+        ("POST", "/api/hades/v1/projects/project_1/logbook"),
+    ]
 
 
 def test_graph_import_create_is_idempotent_for_200_and_201():
