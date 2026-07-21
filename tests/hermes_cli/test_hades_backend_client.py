@@ -236,6 +236,48 @@ CLIENT_ROUTE_CASES = [
         },
     },
     {
+        "method_name": "list_logbook_entries",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/logbook/entries",
+        "wire_path": "/api/hades/v1/logbook/entries",
+        "args": ["proj_1"],
+        "kwargs": {"workspace_binding_id": "wb_1"},
+        "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+    },
+    {
+        "method_name": "get_logbook_entry",
+        "http_method": "GET",
+        "openapi_path": "/api/hades/v1/logbook/entries/{entry}",
+        "wire_path": "/api/hades/v1/logbook/entries/entry_1",
+        "args": ["proj_1", "entry_1"],
+        "kwargs": {"workspace_binding_id": "wb_1"},
+        "query": {"project_id": "proj_1", "workspace_binding_id": "wb_1"},
+    },
+    {
+        "method_name": "create_logbook_entry",
+        "http_method": "POST",
+        "openapi_path": "/api/hades/v1/logbook/entries",
+        "wire_path": "/api/hades/v1/logbook/entries",
+        "args": ["proj_1"],
+        "kwargs": {
+            "workspace_binding_id": "wb_1",
+            "event_type": "change",
+            "summary": "Done",
+            "severity": "info",
+            "idempotency_key": "key_1",
+            "references": [],
+        },
+        "json_body": {
+            "project_id": "proj_1",
+            "workspace_binding_id": "wb_1",
+            "event_type": "change",
+            "summary": "Done",
+            "severity": "info",
+            "idempotency_key": "key_1",
+            "references": [],
+        },
+    },
+    {
         "method_name": "memory_snapshot",
         "http_method": "GET",
         "openapi_path": "/api/hades/v1/memory/snapshot",
@@ -940,13 +982,10 @@ INTENTIONALLY_UNMAPPED_CLIENT_METHODS = {
     "code_claim_create",
     "code_claim_release",
     "code_claim_detect_conflicts",
-    "list_logbook_entries",
-    "get_logbook_entry",
-    "create_logbook_entry",
 }
 
 
-def test_logbook_client_uses_project_scoped_routes_and_accepts_201():
+def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201():
     from hermes_cli.hades_backend_client import HadesBackendClient
 
     requests: list[httpx.Request] = []
@@ -967,10 +1006,25 @@ def test_logbook_client_uses_project_scoped_routes_and_accepts_201():
         summary="Done", severity="info", idempotency_key="key_1", references=[],
     ) == {"entry": {"id": "entry_1"}}
     assert [(request.method, request.url.path) for request in requests] == [
-        ("GET", "/api/hades/v1/projects/project_1/logbook"),
-        ("GET", "/api/hades/v1/projects/project_1/logbook/entry_1"),
-        ("POST", "/api/hades/v1/projects/project_1/logbook"),
+        ("GET", "/api/hades/v1/logbook/entries"),
+        ("GET", "/api/hades/v1/logbook/entries/entry_1"),
+        ("POST", "/api/hades/v1/logbook/entries"),
     ]
+    assert _query_dict(requests[0]) == {
+        "project_id": "project_1", "workspace_binding_id": "binding_1",
+    }
+    assert _query_dict(requests[1]) == {
+        "project_id": "project_1", "workspace_binding_id": "binding_1",
+    }
+    assert _json_request_body(requests[2]) == {
+        "project_id": "project_1",
+        "workspace_binding_id": "binding_1",
+        "event_type": "change",
+        "summary": "Done",
+        "severity": "info",
+        "idempotency_key": "key_1",
+        "references": [],
+    }
 
 
 def test_graph_import_create_is_idempotent_for_200_and_201():
@@ -2493,7 +2547,7 @@ def test_openapi_capability_contract_matches_authenticated_backend_discovery():
         in capability_schema["properties"]["capability_names"]["description"]
     )
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"] == {
-        "$ref": "#/components/responses/Error"
+        "$ref": "#/components/responses/Unauthorized"
     }
 
 

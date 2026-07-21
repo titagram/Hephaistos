@@ -824,19 +824,25 @@ class HadesBackendClient:
 
     def list_logbook_entries(self, project_id: str, **payload: Any) -> dict[str, Any]:
         project = validate_logbook_route_id(project_id, field="project id")
-        return self._request("GET", f"projects/{project}/logbook", params=payload)
+        return self._request(
+            "GET", "logbook/entries", params={**payload, "project_id": project}
+        )
 
     def get_logbook_entry(
         self, project_id: str, entry_id: str, **payload: Any
     ) -> dict[str, Any]:
         project = validate_logbook_route_id(project_id, field="project id")
         entry = validate_logbook_route_id(entry_id, field="logbook entry id")
-        return self._request("GET", f"projects/{project}/logbook/{entry}", params=payload)
+        return self._request(
+            "GET",
+            f"logbook/entries/{entry}",
+            params={**payload, "project_id": project},
+        )
 
     def create_logbook_entry(self, project_id: str, **payload: Any) -> dict[str, Any]:
         project = validate_logbook_route_id(project_id, field="project id")
         return self._request(
-            "POST", f"projects/{project}/logbook", json_body=payload,
+            "POST", "logbook/entries", json_body={**payload, "project_id": project},
             success_statuses=(200, 201),
         )
 
