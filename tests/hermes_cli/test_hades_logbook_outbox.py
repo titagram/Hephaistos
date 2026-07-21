@@ -101,6 +101,25 @@ def test_malformed_success_response_retries_without_marking_logbook_entry_sent(t
     assert current.last_error == "backend logbook response missing entry id"
 
 
+def test_success_response_entry_id_alias_is_not_accepted_as_a_logbook_entry_id(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry, flush_due_logbook_entries
+
+    class Client:
+        def create_logbook_entry(self, _project_id, **_payload):
+            return {"entry": {"entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, "replayed": False}
+
+    conn = db.connect(tmp_path / "backend.db")
+    enqueue_logbook_entry(conn, command=_command(), binding=_binding(), now=999)
+    assert flush_due_logbook_entries(conn, Client(), now=1000) == {
+        "pending": 1, "sent": 0, "retry": 1, "dead_letter": 0,
+    }
+    current = db.list_logbook_outbox_entries(conn)[0]
+    assert current.state == "pending"
+    assert current.response_id is None
+    assert current.last_error == "backend logbook response missing entry id"
+
+
 def test_write_persists_before_network_and_replays_once_after_restart(tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import (

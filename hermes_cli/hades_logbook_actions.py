@@ -206,7 +206,7 @@ def _response_identity(response: Any) -> str | None:
         entry = data.get("entry") if isinstance(data, dict) else None
     if not isinstance(entry, dict):
         return None
-    entry_id = entry.get("id") or entry.get("entry_id")
+    entry_id = entry.get("id")
     if not isinstance(entry_id, str):
         return None
     clean = entry_id.strip()
