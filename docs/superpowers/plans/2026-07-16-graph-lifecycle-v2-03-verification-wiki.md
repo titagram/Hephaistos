@@ -21,6 +21,30 @@
 - Free prose cannot complete a verification item.
 - Automated claim/complete always requires agent/device capability plus project and binding checks; an admin user token does not erase those automated checks.
 
+## Addendum — Project Logbook recording seam (Task 4 MVP)
+
+This addendum is additive and limited to successful verification completion and
+Wiki publication/revision transitions. It does not change verification result
+validation, lease rules, or immutable Wiki semantics.
+
+- A successful verification completion calls `ProjectLogbookService`, never the
+  ledger persistence model directly, with fixed system actor
+  `{kind: system, id: hades-verification, display_label: Hades Verification}`,
+  event type `verification`, correlation ID `verification:<work-item-id>`, and
+  one fixed reference `{kind: verification_work_item, id: <work-item-id>}`.
+- A successful Wiki publication/revision calls the service with fixed system
+  actor `{kind: system, id: hades-wiki, display_label: Hades Wiki}`, event type
+  `wiki`, correlation ID `wiki-revision:<revision-id>`, and one fixed reference
+  `{kind: wiki_revision, id: <revision-id>}`.
+- The call is in the domain completion transaction, or that transaction stores
+  a durable post-commit recording obligation with exactly those fixed values.
+  Completion services, listeners, and Wiki services never insert ledger rows
+  directly.
+- Do not report a work item, verification result, or Wiki publication complete
+  while that obligation is unresolved. Surface typed
+  `logbook_recording_failed` as degraded operation and retry the durable
+  obligation idempotently before terminal success is exposed.
+
 ---
 
 ## File Structure

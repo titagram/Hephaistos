@@ -62,6 +62,43 @@ def test_hades_openapi_contract_covers_client_routes():
     assert spec["paths"]["/api/hades/v1/token/verify"]["post"]["responses"]["401"]["$ref"] == "#/components/responses/Unauthorized"
 
 
+def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
+    backend = (HADES_DOCS / "backend.md").read_text(encoding="utf-8").lower()
+    operations = (HADES_DOCS / "operations.md").read_text(encoding="utf-8").lower()
+    documented = f"{backend}\n{operations}"
+
+    for topic in [
+        "hades backend logbook list",
+        "hades backend logbook show <entry-id>",
+        "hades backend logbook write",
+        "write_project_logbook",
+        "no legacy grant",
+        "re-registration",
+        "dead-letter",
+        "degraded sync",
+        "re-register",
+    ]:
+        assert topic in documented, f"missing logbook operational contract: {topic!r}"
+
+    spec = json.loads((HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"))
+    paths = spec["paths"]
+    entries = paths["/api/hades/v1/logbook/entries"]
+    entry = paths["/api/hades/v1/logbook/entries/{entry}"]
+
+    assert set(entries) >= {"get", "post"}
+    assert entry["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
+    assert entries["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryPage"
+    assert entries["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryCreateRequest"
+    assert entries["post"]["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
+    assert entries["post"]["responses"]["503"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/LogbookRecordingFailedResponse"
+
+    schemas = spec["components"]["schemas"]
+    assert schemas["ProjectLogbookEntryCreateRequest"]["required"] == [
+        "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references"
+    ]
+    assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
+
+
 def test_hades_openapi_refs_and_launch_examples_are_resolved():
     spec = json.loads((HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"))
     refs: set[str] = set()

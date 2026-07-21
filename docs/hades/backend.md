@@ -110,6 +110,52 @@ If the backend refuses or conflicts a proposal, local status must show the
 reason. If the backend is unavailable, Hades uses local memory and may use stale
 shared memory cache as degraded context.
 
+## Project Logbook
+
+The project Logbook is an append-only, project-scoped ledger for durable
+changes, imports, projections, verification transitions, Wiki publication, and
+concise operator notes. It is not shared memory and it is not a second Wiki:
+the entry records who did what and points at the project-local evidence.
+
+The v1 API contract is deliberately small:
+
+- `GET /api/hades/v1/logbook/entries` lists the authenticated agent's linked
+  project entries newest first, with cursor, type, actor, severity, time, and
+  bounded text filters.
+- `GET /api/hades/v1/logbook/entries/{entry}` reads one already-authorized
+  entry.
+- `POST /api/hades/v1/logbook/entries` appends an immutable entry. There is no
+  update or delete operation.
+
+Every agent write includes its linked `workspace_binding_id`, an event type,
+severity, plain-language summary, project-local typed references, and a stable
+`idempotency_key`; a correlation ID groups one durable workflow. The backend
+derives the actor from the authenticated agent/device rather than accepting an
+impersonated actor. It authorizes the project and binding before deduplicating,
+so an idempotency key cannot disclose an entry from another project.
+
+Writing is an explicit registered capability: discovery for the current derived
+token must advertise `write_project_logbook`. There is **no legacy grant**,
+implicit role fallback, or local flag that substitutes for that capability.
+Human notes/decisions and trusted backend system events use their own
+authorization paths; an agent cannot claim either identity.
+
+The CLI and the `hades-logbook` skill are the agent surface; this adds no core
+model tool. Use a linked workspace and factual durable outcome:
+
+```bash
+hades backend logbook list
+hades backend logbook show <entry-id>
+hades backend logbook write --type change --summary "..." \
+  --reference commit:<sha> --idempotency-key <stable-key>
+```
+
+The write is persisted to the local outbox before the network call. A transient
+backend failure leaves the same request pending for authenticated sync; replay
+uses the same idempotency key, never a second entry. A matching idempotency
+conflict is accepted only when the backend confirms the same existing key;
+another entry is a permanent conflict requiring inspection.
+
 ## Kanban Task Work Contract
 
 Dashboard Kanban tasks can become local Hades work only through the versioned

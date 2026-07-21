@@ -55,6 +55,49 @@ silently.
 `hades backend sync` remains the manual repair path and bypasses any background
 backoff. A successful manual sync clears stale background-sync failure state.
 
+### Project Logbook delivery and recovery
+
+Logbook writes are first persisted locally, then sent by authenticated sync.
+The capability is explicit: the derived agent token must advertise
+`write_project_logbook`; there is **no legacy grant**, role fallback, or local
+configuration switch that authorizes an append. Use only the dedicated CLI
+surface:
+
+```bash
+hades backend logbook list
+hades backend logbook show <entry-id>
+hades backend logbook write --type change --summary "..." \
+  --reference commit:<sha> --idempotency-key <stable-key>
+```
+
+`write` requires a linked project/binding and persists one canonical request
+before it contacts the backend. The request carries that binding, event type,
+severity, summary, typed references, correlation ID when applicable, and the
+stable idempotency key. Do not generate a new key after an interruption: the
+same key is the proof that a restart/retry produces one ledger entry.
+
+Recovery state is visible and actionable:
+
+- `pending` or `retry` is a **degraded sync** result, not recorded success.
+  Run `hades backend sync` after restoring connectivity; it replays the durable
+  request with bounded backoff.
+- `dead_letter` is a permanent rejection or exhausted retry budget. Inspect
+  the error and preserve the idempotency key. For a capability denial, ask a
+  project administrator to grant `write_project_logbook`, then **re-register**
+  with `hades backend setup`; this re-registration is required before the
+  derived token can receive the capability.
+- A conflict only counts as delivered when the backend returns the existing
+  entry with the same idempotency key. A different key is not a retry target;
+  inspect the existing event and record a new factual correction only when
+  appropriate.
+
+Never report a mutation or workflow fully complete while its required logbook
+recording obligation remains pending, retrying, or dead-lettered. If a backend
+transition cannot record its event after the domain mutation, the typed
+`logbook_recording_failed` result means degraded operation and a durable
+post-commit recording obligation must remain visible until it succeeds or an
+authorized human records a decision explaining the exception.
+
 Normal agent turns start a lightweight piggyback sync when a profile has a
 linked backend workspace and the per-profile backoff window is due. The
 piggyback run is asynchronous, quiet, and fail-open: chat continues even if the

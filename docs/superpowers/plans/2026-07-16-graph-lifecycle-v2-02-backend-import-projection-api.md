@@ -19,6 +19,30 @@
 - A candidate namespace remains invisible until PostgreSQL head CAS succeeds.
 - No controller contains validation, projection, overlay, or traversal business logic.
 
+## Addendum — Project Logbook recording seam (Task 4 MVP)
+
+This addendum is additive and limited to successful Graph v2 import and
+projection transitions. It does not change the Graph contracts, route shape, or
+projection lifecycle.
+
+- The successful import transition calls `ProjectLogbookService`, never the
+  persistence model directly, with fixed system actor
+  `{kind: system, id: hades-graph-import, display_label: Hades Graph Import}`,
+  event type `import`, correlation ID `graph-import:<import-id>`, and one fixed
+  project-local reference `{kind: graph_import, id: <import-id>}`.
+- The successful projection publication calls the same service with fixed
+  system actor `{kind: system, id: hades-graph-projection, display_label:
+  Hades Graph Projection}`, event type `projection`, correlation ID
+  `graph-projection:<projection-id>`, and one fixed reference
+  `{kind: graph_projection, id: <projection-id>}`.
+- The service call and domain transition share one database transaction, or the
+  transaction durably stores a post-commit recording obligation with the exact
+  actor/event/correlation/reference above. Controllers, jobs, import services,
+  and projectors never insert ledger rows directly.
+- A transition with an unresolved obligation is not reported complete. Its
+  response/status is degraded and carries typed `logbook_recording_failed`; the
+  obligation must be retried idempotently before terminal success is exposed.
+
 ---
 
 ## File Structure
