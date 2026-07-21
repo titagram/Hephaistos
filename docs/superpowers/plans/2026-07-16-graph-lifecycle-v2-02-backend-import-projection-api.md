@@ -33,8 +33,8 @@ projection lifecycle.
 - The successful projection publication calls the same service with fixed
   system actor `{kind: system, id: hades-graph-projection, display_label:
   Hades Graph Projection}`, event type `projection`, correlation ID
-  `graph-projection:<projection-id>`, and one fixed reference
-  `{kind: graph_projection, id: <projection-id>}`.
+  `graph-projection:<projection-id>`, and the canonical fixed reference
+  `{kind: graph_import, id: <import-id>}` for the imported graph it publishes.
 - The service call and domain transition share one database transaction, or the
   transaction durably stores a post-commit recording obligation with the exact
   actor/event/correlation/reference above. Controllers, jobs, import services,

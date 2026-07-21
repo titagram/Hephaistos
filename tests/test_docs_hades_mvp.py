@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HADES_DOCS = REPO_ROOT / "docs" / "hades"
@@ -93,9 +95,36 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     assert entries["post"]["responses"]["503"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/LogbookRecordingFailedResponse"
 
     schemas = spec["components"]["schemas"]
-    assert schemas["ProjectLogbookEntryCreateRequest"]["required"] == [
-        "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references"
+    create_request = schemas["ProjectLogbookEntryCreateRequest"]
+    assert create_request["additionalProperties"] is False
+    assert create_request["required"] == [
+        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references"
     ]
+    client_body = {
+        "project_id": "proj_1",
+        "workspace_binding_id": "wb_1",
+        "event_type": "change",
+        "severity": "info",
+        "summary": "Done",
+        "idempotency_key": "0123456789abcdef",
+        "references": [{"kind": "commit", "id": "abc123"}],
+    }
+    assert set(create_request["required"]) <= client_body.keys()
+    assert set(client_body) <= create_request["properties"].keys()
+    Draft202012Validator({
+        "$ref": "#/components/schemas/ProjectLogbookEntryCreateRequest",
+        "components": {"schemas": schemas},
+    }).validate(client_body)
+    assert create_request["properties"]["project_id"]["minLength"] == 1
+    assert create_request["properties"]["references"]["maxItems"] == 20
+    assert create_request["properties"]["idempotency_key"] == {
+        "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[ -~]+$"
+    }
+    assert schemas["ProjectLogbookReference"]["properties"]["kind"]["enum"] == [
+        "wiki_page", "wiki_revision", "graph_import", "verification_work", "kanban_task",
+        "run", "repository", "commit", "file",
+    ]
+    assert entries["get"]["parameters"][-1]["schema"]["maximum"] == 50
     assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
 
 

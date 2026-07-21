@@ -31,7 +31,7 @@ validation, lease rules, or immutable Wiki semantics.
   ledger persistence model directly, with fixed system actor
   `{kind: system, id: hades-verification, display_label: Hades Verification}`,
   event type `verification`, correlation ID `verification:<work-item-id>`, and
-  one fixed reference `{kind: verification_work_item, id: <work-item-id>}`.
+  one fixed reference `{kind: verification_work, id: <work-item-id>}`.
 - A successful Wiki publication/revision calls the service with fixed system
   actor `{kind: system, id: hades-wiki, display_label: Hades Wiki}`, event type
   `wiki`, correlation ID `wiki-revision:<revision-id>`, and one fixed reference

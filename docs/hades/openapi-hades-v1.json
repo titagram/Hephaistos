@@ -158,7 +158,7 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 100,
+              "maximum": 50,
               "default": 20
             }
           }
@@ -4302,14 +4302,15 @@
           "kind": {
             "type": "string",
             "enum": [
-              "commit",
-              "file",
-              "graph_import",
-              "graph_projection",
-              "verification_work_item",
+              "wiki_page",
               "wiki_revision",
-              "kanban_item",
-              "logbook_entry"
+              "graph_import",
+              "verification_work",
+              "kanban_task",
+              "run",
+              "repository",
+              "commit",
+              "file"
             ]
           },
           "id": {
@@ -4404,7 +4405,7 @@
           },
           "references": {
             "type": "array",
-            "maxItems": 32,
+            "maxItems": 20,
             "items": {
               "$ref": "#/components/schemas/ProjectLogbookReference"
             }
@@ -4418,8 +4419,9 @@
           },
           "idempotency_key": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 255
+            "minLength": 16,
+            "maxLength": 128,
+            "pattern": "^[ -~]+$"
           },
           "payload": {
             "type": "object",
@@ -4439,6 +4441,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "project_id",
           "workspace_binding_id",
           "event_type",
           "severity",
@@ -4447,6 +4450,11 @@
           "references"
         ],
         "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
           "workspace_binding_id": {
             "type": "string",
             "minLength": 1,
@@ -4486,7 +4494,7 @@
           },
           "references": {
             "type": "array",
-            "maxItems": 32,
+            "maxItems": 20,
             "items": {
               "$ref": "#/components/schemas/ProjectLogbookReference"
             }
@@ -4497,8 +4505,9 @@
           },
           "idempotency_key": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 255
+            "minLength": 16,
+            "maxLength": 128,
+            "pattern": "^[ -~]+$"
           },
           "payload": {
             "type": "object",
@@ -4532,6 +4541,7 @@
         "properties": {
           "items": {
             "type": "array",
+            "maxItems": 50,
             "items": {
               "$ref": "#/components/schemas/ProjectLogbookEntry"
             }

@@ -127,12 +127,13 @@ The v1 API contract is deliberately small:
 - `POST /api/hades/v1/logbook/entries` appends an immutable entry. There is no
   update or delete operation.
 
-Every agent write includes its linked `workspace_binding_id`, an event type,
-severity, plain-language summary, project-local typed references, and a stable
-`idempotency_key`; a correlation ID groups one durable workflow. The backend
-derives the actor from the authenticated agent/device rather than accepting an
-impersonated actor. It authorizes the project and binding before deduplicating,
-so an idempotency key cannot disclose an entry from another project.
+Every agent write includes `project_id`, its linked `workspace_binding_id`, an
+event type, severity, plain-language summary, project-local typed references,
+and a stable `idempotency_key`; a correlation ID groups one durable workflow.
+The backend derives the actor from the authenticated agent/device rather than
+accepting an impersonated actor. It authorizes the project and binding before
+deduplicating, so an idempotency key cannot disclose an entry from another
+project.
 
 Writing is an explicit registered capability: discovery for the current derived
 token must advertise `write_project_logbook`. There is **no legacy grant**,
