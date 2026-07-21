@@ -220,7 +220,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
     logbook = sub.add_parser("logbook", help="Read or append durable project logbook entries")
     logbook_sub = logbook.add_subparsers(dest="logbook_action")
     logbook_list = logbook_sub.add_parser("list", help="List project logbook entries")
-    logbook_list.add_argument("--type", dest="event_type", default=None, help="Filter by event type")
+    logbook_list.add_argument(
+        "--type", dest="event_type", action="append", default=None,
+        help="Filter by event type; repeat or separate types with commas",
+    )
     logbook_list.add_argument("--actor", default=None, help="Filter by actor identity")
     logbook_list.add_argument("--severity", choices=("info", "warning", "error"), default=None)
     logbook_list.add_argument("--cursor", default=None, help="Opaque pagination cursor")

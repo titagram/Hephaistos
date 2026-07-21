@@ -96,10 +96,29 @@
             }
           },
           {
-            "name": "types",
+            "name": "types[]",
             "in": "query",
+            "style": "form",
+            "explode": true,
             "schema": {
-              "type": "string"
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "change",
+                  "creation",
+                  "import",
+                  "projection",
+                  "verification",
+                  "wiki",
+                  "decision",
+                  "failure",
+                  "rollback",
+                  "note"
+                ]
+              }
             }
           },
           {
@@ -4315,8 +4334,7 @@
           },
           "id": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 255
+            "minLength": 1
           },
           "label": {
             "type": [
@@ -4325,7 +4343,40 @@
             ],
             "maxLength": 240
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "kind": { "const": "commit" },
+              "id": { "pattern": "^[0-9a-f]{40}$" }
+            }
+          },
+          {
+            "properties": {
+              "kind": { "const": "file" },
+              "id": {
+                "maxLength": 2048,
+                "description": "Safe project-relative path: no absolute, drive, empty, dot, or dot-dot segments."
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "wiki_page",
+                  "wiki_revision",
+                  "graph_import",
+                  "verification_work",
+                  "kanban_task",
+                  "run",
+                  "repository"
+                ]
+              },
+              "id": { "maxLength": 255 }
+            }
+          }
+        ]
       },
       "ProjectLogbookEntry": {
         "type": "object",
@@ -4394,14 +4445,16 @@
           "summary": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 240
+            "maxLength": 240,
+            "description": "Plain-language text; raw HTML tags are rejected, while Markdown is allowed."
           },
           "narrative_markdown": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 8000
+            "maxLength": 8000,
+            "description": "Optional Markdown narrative; raw HTML tags are rejected."
           },
           "references": {
             "type": "array",
@@ -4421,7 +4474,7 @@
             "type": "string",
             "minLength": 16,
             "maxLength": 128,
-            "pattern": "^[ -~]+$"
+            "pattern": "^[!-~]+$"
           },
           "payload": {
             "type": "object",
@@ -4446,6 +4499,7 @@
           "event_type",
           "severity",
           "summary",
+          "correlation_id",
           "idempotency_key",
           "references",
           "narrative_markdown",
@@ -4489,14 +4543,16 @@
           "summary": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 240
+            "maxLength": 240,
+            "description": "Plain-language text; raw HTML tags are rejected, while Markdown is allowed."
           },
           "narrative_markdown": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 8000
+            "maxLength": 8000,
+            "description": "Optional Markdown narrative; raw HTML tags are rejected."
           },
           "references": {
             "type": "array",
@@ -4506,14 +4562,17 @@
             }
           },
           "correlation_id": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 255
           },
           "idempotency_key": {
             "type": "string",
             "minLength": 16,
             "maxLength": 128,
-            "pattern": "^[ -~]+$"
+            "pattern": "^[!-~]+$"
           },
           "payload": {
             "type": "object",
@@ -4532,11 +4591,15 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "entry"
+          "entry",
+          "replayed"
         ],
         "properties": {
           "entry": {
             "$ref": "#/components/schemas/ProjectLogbookEntry"
+          },
+          "replayed": {
+            "type": "boolean"
           }
         }
       },

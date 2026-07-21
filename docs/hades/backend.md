@@ -130,6 +130,10 @@ The v1 API contract is deliberately small:
 Every agent write includes `project_id`, its linked `workspace_binding_id`, an
 event type, severity, plain-language summary, project-local typed references,
 and a stable `idempotency_key`; a correlation ID groups one durable workflow.
+Summaries and optional narratives may use Markdown but not raw HTML tags. The
+CLI statically validates the reference shape (a `commit` is a lowercase 40-hex
+SHA and a `file` is a safe project-relative path); the backend additionally
+verifies resource existence and ownership within the linked project.
 The backend derives the actor from the authenticated agent/device rather than
 accepting an impersonated actor. It authorizes the project and binding before
 deduplicating, so an idempotency key cannot disclose an entry from another
@@ -155,7 +159,10 @@ The write is persisted to the local outbox before the network call. A transient
 backend failure leaves the same request pending for authenticated sync; replay
 uses the same idempotency key, never a second entry. A matching idempotency
 conflict is accepted only when the backend confirms the same existing key;
-another entry is a permanent conflict requiring inspection.
+another entry is a permanent conflict requiring inspection. A dead-letter
+capability failure requires the grant and re-registration, then re-running
+exactly the original write command (same key and payload) to requeue it;
+`hades backend sync` alone does not reopen it.
 
 ## Kanban Task Work Contract
 

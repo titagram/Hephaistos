@@ -98,7 +98,7 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     create_request = schemas["ProjectLogbookEntryCreateRequest"]
     assert create_request["additionalProperties"] is False
     assert create_request["required"] == [
-        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references",
+        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "correlation_id", "idempotency_key", "references",
         "narrative_markdown", "payload", "supersedes_entry_id",
     ]
     client_body = {
@@ -107,8 +107,9 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
         "event_type": "change",
         "severity": "info",
         "summary": "Done",
+        "correlation_id": None,
         "idempotency_key": "0123456789abcdef",
-        "references": [{"kind": "commit", "id": "abc123"}],
+        "references": [{"kind": "commit", "id": "a" * 40}],
         "narrative_markdown": None,
         "payload": {},
         "supersedes_entry_id": None,
@@ -122,12 +123,33 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     assert create_request["properties"]["project_id"]["minLength"] == 1
     assert create_request["properties"]["references"]["maxItems"] == 20
     assert create_request["properties"]["idempotency_key"] == {
-        "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[ -~]+$"
+        "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[!-~]+$"
+    }
+    assert create_request["properties"]["correlation_id"] == {"type": ["string", "null"], "maxLength": 255}
+    assert schemas["ProjectLogbookActor"]["required"] == ["kind", "display_label"]
+    assert set(schemas["ProjectLogbookActor"]["properties"]) == {
+        "kind", "id", "display_label", "hades_instance_id", "role", "model",
+    }
+    assert schemas["ProjectLogbookEntryResponse"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["entry", "replayed"],
+        "properties": {
+            "entry": {"$ref": "#/components/schemas/ProjectLogbookEntry"},
+            "replayed": {"type": "boolean"},
+        },
     }
     assert schemas["ProjectLogbookReference"]["properties"]["kind"]["enum"] == [
         "wiki_page", "wiki_revision", "graph_import", "verification_work", "kanban_task",
         "run", "repository", "commit", "file",
     ]
+    types_parameter = next(parameter for parameter in entries["get"]["parameters"] if parameter["name"] == "types[]")
+    assert types_parameter["schema"] == {
+        "type": "array", "minItems": 1, "uniqueItems": True,
+        "items": {"type": "string", "enum": [
+            "change", "creation", "import", "projection", "verification", "wiki", "decision", "failure", "rollback", "note",
+        ]},
+    }
     assert entries["get"]["parameters"][-1]["schema"]["maximum"] == 50
     assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
 

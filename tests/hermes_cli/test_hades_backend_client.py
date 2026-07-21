@@ -999,7 +999,9 @@ def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201
     client = HadesBackendClient(
         "https://backend.example", "agent-token", transport=httpx.MockTransport(handler)
     )
-    assert client.list_logbook_entries("project_1", workspace_binding_id="binding_1") == {"items": []}
+    assert client.list_logbook_entries(
+        "project_1", workspace_binding_id="binding_1", types=["change", "import"],
+    ) == {"items": []}
     assert client.get_logbook_entry("project_1", "entry_1", workspace_binding_id="binding_1") == {"items": []}
     assert client.create_logbook_entry(
         "project_1", workspace_binding_id="binding_1", event_type="change",
@@ -1010,8 +1012,9 @@ def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201
         ("GET", "/api/hades/v1/logbook/entries/entry_1"),
         ("POST", "/api/hades/v1/logbook/entries"),
     ]
+    assert requests[0].url.params.get_list("types[]") == ["change", "import"]
     assert _query_dict(requests[0]) == {
-        "project_id": "project_1", "workspace_binding_id": "binding_1",
+        "project_id": "project_1", "workspace_binding_id": "binding_1", "types[]": "change",
     }
     assert _query_dict(requests[1]) == {
         "project_id": "project_1", "workspace_binding_id": "binding_1",

@@ -38,8 +38,11 @@ MAX_RETRY_ATTEMPTS = 5
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 3_600
 _REFERENCE_KIND = re.compile(r"\A[a-z][a-z0-9_-]{0,63}\Z")
-_IDEMPOTENCY_KEY = re.compile(r"\A[ -~]{16,128}\Z")
+_IDEMPOTENCY_KEY = re.compile(r"\A[!-~]{16,128}\Z")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_COMMIT_REFERENCE = re.compile(r"\A[0-9a-f]{40}\Z")
+_FILE_DRIVE_ABSOLUTE = re.compile(r"\A[A-Za-z]:[\\\\/]")
+_RAW_HTML = re.compile(r"</?[A-Za-z][^>]*>|<!--.*?-->|<![A-Z][^>]*>", re.DOTALL | re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -105,31 +108,64 @@ def _clean_text(value: Any, *, field: str, maximum: int, required: bool = False)
     return clean or None
 
 
+def _reject_raw_html(value: str, *, field: str) -> str:
+    if _RAW_HTML.search(value):
+        raise ValueError(f"logbook {field} must not contain raw HTML")
+    return value
+
+
+def _safe_file_reference(reference_id: str) -> bool:
+    if (
+        not reference_id
+        or len(reference_id.encode("utf-8")) > 2_048
+        or reference_id.startswith(("/", "\\"))
+        or _FILE_DRIVE_ABSOLUTE.match(reference_id) is not None
+        or _CONTROL.search(reference_id)
+    ):
+        return False
+    return not any(segment in {"", ".", ".."} for segment in re.split(r"[/\\\\]", reference_id))
+
+
 def _parse_references(value: Any) -> list[dict[str, str]]:
-    raw_values = list(value or [])
+    if value is None:
+        raw_values: list[Any] = []
+    elif isinstance(value, (list, tuple)):
+        raw_values = list(value)
+    else:
+        raise ValueError("logbook references must be a list")
     if len(raw_values) > MAX_REFERENCE_COUNT:
         raise ValueError(f"logbook references exceed {MAX_REFERENCE_COUNT}")
     references: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for raw in raw_values:
         if isinstance(raw, dict) and set(raw) == {"kind", "id"}:
-            kind = str(raw["kind"]).strip()
-            reference_id = str(raw["id"]).strip()
+            kind = raw["kind"]
+            reference_id = raw["id"]
         elif isinstance(raw, str) and ":" in raw:
             kind, reference_id = raw.split(":", 1)
-            kind = kind.strip()
-            reference_id = reference_id.strip()
         else:
             raise ValueError("logbook reference must use KIND:ID")
+        if not isinstance(kind, str) or not isinstance(reference_id, str):
+            raise ValueError("logbook reference must use text KIND:ID")
         if (
             _REFERENCE_KIND.fullmatch(kind) is None
             or kind not in LOGBOOK_REFERENCE_KINDS
             or not reference_id
-            or len(reference_id) > 255
             or _CONTROL.search(reference_id)
         ):
             raise ValueError("logbook reference must use a safe KIND:ID")
+        if kind == "commit" and _COMMIT_REFERENCE.fullmatch(reference_id) is None:
+            raise ValueError("logbook commit reference must use a lowercase 40-hex SHA")
+        if kind == "file" and not _safe_file_reference(reference_id):
+            raise ValueError("logbook file reference must use a safe relative path")
+        if kind != "file" and len(reference_id) > 255:
+            raise ValueError("logbook reference must use a safe KIND:ID")
+        identity = (kind, reference_id)
+        if identity in seen:
+            raise ValueError("logbook references must not contain duplicates")
+        seen.add(identity)
         references.append({"kind": kind, "id": reference_id})
-    return references
+    return sorted(references, key=lambda reference: (reference["kind"], reference["id"]))
 
 
 def _validate_idempotency_key(value: Any) -> str:
@@ -143,6 +179,8 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     if event_type not in LOGBOOK_EVENT_TYPES:
         raise ValueError("logbook type is not supported")
     summary = _clean_text(command.get("summary"), field="summary", maximum=MAX_SUMMARY_CODE_POINTS, required=True)
+    assert summary is not None
+    _reject_raw_html(summary, field="summary")
     severity = _clean_text(command.get("severity") or "info", field="severity", maximum=16, required=True)
     if severity not in LOGBOOK_SEVERITIES:
         raise ValueError("logbook severity must be info, warning, or error")
@@ -152,6 +190,7 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     if narrative is not None:
         if not isinstance(narrative, str) or len(narrative) > MAX_NARRATIVE_CODE_POINTS:
             raise ValueError("logbook narrative exceeds 8,000 code points")
+        _reject_raw_html(narrative, field="narrative markdown")
     payload = command.get("payload")
     if payload is None:
         payload = {}
@@ -171,12 +210,11 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
         "summary": summary,
         "idempotency_key": idempotency_key,
         "references": _parse_references(command.get("references", [])),
+        "correlation_id": correlation_id,
         "narrative_markdown": narrative,
         "payload": payload,
         "supersedes_entry_id": supersedes_entry_id,
     }
-    if correlation_id:
-        request["correlation_id"] = correlation_id
     return request
 
 
@@ -378,20 +416,38 @@ def _list_limit(value: Any) -> int:
     return value
 
 
+def _list_types(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    raw_values = [value] if isinstance(value, str) else value
+    if not isinstance(raw_values, (list, tuple)):
+        raise ValueError("logbook type must be text")
+    types: list[str] = []
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            raise ValueError("logbook type must be text")
+        for part in raw.split(","):
+            clean = _clean_text(part, field="type", maximum=32, required=True)
+            assert clean is not None
+            if clean not in LOGBOOK_EVENT_TYPES:
+                raise ValueError("logbook type is not supported")
+            if clean not in types:
+                types.append(clean)
+    return types or None
+
+
 def run_logbook_list(
-    *, event_type: str | None, actor: str | None, severity: str | None,
+    *, event_type: str | list[str] | tuple[str, ...] | None, actor: str | None, severity: str | None,
     cursor: str | None, limit: int, client: Any,
 ) -> LogbookActionResult:
     _agent, binding = _current_agent_binding()
-    clean_type = _clean_text(event_type, field="type", maximum=32)
-    if clean_type and clean_type not in LOGBOOK_EVENT_TYPES:
-        raise ValueError("logbook type is not supported")
+    clean_types = _list_types(event_type)
     clean_severity = _clean_text(severity, field="severity", maximum=16)
     if clean_severity and clean_severity not in LOGBOOK_SEVERITIES:
         raise ValueError("logbook severity must be info, warning, or error")
     request = {
         "workspace_binding_id": binding.backend_workspace_binding_id,
-        "types": clean_type,
+        "types": clean_types,
         "actor": _clean_text(actor, field="actor", maximum=255),
         "severity": clean_severity,
         "cursor": _clean_text(cursor, field="cursor", maximum=1_024),

@@ -17,7 +17,7 @@ def _command(key: str = "stable-idempotency-0001") -> dict[str, object]:
         "summary": "Persisted before the network call.",
         "severity": "info",
         "idempotency_key": key,
-        "references": [{"kind": "commit", "id": "abc123"}],
+        "references": [{"kind": "commit", "id": "a" * 40}],
     }
 
 
@@ -28,7 +28,8 @@ def _expected_wire_request(key: str = "stable-idempotency-0001") -> dict[str, ob
         "severity": "info",
         "summary": "Persisted before the network call.",
         "idempotency_key": key,
-        "references": [{"kind": "commit", "id": "abc123"}],
+        "references": [{"kind": "commit", "id": "a" * 40}],
+        "correlation_id": None,
         "narrative_markdown": None,
         "payload": {},
         "supersedes_entry_id": None,
