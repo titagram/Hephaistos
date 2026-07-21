@@ -4447,7 +4447,10 @@
           "severity",
           "summary",
           "idempotency_key",
-          "references"
+          "references",
+          "narrative_markdown",
+          "payload",
+          "supersedes_entry_id"
         ],
         "properties": {
           "project_id": {
@@ -4489,7 +4492,10 @@
             "maxLength": 240
           },
           "narrative_markdown": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 8000
           },
           "references": {
@@ -4515,7 +4521,10 @@
             "additionalProperties": true
           },
           "supersedes_entry_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

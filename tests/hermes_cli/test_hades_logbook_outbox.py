@@ -21,6 +21,63 @@ def _command(key: str = "stable-idempotency-0001") -> dict[str, object]:
     }
 
 
+def _expected_wire_request(key: str = "stable-idempotency-0001") -> dict[str, object]:
+    return {
+        "workspace_binding_id": "binding_1",
+        "event_type": "change",
+        "severity": "info",
+        "summary": "Persisted before the network call.",
+        "idempotency_key": key,
+        "references": [{"kind": "commit", "id": "abc123"}],
+        "narrative_markdown": None,
+        "payload": {},
+        "supersedes_entry_id": None,
+    }
+
+
+def test_immediate_logbook_write_materializes_complete_backend_request(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import run_logbook_write
+
+    class Client:
+        def __init__(self):
+            self.payloads: list[dict[str, object]] = []
+
+        def create_logbook_entry(self, project_id, **payload):
+            assert project_id == "project_1"
+            self.payloads.append(payload)
+            return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
+
+    conn = db.connect(tmp_path / "backend.db")
+    client = Client()
+    assert run_logbook_write(conn, command=_command(), binding=_binding(), client=client, now=1000).state == "sent"
+    assert client.payloads == [_expected_wire_request()]
+
+
+def test_replayed_logbook_write_materializes_same_complete_backend_request_after_restart(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry, flush_due_logbook_entries
+
+    class Client:
+        def __init__(self):
+            self.payloads: list[dict[str, object]] = []
+
+        def create_logbook_entry(self, project_id, **payload):
+            assert project_id == "project_1"
+            self.payloads.append(payload)
+            return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
+
+    path = tmp_path / "backend.db"
+    conn = db.connect(path)
+    enqueue_logbook_entry(conn, command=_command(), binding=_binding(), now=999)
+    conn.close()
+
+    reopened = db.connect(path)
+    client = Client()
+    assert flush_due_logbook_entries(reopened, client, now=1000)["sent"] == 1
+    assert client.payloads == [_expected_wire_request()]
+
+
 def test_write_persists_before_network_and_replays_once_after_restart(tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import (

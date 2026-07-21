@@ -152,6 +152,14 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     if narrative is not None:
         if not isinstance(narrative, str) or len(narrative) > MAX_NARRATIVE_CODE_POINTS:
             raise ValueError("logbook narrative exceeds 8,000 code points")
+    payload = command.get("payload")
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError("logbook payload must be an object")
+    supersedes_entry_id = _clean_text(
+        command.get("supersedes_entry_id"), field="supersedes entry id", maximum=255,
+    )
     workspace_binding_id = _clean_text(
         getattr(binding, "backend_workspace_binding_id", None),
         field="workspace binding id", maximum=255, required=True,
@@ -163,9 +171,10 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
         "summary": summary,
         "idempotency_key": idempotency_key,
         "references": _parse_references(command.get("references", [])),
+        "narrative_markdown": narrative,
+        "payload": payload,
+        "supersedes_entry_id": supersedes_entry_id,
     }
-    if narrative:
-        request["narrative_markdown"] = narrative
     if correlation_id:
         request["correlation_id"] = correlation_id
     return request

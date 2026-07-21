@@ -98,7 +98,8 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     create_request = schemas["ProjectLogbookEntryCreateRequest"]
     assert create_request["additionalProperties"] is False
     assert create_request["required"] == [
-        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references"
+        "project_id", "workspace_binding_id", "event_type", "severity", "summary", "idempotency_key", "references",
+        "narrative_markdown", "payload", "supersedes_entry_id",
     ]
     client_body = {
         "project_id": "proj_1",
@@ -108,6 +109,9 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
         "summary": "Done",
         "idempotency_key": "0123456789abcdef",
         "references": [{"kind": "commit", "id": "abc123"}],
+        "narrative_markdown": None,
+        "payload": {},
+        "supersedes_entry_id": None,
     }
     assert set(create_request["required"]) <= client_body.keys()
     assert set(client_body) <= create_request["properties"].keys()
