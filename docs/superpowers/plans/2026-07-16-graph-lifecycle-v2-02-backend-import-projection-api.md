@@ -584,4 +584,4 @@ git commit -m "test(graph): close backend lifecycle v2 gates"
 - `scopes` is the only graph query without context/projection; all other successful responses carry the exact active context.
 - No active v2 repository/query path falls back to repository/workspace/v1 data.
 - Old active projection survives every injected candidate failure.
-- Fresh spec-compliance review contains no unresolved P0/P1 finding.
+- Fresh spec-compliance review contains no unresolved Critical/Important finding.

@@ -119,7 +119,7 @@ cd /Users/gabriele/Dev/sinervis/carnovali
 hades backend sync
 ```
 
-For this release, `hades backend sync` is the explicit graph-index command boundary and may install the pinned `hades-indexer` lazy dependency group before extraction begins. It must not install anything after the agent conversation loop starts.
+For this release, `hades backend sync` is the explicit graph-index command boundary. Tree-sitter and every pinned grammar wheel are mandatory base dependencies installed before the command starts; sync never installs a lazy `hades-indexer` group or downloads a grammar at runtime. A missing or failed required-language canary blocks graph publication with the typed failure required by Plan 1 Task 16.
 
 - [ ] **Step 3: Monitor resumable import/validation/projection**
 
@@ -225,7 +225,7 @@ Agent: Hades backend sync/client/jobs/status/provider/skills suites. Backend: co
 
 - [ ] **Step 5: Request two-stage reviews**
 
-Review each completed task/spec first, then overall code quality/security/concurrency/data safety. Run an explicit search for dead v1 reader, silent cap, unscoped query/delete, false-zero coalesce, arbitrary overlay input, prompt-cache mutation, inert UI control, secret in backup config, and Inertia import. Resolve every P0/P1 before proceeding.
+Review each completed task/spec first, then overall code quality/security/concurrency/data safety. Run an explicit search for dead v1 reader, silent cap, unscoped query/delete, false-zero coalesce, arbitrary overlay input, prompt-cache mutation, inert UI control, secret in backup config, and Inertia import. Resolve every Critical/Important finding before proceeding.
 
 - [ ] **Step 6: Compare truth stores and unrelated data**
 

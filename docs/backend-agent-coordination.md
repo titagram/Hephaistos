@@ -1,5 +1,10 @@
 # Coordinamento con agente backend Laravel
 
+> **Historical coordination record — not current Graph Lifecycle v2 status.**
+> Use
+> `docs/superpowers/plans/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md`
+> for current SHAs, blockers, milestone definitions, and next-session ownership.
+
 Documento operativo per preparare e registrare il confronto con l'agente del
 progetto backend Laravel. Non sostituisce `docs/implementation_plan.md`:
 questo file raccoglie domande, risposte, migliorie emerse e conclusioni da

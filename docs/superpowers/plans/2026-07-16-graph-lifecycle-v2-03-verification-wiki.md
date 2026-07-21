@@ -635,4 +635,4 @@ Agent commit message: `test(hades): close verification worker gates`.
 - Graph base artifact remains byte-identical after verified and contradicted results.
 - New Wiki revision fingerprints validate against the new revision ID.
 - Sync has no model/prompt/message side effect.
-- Fresh reviews of both repositories contain no unresolved P0/P1 finding.
+- Fresh reviews of both repositories contain no unresolved Critical/Important finding.

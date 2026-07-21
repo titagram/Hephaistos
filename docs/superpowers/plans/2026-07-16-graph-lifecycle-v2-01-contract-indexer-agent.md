@@ -1001,4 +1001,4 @@ git commit -m "test(hades): close graph v2 producer gates"
 - Contract manifest, contract lock, and golden vectors are committed.
 - The large benchmark has no silent cap.
 - A clean v2 bundle validates after round-trip spool readback.
-- Fresh spec-compliance review contains no unresolved P0/P1 finding.
+- Fresh spec-compliance review contains no unresolved Critical/Important finding.
