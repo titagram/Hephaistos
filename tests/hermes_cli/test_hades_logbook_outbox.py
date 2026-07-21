@@ -10,6 +10,7 @@ def _binding():
     return SimpleNamespace(
         project_id="project_1",
         backend_workspace_binding_id="binding_1",
+        agent_id="agent_1",
     )
 
 
@@ -311,7 +312,9 @@ def test_idempotency_key_reuses_one_pending_obligation_across_project_bindings(t
     from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
 
     first = _binding()
-    second = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2")
+    second = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_2", agent_id="agent_1",
+    )
     conn = db.connect(tmp_path / "backend.db")
     enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=first, now=999)
     repeated = enqueue_logbook_entry(
@@ -345,7 +348,9 @@ def test_existing_project_scoped_outbox_schema_stays_project_scoped(tmp_path):
     repeated = enqueue_logbook_entry(
         conn,
         command=_command("shared-idempotency-0001"),
-        binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
+        binding=SimpleNamespace(
+            project_id="project_1", backend_workspace_binding_id="binding_2", agent_id="agent_1",
+        ),
         now=999,
     )
     assert repeated.workspace_binding_id == "binding_2"
@@ -364,7 +369,9 @@ def test_immediate_write_flush_is_scoped_to_its_workspace_binding(tmp_path):
             self.projects.append(project_id)
             return {"entry": {"id": "entry_1", "idempotency_key": payload["idempotency_key"]}}
 
-    foreign = SimpleNamespace(project_id="project_2", backend_workspace_binding_id="binding_2")
+    foreign = SimpleNamespace(
+        project_id="project_2", backend_workspace_binding_id="binding_2", agent_id="agent_2",
+    )
     conn = db.connect(tmp_path / "backend.db")
     enqueue_logbook_entry(conn, command=_command("foreign-idempotency-0001"), binding=foreign, now=999)
     client = Client()

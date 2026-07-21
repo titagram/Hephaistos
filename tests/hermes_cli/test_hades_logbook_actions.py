@@ -92,7 +92,9 @@ def test_run_logbook_list_forwards_only_bound_workspace_filters(monkeypatch):
             calls.append({"project_id": project_id, **payload})
             return {"items": []}
 
-    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    binding = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+    )
     monkeypatch.setattr(actions, "_current_agent_binding", lambda: (SimpleNamespace(), binding))
     result = actions.run_logbook_list(
         event_type=["change,import", "wiki"], actor="agent", severity="info", cursor="x" * 1500, limit=10,
@@ -118,7 +120,9 @@ def test_logbook_write_rejects_noncanonical_idempotency_key_before_outbox_persis
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import run_logbook_write
 
-    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    binding = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+    )
     conn = db.connect(tmp_path / "backend.db")
 
     class Client:
@@ -152,7 +156,9 @@ def test_logbook_write_rejects_noncanonical_references_before_outbox_persistence
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import run_logbook_write
 
-    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    binding = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+    )
     conn = db.connect(tmp_path / "backend.db")
     class Client:
         calls = 0
@@ -179,7 +185,9 @@ def test_logbook_write_rejects_raw_html_before_outbox_or_network(field, value, t
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import run_logbook_write
 
-    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    binding = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+    )
     conn = db.connect(tmp_path / "backend.db")
 
     class Client:
@@ -287,7 +295,9 @@ def test_logbook_write_rejects_optional_identifiers_over_backend_limit(field, tm
     with pytest.raises(ValueError, match="too long"):
         run_logbook_write(
             conn, command=command,
-            binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1"),
+            binding=SimpleNamespace(
+                project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+            ),
             client=client, now=1000,
         )
     assert db.list_logbook_outbox_entries(conn) == []
@@ -297,7 +307,9 @@ def test_logbook_write_rejects_optional_identifiers_over_backend_limit(field, tm
 def test_logbook_list_rejects_actor_identity_when_backend_requires_actor_kind(monkeypatch):
     from hermes_cli import hades_logbook_actions as actions
 
-    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    binding = SimpleNamespace(
+        project_id="project_1", backend_workspace_binding_id="binding_1", agent_id="agent_1",
+    )
     monkeypatch.setattr(actions, "_current_agent_binding", lambda: (SimpleNamespace(), binding))
 
     with pytest.raises(ValueError, match="actor must be"):

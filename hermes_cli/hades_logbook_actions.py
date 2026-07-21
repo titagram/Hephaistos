@@ -226,10 +226,14 @@ def enqueue_logbook_entry(
 ) -> db.LogbookOutboxEntry:
     request = canonical_logbook_request(command, binding)
     project_id = _clean_text(getattr(binding, "project_id", None), field="project id", maximum=191, required=True)
+    actor_agent_id = _clean_text(
+        getattr(binding, "agent_id", None), field="actor agent id", maximum=191, required=True,
+    )
     return db.enqueue_logbook_outbox_entry(
         conn,
         project_id=project_id or "",
         workspace_binding_id=request["workspace_binding_id"],
+        actor_agent_id=actor_agent_id or "",
         idempotency_key=request["idempotency_key"],
         request=request,
         now=_now(now),
@@ -290,7 +294,7 @@ def _retry_at(entry: db.LogbookOutboxEntry, now: int) -> int:
 def _dead_letter_message(last_error: str | None) -> str:
     detail = f" Last error: {last_error}." if last_error else ""
     return (
-        "logbook write was persisted but rejected after the bounded retry budget."
+        "logbook write was rejected permanently or exhausted the bounded retry budget."
         f"{detail} Correct the reported cause; for a capability denial, obtain "
         "write_project_logbook and re-register with `hades backend setup`. Then re-run the "
         "exact original write command; sync alone does not reopen a dead letter"

@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS logbook_outbox (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id            TEXT NOT NULL,
     workspace_binding_id  TEXT NOT NULL,
+    actor_agent_id        TEXT NOT NULL,
     idempotency_key       TEXT NOT NULL,
     request_json          TEXT NOT NULL,
     request_digest        TEXT NOT NULL,
@@ -631,6 +632,27 @@ def _has_project_scoped_logbook_idempotency(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _migrate_logbook_outbox_actor_identity(conn: sqlite3.Connection) -> None:
+    """Persist the stable backend actor separately from replaceable routing."""
+
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(logbook_outbox)").fetchall()
+    }
+    if "actor_agent_id" not in columns:
+        with write_txn(conn):
+            conn.execute("ALTER TABLE logbook_outbox ADD COLUMN actor_agent_id TEXT")
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE logbook_outbox SET actor_agent_id = ("
+            "SELECT workspace_bindings.agent_id FROM workspace_bindings "
+            "WHERE workspace_bindings.project_id = logbook_outbox.project_id "
+            "AND workspace_bindings.backend_workspace_binding_id = "
+            "logbook_outbox.workspace_binding_id LIMIT 1) "
+            "WHERE actor_agent_id IS NULL OR actor_agent_id = ''"
+        )
+
+
 def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
     """Move branch-era binding-scoped outboxes to the backend's identity.
 
@@ -654,7 +676,8 @@ def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE logbook_outbox_replacement ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, "
-            "workspace_binding_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, "
+            "workspace_binding_id TEXT NOT NULL, actor_agent_id TEXT, "
+            "idempotency_key TEXT NOT NULL, "
             "request_json TEXT NOT NULL, request_digest TEXT NOT NULL, "
             "state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'sent', 'dead_letter')), "
             "lease_token TEXT, lease_expires_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, "
@@ -664,7 +687,7 @@ def _migrate_logbook_outbox_idempotency(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             "INSERT INTO logbook_outbox_replacement "
-            "SELECT id, project_id, workspace_binding_id, idempotency_key, request_json, "
+            "SELECT id, project_id, workspace_binding_id, actor_agent_id, idempotency_key, request_json, "
             "request_digest, state, lease_token, lease_expires_at, attempts, next_attempt_at, "
             "response_id, last_error, created_at, updated_at FROM logbook_outbox"
         )
@@ -684,7 +707,9 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True, separators=(",", ":"))
 
 
-def _logbook_request_digest(request: dict[str, Any]) -> str:
+def _logbook_request_digest(
+    request: dict[str, Any], actor_agent_id: str | None = None
+) -> str:
     """Hash the backend mutation, excluding the replaceable routing binding."""
 
     canonical = dict(request)
@@ -694,6 +719,17 @@ def _logbook_request_digest(request: dict[str, Any]) -> str:
     canonical.setdefault("payload", {})
     canonical.setdefault("references", [])
     canonical.setdefault("supersedes_entry_id", None)
+    references = canonical.get("references")
+    if isinstance(references, list) and all(
+        isinstance(reference, dict)
+        and isinstance(reference.get("kind"), str)
+        and isinstance(reference.get("id"), str)
+        for reference in references
+    ):
+        canonical["references"] = sorted(
+            references, key=lambda reference: (reference["kind"], reference["id"])
+        )
+    canonical["_actor_agent_id"] = actor_agent_id
     encoded = _json_dumps(canonical)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -701,13 +737,18 @@ def _logbook_request_digest(request: dict[str, Any]) -> str:
 def _migrate_logbook_outbox_request_digests(conn: sqlite3.Connection) -> None:
     """Normalize branch-era digests that included workspace routing metadata."""
 
-    rows = conn.execute("SELECT id, request_json, request_digest FROM logbook_outbox").fetchall()
+    rows = conn.execute(
+        "SELECT id, actor_agent_id, request_json, request_digest FROM logbook_outbox"
+    ).fetchall()
     updates: list[tuple[str, int]] = []
     for row in rows:
         request = _json_loads(row["request_json"])
         if not isinstance(request, dict):
             raise ValueError(f"logbook outbox entry {row['id']} has invalid request JSON")
-        digest = _logbook_request_digest(request)
+        actor_agent_id = str(row["actor_agent_id"] or "").strip() or None
+        if actor_agent_id is None:
+            continue
+        digest = _logbook_request_digest(request, actor_agent_id)
         if digest != str(row["request_digest"]):
             updates.append((digest, int(row["id"])))
     if updates:
@@ -742,6 +783,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
             # schema pass so partially-created legacy stores migrate safely too.
             _migrate_agent_coordination_schema(conn)
             conn.executescript(SCHEMA_SQL)
+            _migrate_logbook_outbox_actor_identity(conn)
             _migrate_logbook_outbox_idempotency(conn)
             _migrate_logbook_outbox_request_digests(conn)
             _migrate_persephone_message_identities(conn)
@@ -847,6 +889,7 @@ class LogbookOutboxEntry:
     id: int
     project_id: str
     workspace_binding_id: str
+    actor_agent_id: str | None
     idempotency_key: str
     request: dict[str, Any]
     request_digest: str
@@ -1837,6 +1880,7 @@ def _logbook_outbox_from_row(row: sqlite3.Row) -> LogbookOutboxEntry:
         id=int(row["id"]),
         project_id=str(row["project_id"]),
         workspace_binding_id=str(row["workspace_binding_id"]),
+        actor_agent_id=(str(row["actor_agent_id"]) if row["actor_agent_id"] else None),
         idempotency_key=str(row["idempotency_key"]),
         request=request,
         request_digest=str(row["request_digest"]),
@@ -1857,15 +1901,18 @@ def enqueue_logbook_outbox_entry(
     *,
     project_id: str,
     workspace_binding_id: str,
+    actor_agent_id: str,
     idempotency_key: str,
     request: dict[str, Any],
     now: int | None = None,
 ) -> LogbookOutboxEntry:
     """Persist one canonical request before any caller may start network I/O."""
 
+    if not isinstance(actor_agent_id, str) or not actor_agent_id or len(actor_agent_id) > 191:
+        raise ValueError("logbook actor agent id must be a non-empty bounded string")
     timestamp = _now() if now is None else int(now)
     encoded = _json_dumps(request)
-    digest = _logbook_request_digest(request)
+    digest = _logbook_request_digest(request, actor_agent_id)
     with write_txn(conn):
         existing = conn.execute(
             "SELECT * FROM logbook_outbox WHERE project_id = ? AND idempotency_key = ?",
@@ -1873,16 +1920,24 @@ def enqueue_logbook_outbox_entry(
         ).fetchone()
         if existing is not None:
             loaded = _logbook_outbox_from_row(existing)
-            if _logbook_request_digest(loaded.request) != digest:
+            if loaded.actor_agent_id is None:
+                if _logbook_request_digest(loaded.request) != _logbook_request_digest(request):
+                    raise ValueError("logbook idempotency key is already bound to a different request")
+                if loaded.state == "sent":
+                    raise ValueError(
+                        "logbook idempotency key has a sent legacy entry without actor identity"
+                    )
+            elif _logbook_request_digest(loaded.request, loaded.actor_agent_id) != digest:
                 raise ValueError("logbook idempotency key is already bound to a different request")
             if loaded.state == "dead_letter":
                 conn.execute(
-                    "UPDATE logbook_outbox SET workspace_binding_id = ?, request_json = ?, "
+                    "UPDATE logbook_outbox SET workspace_binding_id = ?, actor_agent_id = ?, request_json = ?, "
                     "request_digest = ?, state = 'pending', lease_token = NULL, "
                     "lease_expires_at = NULL, attempts = 0, next_attempt_at = ?, "
                     "response_id = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
                     (
-                        workspace_binding_id, encoded, digest, timestamp, timestamp, loaded.id,
+                        workspace_binding_id, actor_agent_id, encoded, digest,
+                        timestamp, timestamp, loaded.id,
                     ),
                 )
                 existing = conn.execute(
@@ -1892,12 +1947,13 @@ def enqueue_logbook_outbox_entry(
                 return _logbook_outbox_from_row(existing)
             if loaded.state in {"pending", "leased"} and (
                 loaded.workspace_binding_id != workspace_binding_id
+                or loaded.actor_agent_id != actor_agent_id
                 or loaded.request != request
             ):
                 conn.execute(
-                    "UPDATE logbook_outbox SET workspace_binding_id = ?, request_json = ?, "
+                    "UPDATE logbook_outbox SET workspace_binding_id = ?, actor_agent_id = ?, request_json = ?, "
                     "request_digest = ?, updated_at = ? WHERE id = ?",
-                    (workspace_binding_id, encoded, digest, timestamp, loaded.id),
+                    (workspace_binding_id, actor_agent_id, encoded, digest, timestamp, loaded.id),
                 )
                 existing = conn.execute(
                     "SELECT * FROM logbook_outbox WHERE id = ?", (loaded.id,)
@@ -1907,12 +1963,13 @@ def enqueue_logbook_outbox_entry(
             return loaded
         cursor = conn.execute(
             "INSERT INTO logbook_outbox "
-            "(project_id, workspace_binding_id, idempotency_key, request_json, request_digest, state, "
+            "(project_id, workspace_binding_id, actor_agent_id, idempotency_key, request_json, request_digest, state, "
             "attempts, next_attempt_at, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
             (
                 project_id,
                 workspace_binding_id,
+                actor_agent_id,
                 idempotency_key,
                 encoded,
                 digest,

@@ -1030,6 +1030,14 @@ def test_logbook_client_uses_entries_routes_preserves_project_id_and_accepts_201
     }
 
 
+def test_logbook_route_ids_match_backend_191_character_boundary():
+    from hermes_cli.hades_backend_client import validate_logbook_route_id
+
+    assert validate_logbook_route_id("a" * 191, field="project id") == "a" * 191
+    with pytest.raises(ValueError, match="project id"):
+        validate_logbook_route_id("a" * 192, field="project id")
+
+
 def test_graph_import_create_is_idempotent_for_200_and_201():
     from hermes_cli.hades_backend_client import HadesBackendClient, GraphImportState
 

@@ -38,7 +38,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key[=:]\s*)[A-Za-z0-9._\-]{8,}"),
 )
 _WIKI_PAGE_ID = re.compile(r"\A[0-9A-HJKMNP-TV-Z]{26}\Z")
-_LOGBOOK_ROUTE_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,191}\Z")
+_LOGBOOK_ROUTE_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,190}\Z")
 _ROUTE_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 _GRAPH_IMPORT_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")

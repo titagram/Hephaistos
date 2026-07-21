@@ -29,6 +29,7 @@ def _enqueue(conn, *, project: str = "project_1", binding: str = "binding_1", no
         conn,
         project_id=project,
         workspace_binding_id=binding,
+        actor_agent_id="agent_1",
         idempotency_key="project-scoped-key-0001",
         request=_request(binding),
         now=now,
@@ -95,8 +96,28 @@ def test_same_project_key_rejects_a_different_backend_mutation(tmp_path):
             conn,
             project_id="project_1",
             workspace_binding_id="binding_1",
+            actor_agent_id="agent_1",
             idempotency_key="project-scoped-key-0001",
             request=changed,
+            now=1001,
+        )
+    assert len(db.list_logbook_outbox_entries(conn)) == 1
+
+
+def test_same_project_key_rejects_a_different_backend_actor(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    conn = db.connect(tmp_path / "backend.db")
+    _enqueue(conn)
+
+    with pytest.raises(ValueError, match="already bound to a different request"):
+        db.enqueue_logbook_outbox_entry(
+            conn,
+            project_id="project_1",
+            workspace_binding_id="binding_2",
+            actor_agent_id="agent_2",
+            idempotency_key="project-scoped-key-0001",
+            request=_request("binding_2"),
             now=1001,
         )
     assert len(db.list_logbook_outbox_entries(conn)) == 1
@@ -278,4 +299,48 @@ def test_branch_era_route_inclusive_request_digest_is_migrated(tmp_path):
     migrated = db.connect(path)
     row = db.list_logbook_outbox_entries(migrated)[0]
     assert row.request_digest != old_digest
-    assert row.request_digest == db._logbook_request_digest(row.request)
+    assert row.request_digest == db._logbook_request_digest(row.request, "agent_1")
+
+
+def test_branch_era_unsorted_references_migrate_to_backend_canonical_digest(tmp_path):
+    from hermes_cli import hades_backend_db as db
+
+    path = tmp_path / "unsorted-digest.db"
+    conn = db.connect(path)
+    request = _request()
+    request["references"] = [
+        {"kind": "file", "id": "src/main.py"},
+        {"kind": "commit", "id": "a" * 40},
+    ]
+    entry = db.enqueue_logbook_outbox_entry(
+        conn, project_id="project_1", workspace_binding_id="binding_1",
+        actor_agent_id="agent_1", idempotency_key="project-scoped-key-0001",
+        request=request, now=1000,
+    )
+    legacy_canonical = dict(request)
+    legacy_canonical.pop("workspace_binding_id")
+    legacy_canonical["_actor_agent_id"] = "agent_1"
+    legacy_digest = hashlib.sha256(
+        json.dumps(legacy_canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    conn.execute(
+        "UPDATE logbook_outbox SET request_json = ?, request_digest = ? WHERE id = ?",
+        (json.dumps(request, sort_keys=True, separators=(",", ":")), legacy_digest, entry.id),
+    )
+    conn.commit()
+    conn.close()
+    db._INITIALIZED_PATHS.discard(str(path.resolve()))
+
+    migrated = db.connect(path)
+    row = db.list_logbook_outbox_entries(migrated)[0]
+    assert row.request_digest != legacy_digest
+    assert row.request_digest == db._logbook_request_digest(row.request, "agent_1")
+
+    reordered = dict(request)
+    reordered["references"] = list(reversed(request["references"]))
+    replay = db.enqueue_logbook_outbox_entry(
+        migrated, project_id="project_1", workspace_binding_id="binding_1",
+        actor_agent_id="agent_1", idempotency_key="project-scoped-key-0001",
+        request=reordered, now=1001,
+    )
+    assert replay.id == row.id
