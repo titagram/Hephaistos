@@ -2177,7 +2177,22 @@ class AdapterResult:
                         "parent structure must belong to the same declaration",
                     )
 
+        call_site_structures_by_occurrence: dict[
+            tuple[str, str, int], list[StructureIR]
+        ] = {}
+        for structure in self.structures:
+            if structure.kind is StructureKind.CALL_SITE:
+                call_site_structures_by_occurrence.setdefault(
+                    (
+                        structure.owner_declaration_key,
+                        structure.structural_path,
+                        structure.ordinal,
+                    ),
+                    [],
+                ).append(structure)
+
         call_site_structure_by_site: dict[str, StructureIR] = {}
+        call_site_by_structure_key: dict[str, CallSite] = {}
         for site in self.call_sites:
             need(
                 declarations,
@@ -2194,20 +2209,21 @@ class AdapterResult:
                 site.caller_declaration_key,
                 "call-site continuation block",
             )
-            matching = [
-                structure
-                for structure in self.structures
-                if structure.kind is StructureKind.CALL_SITE
-                and structure.owner_declaration_key == site.caller_declaration_key
-                and structure.structural_path == site.locator.structural_path
-                and structure.ordinal == site.locator.ordinal
-            ]
+            matching = call_site_structures_by_occurrence.get(
+                (
+                    site.caller_declaration_key,
+                    site.locator.structural_path,
+                    site.locator.ordinal,
+                ),
+                [],
+            )
             if len(matching) != 1:
                 _fail(
                     "invalid_structure",
                     "call-site requires one matching call_site StructureIR",
                 )
             call_site_structure_by_site[site.local_key] = matching[0]
+            call_site_by_structure_key.setdefault(matching[0].local_key, site)
             if site.exception_scope_key is not None:
                 structure = need(
                     structures,
@@ -2277,6 +2293,10 @@ class AdapterResult:
                 )
             scope_structure_by_scope[scope.local_key] = structure
 
+        branch_arm_by_branch_and_ordinal = {
+            (arm.branch_local_key, arm.arm_ordinal): arm for arm in self.branch_arms
+        }
+
         for block in self.blocks:
             need(declarations, block.declaration_key, "block declaration")
             for successor in block.successors:
@@ -2303,15 +2323,14 @@ class AdapterResult:
                             "return successor must reference a terminal from its source block",
                         )
                 if type(successor) is BranchSuccessor:
-                    matching_arms = [
-                        arm
-                        for arm in self.branch_arms
-                        if arm.branch_local_key == successor.branch_arm_key
-                        and arm.arm_ordinal == successor.arm_ordinal
-                        and arm.source_block_key == block.local_key
-                        and arm.target_block_key == successor.target_block_key
-                    ]
-                    if len(matching_arms) != 1:
+                    matching_arm = branch_arm_by_branch_and_ordinal.get(
+                        (successor.branch_arm_key, successor.arm_ordinal)
+                    )
+                    if (
+                        matching_arm is None
+                        or matching_arm.source_block_key != block.local_key
+                        or matching_arm.target_block_key != successor.target_block_key
+                    ):
                         _fail(
                             "invalid_branch_successor",
                             "branch successor must resolve to one exact branch arm",
@@ -2414,6 +2433,14 @@ class AdapterResult:
             Relation.DISPATCHES,
             Relation.SCHEDULES,
         })
+        invocation_call_site_keys = frozenset(
+            edge.call_site_key
+            for edge in self.edge_facts
+            if edge.relation is Relation.INVOKES
+        )
+        scope_structure_keys = frozenset(
+            structure.local_key for structure in scope_structure_by_scope.values()
+        )
 
         for edge in self.edge_facts:
             need_node(edge.source_node_local_key, "edge source")
@@ -2454,10 +2481,7 @@ class AdapterResult:
             if edge.relation is Relation.INVOKES:
                 if edge.call_site_key is None:
                     _fail("invalid_call_site", "invokes edges require a call-site")
-                if not any(
-                    structure.local_key == edge.call_site_key
-                    for structure in call_site_structure_by_site.values()
-                ):
+                if edge.call_site_key not in call_site_by_structure_key:
                     _fail(
                         "invalid_call_site",
                         "invokes edge call-site must match an emitted CallSite",
@@ -2465,20 +2489,12 @@ class AdapterResult:
             if edge.relation is Relation.RETURNS_TO:
                 if edge.call_site_key is None:
                     _fail("invalid_call_site", "returns_to edges require a call-site")
-                site = next(
-                    (
-                        candidate
-                        for candidate, structure in call_site_structure_by_site.items()
-                        if structure.local_key == edge.call_site_key
-                    ),
-                    None,
-                )
-                if site is None:
+                call_site = call_site_by_structure_key.get(edge.call_site_key)
+                if call_site is None:
                     _fail(
                         "invalid_call_site",
                         "returns_to edge call-site must match an emitted CallSite",
                     )
-                call_site = call_sites[site]
                 if (
                     type(edge.target) is not LocalNodeTarget
                     or edge.target.local_key != call_site.continuation_block_key
@@ -2487,21 +2503,14 @@ class AdapterResult:
                         "invalid_return",
                         "returns_to must target its call-site continuation",
                     )
-                if not any(
-                    invocation.relation is Relation.INVOKES
-                    and invocation.call_site_key == edge.call_site_key
-                    for invocation in self.edge_facts
-                ):
+                if edge.call_site_key not in invocation_call_site_keys:
                     _fail(
                         "invalid_return",
                         "returns_to requires a matching invocation",
                     )
             if edge.relation is Relation.THROWS_TO:
                 if edge.exception_scope_key is not None:
-                    if not any(
-                        structure.local_key == edge.exception_scope_key
-                        for structure in scope_structure_by_scope.values()
-                    ):
+                    if edge.exception_scope_key not in scope_structure_keys:
                         _fail(
                             "invalid_exception_scope",
                             "handled throws_to requires a matching exception scope",
@@ -2567,14 +2576,14 @@ class AdapterResult:
                                 "invalid_structure",
                                 "framework branch successor requires branch_group structure",
                             )
-                        matching_arms = [
-                            arm
-                            for arm in self.branch_arms
-                            if arm.branch_local_key == successor.branch_arm_key
-                            and arm.arm_ordinal == successor.arm_ordinal
-                            and arm.target_block_key == successor.target_block_key
-                        ]
-                        if len(matching_arms) != 1:
+                        matching_arm = branch_arm_by_branch_and_ordinal.get(
+                            (successor.branch_arm_key, successor.arm_ordinal)
+                        )
+                        if (
+                            matching_arm is None
+                            or matching_arm.target_block_key
+                            != successor.target_block_key
+                        ):
                             _fail(
                                 "invalid_branch_successor",
                                 "framework branch successor must resolve to one exact branch arm",
@@ -2727,6 +2736,25 @@ class AdapterResult:
                 )
             return target_key
 
+        call_target_subject_invocations_by_structure: dict[
+            str, list[EdgeFactIR]
+        ] = {}
+        for edge in self.edge_facts:
+            if (
+                edge.relation is Relation.INVOKES
+                and edge.flow
+                in {
+                    EdgeFlow.ALWAYS,
+                    EdgeFlow.CONDITIONAL,
+                    EdgeFlow.ALTERNATIVE,
+                }
+                and edge.call_site_key is not None
+            ):
+                if edge.evidence.origin is not EvidenceOrigin.INFERRED:
+                    call_target_subject_invocations_by_structure.setdefault(
+                        edge.call_site_key, []
+                    ).append(edge)
+
         for fact in self.unresolved_facts:
             subject_edge: EdgeFactIR | None = None
             call_site_structure_key: str | None = None
@@ -2737,26 +2765,17 @@ class AdapterResult:
                 call_site_structure_key = call_site_structure_by_site[
                     site.local_key
                 ].local_key
-                all_invocations = [
-                    edge
-                    for edge in self.edge_facts
-                    if edge_matches_resolution(
-                        edge,
-                        fact.resolution_kind,
-                        call_site_structure_key=call_site_structure_key,
-                    )
-                ]
                 if fact.candidate_set_knowledge is not CandidateSetKnowledge.COMPLETE:
                     # Incomplete inferred hints (including optional Graphify
                     # hints) share the call-site structure but cannot replace
                     # the one native unresolved assertion.  The assertion is
                     # the sole non-inferred invocation; inferred candidates
                     # are validated below through candidate_edge_local_keys.
-                    subject_invocations = [
-                        edge
-                        for edge in all_invocations
-                        if edge.evidence.origin is not EvidenceOrigin.INFERRED
-                    ]
+                    subject_invocations = (
+                        call_target_subject_invocations_by_structure.get(
+                            call_site_structure_key, []
+                        )
+                    )
                     if len(subject_invocations) != 1:
                         _fail(
                             "invalid_unresolved_subject",
@@ -2777,6 +2796,7 @@ class AdapterResult:
                 need(edges, key, "unresolved candidate edge")
                 for key in fact.candidate_edge_local_keys
             )
+            candidate_target_key_set = set(fact.candidate_target_local_keys)
             for target_key in fact.candidate_target_local_keys:
                 need_node(target_key, "unresolved candidate target")
                 if (
@@ -2810,8 +2830,9 @@ class AdapterResult:
                             "invalid_candidate_edge",
                             "incomplete candidate edges must be inferred",
                         )
-                    if require_candidate_target(edge, fact.resolution_kind) not in set(
-                        fact.candidate_target_local_keys
+                    if (
+                        require_candidate_target(edge, fact.resolution_kind)
+                        not in candidate_target_key_set
                     ):
                         _fail(
                             "invalid_candidate_set",

@@ -1,0 +1,74 @@
+{
+  "schema": "hades.graph_v2.adapter_result_validation.v1",
+  "scale": {
+    "call_site_counts": [64, 128],
+    "max_structure_iterations_per_call_site": 9,
+    "unresolved_fact_counts": [32, 64],
+    "lookup_family_counts": [32, 64],
+    "candidate_edge_counts": [8, 16],
+    "max_growth_factor": 3,
+    "max_candidate_target_key_operations": 8
+  },
+  "diagnostics": [
+    {
+      "case": "call_site_structure",
+      "code": "invalid_structure",
+      "message": "call-site requires one matching call_site StructureIR"
+    },
+    {
+      "case": "branch_successor",
+      "code": "invalid_branch_successor",
+      "message": "branch successor must resolve to one exact branch arm"
+    },
+    {
+      "case": "semantic_order",
+      "code": "invalid_structure",
+      "message": "call-site requires one matching call_site StructureIR"
+    },
+    {
+      "case": "invokes_call_site",
+      "code": "invalid_call_site",
+      "message": "invokes edge call-site must match an emitted CallSite"
+    },
+    {
+      "case": "returns_to_missing_call_site",
+      "code": "invalid_call_site",
+      "message": "returns_to edge call-site must match an emitted CallSite"
+    },
+    {
+      "case": "returns_to_call_site",
+      "code": "invalid_return",
+      "message": "returns_to requires a matching invocation"
+    },
+    {
+      "case": "returns_to_continuation",
+      "code": "invalid_return",
+      "message": "returns_to must target its call-site continuation"
+    },
+    {
+      "case": "framework_branch_successor",
+      "code": "invalid_branch_successor",
+      "message": "framework branch successor must resolve to one exact branch arm"
+    },
+    {
+      "case": "unresolved_call_target_subject",
+      "code": "invalid_unresolved_subject",
+      "message": "call_target requires one exact subject invocation"
+    },
+    {
+      "case": "incomplete_candidate_target_membership",
+      "code": "invalid_candidate_set",
+      "message": "incomplete candidate edge target is not a target hint"
+    },
+    {
+      "case": "edge_before_unresolved",
+      "code": "invalid_return",
+      "message": "returns_to must target its call-site continuation"
+    },
+    {
+      "case": "handled_throws_scope",
+      "code": "invalid_exception_scope",
+      "message": "handled throws_to requires a matching exception scope"
+    }
+  ]
+}
