@@ -180,6 +180,28 @@ def test_capability_denial_is_visible_dead_letter_not_success(tmp_path):
     assert db.list_logbook_outbox_entries(conn)[0].state == "dead_letter"
 
 
+def test_non_capability_dead_letter_exposes_its_actual_error_and_conditional_remedy(tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import enqueue_logbook_entry, run_logbook_write
+
+    class BrokenClient:
+        def create_logbook_entry(self, _project_id, **_payload):
+            raise RuntimeError("upstream malformed response")
+
+    conn = db.connect(tmp_path / "backend.db")
+    entry = enqueue_logbook_entry(conn, command=_command(), binding=_binding(), now=999)
+    conn.execute("UPDATE logbook_outbox SET attempts = 4 WHERE id = ?", (entry.id,))
+    conn.commit()
+
+    result = run_logbook_write(
+        conn, command=_command(), binding=_binding(), client=BrokenClient(), now=1000,
+    )
+    assert result.state == "dead_letter"
+    assert "Last error: upstream malformed response." in result.message
+    assert "for a capability denial" in result.message
+    assert "Correct the reported cause" in result.message
+
+
 def test_conflict_only_succeeds_when_backend_confirms_same_idempotency_key(tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_backend_client import HadesBackendError
@@ -284,7 +306,7 @@ def test_conflict_dead_letter_uses_conflict_remedy_not_capability_remedy(tmp_pat
     assert "re-register" not in result.message
 
 
-def test_idempotency_key_cannot_be_rebound_within_one_project(tmp_path):
+def test_idempotency_key_reuses_one_pending_obligation_across_project_bindings(tmp_path):
     from hermes_cli import hades_backend_db as db
     from hermes_cli.hades_logbook_actions import enqueue_logbook_entry
 
@@ -292,12 +314,12 @@ def test_idempotency_key_cannot_be_rebound_within_one_project(tmp_path):
     second = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2")
     conn = db.connect(tmp_path / "backend.db")
     enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=first, now=999)
-    with pytest.raises(ValueError, match="already bound to a different request"):
-        enqueue_logbook_entry(
-            conn, command=_command("shared-idempotency-0001"), binding=second, now=999,
-        )
+    repeated = enqueue_logbook_entry(
+        conn, command=_command("shared-idempotency-0001"), binding=second, now=999,
+    )
+    assert repeated.workspace_binding_id == "binding_2"
     assert [(entry.workspace_binding_id, entry.state) for entry in db.list_logbook_outbox_entries(conn)] == [
-        ("binding_1", "pending"),
+        ("binding_2", "pending"),
     ]
 
 
@@ -320,13 +342,13 @@ def test_existing_project_scoped_outbox_schema_stays_project_scoped(tmp_path):
 
     conn = db.connect(path)
     enqueue_logbook_entry(conn, command=_command("shared-idempotency-0001"), binding=_binding(), now=999)
-    with pytest.raises(ValueError, match="already bound to a different request"):
-        enqueue_logbook_entry(
-            conn,
-            command=_command("shared-idempotency-0001"),
-            binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
-            now=999,
-        )
+    repeated = enqueue_logbook_entry(
+        conn,
+        command=_command("shared-idempotency-0001"),
+        binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_2"),
+        now=999,
+    )
+    assert repeated.workspace_binding_id == "binding_2"
     assert len(db.list_logbook_outbox_entries(conn)) == 1
 
 

@@ -26,6 +26,7 @@ LOGBOOK_EVENT_TYPES = frozenset({
     "decision", "failure", "rollback", "note",
 })
 LOGBOOK_SEVERITIES = frozenset({"info", "warning", "error"})
+LOGBOOK_ACTOR_KINDS = frozenset({"user", "agent", "subagent", "system"})
 LOGBOOK_REFERENCE_KINDS = frozenset({
     "wiki_page", "wiki_revision", "graph_import", "verification_work",
     "kanban_task", "run", "repository", "commit", "file",
@@ -185,8 +186,10 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     if severity not in LOGBOOK_SEVERITIES:
         raise ValueError("logbook severity must be info, warning, or error")
     idempotency_key = _validate_idempotency_key(command.get("idempotency_key"))
-    correlation_id = _clean_text(command.get("correlation_id"), field="correlation id", maximum=255)
+    correlation_id = _clean_text(command.get("correlation_id"), field="correlation id", maximum=191)
     narrative = command.get("narrative_markdown")
+    if narrative == "":
+        narrative = None
     if narrative is not None:
         if not isinstance(narrative, str) or len(narrative) > MAX_NARRATIVE_CODE_POINTS:
             raise ValueError("logbook narrative exceeds 8,000 code points")
@@ -197,11 +200,11 @@ def canonical_logbook_request(command: dict[str, Any], binding: Any) -> dict[str
     if not isinstance(payload, dict):
         raise ValueError("logbook payload must be an object")
     supersedes_entry_id = _clean_text(
-        command.get("supersedes_entry_id"), field="supersedes entry id", maximum=255,
+        command.get("supersedes_entry_id"), field="supersedes entry id", maximum=191,
     )
     workspace_binding_id = _clean_text(
         getattr(binding, "backend_workspace_binding_id", None),
-        field="workspace binding id", maximum=255, required=True,
+        field="workspace binding id", maximum=191, required=True,
     )
     request: dict[str, Any] = {
         "workspace_binding_id": workspace_binding_id,
@@ -222,7 +225,7 @@ def enqueue_logbook_entry(
     conn: Any, *, command: dict[str, Any], binding: Any, now: int | None = None
 ) -> db.LogbookOutboxEntry:
     request = canonical_logbook_request(command, binding)
-    project_id = _clean_text(getattr(binding, "project_id", None), field="project id", maximum=255, required=True)
+    project_id = _clean_text(getattr(binding, "project_id", None), field="project id", maximum=191, required=True)
     return db.enqueue_logbook_outbox_entry(
         conn,
         project_id=project_id or "",
@@ -284,11 +287,13 @@ def _retry_at(entry: db.LogbookOutboxEntry, now: int) -> int:
     return int(now) + delay
 
 
-def _dead_letter_message() -> str:
+def _dead_letter_message(last_error: str | None) -> str:
+    detail = f" Last error: {last_error}." if last_error else ""
     return (
-        "logbook write was persisted but rejected permanently; ask a project administrator "
-        "to grant write_project_logbook, re-register with `hades backend setup`, then re-run "
-        "the exact original write command; sync alone does not reopen a dead letter"
+        "logbook write was persisted but rejected after the bounded retry budget."
+        f"{detail} Correct the reported cause; for a capability denial, obtain "
+        "write_project_logbook and re-register with `hades backend setup`. Then re-run the "
+        "exact original write command; sync alone does not reopen a dead letter"
     )
 
 
@@ -397,7 +402,7 @@ def run_logbook_write(
     if current.state == "dead_letter":
         if current.last_error == _IDEMPOTENCY_CONFLICT_ERROR:
             return LogbookActionResult(1, "dead_letter", _conflict_dead_letter_message())
-        return LogbookActionResult(1, "dead_letter", _dead_letter_message())
+        return LogbookActionResult(1, "dead_letter", _dead_letter_message(current.last_error))
     return LogbookActionResult(
         1,
         current.state,
@@ -443,15 +448,18 @@ def run_logbook_list(
 ) -> LogbookActionResult:
     _agent, binding = _current_agent_binding()
     clean_types = _list_types(event_type)
+    clean_actor = _clean_text(actor, field="actor", maximum=16)
+    if clean_actor and clean_actor not in LOGBOOK_ACTOR_KINDS:
+        raise ValueError("logbook actor must be user, agent, subagent, or system")
     clean_severity = _clean_text(severity, field="severity", maximum=16)
     if clean_severity and clean_severity not in LOGBOOK_SEVERITIES:
         raise ValueError("logbook severity must be info, warning, or error")
     request = {
         "workspace_binding_id": binding.backend_workspace_binding_id,
         "types": clean_types,
-        "actor": _clean_text(actor, field="actor", maximum=255),
+        "actor": clean_actor,
         "severity": clean_severity,
-        "cursor": _clean_text(cursor, field="cursor", maximum=1_024),
+        "cursor": _clean_text(cursor, field="cursor", maximum=2_048),
         "limit": _list_limit(limit),
     }
     response = client.list_logbook_entries(
@@ -462,7 +470,7 @@ def run_logbook_list(
 
 def run_logbook_show(*, entry_id: str, client: Any) -> LogbookActionResult:
     _agent, binding = _current_agent_binding()
-    clean_id = _clean_text(entry_id, field="entry id", maximum=255, required=True)
+    clean_id = _clean_text(entry_id, field="entry id", maximum=191, required=True)
     response = client.get_logbook_entry(
         binding.project_id, clean_id or "", workspace_binding_id=binding.backend_workspace_binding_id
     )

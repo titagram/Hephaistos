@@ -83,7 +83,8 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 191
             }
           },
           {
@@ -92,7 +93,8 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 191
             }
           },
           {
@@ -103,7 +105,7 @@
             "schema": {
               "type": "array",
               "minItems": 1,
-              "uniqueItems": true,
+              "maxItems": 10,
               "items": {
                 "type": "string",
                 "enum": [
@@ -125,7 +127,13 @@
             "name": "actor",
             "in": "query",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "user",
+                "agent",
+                "subagent",
+                "system"
+              ]
             }
           },
           {
@@ -161,14 +169,15 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "maxLength": 240
+              "maxLength": 200
             }
           },
           {
             "name": "cursor",
             "in": "query",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 2048
             }
           },
           {
@@ -283,7 +292,8 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 191
             }
           },
           {
@@ -292,7 +302,8 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 191
             }
           },
           {
@@ -301,7 +312,8 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 191
             }
           }
         ],
@@ -311,7 +323,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectLogbookEntryResponse"
+                  "$ref": "#/components/schemas/ProjectLogbookEntryDetailResponse"
                 }
               }
             }
@@ -4267,7 +4279,12 @@
         "additionalProperties": false,
         "required": [
           "kind",
-          "display_label"
+          "label",
+          "user_id",
+          "agent_id",
+          "device_id",
+          "role",
+          "model"
         ],
         "properties": {
           "kind": {
@@ -4279,34 +4296,44 @@
               "system"
             ]
           },
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "display_label": {
+          "label": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 240
+            "maxLength": 191
           },
-          "hades_instance_id": {
+          "user_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 191
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 191
           },
           "role": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 64
           },
           "model": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 191
           }
         }
       },
@@ -4335,13 +4362,6 @@
           "id": {
             "type": "string",
             "minLength": 1
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "maxLength": 240
           }
         },
         "oneOf": [
@@ -4390,8 +4410,11 @@
           "event_type",
           "severity",
           "summary",
+          "narrative_markdown",
           "references",
-          "idempotency_key"
+          "correlation_id",
+          "payload",
+          "supersedes_entry_id"
         ],
         "properties": {
           "id": {
@@ -4401,12 +4424,6 @@
           "project_id": {
             "type": "string",
             "minLength": 1
-          },
-          "workspace_binding_id": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "occurred_at": {
             "type": "string",
@@ -4468,17 +4485,10 @@
               "string",
               "null"
             ],
-            "maxLength": 255
-          },
-          "idempotency_key": {
-            "type": "string",
-            "minLength": 16,
-            "maxLength": 128,
-            "pattern": "^[!-~]+$"
+            "maxLength": 191
           },
           "payload": {
             "type": "object",
-            "maxProperties": 64,
             "additionalProperties": true,
             "description": "Bounded structured technical facts; not indexed by free-text search."
           },
@@ -4486,7 +4496,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 191
           }
         }
       },
@@ -4510,12 +4521,12 @@
           "project_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 255
+            "maxLength": 191
           },
           "workspace_binding_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 255
+            "maxLength": 191
           },
           "event_type": {
             "type": "string",
@@ -4566,7 +4577,7 @@
               "string",
               "null"
             ],
-            "maxLength": 255
+            "maxLength": 191
           },
           "idempotency_key": {
             "type": "string",
@@ -4576,14 +4587,14 @@
           },
           "payload": {
             "type": "object",
-            "maxProperties": 64,
             "additionalProperties": true
           },
           "supersedes_entry_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "maxLength": 191
           }
         }
       },
@@ -4603,14 +4614,58 @@
           }
         }
       },
+      "ProjectLogbookEntryDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "project_id",
+          "workspace_binding_id",
+          "entry"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": "v1"
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "workspace_binding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "entry": {
+            "$ref": "#/components/schemas/ProjectLogbookEntry"
+          }
+        }
+      },
       "ProjectLogbookEntryPage": {
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "protocol_version",
+          "project_id",
+          "workspace_binding_id",
           "items",
           "next_cursor"
         ],
         "properties": {
+          "protocol_version": {
+            "const": "v1"
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
+          "workspace_binding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 191
+          },
           "items": {
             "type": "array",
             "maxItems": 50,

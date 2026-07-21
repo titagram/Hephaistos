@@ -78,6 +78,8 @@ def test_parser_accepts_repeatable_and_comma_separated_logbook_list_types():
     build_backend_parser(subparsers, cmd_backend=lambda args: 0)
     args = parser.parse_args(["backend", "logbook", "list", "--type", "change,import", "--type", "wiki"])
     assert args.event_type == ["change,import", "wiki"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["backend", "logbook", "list", "--actor", "agent_1"])
 
 
 def test_run_logbook_list_forwards_only_bound_workspace_filters(monkeypatch):
@@ -93,13 +95,13 @@ def test_run_logbook_list_forwards_only_bound_workspace_filters(monkeypatch):
     binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
     monkeypatch.setattr(actions, "_current_agent_binding", lambda: (SimpleNamespace(), binding))
     result = actions.run_logbook_list(
-        event_type=["change,import", "wiki"], actor="agent_1", severity="info", cursor="cursor_1", limit=10,
+        event_type=["change,import", "wiki"], actor="agent", severity="info", cursor="x" * 1500, limit=10,
         client=Client(),
     )
     assert result.exit_code == 0
     assert calls == [{
         "project_id": "project_1", "workspace_binding_id": "binding_1", "types": ["change", "import", "wiki"],
-        "actor": "agent_1", "severity": "info", "cursor": "cursor_1", "limit": 10,
+        "actor": "agent", "severity": "info", "cursor": "x" * 1500, "limit": 10,
     }]
 
 
@@ -223,3 +225,83 @@ def test_logbook_accepts_markdown_without_raw_html():
         "idempotency_key": "markdown-idempotency-0001", "references": [],
     }, SimpleNamespace(backend_workspace_binding_id="binding_1"))
     assert request["summary"] == "**Markdown** is factual"
+
+
+def test_empty_narrative_file_value_is_canonicalized_to_backend_nullable_value():
+    from hermes_cli.hades_logbook_actions import canonical_logbook_request
+
+    request = canonical_logbook_request({
+        "event_type": "note", "summary": "Empty narrative omitted",
+        "narrative_markdown": "", "idempotency_key": "empty-narrative-key-0001",
+        "references": [],
+    }, SimpleNamespace(backend_workspace_binding_id="binding_1"))
+    assert request["narrative_markdown"] is None
+
+
+@pytest.mark.parametrize("field", ["project_id", "backend_workspace_binding_id"])
+def test_logbook_write_rejects_scope_identifiers_over_backend_limit(field, tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import run_logbook_write
+
+    values = {"project_id": "project_1", "backend_workspace_binding_id": "binding_1"}
+    values[field] = "x" * 192
+    binding = SimpleNamespace(**values)
+    conn = db.connect(tmp_path / "backend.db")
+
+    class Client:
+        calls = 0
+
+        def create_logbook_entry(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("oversized scope must not reach the network")
+
+    client = Client()
+    with pytest.raises(ValueError, match="too long"):
+        run_logbook_write(conn, command={
+            "event_type": "change", "summary": "Done",
+            "idempotency_key": "scope-idempotency-0001", "references": [],
+        }, binding=binding, client=client, now=1000)
+    assert db.list_logbook_outbox_entries(conn) == []
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize("field", ["correlation_id", "supersedes_entry_id"])
+def test_logbook_write_rejects_optional_identifiers_over_backend_limit(field, tmp_path):
+    from hermes_cli import hades_backend_db as db
+    from hermes_cli.hades_logbook_actions import run_logbook_write
+
+    conn = db.connect(tmp_path / "backend.db")
+
+    class Client:
+        calls = 0
+
+        def create_logbook_entry(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("oversized identifier must not reach the network")
+
+    command = {
+        "event_type": "change", "summary": "Done",
+        "idempotency_key": "identifier-key-0001", "references": [], field: "x" * 192,
+    }
+    client = Client()
+    with pytest.raises(ValueError, match="too long"):
+        run_logbook_write(
+            conn, command=command,
+            binding=SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1"),
+            client=client, now=1000,
+        )
+    assert db.list_logbook_outbox_entries(conn) == []
+    assert client.calls == 0
+
+
+def test_logbook_list_rejects_actor_identity_when_backend_requires_actor_kind(monkeypatch):
+    from hermes_cli import hades_logbook_actions as actions
+
+    binding = SimpleNamespace(project_id="project_1", backend_workspace_binding_id="binding_1")
+    monkeypatch.setattr(actions, "_current_agent_binding", lambda: (SimpleNamespace(), binding))
+
+    with pytest.raises(ValueError, match="actor must be"):
+        actions.run_logbook_list(
+            event_type=None, actor="agent_1", severity=None, cursor=None, limit=20,
+            client=SimpleNamespace(),
+        )

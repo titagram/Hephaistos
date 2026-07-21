@@ -82,13 +82,23 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
     ]:
         assert topic in documented, f"missing logbook operational contract: {topic!r}"
 
-    spec = json.loads((HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"))
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            assert key not in result, f"duplicate OpenAPI key: {key}"
+            result[key] = value
+        return result
+
+    spec = json.loads(
+        (HADES_DOCS / "openapi-hades-v1.json").read_text(encoding="utf-8"),
+        object_pairs_hook=unique_object,
+    )
     paths = spec["paths"]
     entries = paths["/api/hades/v1/logbook/entries"]
     entry = paths["/api/hades/v1/logbook/entries/{entry}"]
 
     assert set(entries) >= {"get", "post"}
-    assert entry["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
+    assert entry["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryDetailResponse"
     assert entries["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryPage"
     assert entries["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryCreateRequest"
     assert entries["post"]["responses"]["201"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ProjectLogbookEntryResponse"
@@ -120,15 +130,21 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
         "$ref": "#/components/schemas/ProjectLogbookEntryCreateRequest",
         "components": {"schemas": schemas},
     }).validate(client_body)
-    assert create_request["properties"]["project_id"]["minLength"] == 1
+    assert create_request["properties"]["project_id"] == {
+        "type": "string", "minLength": 1, "maxLength": 191,
+    }
+    assert create_request["properties"]["workspace_binding_id"]["maxLength"] == 191
     assert create_request["properties"]["references"]["maxItems"] == 20
     assert create_request["properties"]["idempotency_key"] == {
         "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[!-~]+$"
     }
-    assert create_request["properties"]["correlation_id"] == {"type": ["string", "null"], "maxLength": 255}
-    assert schemas["ProjectLogbookActor"]["required"] == ["kind", "display_label"]
+    assert create_request["properties"]["correlation_id"] == {"type": ["string", "null"], "maxLength": 191}
+    assert create_request["properties"]["supersedes_entry_id"]["maxLength"] == 191
+    assert schemas["ProjectLogbookActor"]["required"] == [
+        "kind", "label", "user_id", "agent_id", "device_id", "role", "model",
+    ]
     assert set(schemas["ProjectLogbookActor"]["properties"]) == {
-        "kind", "id", "display_label", "hades_instance_id", "role", "model",
+        "kind", "label", "user_id", "agent_id", "device_id", "role", "model",
     }
     assert schemas["ProjectLogbookEntryResponse"] == {
         "type": "object",
@@ -143,14 +159,56 @@ def test_hades_logbook_docs_and_openapi_make_recovery_contract_explicit():
         "wiki_page", "wiki_revision", "graph_import", "verification_work", "kanban_task",
         "run", "repository", "commit", "file",
     ]
+    assert set(schemas["ProjectLogbookReference"]["properties"]) == {"kind", "id"}
     types_parameter = next(parameter for parameter in entries["get"]["parameters"] if parameter["name"] == "types[]")
     assert types_parameter["schema"] == {
-        "type": "array", "minItems": 1, "uniqueItems": True,
+        "type": "array", "minItems": 1, "maxItems": 10,
         "items": {"type": "string", "enum": [
             "change", "creation", "import", "projection", "verification", "wiki", "decision", "failure", "rollback", "note",
         ]},
     }
     assert entries["get"]["parameters"][-1]["schema"]["maximum"] == 50
+    parameters = {parameter["name"]: parameter["schema"] for parameter in entries["get"]["parameters"]}
+    assert parameters["actor"]["enum"] == ["user", "agent", "subagent", "system"]
+    assert parameters["project_id"]["maxLength"] == 191
+    assert parameters["workspace_binding_id"]["maxLength"] == 191
+    assert parameters["q"]["maxLength"] == 200
+    assert parameters["cursor"]["maxLength"] == 2048
+
+    actual_entry = {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "project_id": "proj_1",
+        "occurred_at": "2026-07-21T20:00:00Z",
+        "recorded_at": "2026-07-21T20:00:01Z",
+        "actor": {
+            "kind": "agent", "label": "Hades Agent", "user_id": None,
+            "agent_id": "agent_1", "device_id": None, "role": None, "model": None,
+        },
+        "event_type": "change", "severity": "info", "summary": "Done",
+        "narrative_markdown": None, "references": [], "correlation_id": None,
+        "payload": {}, "supersedes_entry_id": None,
+    }
+    assert set(schemas["ProjectLogbookEntry"]["required"]) == set(actual_entry)
+    assert "idempotency_key" not in schemas["ProjectLogbookEntry"]["properties"]
+    assert "workspace_binding_id" not in schemas["ProjectLogbookEntry"]["properties"]
+    assert "maxProperties" not in schemas["ProjectLogbookEntry"]["properties"]["payload"]
+    assert "maxProperties" not in create_request["properties"]["payload"]
+    assert schemas["ProjectLogbookActor"]["properties"]["label"]["maxLength"] == 191
+    for schema_name, envelope in {
+        "ProjectLogbookEntryResponse": {"entry": actual_entry, "replayed": False},
+        "ProjectLogbookEntryDetailResponse": {
+            "protocol_version": "v1", "project_id": "proj_1",
+            "workspace_binding_id": "binding_1", "entry": actual_entry,
+        },
+        "ProjectLogbookEntryPage": {
+            "protocol_version": "v1", "project_id": "proj_1",
+            "workspace_binding_id": "binding_1", "items": [actual_entry], "next_cursor": None,
+        },
+    }.items():
+        Draft202012Validator({
+            "$ref": f"#/components/schemas/{schema_name}",
+            "components": {"schemas": schemas},
+        }).validate(envelope)
     assert schemas["LogbookRecordingFailedResponse"]["properties"]["error"]["properties"]["code"]["const"] == "logbook_recording_failed"
 
 

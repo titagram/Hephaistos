@@ -684,6 +684,39 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True, separators=(",", ":"))
 
 
+def _logbook_request_digest(request: dict[str, Any]) -> str:
+    """Hash the backend mutation, excluding the replaceable routing binding."""
+
+    canonical = dict(request)
+    canonical.pop("workspace_binding_id", None)
+    canonical.setdefault("correlation_id", None)
+    canonical.setdefault("narrative_markdown", None)
+    canonical.setdefault("payload", {})
+    canonical.setdefault("references", [])
+    canonical.setdefault("supersedes_entry_id", None)
+    encoded = _json_dumps(canonical)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _migrate_logbook_outbox_request_digests(conn: sqlite3.Connection) -> None:
+    """Normalize branch-era digests that included workspace routing metadata."""
+
+    rows = conn.execute("SELECT id, request_json, request_digest FROM logbook_outbox").fetchall()
+    updates: list[tuple[str, int]] = []
+    for row in rows:
+        request = _json_loads(row["request_json"])
+        if not isinstance(request, dict):
+            raise ValueError(f"logbook outbox entry {row['id']} has invalid request JSON")
+        digest = _logbook_request_digest(request)
+        if digest != str(row["request_digest"]):
+            updates.append((digest, int(row["id"])))
+    if updates:
+        with write_txn(conn):
+            conn.executemany(
+                "UPDATE logbook_outbox SET request_digest = ? WHERE id = ?", updates
+            )
+
+
 def _json_loads(value: str | None) -> Any:
     if not value:
         return {}
@@ -710,6 +743,7 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
             _migrate_agent_coordination_schema(conn)
             conn.executescript(SCHEMA_SQL)
             _migrate_logbook_outbox_idempotency(conn)
+            _migrate_logbook_outbox_request_digests(conn)
             _migrate_persephone_message_identities(conn)
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
@@ -1831,7 +1865,7 @@ def enqueue_logbook_outbox_entry(
 
     timestamp = _now() if now is None else int(now)
     encoded = _json_dumps(request)
-    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    digest = _logbook_request_digest(request)
     with write_txn(conn):
         existing = conn.execute(
             "SELECT * FROM logbook_outbox WHERE project_id = ? AND idempotency_key = ?",
@@ -1839,14 +1873,31 @@ def enqueue_logbook_outbox_entry(
         ).fetchone()
         if existing is not None:
             loaded = _logbook_outbox_from_row(existing)
-            if loaded.request_digest != digest:
+            if _logbook_request_digest(loaded.request) != digest:
                 raise ValueError("logbook idempotency key is already bound to a different request")
             if loaded.state == "dead_letter":
                 conn.execute(
-                    "UPDATE logbook_outbox SET state = 'pending', lease_token = NULL, "
+                    "UPDATE logbook_outbox SET workspace_binding_id = ?, request_json = ?, "
+                    "request_digest = ?, state = 'pending', lease_token = NULL, "
                     "lease_expires_at = NULL, attempts = 0, next_attempt_at = ?, "
                     "response_id = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
-                    (timestamp, timestamp, loaded.id),
+                    (
+                        workspace_binding_id, encoded, digest, timestamp, timestamp, loaded.id,
+                    ),
+                )
+                existing = conn.execute(
+                    "SELECT * FROM logbook_outbox WHERE id = ?", (loaded.id,)
+                ).fetchone()
+                assert existing is not None
+                return _logbook_outbox_from_row(existing)
+            if loaded.state in {"pending", "leased"} and (
+                loaded.workspace_binding_id != workspace_binding_id
+                or loaded.request != request
+            ):
+                conn.execute(
+                    "UPDATE logbook_outbox SET workspace_binding_id = ?, request_json = ?, "
+                    "request_digest = ?, updated_at = ? WHERE id = ?",
+                    (workspace_binding_id, encoded, digest, timestamp, loaded.id),
                 )
                 existing = conn.execute(
                     "SELECT * FROM logbook_outbox WHERE id = ?", (loaded.id,)

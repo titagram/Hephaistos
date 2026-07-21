@@ -224,7 +224,10 @@ def build_backend_parser(subparsers, *, cmd_backend: Callable) -> None:
         "--type", dest="event_type", action="append", default=None,
         help="Filter by event type; repeat or separate types with commas",
     )
-    logbook_list.add_argument("--actor", default=None, help="Filter by actor identity")
+    logbook_list.add_argument(
+        "--actor", choices=("user", "agent", "subagent", "system"), default=None,
+        help="Filter by actor kind",
+    )
     logbook_list.add_argument("--severity", choices=("info", "warning", "error"), default=None)
     logbook_list.add_argument("--cursor", default=None, help="Opaque pagination cursor")
     logbook_list.add_argument("--limit", type=int, default=20, help="Entries to show (1-50)")
