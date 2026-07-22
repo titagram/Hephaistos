@@ -31,6 +31,53 @@ export interface EngineResponse {
   diagnostics: Array<{ code: string; message: string }>;
 }
 
+export type CaptureInput =
+  | { kind: "local" }
+  | { kind: "file"; path: string; base?: string }
+  | { kind: "range"; range: string }
+  | { kind: "pr"; number: number; ownerRepo: string };
+
+export interface CaptureSkippedFile {
+  path: string;
+  bytes: number | null;
+  reason: string;
+}
+
+export interface CaptureTargetOutput {
+  targetKind: CaptureInput["kind"];
+  baseRef: string | null;
+  headRef: string;
+  diffPath: string;
+  planPath: string;
+  worktreePath: string | null;
+  skippedFiles: CaptureSkippedFile[];
+  files: Array<{
+    path: string;
+    kind: "source" | "test" | "generated" | "docs";
+    hunks: Array<{ newStart: number; newEnd: number }>;
+    addedRanges?: Array<{ start: number; end: number }>;
+    diffRange?: { startLine: number; endLine: number };
+    addedLines: number;
+    removedLines: number;
+    changedLines: number;
+    preLines: number;
+    fileLines: number;
+    rewriteRatio: number;
+    heavy: boolean;
+    binary: boolean;
+  }>;
+  chunks: Array<{
+    id: number;
+    startLine: number;
+    endLine: number;
+    lines: number;
+    chars: number;
+    maxLineChars: number;
+    oversized: boolean;
+    files: Array<{ path: string; newStart: number; newEnd: number }>;
+  }>;
+}
+
 const REQUEST_KEYS = new Set([
   "protocolVersion",
   "requestId",
@@ -64,6 +111,50 @@ const requiredString = (
   }
   return field;
 };
+
+const rejectUnknownFields = (
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): void => {
+  const allowedFields = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allowedFields.has(key));
+  if (unknown) throw new TypeError(`unknown capture input field: ${unknown}`);
+};
+
+export function parseCaptureInput(value: unknown): CaptureInput {
+  if (!isRecord(value)) throw new TypeError("capture input must be an object");
+  const kind = value.kind;
+  if (kind === "local") {
+    rejectUnknownFields(value, ["kind"]);
+    return { kind };
+  }
+  if (kind === "file") {
+    rejectUnknownFields(value, ["kind", "path", "base"]);
+    const path = requiredString(value, "path");
+    const base = value.base;
+    if (base === undefined) return { kind, path };
+    if (typeof base !== "string" || base.length === 0) {
+      throw new TypeError("base must be a non-empty string");
+    }
+    return { kind, path, base };
+  }
+  if (kind === "range") {
+    rejectUnknownFields(value, ["kind", "range"]);
+    return { kind, range: requiredString(value, "range") };
+  }
+  if (kind === "pr") {
+    rejectUnknownFields(value, ["kind", "number", "ownerRepo"]);
+    if (!Number.isSafeInteger(value.number) || (value.number as number) < 1) {
+      throw new TypeError("number must be a positive integer");
+    }
+    const ownerRepo = requiredString(value, "ownerRepo");
+    if (!/^[^/\s]+\/[^/\s]+$/.test(ownerRepo)) {
+      throw new TypeError('ownerRepo must look like "owner/repo"');
+    }
+    return { kind, number: value.number as number, ownerRepo };
+  }
+  throw new TypeError("capture input kind must be local, file, range, or pr");
+}
 
 export function parseRequest(value: unknown): EngineRequest {
   let encoded: string;

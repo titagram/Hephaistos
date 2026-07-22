@@ -6,6 +6,7 @@ import { dispatch } from "../src/handlers/index.js";
 import { main, processRequest } from "../src/main.js";
 import {
   MAX_REQUEST_BYTES,
+  parseCaptureInput,
   parseRequest,
   type EngineRequest,
   type EngineResponse,
@@ -68,17 +69,40 @@ describe("parseRequest", () => {
   });
 });
 
+describe("parseCaptureInput", () => {
+  it.each([
+    { kind: "local" },
+    { kind: "file", path: "src/a.ts" },
+    { kind: "file", path: "src/a.ts", base: "main" },
+    { kind: "range", range: "main...topic" },
+    { kind: "pr", number: 7, ownerRepo: "owner/repo" },
+  ])("accepts the exact capture union member %#", (input) => {
+    expect(parseCaptureInput(input)).toEqual(input);
+  });
+
+  it.each([
+    {},
+    { kind: "local", extra: true },
+    { kind: "file", path: "" },
+    { kind: "range", range: "" },
+    { kind: "pr", number: 0, ownerRepo: "owner/repo" },
+    { kind: "pr", number: 1, ownerRepo: "not-a-repository" },
+  ])("rejects an invalid capture input %#", (input) => {
+    expect(() => parseCaptureInput(input)).toThrow();
+  });
+});
+
 describe("dispatch", () => {
-  it("returns a typed inconclusive response while a valid handler is not installed", async () => {
+  it("returns a typed failure for an invalid capture target", async () => {
     const request = parseRequest(validRequest());
     const response = await dispatch(request);
 
     expect(response).toMatchObject({
       protocolVersion: 1,
       requestId: request.requestId,
-      status: "inconclusive",
+      status: "failed",
       output: {},
-      diagnostics: [{ code: "handler_not_implemented" }],
+      diagnostics: [{ code: "invalid_target" }],
     });
   });
 });

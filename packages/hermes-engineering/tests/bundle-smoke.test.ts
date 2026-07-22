@@ -65,8 +65,8 @@ describe("standalone engineering review bundle", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       protocolVersion: 1,
       requestId: "smoke-1",
-      status: "inconclusive",
-      diagnostics: [{ code: "handler_not_implemented" }],
+      status: "failed",
+      diagnostics: [{ code: "invalid_target" }],
     });
   });
 
