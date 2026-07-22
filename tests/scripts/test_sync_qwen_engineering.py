@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from scripts.sync_qwen_engineering import (
     sync,
     validate_allowlist,
     validate_typescript_header,
+    verify,
 )
 
 
@@ -99,6 +101,7 @@ def test_sync_rejects_path_traversal_and_missing_apache_header(tmp_path: Path) -
 
 
 def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) -> None:
+    outside_source = HEADER + "export const write = () => undefined;\n"
     upstream = make_git_upstream(
         tmp_path,
         {
@@ -107,6 +110,7 @@ def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) ->
             + "import { write } from './outside.js';\n"
             + "import type { Argv } from 'yargs';\n"
             + "export const review = write as unknown as Argv;\n",
+            "src/outside.ts": outside_source,
         },
     )
     allowlist = tmp_path / "allowlist.json"
@@ -116,21 +120,26 @@ def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) ->
   "files": ["LICENSE", "src/review.ts"],
   "importExceptions": {
     "relative": [{
+      "derivation": "narrow test adapter",
       "source": "src/outside.ts",
+      "sourceSha256": "%s",
       "destination": "packages/hermes-engineering/src/shims/outside.ts"
     }],
     "packages": [{"specifier": "yargs", "dependency": "yargs@17.7.2"}]
   }
 }
 """
+        % hashlib.sha256(outside_source.encode()).hexdigest()
     )
 
     manifest = sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
     assert manifest["hermesShims"] == [
         {
+            "derivation": "narrow test adapter",
             "destination": "packages/hermes-engineering/src/shims/outside.ts",
             "source": "src/outside.ts",
+            "sourceSha256": hashlib.sha256(outside_source.encode()).hexdigest(),
         }
     ]
     allowlist.write_text(
@@ -140,6 +149,99 @@ def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) ->
     )
     with pytest.raises(SyncError, match="package import 'yargs'"):
         sync(upstream, tmp_path / "rejected", git_head(upstream), allowlist)
+
+
+def test_sync_regenerates_and_verifies_complete_shim_provenance(
+    tmp_path: Path,
+) -> None:
+    stdio_source = HEADER + "export const write = () => undefined;\n"
+    core_source = HEADER + "export const unquote = (path: string) => path;\n"
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER
+            + "import { write } from './stdio.js';\n"
+            + "import { unquote } from '@qwen-code/qwen-code-core';\n"
+            + "export const review = [write, unquote];\n",
+            "src/stdio.ts": stdio_source,
+            "packages/core/src/utils/gitDiff.ts": core_source,
+        },
+    )
+    shims = [
+        {
+            "derivation": "narrow stdio adapter",
+            "destination": "packages/hermes-engineering/src/shims/stdioHelpers.ts",
+            "source": "src/stdio.ts",
+            "sourceSha256": hashlib.sha256(stdio_source.encode()).hexdigest(),
+        },
+        {
+            "derivation": "extract unquote; add no-op logger",
+            "destination": "packages/hermes-engineering/src/shims/qwenCore.ts",
+            "source": "packages/core/src/utils/gitDiff.ts",
+            "sourceSha256": hashlib.sha256(core_source.encode()).hexdigest(),
+            "specifier": "@qwen-code/qwen-code-core",
+        },
+    ]
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        json.dumps({
+            "repository": "https://github.com/QwenLM/qwen-code.git",
+            "files": ["LICENSE", "src/review.ts"],
+            "importExceptions": {
+                "relative": [shims[0]],
+                "packages": [shims[1]],
+            },
+        })
+    )
+    destination = tmp_path / "out"
+
+    first = sync(upstream, destination, git_head(upstream), allowlist)
+    first_manifest = (destination / "UPSTREAM.json").read_bytes()
+
+    assert first["hermesShims"] == shims
+    assert verify(destination, allowlist) == (git_head(upstream), 0)
+
+    manifest = json.loads(first_manifest)
+    manifest["hermesShims"] = []
+    (destination / "UPSTREAM.json").write_text(json.dumps(manifest))
+    assert verify(destination, allowlist) == (git_head(upstream), 1)
+
+    second = sync(upstream, destination, git_head(upstream), allowlist)
+    assert second["hermesShims"] == shims
+    assert (destination / "UPSTREAM.json").read_bytes() == first_manifest
+
+
+def test_sync_rejects_incorrect_declared_shim_source_hash(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER + "import { write } from './stdio.js';\n",
+            "src/stdio.ts": HEADER + "export const write = () => undefined;\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        json.dumps({
+            "repository": "https://github.com/QwenLM/qwen-code.git",
+            "files": ["LICENSE", "src/review.ts"],
+            "importExceptions": {
+                "relative": [
+                    {
+                        "derivation": "narrow stdio adapter",
+                        "destination": "packages/hermes-engineering/src/shims/stdioHelpers.ts",
+                        "source": "src/stdio.ts",
+                        "sourceSha256": "0" * 64,
+                    }
+                ],
+                "packages": [],
+            },
+        })
+    )
+
+    with pytest.raises(SyncError, match="shim source hash mismatch"):
+        sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
 
 def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path) -> None:

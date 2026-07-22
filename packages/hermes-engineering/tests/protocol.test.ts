@@ -3,11 +3,12 @@ import { isAbsolute } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { dispatch } from "../src/handlers/index.js";
-import { processRequest } from "../src/main.js";
+import { main, processRequest } from "../src/main.js";
 import {
   MAX_REQUEST_BYTES,
   parseRequest,
   type EngineRequest,
+  type EngineResponse,
 } from "../src/protocol.js";
 
 const validRequest = (
@@ -99,5 +100,62 @@ describe("processRequest", () => {
       diagnostics: [{ code: "internal_error" }],
     });
     expect(result.error?.stack).toContain("handler exploded");
+  });
+});
+
+describe("main", () => {
+  it("returns exactly one typed exit-3 response when stdin reading fails", async () => {
+    const output: string[] = [];
+    const previousExitCode = process.exitCode;
+    try {
+      await main({
+        input: (async function* () {
+          throw new Error("stdin exploded");
+        })(),
+        writeOutput: (line) => void output.push(line),
+      });
+
+      expect(process.exitCode).toBe(3);
+      expect(output).toHaveLength(1);
+      expect(JSON.parse(output[0]!)).toMatchObject({
+        protocolVersion: 1,
+        status: "inconclusive",
+        diagnostics: [{ code: "internal_error" }],
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("returns exactly one typed exit-3 response for nonserializable output", async () => {
+    const output: string[] = [];
+    const previousExitCode = process.exitCode;
+    try {
+      await main({
+        input: (async function* () {
+          yield JSON.stringify(validRequest());
+        })(),
+        dispatchRequest: async (request) =>
+          ({
+            protocolVersion: 1,
+            requestId: request.requestId,
+            status: "passed",
+            output: { unsafe: 1n },
+            diagnostics: [],
+          }) as unknown as EngineResponse,
+        writeOutput: (line) => void output.push(line),
+      });
+
+      expect(process.exitCode).toBe(3);
+      expect(output).toHaveLength(1);
+      expect(JSON.parse(output[0]!)).toMatchObject({
+        protocolVersion: 1,
+        requestId: "request-1",
+        status: "inconclusive",
+        diagnostics: [{ code: "internal_error" }],
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 });

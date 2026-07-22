@@ -93,6 +93,8 @@ var writeStderrLine = (line) => void process.stderr.write(`${line}
 `);
 
 // packages/hermes-engineering/src/main.ts
+var InvalidInputError = class extends Error {
+};
 var requestIdFrom = (value) => {
   if (typeof value === "object" && value !== null && !Array.isArray(value) && typeof value.requestId === "string") {
     const requestId = value.requestId;
@@ -108,6 +110,26 @@ var diagnosticResponse = (requestId, status, code, message) => ({
   diagnostics: [{ code, message }]
 });
 var asError = (value) => value instanceof Error ? value : new Error(String(value));
+var internalErrorResult = (requestId, cause) => {
+  const error = asError(cause);
+  return {
+    response: diagnosticResponse(
+      requestId,
+      "inconclusive",
+      "internal_error",
+      error.message
+    ),
+    exitCode: 3,
+    error
+  };
+};
+var serializeResponse = (response) => {
+  const serialized = JSON.stringify(response);
+  if (serialized === void 0) {
+    throw new TypeError("dispatcher response is not JSON-serializable");
+  }
+  return serialized;
+};
 async function processRequest(raw, dispatchRequest = dispatch) {
   let value;
   try {
@@ -117,19 +139,11 @@ async function processRequest(raw, dispatchRequest = dispatch) {
     value = JSON.parse(raw);
     const request = parseRequest(value);
     try {
-      return { response: await dispatchRequest(request), exitCode: 0 };
+      const response = await dispatchRequest(request);
+      serializeResponse(response);
+      return { response, exitCode: 0 };
     } catch (cause) {
-      const error = asError(cause);
-      return {
-        response: diagnosticResponse(
-          request.requestId,
-          "inconclusive",
-          "internal_error",
-          error.message
-        ),
-        exitCode: 3,
-        error
-      };
+      return internalErrorResult(request.requestId, cause);
     }
   } catch (cause) {
     const error = asError(cause);
@@ -144,38 +158,51 @@ async function processRequest(raw, dispatchRequest = dispatch) {
     };
   }
 }
-var readStdin = async () => {
+var readStdin = async (input) => {
   const chunks = [];
   let bytes = 0;
-  for await (const chunk of process.stdin) {
+  for await (const chunk of input) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
     if (bytes <= MAX_REQUEST_BYTES) chunks.push(buffer);
   }
   if (bytes > MAX_REQUEST_BYTES) {
-    throw new TypeError("request must not exceed 1 MiB");
+    throw new InvalidInputError("request must not exceed 1 MiB");
   }
-  return Buffer.concat(chunks).toString("utf8");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(chunks)
+    );
+  } catch (cause) {
+    throw new InvalidInputError("stdin must contain valid UTF-8", { cause });
+  }
 };
 async function main(options = {}) {
   let result;
   try {
-    result = await processRequest(await readStdin());
+    const raw = await readStdin(options.input ?? process.stdin);
+    result = await processRequest(raw, options.dispatchRequest ?? dispatch);
   } catch (cause) {
-    const error = asError(cause);
-    result = {
+    result = cause instanceof InvalidInputError ? {
       response: diagnosticResponse(
         "invalid",
         "failed",
         "invalid_request",
-        error.message
+        cause.message
       ),
       exitCode: 2
-    };
+    } : internalErrorResult("invalid", cause);
   }
-  writeStdoutLine(JSON.stringify(result.response));
+  let serialized;
+  try {
+    serialized = serializeResponse(result.response);
+  } catch (cause) {
+    result = internalErrorResult(requestIdFrom(result.response), cause);
+    serialized = serializeResponse(result.response);
+  }
+  (options.writeOutput ?? writeStdoutLine)(serialized);
   if (options.includeStackTrace === true && result.error?.stack) {
-    writeStderrLine(result.error.stack);
+    (options.writeError ?? writeStderrLine)(result.error.stack);
   }
   process.exitCode = result.exitCode;
 }

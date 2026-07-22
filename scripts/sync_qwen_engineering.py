@@ -18,6 +18,7 @@ REPOSITORY = "https://github.com/QwenLM/qwen-code.git"
 MANIFEST_NAME = "UPSTREAM.json"
 APACHE_SPDX = "SPDX-License-Identifier: Apache-2.0"
 IMPORT_HELPER = Path(__file__).with_name("qwen_engineering_imports.mjs")
+DEFAULT_ALLOWLIST = Path(__file__).with_name("qwen_engineering_allowlist.json")
 HEADER_COMMENT = re.compile(
     r"\A(?:\ufeff)?(?:[ \t\r\n]+|//[^\n]*(?:\n|$)|/\*.*?\*/)*",
     re.DOTALL,
@@ -198,6 +199,53 @@ def _validate_imports(
                 )
 
 
+def _declared_shims(
+    declarations: dict[str, list[dict[str, str]]],
+) -> list[dict[str, str]]:
+    shims = declarations["relative"] + [
+        entry for entry in declarations["packages"] if "destination" in entry
+    ]
+    for shim in shims:
+        required = {"derivation", "destination", "source", "sourceSha256"}
+        missing = required - shim.keys()
+        if missing:
+            raise SyncError("shim declarations require " + ", ".join(sorted(required)))
+        validate_relative_path(shim["destination"])
+        validate_relative_path(shim["source"])
+        if not shim["derivation"]:
+            raise SyncError("shim derivation must be non-empty")
+        if re.fullmatch(r"[0-9a-f]{64}", shim["sourceSha256"]) is None:
+            raise SyncError("shim sourceSha256 must be a lowercase SHA-256 digest")
+    return shims
+
+
+def _git_blob(source: Path, commit: str, relative: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(source), "show", f"{commit}:{relative}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+    except subprocess.CalledProcessError as error:
+        raise SyncError(f"declared source is absent at {commit}: {relative}") from error
+
+
+def _materialize_shims(
+    source: Path,
+    commit: str,
+    declarations: dict[str, list[dict[str, str]]],
+) -> list[dict[str, str]]:
+    shims = _declared_shims(declarations)
+    for shim in shims:
+        actual = hashlib.sha256(_git_blob(source, commit, shim["source"])).hexdigest()
+        if actual != shim["sourceSha256"]:
+            raise SyncError(
+                f"shim source hash mismatch for {shim['source']}: "
+                f"expected {shim['sourceSha256']}, got {actual}"
+            )
+    return shims
+
+
 def _previous_manifested_files(destination: Path) -> list[str]:
     manifest_path = destination / MANIFEST_NAME
     if not manifest_path.exists():
@@ -220,14 +268,7 @@ def sync(source: Path, destination: Path, ref: str, allowlist: Path) -> dict[str
     blobs: dict[str, bytes] = {}
     decoded_sources: dict[str, str] = {}
     for relative in paths:
-        try:
-            blob = subprocess.run(
-                ["git", "-C", str(source), "show", f"{commit}:{relative}"],
-                check=True,
-                capture_output=True,
-            ).stdout
-        except subprocess.CalledProcessError as error:
-            raise SyncError(f"allowlisted source is absent at {commit}: {relative}") from error
+        blob = _git_blob(source, commit, relative)
         blobs[relative] = blob
         if relative.endswith(".ts"):
             try:
@@ -236,6 +277,7 @@ def sync(source: Path, destination: Path, ref: str, allowlist: Path) -> dict[str
                 raise SyncError(f"TypeScript source is not UTF-8: {relative}") from error
             validate_typescript_header(decoded_sources[relative])
     _validate_imports(decoded_sources, paths, declarations)
+    shims = _materialize_shims(source, commit, declarations)
 
     previous = _previous_manifested_files(destination)
     records = []
@@ -254,8 +296,7 @@ def sync(source: Path, destination: Path, ref: str, allowlist: Path) -> dict[str
         "repository": REPOSITORY,
         "upstreamCommit": commit,
         "files": records,
-        "hermesShims": declarations["relative"]
-        + [entry for entry in declarations["packages"] if "destination" in entry],
+        "hermesShims": shims,
         "dependencies": [entry for entry in declarations["packages"] if "dependency" in entry],
         "patches": [],
     }
@@ -263,7 +304,7 @@ def sync(source: Path, destination: Path, ref: str, allowlist: Path) -> dict[str
     return manifest
 
 
-def verify(destination: Path) -> tuple[str, int]:
+def verify(destination: Path, allowlist: Path = DEFAULT_ALLOWLIST) -> tuple[str, int]:
     """Verify the destination against its own deterministic manifest."""
 
     manifest_path = destination / MANIFEST_NAME
@@ -271,10 +312,17 @@ def verify(destination: Path) -> tuple[str, int]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         commit = manifest["upstreamCommit"]
         records = manifest["files"]
+        actual_shims = manifest["hermesShims"]
     except (KeyError, TypeError, json.JSONDecodeError, OSError) as error:
         raise SyncError(f"unable to read {manifest_path}: {error}") from error
-    if not isinstance(commit, str) or not isinstance(records, list):
+    if (
+        not isinstance(commit, str)
+        or not isinstance(records, list)
+        or not isinstance(actual_shims, list)
+    ):
         raise SyncError(f"invalid {manifest_path}")
+    _, declarations = _read_allowlist(allowlist)
+    expected_shims = _declared_shims(declarations)
     mismatches = 0
     for record in records:
         if not isinstance(record, dict):
@@ -286,6 +334,7 @@ def verify(destination: Path) -> tuple[str, int]:
         path = destination / relative
         actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         mismatches += actual != expected
+    mismatches += actual_shims != expected_shims
     return commit, mismatches
 
 
@@ -297,14 +346,14 @@ def main() -> int:
     parser.add_argument(
         "--allowlist",
         type=Path,
-        default=Path(__file__).with_name("qwen_engineering_allowlist.json"),
+        default=DEFAULT_ALLOWLIST,
     )
     parser.add_argument("--verify", action="store_true")
     arguments = parser.parse_args()
     try:
         if arguments.verify:
-            commit, mismatches = verify(arguments.destination)
-            print(f"verified {commit}: {mismatches} hash mismatches")
+            commit, mismatches = verify(arguments.destination, arguments.allowlist)
+            print(f"verified {commit}: {mismatches} provenance mismatches")
             return int(bool(mismatches))
         if arguments.source is None or arguments.ref is None:
             parser.error("--source and --ref are required unless --verify is used")

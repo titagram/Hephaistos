@@ -63,13 +63,18 @@
   "importExceptions": {
     "relative": [
       {
+        "derivation": "narrow adapter retaining writeStdoutLine and writeStderrLine with unconditional newlines",
         "source": "packages/cli/src/utils/stdioHelpers.ts",
+        "sourceSha256": "c7fc344a4375bdcd9f94f4eeba4a9965120e76bc9158e75981c44b2c9e1efca0",
         "destination": "packages/hermes-engineering/src/shims/stdioHelpers.ts"
       }
     ],
     "packages": [
       {
         "specifier": "@qwen-code/qwen-code-core",
+        "source": "packages/core/src/utils/gitDiff.ts",
+        "sourceSha256": "e6afa6050e60a61cd1d0b040157799cf8813b74b2ed8339b86dc7fb44a46d563",
+        "derivation": "extract unquoteCStylePath and add a no-op createDebugLogger",
         "destination": "packages/hermes-engineering/src/shims/qwenCore.ts"
       },
       {

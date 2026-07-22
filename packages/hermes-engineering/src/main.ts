@@ -11,6 +11,10 @@ import {
 import { writeStderrLine, writeStdoutLine } from "./shims/stdioHelpers.js";
 
 type Dispatcher = (request: EngineRequest) => Promise<EngineResponse>;
+type LineWriter = (line: string) => void;
+type InputStream = AsyncIterable<string | Uint8Array>;
+
+class InvalidInputError extends Error {}
 
 export interface ProcessResult {
   response: EngineResponse;
@@ -47,6 +51,31 @@ const diagnosticResponse = (
 const asError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
 
+const internalErrorResult = (
+  requestId: string,
+  cause: unknown,
+): ProcessResult => {
+  const error = asError(cause);
+  return {
+    response: diagnosticResponse(
+      requestId,
+      "inconclusive",
+      "internal_error",
+      error.message,
+    ),
+    exitCode: 3,
+    error,
+  };
+};
+
+const serializeResponse = (response: EngineResponse): string => {
+  const serialized = JSON.stringify(response);
+  if (serialized === undefined) {
+    throw new TypeError("dispatcher response is not JSON-serializable");
+  }
+  return serialized;
+};
+
 export async function processRequest(
   raw: string,
   dispatchRequest: Dispatcher = dispatch,
@@ -59,19 +88,11 @@ export async function processRequest(
     value = JSON.parse(raw) as unknown;
     const request = parseRequest(value);
     try {
-      return { response: await dispatchRequest(request), exitCode: 0 };
+      const response = await dispatchRequest(request);
+      serializeResponse(response);
+      return { response, exitCode: 0 };
     } catch (cause) {
-      const error = asError(cause);
-      return {
-        response: diagnosticResponse(
-          request.requestId,
-          "inconclusive",
-          "internal_error",
-          error.message,
-        ),
-        exitCode: 3,
-        error,
-      };
+      return internalErrorResult(request.requestId, cause);
     }
   } catch (cause) {
     const error = asError(cause);
@@ -87,44 +108,65 @@ export async function processRequest(
   }
 }
 
-const readStdin = async (): Promise<string> => {
+const readStdin = async (input: InputStream): Promise<string> => {
   const chunks: Buffer[] = [];
   let bytes = 0;
-  for await (const chunk of process.stdin) {
+  for await (const chunk of input) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
     if (bytes <= MAX_REQUEST_BYTES) chunks.push(buffer);
   }
   if (bytes > MAX_REQUEST_BYTES) {
-    throw new TypeError("request must not exceed 1 MiB");
+    throw new InvalidInputError("request must not exceed 1 MiB");
   }
-  return Buffer.concat(chunks).toString("utf8");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(chunks),
+    );
+  } catch (cause) {
+    throw new InvalidInputError("stdin must contain valid UTF-8", { cause });
+  }
 };
 
 export async function main(
   options: {
     includeStackTrace?: boolean;
+    input?: InputStream;
+    dispatchRequest?: Dispatcher;
+    writeOutput?: LineWriter;
+    writeError?: LineWriter;
   } = {},
 ): Promise<void> {
   let result: ProcessResult;
   try {
-    result = await processRequest(await readStdin());
+    const raw = await readStdin(options.input ?? process.stdin);
+    result = await processRequest(raw, options.dispatchRequest ?? dispatch);
   } catch (cause) {
-    const error = asError(cause);
-    result = {
-      response: diagnosticResponse(
-        "invalid",
-        "failed",
-        "invalid_request",
-        error.message,
-      ),
-      exitCode: 2,
-    };
+    result =
+      cause instanceof InvalidInputError
+        ? {
+            response: diagnosticResponse(
+              "invalid",
+              "failed",
+              "invalid_request",
+              cause.message,
+            ),
+            exitCode: 2,
+          }
+        : internalErrorResult("invalid", cause);
   }
 
-  writeStdoutLine(JSON.stringify(result.response));
+  let serialized: string;
+  try {
+    serialized = serializeResponse(result.response);
+  } catch (cause) {
+    result = internalErrorResult(requestIdFrom(result.response), cause);
+    serialized = serializeResponse(result.response);
+  }
+
+  (options.writeOutput ?? writeStdoutLine)(serialized);
   if (options.includeStackTrace === true && result.error?.stack) {
-    writeStderrLine(result.error.stack);
+    (options.writeError ?? writeStderrLine)(result.error.stack);
   }
   process.exitCode = result.exitCode;
 }

@@ -85,4 +85,25 @@ describe("standalone engineering review bundle", () => {
       diagnostics: [{ code: "invalid_request" }],
     });
   });
+
+  it("rejects malformed UTF-8 with one typed exit-2 response", () => {
+    const result = spawnSync(process.execPath, [isolatedBundle], {
+      cwd: isolatedDirectory,
+      env: { PATH: process.env.PATH ?? "" },
+      input: Buffer.from([0xff]),
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe("");
+    expect(result.stdout.endsWith("\n")).toBe(true);
+    expect(result.stdout.trimEnd().split("\n")).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      protocolVersion: 1,
+      status: "failed",
+      diagnostics: [
+        { code: "invalid_request", message: expect.stringMatching(/UTF-8/) },
+      ],
+    });
+  });
 });
