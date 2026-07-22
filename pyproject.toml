@@ -326,7 +326,14 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 # `gateway.reset.header_default` (#27632, #35374, #23943).
 locales = ["locales/*.yaml"]
 [tool.setuptools.package-data]
-hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
+hermes_cli = [
+  "web_dist/**/*",
+  "tui_dist/**/*",
+  "engineering_dist/*.mjs",
+  "engineering_dist/NOTICE.qwen-code",
+  "scripts/install.sh",
+  "scripts/install.ps1"
+]
 "hermes_cli.hades_graph_v2" = ["contracts/*.schema.json"]
 gateway = ["assets/**/*"]
 plugins = [
