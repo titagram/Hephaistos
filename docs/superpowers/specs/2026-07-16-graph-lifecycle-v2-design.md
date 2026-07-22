@@ -21,7 +21,7 @@ The implementation is a clean cut:
 
 - v2 artifacts use a new top-level schema and new IDs;
 - the v2 backend never adapts, merges, or falls back to v1 graph data;
-- the Carnovali graph is imported again from the source workspace;
+- a pinned Symfony Demo is imported in an isolated acceptance environment before production promotion; Carnovali is an optional later monitored scale fixture;
 - v1 graph data is removed only after backup and successful v2 acceptance;
 - unrelated project data, users, memory, Wiki pages, and Kanban data are never reset.
 
@@ -1206,17 +1206,19 @@ The wire protocol is exact:
 
 `manifest_semantic_sha256` is SHA-256 JCS of the manifest after removing only `generated_at`; all schema, source/project/contract/framework/language/count/chunk descriptor fields remain. This permits regeneration of the same semantic artifact at a later time without conflicting merely on its informational timestamp. The first accepted manifest/timestamp remains stored for audit; a replay is never allowed to alter descriptors.
 
-Create-attempt selection locks all rows for project/binding/artifact and applies exactly: a `validated` row returns 200 regardless of chunking because artifact semantic identity has already been proved; a live `staging|validating` row with equal manifest semantic digest returns 200, while a different live manifest returns `409 graph_import_manifest_conflict`; when only `failed|stale` rows exist, create generation `max+1` and accept any valid chunk layout whose recomputed logical artifact digest equals the declared artifact version. Thus the same semantic graph may be rechunked on a later import attempt without changing its artifact version. Projection retry/rebuild always reuses a retained validated import and never creates another import attempt.
+Create-attempt selection locks all rows for project/binding/artifact and applies exactly: if the matching row is `tombstoned|objects_deleted`, return retryable `409 graph_import_cleanup_in_progress` with empty `details`; otherwise a `validated` row returns 200 regardless of chunking because artifact semantic identity has already been proved; a live `staging|validating` row with equal manifest semantic digest returns 200, while a different live manifest returns `409 graph_import_manifest_conflict`; when only `failed|stale` rows exist, create generation `max+1` and accept any valid chunk layout whose recomputed logical artifact digest equals the declared artifact version. After cleanup removes the terminal row, the same request may create a fresh attempt. Thus the same semantic graph may be rechunked on a later import attempt without changing its artifact version. Projection retry/rebuild always reuses a retained validated import and never creates another import attempt.
 
-Only `staging` imports accept chunks. The create endpoint sets `expires_at` to 24 hours after creation; accepting a chunk extends it to 24 hours after that acceptance. `expires_at` applies only to `staging`; `complete` verifies manifest identity and receipt of every declared chunk, then CAS-transitions to `validating`, clears expiry, and dispatches validation—nothing more. An expired staging import becomes `stale` and rejects writes. Authentication/authorization failures are `401/403`; wrong project/binding or unknown import is `404`; schema/body/index errors are `422` with one stable code from `graph_manifest_invalid`, `graph_chunk_invalid`, `graph_chunk_too_large`, `graph_import_not_staging`, or `graph_import_incomplete`; digest conflicts are `409`.
+Only `staging` imports accept chunks. The create endpoint sets `expires_at` to 24 hours after creation; accepting a chunk extends it to 24 hours after that acceptance. `expires_at` applies only to `staging`; `complete` verifies manifest identity and receipt of every declared chunk, then CAS-transitions to `validating`, clears expiry, and dispatches validation—nothing more. An expired staging import becomes `stale` and rejects writes. Authentication/authorization failures are `401/403`; wrong project/binding or unknown import is `404`; schema/body/index errors are `422` with one stable code from `graph_manifest_invalid`, `graph_chunk_invalid`, `graph_chunk_too_large`, `graph_import_not_staging`, or `graph_import_incomplete`; digest conflicts are `409`; a matching import whose cleanup state is not active returns retryable `409 graph_import_cleanup_in_progress` with empty `details`.
 
 Import validation and projection publication are separate state machines. Import `validation_status` is exactly `staging|validating|validated|failed|stale`. Projection `publication_status` is derived from the projection head/attempt and is exactly `not_requested|queued|projecting|ready|failed|stale`. `complete` transitions are: `staging` with all chunks → atomically `validating`, clear expiry, and 202; `staging` missing chunks → 422; `validating` → 202 without duplicate validation; `validated` → 200 only when the exact projection is already ready, otherwise 202 after idempotently requesting it; `failed` → 409 `graph_import_failed`; `stale` → 410 `graph_import_stale`. Validation success makes the immutable import `validated` and requests projection after commit. Validation failure stores code/details and makes the import `failed`. Projection success/failure never mutates import validation status. No transition returns a terminal import to staging.
 
-Validation is asynchronous because a bundle may be 512 MiB. There are exactly four acquired transient runs: run 1, then new runs after 10, 30, and 90 seconds. Schema/digest/reference/privacy failures are deterministic and fail immediately. Initial dispatch and reconciliation use the same lease-acquisition transaction: lock the import row, require `status=validating`, require no unexpired validation lease, increment `validation_attempts`, generate a random 256-bit run token, store only its lower-case SHA-256 in `validation_run_token_hash`, set `validation_started_at`/`validation_heartbeat_at=now()` and `validation_lease_expires_at=now()+5 minutes`, commit, then dispatch `ValidateGraphV2Import(import_id,attempt_generation,validation_attempts,raw_run_token)` through `DB::afterCommit()`. The job implements Laravel `ShouldBeEncrypted` and has `$tries=1`; the raw token exists only in its encrypted queue payload and executing job memory and is never stored in application columns or logs. The unique job key is `graph-import:{id}:{attempt_generation}:validation:{validation_attempts}`.
+Validation is asynchronous because a bundle may be 512 MiB. There are exactly four acquired **domain runs**: run 1, then new runs after 10, 30, and 90 seconds. Schema/digest/reference/privacy failures are deterministic and fail immediately. Initial dispatch and reconciliation use the same lease-acquisition transaction: lock the import row, require `status=validating`, require no unexpired execution lease, increment `validation_attempts` and `validation_execution_generation`, generate a random 256-bit run token, store only its lower-case SHA-256 in the execution token column, set start/heartbeat to now, execution expiry to `now()+120 seconds`, and `validation_execution_delivery_claimed_at=null`, commit, then dispatch `ValidateGraphV2Import(import_id,attempt_generation,validation_attempts,validation_execution_generation,raw_run_token)` through `DB::afterCommit()`.
 
-Every heartbeat hashes the supplied raw token and CAS-updates only when import ID, import generation, `status=validating`, validation attempt number, and token hash all match; it extends the lease by five minutes. The job heartbeats before every chunk, after every 1,000-record batch, and in all cases before 30 seconds of monotonic elapsed time. A zero-row CAS aborts immediately as `LostValidationLease` without a terminal write. Success or deterministic failure uses the same CAS tuple, then clears `validation_run_token_hash` and `validation_lease_expires_at` while retaining start/heartbeat timestamps for audit.
+The validator implements `ShouldBeEncrypted` and `ShouldBeUniqueUntilProcessing`, has `$tries=1`, `$timeout=1740`, `$failOnTimeout=true`, `$uniqueFor=300`, and exact unique ID `graph-import:{import_id}:{attempt_generation}:validation:{validation_attempts}`; the raw token exists only in its encrypted queue payload and executing memory and is never stored or logged. It runs on the dedicated `graph-v2` database queue whose `retry_after=1900s`, behind a worker timeout of 1800s. Queue uniqueness only coalesces waiting messages and is never the runtime mutex.
 
-A caught transient failure CAS-records the safe failure detail and clears the current token/lease while keeping `status=validating`. Runs 1–3 then dispatch `AcquireGraphV2ValidationRun(import_id,attempt_generation)` after exactly 10/30/90 seconds respectively; that job calls the same locked acquisition service, increments `validation_attempts`, creates a new token, and dispatches a new single-try validator. A transient failure in run 4 CAS-writes terminal `failed/graph_validation_infrastructure_failed`. An uncaught process crash cannot schedule anything; only lease expiry plus `hades:graph-v2:reconcile` may acquire the next run. Reconcile acts only on absent/expired database leases and applies the same four-run ceiling. An old worker racing the reclaimed worker fails its heartbeat/final CAS and cannot publish, fail, or mutate the import. Projection cannot observe or dispatch from `validating`. Tests assert four distinct token hashes and the 10/30/90 schedule, pause run N past expiry, start N+1, and prove N cannot commit either before or after N+1 succeeds.
+At job entry, before reading chunks or heartbeating, the delivery performs a one-shot CAS from `validation_execution_delivery_claimed_at=null` to `now()` matching import ID, import generation, `status=validating`, domain attempt, execution generation, and token hash. Exactly one delivery can win; a duplicate carrying the same token/generation exits as a successful no-op and cannot read artifacts, heartbeat, or consume another domain attempt. Lease reclamation creates a new execution generation and resets the claim field to null. Every heartbeat hashes the supplied token and CAS-updates only when the full tuple matches and the delivery claim is non-null; it renews the lease to 120 seconds. The job heartbeats before every chunk, after every 1,000-record batch, and in all cases before 30 seconds of monotonic elapsed time. A zero-row CAS aborts immediately as `LostValidationLease` without a terminal write. Success or deterministic failure uses the same full CAS tuple, then clears only its own execution token/lease while retaining audit timestamps and the delivery-claim audit timestamp.
+
+A caught transient failure CAS-records the safe failure detail and clears its current token/lease while keeping `status=validating`. Runs 1–3 schedule `AcquireGraphV2ValidationRun(import_id,attempt_generation)` after exactly 10/30/90 seconds; that wrapper calls the same acquisition service. A transient failure in run 4 writes terminal `failed/graph_validation_infrastructure_failed` only through the fenced CAS. An uncaught crash schedules nothing; lease expiry plus the minute reconciler may acquire the next domain run. Duplicate broker delivery cannot consume a domain attempt unless it wins an expired lease, and maintenance deferral consumes neither. An old worker racing a reclaimed worker cannot heartbeat, publish, fail, clear, or otherwise mutate the import. Projection cannot observe or dispatch from `validating`.
 
 The validation job MUST use two bounded streaming passes over retained chunk blobs; it MUST NOT load and decode the entire logical graph as one JSON object. Pass one streams chunks in manifest order, verifies compressed/uncompressed descriptors, schema, record shape, source identity, counts, chunk/kind order, and strictly increasing IDs, then batch-inserts every record key and file-node path/digest into staging tables. Pass two re-streams the same retained bytes, batch-inserts every typed reference, and validates each file/AST/config evidence locator/fingerprint against the complete file-path index; a server-derived locator is forbidden in producer chunks. Unique constraints detect cross-chunk collisions; set-based anti-joins after pass two detect missing or cross-import references. Batches are at most 1,000 rows and neither pass keeps graph-size-proportional application memory. Only after both passes and every set-based invariant succeed does the job CAS-commit `validated` and request projection. Validation key/reference rows may be deleted after successful validation; the validated import, manifest, chunk metadata, and chunk blobs follow the reachability retention rule in section 9.1 and are not staging garbage.
 
@@ -1299,9 +1301,15 @@ Create `hades_graph_import_references` with a bigint primary key, `graph_import_
 
 #### Validated artifact and chunk retention
 
-A `validated` import has `expires_at=null` and is immutable. Its manifest, chunk rows, and exact stored compressed blobs are retained while reachable from any projection row/head, active or previous namespace, graph overlay, verification request/result, graph context within TTL, or Wiki claim/evidence ledger. `graph_ref` resolution always reads these retained immutable bytes or their validated indexed representation; it never depends on temporary validation rows.
+A `validated` import has `expires_at=null` and is immutable. Its manifest, chunk rows, and exact stored compressed blobs are retained while reachable from any projection row/head, active or previous namespace, graph overlay, verification request/result, graph context within TTL, or normalized Wiki claim/evidence reference. `graph_ref` resolution always reads these retained immutable bytes or their validated indexed representation; it never depends on temporary validation rows.
 
-Cleanup computes reachability inside a transaction, acquires an advisory lock for the project/binding/import, and rechecks it immediately before deletion. It may remove validation key/reference rows after validation, and may remove `failed|stale` import attempts plus their blobs after 24 hours. It may remove a validated import only when no retained reference above exists and its last projection/context retention window has closed. A referenced blob is never deleted, even if a row age or local disk threshold would otherwise select it. Artifact storage cleanup uses `ArtifactStorageService` on the configured disk and verifies that every deleted object belonged to the selected import; no raw path prefix deletion is allowed.
+All graph-import reference writers and cleanup share `GraphArtifactReferenceLock`. Outside any transaction a caller identifies the complete import-ID set, then `within(project_id,workspace_binding_id,import_ids,callback)` opens the outer transaction. It acquires every PostgreSQL advisory lock in total `(project_id,workspace_binding_id,import_id)` order using key `hades:graph-import:v2:{project_id}:{workspace_binding_id}:{import_id}`, then every matching import row `FOR UPDATE` in that order, rechecks exact count/scope, and only then exposes a per-invocation `GraphArtifactReferenceGuard`. Domain locks follow; a writer holding a domain lock may not enter this service. A domain service asserts the guard contains every import before inserting a reference. If a locked reread discovers a different import set, the caller rolls back and retries from outside; it never takes an incremental lock.
+
+`GraphArtifactReachability` composes one fixed internal Laravel tag of read-only providers. Plan 2 registers projection/head/attempt/context reachability; Plan 3 adds verification request/overlay and Wiki reference providers. It throws when no provider is configured, short-circuits on `true`, returns `false` only after at least one provider ran and all returned false, and never catches a provider exception. Namespace reachability and artifact reachability are separate decisions: retaining immutable source bytes does not retain every old physical projection incarnation.
+
+Cleanup uses forward-only crash-resumable state machines inside a graph mutation lease. Namespace phase A enters `GraphArtifactReferenceLock`, rechecks head/attempt/context roots, and CASes only the exact incarnation `active→tombstoned` with an operation ULID; after commit it retires that incarnation's permanent Neo4j projection fence, deletes only `(project,scope,projection_version,projection_incarnation_id)` canonical records, proves zero remain, and keeps the tiny retired fence forever. It then resumes PostgreSQL `tombstoned→neo4j_deleted` and deletes the projection row only after FKs/heads/attempts permit. Artifact phase A begins only after no projection incarnation remains, enters the same reference lock, reruns every artifact provider, and CASes import `active→tombstoned`; after commit it deletes only the stored verified object list, resumes `tombstoned→objects_deleted`, then deletes chunk/validation/import ownership rows last. Resume accepts only the stored operation ID and forward state and never issues a reference guard. A crash or external failure leaves the durable stage for idempotent retry. Once tombstoned, replay, desired-state, publication, and new reference writers reject the row. A retired Neo4j fence is a negative ownership record, not graph data; backup retains it and no cleanup TTL may remove it.
+
+Disposable validation key/reference rows may be removed after the durable uncertainty index is written. `failed|stale` imports become eligible after 24 hours only when unreachable. Terminal projection attempts are audit-retained for exactly 24 hours and are roots only while queued/projecting with an unexpired execution lease; a namespace cannot be tombstoned until its terminal attempts are past retention and removed. A validated import is removable only when no provider retains it and all namespace/context grace has closed. A referenced blob is never deleted due to age or pressure. Raw prefix deletion is forbidden, and every `ArtifactStorageService` deletion path participates in graph maintenance/backup fencing.
 
 #### `backend/database/migrations/2026_07_16_000300_extend_canonical_graph_projections_for_v2.php`
 
@@ -1323,7 +1331,7 @@ effective_relationship_count nullable unsigned bigint
 effective_flow_count        nullable unsigned bigint
 ```
 
-Add unique `(project_id, source_scope_type, source_scope_id, projection_version)`. Existing v1 rows remain readable only by rollback code until the cutover and are never selected by a v2 query.
+Migration `000300` originally adds unique `(project_id, source_scope_type, source_scope_id, projection_version)`. Existing v1 rows remain readable only by rollback code until the cutover and are never selected by a v2 query. Because this migration may already be applied, its bytes are immutable; the forward-only `000375` migration below replaces that v2 uniqueness rule with a non-unique lookup index so every retry can own a fresh physical incarnation.
 
 #### `backend/database/migrations/2026_07_16_000350_create_canonical_graph_projection_heads.php`
 
@@ -1348,6 +1356,20 @@ created_at / updated_at
 
 Add unique `(project_id, source_scope_type, source_scope_id)`. Extend `canonical_graph_projection_attempts` with required nullable `desired_generation` and `candidate_projection_version` fields for v2 attempts. V2 readers use this head table; they ignore the legacy `active_graph_version` column.
 
+#### `backend/database/migrations/2026_07_16_000375_add_graph_v2_coordination_state.php`
+
+This is the only migration allowed to amend the already-applied `000100`–`000350` contract. Never edit or replace those historical migration files. The migration is additive/forward-only except for replacing the obsolete v2 scope/version unique index by its non-unique equivalent.
+
+Add `canonical_graph_projection_heads.desired_graph_import_id`, nullable but all-or-none with `desired_artifact_graph_version`, `desired_verification_set_hash`, and `desired_projection_version`. Add the parent unique key `(project_id,workspace_binding_id,id)` to `hades_graph_imports`, then the scoped composite FK `(project_id,source_scope_id,desired_graph_import_id)` to that key with `RESTRICT`, plus an index and a v2 check requiring `source_scope_type='workspace_binding'`. Backfill every existing nonempty desired tuple from the unique same-scope import with the matching artifact version; abort with a diagnostic rather than guess when there are zero or multiple candidates.
+
+Add independent execution-fencing state to graph imports and projection attempts: unsigned `*_execution_generation`, nullable 64-character `*_execution_run_token_hash`, nullable timezone-aware `*_execution_started_at`, `*_execution_heartbeat_at`, `*_execution_lease_expires_at`, and `*_execution_delivery_claimed_at`. Acquisition or reclamation sets the delivery claim null; job entry must win a null-to-timestamp CAS on the complete owner tuple before any read or side effect. A lease owner is identified by `(row ID, logical attempt generation, execution generation, token hash)`; an older owner or duplicate delivery cannot heartbeat, finalize, clear, publish, or clean a replacement owner's work.
+
+Add `hades_graph_imports.artifact_cleanup_state=active|tombstoned|objects_deleted` plus nullable cleanup operation ULID/start/object-deleted timestamps. Add `canonical_graph_projections.namespace_cleanup_state=active|tombstoned|neo4j_deleted` plus nullable cleanup operation ULID/start/Neo4j-deleted timestamps. Both machines are forward-only and can never return to `active`.
+
+Create durable `hades_graph_import_uncertainty_index` rows keyed by `(graph_import_id,public_id)` with the scoped import FK, `record_ordinal`, `chunk_index`, and indexes beginning `(graph_import_id,public_id)` and `(graph_import_id,record_ordinal)`. A successful validation copies only schema-verified uncertainty locators here before temporary validation rows are removed. `GraphV2ArtifactReader::recordsByPublicIds()` resolves these locators by primary public ID, verifies the stored ordinal/chunk against streamed bytes, and never pages the source table by unindexed ordinal ranges.
+
+Drop only the already-applied named `canonical_graph_projections_v2_scope_version_unique` index and create a non-unique scoped lookup on the same logical columns. `canonical_graph_projections.id` becomes the immutable `projection_incarnation_id`; head CAS, not a uniqueness constraint on logical version, is the sole authority over which incarnation is readable. Upgrade tests must start from applied `000100`–`000350`, and a guarded fresh PostgreSQL build must reach the identical schema.
+
 #### `backend/database/migrations/2026_07_16_000400_extend_agent_work_items_for_verification.php`
 
 Extend `agent_work_items` with:
@@ -1359,8 +1381,20 @@ deduplication_key     nullable char(64)
 result                nullable jsonb
 result_digest         nullable char(64)
 state_version         unsigned bigint, not null, default 1
+execution_attempts    unsigned integer, not null, default 0
 retry_of_work_item_id nullable self FK, ON DELETE RESTRICT/NO ACTION
+verification_execution_epoch_generation nullable unsigned bigint
+specialist_fence_id   nullable ULID
+specialist_fence_generation unsigned integer, not null, default 0
+specialist_fence_state nullable string: active or quarantined
+specialist_fence_token_hash nullable char(64)
+specialist_containment_kind nullable string: linux_cgroup_v2, windows_job, or darwin_container
+specialist_containment_id_hash nullable char(64)
+specialist_fence_started_at nullable timestamp with timezone
+specialist_fence_quarantined_at nullable timestamp with timezone
 ```
+
+The same migration creates singleton `hades_verification_execution_epochs` row `name='verification'` with `generation` (unsigned bigint), random `epoch_id` (ULID), and timestamps. Every verification claim copies the current generation to `verification_execution_epoch_generation`; claim, heartbeat, specialist-fence start/quarantine/clear, completion, lease release, and terminal CAS match it. Generic work stores null. Epoch generation is part of the authenticated execution authority but never a user-supplied filter.
 
 Preserve the existing work-item statuses and add `stale`. The stored union is:
 
@@ -1369,9 +1403,13 @@ draft, queued, claimed, running, completed,
 completed_with_incomplete_memory, failed, canceled, stale
 ```
 
-Verification items use only `queued`, `claimed`, `running`, `completed`, `failed`, `canceled`, and `stale`; they never use `draft` or `completed_with_incomplete_memory`. Lease expiry remains an event handled by the existing lease-release/reclaim policy rather than a new terminal status. Add a partial unique index on `(project_id, deduplication_key)` where `deduplication_key` is non-null. Update status constants to include `stale` without changing historical terminal values.
+Verification items use only `queued`, `claimed`, `running`, `completed`, `failed`, `canceled`, and `stale`; they never use `draft` or `completed_with_incomplete_memory`. Lease expiry remains an event handled by the existing lease-release/reclaim policy rather than a new terminal status. Add a partial unique index on `(project_id, deduplication_key)` where `deduplication_key` is non-null and a partial unique index on `specialist_fence_id` where non-null. Fence fields are all-null except generation, or all required for `active|quarantined`; only verification work may carry them. Update status constants to include `stale` without changing historical terminal values.
 
-Every create starts at `state_version=1`; every committed status, claim owner, lease, result, or terminal-reason mutation atomically increments it exactly once. Read/list/claim/heartbeat/complete DTOs include `state_version` and RFC3339 `remote_updated_at`. Earlier product shorthand called lease timeout `expired`; this contract deliberately does not persist an `expired` status because the existing queue reclaims the same live item. The audit event is `lease_expired`, after which the item returns to `queued` with claim fields cleared, state version incremented, and attempt generation unchanged. `stale` is reserved for a target/source version that can no longer be completed.
+Every create starts at `state_version=1`; every committed status, claim owner, lease, result, or terminal-reason mutation atomically increments it exactly once. Read/list/claim/heartbeat/complete DTOs include `state_version` and RFC3339 `remote_updated_at`. A heartbeat that actually extends the lease increments `state_version` once but never `execution_attempts`; a semantic no-op changes neither. Earlier product shorthand called lease timeout `expired`; this contract deliberately does not persist an `expired` status because the existing queue reclaims the same live item. The audit event is `lease_expired`, after which the item returns to `queued` with claim fields cleared, state version incremented, and attempt generation unchanged. Each successful new claim increments `execution_attempts`; after attempt 10, the next claim/reclaim boundary atomically terminalizes that generation as `failed/verification_execution_attempts_exhausted` instead of creating an eleventh execution. Human retry creates a new request/work-item generation with zero executions. `stale` is reserved for a target/source version that can no longer be completed.
+
+A restored PostgreSQL snapshot may contain claims and `active|quarantined` specialist fences whose raw tokens/process domains belong to the source deployment. Before any restored worker or reconciliation starts, the restore-target-only recovery command from section 14.2 holds the exclusive global lock, verifies the sealed consistency set and all stores, atomically increments the singleton verification epoch, and processes every nonterminal verification row from the copied older epoch in ascending ID order. It clears copied claim/lease/fence token/containment fields, records `verification.restore_epoch_rotated`, increments `state_version`, and returns work below ten attempts to `queued`; exhausted work becomes `failed/verification_execution_attempts_exhausted`. Evidence/results/attempt counts remain immutable. All old-epoch heartbeat, fence-clear, and completion requests then fail CAS even if the source host reaches the restored endpoint. The recovery audit binds old/new epoch, consistency set, item counts, and manifest digest. It never rotates a live production database and is idempotent for the exact restored target/new epoch.
+
+Verification-request priority is `low|normal|high|critical`. The existing work-item transport represents `critical` as `urgent`; API filtering and ordering translate `critical↔urgent` only for verification work. Verification payloads and request DTOs never expose `urgent`, and generic work retains its existing priority contract. Add explicit indexes on every new referencing FK, including `agent_work_items.retry_of_work_item_id`.
 
 #### `backend/database/migrations/2026_07_16_000500_create_verification_requests_table.php`
 
@@ -1387,6 +1425,8 @@ target_type              string
 target_id                string
 target_version           string
 assertion_fingerprint    char(64)
+source_graph_import_id   nullable graph import FK, indexed, ON DELETE RESTRICT/NO ACTION
+source_artifact_graph_version nullable char(64)
 attempt_generation       unsigned integer, default 1
 retry_of_request_id      nullable self FK, ON DELETE RESTRICT/NO ACTION
 reason_code              string
@@ -1404,6 +1444,20 @@ created_at / updated_at
 
 Add unique `(project_id, workspace_binding_id, domain, target_type, target_id, target_version, assertion_fingerprint, attempt_generation)`. Generation starts at one and increments only inside the locked retry/reactivation transaction: either explicit human retry or exact stale A→B→A reactivation from section 11.2. Both link to the immediately previous request; no other reconciliation path increments it. A concurrency test races human retry with auto-reactivation and proves that row locking plus the unique key creates at most one next generation.
 
+Graph requests and Wiki requests with an available source snapshot require `source_graph_import_id` and the exact matching artifact version. Only a Wiki request whose source snapshot is explicitly unavailable may store both fields null. The FK is the authoritative reachability join; cleanup never parses result JSON to infer source ownership.
+
+#### `backend/database/migrations/2026_07_16_000525_extend_wiki_revisions_for_verification.php`
+
+Extend the existing `wiki_revisions` table; do not edit the June core migration. Add nullable `workspace_binding_id` FK (legacy rows may be null), nullable indexed `content_sha256` char(64), nullable self-FK `verification_source_revision_id` with RESTRICT/NO ACTION, nullable `result_digest` char(64), and nullable JSONB `generator_metadata`. Every new Hades-generated revision requires binding plus content digest. A verification-created revision also requires source revision and result digest. Generator metadata stores bounded generator/source-snapshot descriptors only; claims and graph ownership use normalized tables below.
+
+#### `backend/database/migrations/2026_07_16_000550_create_wiki_verification_claims_table.php`
+
+Create `wiki_verification_claims` with ULID `id`, `wiki_revision_id` FK `ON DELETE CASCADE`, `ordinal`, `byte_start`, `byte_end`, `normalized_text`, `fingerprint` char(64), nullable `verdict=supported|contradicted`, nullable JSONB `evidence_indexes`, nullable `reason`, and `created_at`. Add unique `(wiki_revision_id,ordinal)` and `(wiki_revision_id,fingerprint)`, require nonnegative half-open ranges and contiguous ordinals at service validation, and cascade rows only when their owning Wiki revision is deliberately deleted. This table is the immutable claim ledger returned by show/read APIs.
+
+#### `backend/database/migrations/2026_07_16_000575_create_wiki_graph_artifact_references_table.php`
+
+Create `wiki_graph_artifact_references` with ULID `id`, `wiki_revision_id` FK `ON DELETE CASCADE`, nullable `verification_request_id` FK with RESTRICT/NO ACTION, required project/binding FKs with project-owned cascade, required graph-import FK with RESTRICT/NO ACTION, `reference_kind=source_snapshot|evidence`, `artifact_graph_version`, nullable `evidence_index`, nullable `record_kind=node|edge`, nullable `public_id`, nullable `source_fingerprint`, and `created_at`. A `source_snapshot` row has all evidence-record fields null; an `evidence` row requires evidence index, record kind, public ID, and fingerprint. Add one PostgreSQL `UNIQUE NULLS NOT DISTINCT` index over `(wiki_revision_id,verification_request_id,graph_import_id,reference_kind,evidence_index,record_kind,public_id,source_fingerprint)`; the SQLite test migration uses an equivalent `COALESCE` expression index. Add standalone indexes beginning with `graph_import_id`, `verification_request_id`, `project_id`, and `workspace_binding_id`, plus `(project_id,workspace_binding_id,graph_import_id)`; PostgreSQL does not add them automatically for FKs. This is the sole Wiki query source for graph-artifact reachability.
+
 #### `backend/database/migrations/2026_07_16_000600_create_graph_verification_overlays_table.php`
 
 Create `graph_verification_overlays` with:
@@ -1411,6 +1465,7 @@ Create `graph_verification_overlays` with:
 ```text
 id                       ULID primary key
 verification_request_id  unique FK to verification_requests, ON DELETE RESTRICT/NO ACTION
+graph_import_id          graph import FK, indexed, ON DELETE RESTRICT/NO ACTION
 project_id               project FK, indexed
 workspace_binding_id     workspace binding FK, indexed
 artifact_graph_version   char(64), indexed
@@ -1423,13 +1478,44 @@ result_digest            char(64)
 created_at
 ```
 
-Add unique `(project_id, workspace_binding_id, artifact_graph_version, assertion_fingerprint)`. Overlay rows are append-only: no update endpoint exists, and a new artifact naturally selects a different version-bound set. `deferred` creates no overlay.
+Add unique `(project_id, workspace_binding_id, artifact_graph_version, assertion_fingerprint)` and a scoped parent key `(project_id,workspace_binding_id,graph_import_id,id)` for membership FKs. Overlay rows are append-only: no update endpoint exists. An overlay remains eligible across an identical reimport only when the immutable `artifact_graph_version` is exactly equal; membership records preserve both the new base import and the original overlay-source import, so this reuse cannot erase provenance. `deferred` creates no overlay.
 
-Verification audit retention is independent of generic queue cleanup. Generic `agent_work_items` cleanup always excludes a work item referenced by `verification_requests`, and no live verification chain is ever garbage-collected. An overlay-bearing retry chain is retained while its artifact or verification set is reachable from an active/previous projection or head, retained projection attempt, graph context within TTL, Wiki claim/evidence ledger, or another audit FK, and in every case for at least 90 days after the latest terminal generation. A terminal chain with no overlay is retained for 90 days after its latest `resolved_at|superseded_at|updated_at`. The v2 cleanup command uses a project/binding advisory lock, selects the whole connected retry chain, proves **external** reachability while excluding references internal to that candidate chain, and rechecks it in the deletion transaction. It then deletes candidate overlays first, requests from highest to lowest generation, work items from highest to lowest generation, and finally eligible artifact data. RESTRICT/NO ACTION FKs intentionally make every wrong order or incomplete reachability proof fail. Cleanup never mutates an overlay, result, digest, or retry link, so a retained projection's `verification_set_hash` cannot change underneath it. Golden retention tests cover a self-contained expired chain, an active-projection chain, a Wiki-referenced chain, and a concurrent new reference that aborts deletion.
+#### `backend/database/migrations/2026_07_16_000625_create_projection_verification_overlay_links_table.php`
+
+Create `canonical_graph_desired_verification_overlays` and `canonical_graph_projection_verification_overlays`. The first is the durable exact overlay set desired by a head before a candidate exists; the second is the immutable exact set used by a particular projection incarnation. Every membership row stores `project_id`, `workspace_binding_id`, `base_graph_import_id`, `overlay_source_graph_import_id`, and `graph_verification_overlay_id`.
+
+Add parent unique keys `(project_id,source_scope_id,id)` to v2 projection heads and projection rows. Desired membership FK `(project_id,workspace_binding_id,projection_head_id)` references head `(project_id,source_scope_id,id)`; projection membership FK `(project_id,workspace_binding_id,canonical_graph_projection_id)` references projection `(project_id,source_scope_id,id)`. Existing v2 checks require `source_scope_type='workspace_binding'`, so child binding is the parent scope ID without adding a duplicate parent column. Both import IDs use separate scoped composite FKs to imports `(project_id,workspace_binding_id,id)` with `RESTRICT`; overlay FK `(project_id,workspace_binding_id,overlay_source_graph_import_id,graph_verification_overlay_id)` references overlay `(project_id,workspace_binding_id,graph_import_id,id)`. Head/projection ownership cascades; overlay/import ownership restricts. Primary keys are `(projection_head_id,graph_verification_overlay_id)` and `(canonical_graph_projection_id,graph_verification_overlay_id)`. Add indexes beginning with overlay ID and with each import FK. Cross-project/binding links are impossible.
+
+`base_graph_import_id` may differ from `overlay_source_graph_import_id` only when both imports have the same immutable `artifact_graph_version`. Under the ordered reference/scope/head locks, the service recomputes the canonical sorted overlay set and requires its hash to equal the owning head/projection `verification_set_hash`. Verification-chain retention reads these membership tables directly and is intentionally separate from artifact-level reachability.
+
+Verification audit retention is independent of generic queue and graph-artifact cleanup. Generic `agent_work_items` cleanup always excludes a work item referenced by `verification_requests`, and no live verification chain is ever collected. A terminal retry chain is retained for at least 90 days after the latest terminal generation. After that boundary, a chain with no overlay is eligible even when its source artifact remains active; immutable artifact reachability is not itself an audit-chain root. An overlay-bearing chain remains retained only while a desired-head membership, projection-incarnation membership, Wiki/direct audit FK, or another explicit verification-chain FK references it.
+
+`VerificationRetentionService` and `hades:verification:cleanup` select the whole connected component through both retry links and prove **external chain reachability** while logically excluding references internal to that candidate. For a nonempty source-import set they recheck under `GraphArtifactReferenceLock`, scope lock, head, then chain rows; a source-unavailable Wiki-only component starts an ordinary transaction at that scope lock and never constructs an empty guard. Before any delete, the locked transaction computes the complete candidate work/request/overlay ID sets and queries desired/projection memberships, Wiki references, direct audit/domain FKs, and every other explicit chain root with candidate-internal retry/request/overlay links excluded by ID. Any query failure or external root aborts/skips with no mutation. Only a root-free candidate is deleted in FK-safe order: overlays, requests from highest to lowest generation, then work items from highest to lowest generation. Generic `GraphArtifactReachability` is never used as a veto in this chain decision. After commit, artifact cleanup independently reacquires its own lock and may re-evaluate newly eligible bytes. RESTRICT/NO ACTION FKs remain a final safety net, not the reachability algorithm. Cleanup never mutates a retained overlay, result, digest, membership, or retry link, so a retained projection's `verification_set_hash` cannot change underneath it.
 
 #### `backend/database/migrations/2026_07_16_000650_create_graph_maintenance_windows_table.php`
 
 Create `graph_maintenance_windows` with `id` ULID, nullable indexed `project_id` (null means global), `reason=backup|cutover|retirement|operator`, `token_hash` char(64), `active` boolean, `started_at`, `expires_at`, nullable `ended_at`, safe JSONB `metadata`, and timestamps. `GraphMaintenanceService` serializes begin/end under a scope advisory lock; it allows at most one active global window and one active window per project. Begin returns a one-time random token, stores only its hash, and requires a bounded expiry. End requires the token and health preconditions; expired windows remain visible to operators and fail safe until explicitly cleared after health verification.
+
+#### `backend/database/migrations/2026_07_16_000675_add_bound_maintenance_authority_and_graph_v1_exports.php`
+
+Extend `graph_maintenance_windows` with monotonic `scope_generation`, nullable `owner_kind=v1_export|v1_retirement|v1_restore`, nullable `owner_operation_id`, `authority_generation`, nullable `authority_token_hash`, nullable `authority_heartbeat_at`, nullable `external_mutation_started_at`, nullable `external_mutation_kind`, and nullable `external_mutation_progress` closed JSON; owner fields are all-null or all-non-null. Create `graph_v1_exports` with project/window/scope-generation/authority-generation ownership, immutable output/selection/pre-v2 deployment descriptors, per-stage digests/counts, error audit fields, and exact forward state `prepared|postgres_captured|neo4j_captured|artifacts_captured|sealed|verified`. Every nonterminal export is uniquely bound to one active `reason=retirement` project window and operation ID; export never sets an external-mutation marker.
+
+`GraphMaintenanceService` exposes only this typed internal operation surface; no controller, generic graph mutation, or unrelated reason can manufacture an authority:
+
+```php
+beginBoundProjectOperation($projectId, $reason, $kind, $operationId, $ttl, $initialize): MaintenanceAuthority
+resumeBoundProjectOperation($projectId, $reason, $kind, $operationId, $expectedScopeGeneration, $validateOwner): MaintenanceAuthority
+transferBoundProjectOperation(MaintenanceAuthority $authority, $nextKind, $nextOperationId, $transition): MaintenanceAuthority
+withinAuthorizedRead(MaintenanceAuthority $authority, callable $callback): mixed
+withinAuthorizedMutation(MaintenanceAuthority $authority, callable $callback): mixed
+completeBoundProjectOperation(MaintenanceAuthority $authority, bool $requireNeo4jHealthy, callable $finalize): void
+```
+
+`MaintenanceAuthority` contains window ID, project ID, `reason=retirement`, closed owner kind/operation ID, scope generation, authority generation, expiry, and a process-only random 256-bit raw token; PostgreSQL stores only its lower-case SHA-256. It authorizes only the exact operation's project-scoped graph reads/mutations and never schema mutation, general HTTP bypass, another project, or a different reason. Resume is legal only after owner TTL expiry, validates the exact nonterminal operation plus immutable selection/manifest digests, increments authority generation, rotates the raw token/hash, renews TTL, and fences every earlier owner. Every stage/heartbeat/final CAS matches window ID, scope generation, authority generation, token hash, owner kind, and operation ID. Before the first external mutation and before every bounded batch, a fenced transaction sets/advances the closed mutation kind, batch ordinal, selection digest, and pre-state digest; completion records the post-state digest. An ordinary maintenance-off call refuses a bound window; only `completeBoundProjectOperation` may close it after the operation's final verified state and health callback.
+
+The audited manual-abandon command may close only a `v1_export` owner, because export is read-only, and only after it re-proves every PostgreSQL/Neo4j/artifact pre-state count/digest and `external_mutation_started_at IS NULL` under the normal locks. A `v1_retirement|v1_restore` owner never has an abandon-open path, even before its first batch: it remains fenced and may only resume, transfer to a verified scoped restore, or enter separately approved whole-system DR. A marker with incomplete batch progress is positive evidence that external state may be partial, not a reason to reopen.
+
+The total session-lock order is normative. Begin/resume/transfer/complete take shared global session advisory lock, exclusive project session advisory lock, then a short transaction locking window, operation row, and only then pointer/domain rows; no external I/O occurs inside that transaction. Authorized work takes shared global, shared project, exclusive operation advisory lock, verifies authority in a short transaction, then enters the existing reference lock and performs external I/O while the session locks remain held, followed by a short fenced stage CAS. Nested ordinary graph leases reuse the same authority; scope widening, cross-project nesting, or switching owner kind without `transferBoundProjectOperation` is rejected.
 
 #### `backend/database/migrations/2026_07_16_000700_create_graph_v1_retirements_table.php`
 
@@ -1454,6 +1540,12 @@ created_at / updated_at
 
 Allowed state values are `prepared|neo4j_deleted|postgres_deleted|completed|restored`. Add unique `(project_id, selection_sha256)`. `pre_v2_deployment` is the closed object `{backend_image_digest,frontend_image_digest,backend_git_commit,frontend_git_commit,agent_git_commit,agent_artifact_path,agent_artifact_sha256}`. The table is the resumable audit/state machine for section 14.3; command stdout is never its source of truth.
 
+The retirement row also stores the bound maintenance window ID, scope generation, authority generation, current owner operation ID, sealed export ID, external-mutation start time/kind, last started/completed batch ordinal, and pre/post-state digests. Its forward stages match those authority fields on every CAS. A nonterminal row can be resumed only through the `v1_retirement` authority owner and can transfer to `v1_restore` only through the explicit restore transition; it can never be abandoned open.
+
+#### `backend/database/migrations/2026_07_16_000725_create_graph_v1_restores_table.php`
+
+Create `graph_v1_restores` with project, retirement/export/window ownership, scope and authority generations, immutable manifest/selection/deployment digests, stage digests/counts, external-mutation start/kind and batch-progress/pre/post-state digests, error audit fields, and exact forward state `prepared|artifacts_restored|postgres_restored|neo4j_restored|pointer_restored|smoke_verified|completed`. Add unique `(project_id,retirement_id,scoped_backup_manifest_sha256)`. Every mutation marker and stage CAS matches the active `v1_restore` authority. A restore may start by transferring a nonterminal retirement authority or by beginning a new bound restore window after a completed retirement; it never overwrites existing different bytes/rows/namespaces and never has an abandon-open path. The retirement becomes `restored` and the window closes only after `smoke_verified→completed` verifies exact counts/digests, active pointer, Neo4j health, authenticated v1 smoke, and unrelated-data invariants.
+
 ### 9.2 Projection versioning
 
 The backend calculates:
@@ -1466,31 +1558,39 @@ projection_version      = SHA-256(artifact_graph_version + ":" + verification_se
 
 For an empty overlay set, `verification_set_hash` is SHA-256 of the RFC 8785 canonical JSON bytes for `[]`. Otherwise sort overlays by `assertion_fingerprint` then overlay ID and hash JCS of an array whose members have exactly `artifact_graph_version`, `assertion_fingerprint`, `verdict`, `overlay`, and `evidence`. The projection preimage is the exact byte concatenation defined in section 6.4.
 
-When a new artifact or overlay set is desired, lock the exact head row, increment `desired_generation`, set all three desired-version fields, clear the three failure fields, commit, and dispatch `ProjectCanonicalGraphV2` after commit with that generation. The publication flip locks the head and succeeds only when both `desired_generation` and `desired_projection_version` still match the job. A superseded candidate is marked stale and can never become active.
+When a new artifact or overlay set is desired, the writer first enters `GraphArtifactReferenceLock` for the complete base/overlay-source import set, then takes the verification scope lock where applicable and the exact projection-head lock. It stores `desired_graph_import_id`, all three desired-version fields, and the exact desired overlay memberships in one transaction. It increments `desired_generation` and clears the three failure fields only when that complete tuple/set differs. Validation success is the sole special case: while its exact validating import row is already locked and cleanup cannot select it, it records the empty-overlay desired tuple in the same transaction that makes the import validated. Dispatch after commit is a latency optimization; the minute reconciler recovers a committed intent after a crash.
 
-Every Neo4j v2 node, relationship, lifecycle flow, and lifecycle step has `project_id`, `source_scope_type`, `source_scope_id`, and `projection_version`. Every query filters all four. The browser can never submit an arbitrary projection version.
+Every Neo4j v2 node, relationship, lifecycle flow, and lifecycle step has `project_id`, `source_scope_type`, `source_scope_id`, `projection_version`, and immutable `projection_incarnation_id=canonical_graph_projections.id`. Every namespace key, relationship identity, query, validation, and delete filters all five. Logical projection versions may recur after A→B→A or a retry; physical incarnations never do. The browser can submit neither an arbitrary projection version nor an incarnation ID.
 
 PostgreSQL and Neo4j cannot share a transaction. Publication is therefore exactly:
 
 1. Persist and validate all staged chunks.
-2. Create/update a PostgreSQL candidate projection row in `projecting` state without changing the active pointer.
-3. Under the projection lease, prepare the isolated Neo4j namespace keyed by `projection_version` using the retry rule below, then project the candidate from zero.
+2. In short PostgreSQL transaction A, create and claim a fresh `projecting` projection row whose ULID is the immutable incarnation, without changing the active pointer; commit before external work.
+3. Under a fenced renewable execution lease, prepare the isolated Neo4j namespace keyed by logical version plus incarnation and create/validate its permanent projection fence, then project that fresh candidate from zero in fence-locked batches while no PostgreSQL transaction/advisory/row lock is held.
 4. Validate base counts/digests/endpoints/lifecycle membership against the manifest, then validate effective counts against `base counts + canonical overlay delta`; verify search index availability.
-5. In one PostgreSQL transaction, perform the desired-generation/version CAS, mark the candidate `ready`, move the old active projection to `previous_projection_id`, and update `active_projection_id`. If the CAS fails, mark the candidate stale and do not move the head.
+5. In short PostgreSQL transaction B, reacquire the complete reference lock, then head/attempt/candidate locks; CAS the desired import/generation/version, execution generation/token, cleanup state, and exact overlay memberships; mark the candidate `ready`, move the old active projection to `previous_projection_id`, and update `active_projection_id`. If any CAS fails, mark only that candidate stale and do not move the head.
 6. Readers resolve the active pointer first, then query only that exact Neo4j namespace.
 7. On any failure, mark the candidate failed and leave the old active pointer and namespace untouched.
 
-Retain the active and immediately previous ready v2 namespaces. A stale namespace may be deleted only after the graph-context TTL plus ten minutes has elapsed and no active projection references it.
+Retain the active and immediately previous ready v2 incarnations. A stale incarnation may be tombstoned only after the graph-context TTL plus ten minutes has elapsed, no head/candidate/read context retains it, and every terminal projection attempt that refers to it has passed its 24-hour audit retention and been removed.
 
-Before every first attempt or retry writes Neo4j, the job rechecks the head and all projection attempts under the project/scope advisory lock. If that `projection_version` is active, it short-circuits as success without writing. If it is the retained previous version and that row/namespace is still `ready` with exact artifact, overlay hash, counts, and digests, it performs the desired-generation CAS and swaps active/previous pointers without a Neo4j write; if any check fails, it returns `graph_previous_projection_invalid` and does not delete/rebuild the retained version. Otherwise it requires no other live attempt for that version, deletes the entire candidate namespace in bounded batches, verifies zero remaining candidate nodes/relationships/flow records, resets candidate counters, and only then rebuilds. A crash after partial Neo4j writes therefore cannot contaminate a retry. No cleanup query may omit project, source scope, and projection version.
+Before each domain attempt, transaction A rechecks the desired head and live attempts under the reference-lock order. If the exact desired projection incarnation is already active, it short-circuits without writing. If the exact logical version is the retained previous incarnation and that row/namespace is still `ready` with matching base import, overlay memberships, counts, and digests, transaction B may swap the exact active/previous IDs without a Neo4j rewrite; any mismatch returns `graph_previous_projection_invalid` and never deletes/rebuilds the retained version. Otherwise every retry creates a new candidate row/incarnation and leaves older partial incarnations isolated for the cleanup state machine. No retry clears or reuses another incarnation, and no cleanup query may omit project, source scope, logical version, and incarnation.
 
-Create `backend/app/Jobs/ProjectCanonicalGraphV2.php`. Dispatch it through `DB::afterCommit()` with a two-second delay and one unique queue key per project/scope. It has exactly four total attempts with delays before attempts 2/3/4 of 10/30/90 seconds (`$tries=4`, `backoff()=[10,30,90]`). Only failure of attempt 4 retains the old active projection and transactionally sets the three failure fields to that exact desired generation/version; a stale desired-generation CAS abort is a successful no-op, not a failed attempt. Add Artisan commands `hades:graph-v2:reconcile` and `hades:graph-v2:cleanup`; scheduler runs reconcile every minute and cleanup hourly. Reconcile dispatches a head only when desired differs from active, no live attempt exists, and `failed_generation != desired_generation`; it can never retry a blocked generation forever. `hades:graph-v2:reconcile --project=... --scope=... --retry-failed` is a human-operator mutation that locks the head, increments desired generation while keeping the desired versions, clears failure fields, and dispatches one fresh four-attempt cycle. Cleanup removes only unreferenced namespaces older than 40 minutes. Acceptance tests assert exactly four projection executions and that failure fields remain null through attempts 1–3.
+Create `backend/app/Jobs/ProjectCanonicalGraphV2.php` as a one-delivery job: `$tries=1`, `$timeout=1740`, `$failOnTimeout=true`, `ShouldBeUniqueUntilProcessing`, `$uniqueFor=300`, and exact unique ID `graph-projection:{project_id}:{workspace_binding_id}:{desired_generation}`. `ValidateGraphV2Import` has the same broker/runtime settings and an encrypted payload, with exact unique ID `graph-import:{import_id}:{attempt_generation}:validation:{validation_attempts}` that never contains the raw token. Both dispatch explicitly to the dedicated `graph-v2` database connection/queue. Development and production Compose run a dedicated `graph-v2-worker`; the frozen runtime inequality is queue `retry_after=1900s` > worker `--timeout=1800s` > job timeout `1740s`.
+
+Projection has exactly four **domain attempts**, each represented by its own attempt/candidate row and fresh incarnation, with delays of 10/30/90 seconds before attempts 2/3/4. They are never broker retries. Acquisition creates a renewable 120-second execution-owner lease with a random 256-bit raw token (only its lower-case SHA-256 is stored) and resets `projection_execution_delivery_claimed_at=null`. At job entry the delivery must win the matching null-to-timestamp claim CAS before reading PostgreSQL/Neo4j or heartbeating; a duplicate carrying the same token/generation exits as a successful no-op. The winner heartbeats at most every 30 seconds in short fenced transactions. Only reconciliation after an expired lease may acquire a new execution generation; maintenance deferral consumes neither a broker delivery nor a domain attempt. An expired owner loses every later heartbeat/final CAS, including after its external Neo4j call returns.
+
+Only failure of domain attempt 4 retains the old active projection and transactionally sets the three head failure fields to that exact desired generation/version. A stale desired-generation CAS is a successful no-op. `hades:graph-v2:reconcile` runs every minute and dispatches only when desired differs from active, no unexpired execution lease exists, and `failed_generation != desired_generation`; it never retries a blocked generation forever. `--retry-failed` is an explicit mutation that enters the reference lock before the head, increments desired generation while keeping the exact desired import/version/memberships, clears failure fields, and begins one new four-attempt cycle. Cleanup runs hourly through separate incarnation and artifact state machines. Acceptance tests assert exactly four domain executions, one broker try each, and null head failure through attempts 1–3.
 
 ### 9.3 Graph context
 
-Multi-request browser exploration uses an opaque `graph_context`. Add `backend/app/Services/Graph/DashboardGraphContext.php`.
+Multi-request dashboard and Hades-device exploration uses an opaque `graph_context`. Add `DashboardGraphContext`, `GraphCallerPrincipal`, `GraphProjectionIdentity`, `VerifiedGraphContext`, and `GraphCursorPayload` services/DTOs.
 
-The token contains project ID, scope type/ID, projection version, verification set hash, and expiry. Serialize canonical JSON, base64url encode it, and sign with HMAC-SHA256 using the existing Laravel `APP_KEY`; add no new secret. TTL is 30 minutes.
+Decode Laravel `APP_KEY` exactly once: strict-base64 decode a `base64:` suffix, otherwise use its raw UTF-8 bytes, and reject a result shorter than 32 bytes. The context payload is exactly `{v:2,principal_type,principal_id,credential_binding,project_id,scope_type:"workspace_binding",scope_id,projection_id,verification_set_hash,projection_version,issued_at,expires_at}`. `projection_id` is the physical incarnation ID. TTL is 30 minutes.
+
+The server derives principals only from authenticated state. Dashboard credential binding is lower-case HMAC-SHA256 of the root key over domain `hades.graph-principal.dashboard.v2\0` plus JCS `{user_id,session_id}`. Hades credential binding uses domain `hades.graph-principal.device.v2\0` plus JCS `{api_token_id,hades_agent_id,device_id}` and requires a device-bound token. Raw session IDs, raw tokens, client-provided subject IDs, and client hashes never enter a request body. Sign contexts with HMAC-SHA256 of the root key over `hades.graph-context.v2\0 || JCS(payload)`.
+
+Handles and cursors are bound to the exact raw context token: derive a 32-byte signing key using HKDF-SHA256 with root key, salt `SHA256(raw graph-context token)`, and info `hades.graph-context-bound-token.v2`. This prevents replay across another dashboard session, user, API token, Hades agent/device, project, binding, projection incarnation, or verification set. No controller or repository duplicates token decoding/signature logic.
 
 Every detail, expansion, impact, or advanced-path request requires the context returned by the initial `overview`, `entrypoints`, `search`, or `lifecycle` response. The service verifies session authorization and all embedded scope fields. An expired, no-longer-current, or no-longer-retained context returns:
 
@@ -1510,20 +1610,27 @@ with HTTP 409. The frontend discards all graph state and reloads; it never merge
 
 ### 9.4 Neo4j lifecycle projection
 
-Keep canonical code nodes and executable relationships as the structural graph. Additionally project:
+Keep canonical code nodes and executable relationships as the structural graph. Every projected record and relationship includes `project_id`, `source_scope_type`, `source_scope_id`, `projection_version`, and `projection_incarnation_id`. Additionally project:
 
 ```text
+(:CanonicalProjectionFence {
+  fence_key, project_id, source_scope_type, source_scope_id,
+  projection_version, projection_incarnation_id,
+  execution_generation, execution_token_hash,
+  state, cleanup_operation_id, lock_nonce
+})
+
 (:CanonicalLifecycleFlow {
-  namespace_key, public_id, entrypoint_public_id, kind, projection_version,
+  namespace_key, public_id, entrypoint_public_id, kind, projection_version, projection_incarnation_id,
   completeness_status, stage_counts_json,
-  terminal_represented_count, terminal_exact_value, terminal_knowledge,
-  uncertainty_represented_count, uncertainty_exact_value, uncertainty_knowledge
+  terminal_represented_count, terminal_value, terminal_knowledge, terminal_reason,
+  uncertainty_represented_count, uncertainty_value, uncertainty_knowledge, uncertainty_reason
 })
 
 (:CanonicalLifecycleFlow)-[:HAS_STEP]->(:CanonicalLifecycleStep {
   namespace_key, public_id, canonical_edge_public_id, stage_from, stage_to,
   min_depth, branch_group_id, async_context, async_child_flow_id, async_cycle, backbone_role,
-  order_key, projection_version
+  order_key, projection_version, projection_incarnation_id
 })
 
 (:CanonicalLifecycleStep)-[:FROM]->(:CanonicalNode)
@@ -1531,9 +1638,19 @@ Keep canonical code nodes and executable relationships as the structural graph. 
 (:CanonicalLifecycleFlow)-[:SPAWNS_ASYNC]->(:CanonicalLifecycleFlow)
 ```
 
+The two count families round-trip the exact `CountKnowledge` contract: `represented`, `value`, `knowledge`, and `reason`. Neo4j property absence represents JSON null only for `value`/`reason`; mapper and query code must reconstruct explicit nulls and validate the knowledge-dependent rules before returning the DTO. Golden mapper/query tests cover exact nonzero, verified zero, and unknown with its lexically selected reason, and reject the obsolete `*_exact_value`/`lower_bound` aliases.
+
+Each physical incarnation owns exactly one permanent `CanonicalProjectionFence`. Its unique `fence_key` is SHA-256 of JCS `{schema:"hades.neo4j_projection_fence.v2",project_id,source_scope_type,source_scope_id,projection_version,projection_incarnation_id}`. It stores the exact scope/incarnation, current execution generation, only the lower-case SHA-256 execution-token hash, `state=building|deleting|retired`, nullable cleanup operation ID, and a random per-transaction `lock_nonce`; state is forward-only. Add a named uniqueness constraint on `fence_key` and a scoped range index ending `(projection_incarnation_id,state)`, and verify their complete definitions during the Task 5→6 schema upgrade.
+
+Projector setup `MERGE`s the fence. `ON CREATE` may initialize `building` only for the current fenced owner; `ON MATCH` accepts only the identical building generation/token and can never revive `deleting|retired`. Every Neo4j mutation transaction handles at most 1,000 records and has a server-side 60-second transaction timeout. Before any canonical write it matches the exact fence, writes a fresh `lock_nonce` to acquire the fence write lock, then rereads and requires `state=building` plus the exact execution generation/token; zero/mismatch raises `LostProjectionNamespaceFence` and writes no canonical record. No projector query may mutate v2 data without this locked-fence prefix.
+
+After PostgreSQL tombstones an incarnation, cleanup `MERGE`s/locks the same fence (creating it directly as `deleting` when an old attempt never created one), requires the exact cleanup operation, transitions `building→deleting`, deletes only exact-incarnation canonical records in bounded guarded transactions, proves zero remain, then transitions `deleting→retired`. The retired fence is never deleted or reused and is excluded from normal graph queries/counts. Consequently a batch paused before fence creation, during a transaction, after lease loss, or even after PostgreSQL ownership deletion cannot recreate a retired namespace. An invariant scan requires every non-fence v2 record to have one matching non-retired fence and every retired fence to have zero matching canonical records.
+
 A `CanonicalLifecycleStep` exists once per `(flow_id, canonical_edge_id, stage_from, stage_to, async_context)`. An explicit CFG loop/back edge has `flow=loop`; a recursive invocation retains `flow=always|conditional|alternative` and has `backbone_role=loop`. Both are one step per finite stage context and neither expands paths. `min_depth` is the shortest edge distance from the flow entrypoint for that state and is used only for deterministic layout. `order_key` is a stable tuple serialized as text: stage ordinal, min depth, source public ID, target public ID, edge public ID.
 
-The current `Neo4jCanonicalGraphProjector.php` performs this projection in batches and always includes `projection_version`. It MUST NOT delete or reuse nodes from another version while projecting a candidate.
+The current `Neo4jCanonicalGraphProjector.php` performs this projection in batches and always includes both version and incarnation. `namespace_key` is SHA-256 JCS of project, scope type/ID, logical projection version, physical incarnation ID, record type, and public ID. It MUST NOT delete or reuse records from another incarnation while projecting a candidate.
+
+`Neo4jGraphV2Schema` compares the complete definition—not only the name—of every named v2 uniqueness constraint/range index. Its forward upgrade recognizes only the exact Task 5 definitions, replaces only those named v2 objects to incorporate incarnation identity, and leaves every legacy/unrelated Neo4j object untouched. Only `hades:graph-v2:init-schema --maintenance-token=...` under an active global `reason=cutover` window may mutate schema; `--verify` is read-only. A `backup` token can never authorize schema changes.
 
 ### 9.5 Backend services and exact file changes
 
@@ -1541,6 +1658,8 @@ Create:
 
 ```text
 backend/app/Http/Controllers/Hades/GraphImportController.php
+backend/app/Http/Controllers/Hades/GraphQueryController.php
+backend/app/Services/Graph/CanonicalGraphDesiredProjectionService.php
 backend/app/Services/Graph/V2/GraphV2ManifestValidator.php
 backend/app/Services/Graph/V2/GraphV2ChunkValidator.php
 backend/app/Services/Graph/V2/GraphV2ImportService.php
@@ -1549,11 +1668,40 @@ backend/app/Services/Graph/V2/GraphV2Normalizer.php
 backend/app/Services/Graph/V2/GraphV2ValidationRunService.php
 backend/app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php
 backend/app/Services/Graph/DashboardGraphContext.php
+backend/app/Services/Graph/GraphCallerPrincipal.php
+backend/app/Services/Graph/GraphProjectionIdentity.php
+backend/app/Services/Graph/VerifiedGraphContext.php
+backend/app/Services/Graph/GraphCursorPayload.php
 backend/app/Services/Graph/DashboardGraphSearchSnapshot.php
+backend/app/Contracts/Graph/GraphArtifactReachabilityProvider.php
+backend/app/Services/Graph/Retention/GraphArtifactReferenceLock.php
+backend/app/Services/Graph/Retention/GraphArtifactReferenceGuard.php
+backend/app/Services/Graph/Retention/GraphArtifactReachability.php
+backend/app/Services/Graph/Retention/ProjectionGraphArtifactReachabilityProvider.php
+backend/app/Services/Graph/Retention/ProjectionNamespaceReachability.php
+backend/app/Services/Graph/Retention/GraphArtifactCleanupLock.php
+backend/app/Services/Graph/Retention/GraphV2NamespaceCleanupService.php
+backend/app/Services/Graph/Retention/VerificationGraphArtifactReachabilityProvider.php
+backend/app/Services/Graph/Retention/WikiGraphArtifactReachabilityProvider.php
+backend/app/Services/Graph/Retention/GraphV2ArtifactCleanupService.php
 backend/app/Services/Hades/VerificationQueueService.php
+backend/app/Services/Hades/VerificationScope.php
+backend/app/Services/Hades/VerificationScopeLock.php
+backend/app/Services/Hades/VerificationSummary.php
+backend/app/Services/Hades/VerificationCompletion.php
 backend/app/Services/Hades/VerificationCompletionService.php
 backend/app/Services/Hades/GraphVerificationOverlayService.php
+backend/app/Services/Hades/GraphVerificationOverlayDraft.php
+backend/app/Services/Hades/HadesAuthenticatedPrincipal.php
+backend/app/Services/Hades/VerificationRetentionService.php
+backend/app/Services/Hades/AgentWorkItemStateService.php
+backend/app/Services/WikiRevisionDraft.php
 backend/app/Services/Graph/GraphMaintenanceService.php
+backend/app/Services/Graph/MaintenanceToken.php
+backend/app/Services/Graph/MaintenanceAuthority.php
+backend/app/Services/Graph/ArtifactStorageMaintenanceGuard.php
+backend/app/Services/Graph/GraphArtifactInventoryService.php
+backend/app/Services/Graph/RestoredBackupMaintenanceRecoveryService.php
 backend/app/Services/Graph/V2/GraphV1ExportService.php
 backend/app/Services/Graph/V2/GraphV1RetirementService.php
 backend/app/Services/Graph/V2/GraphV1RestoreService.php
@@ -1561,23 +1709,32 @@ backend/app/Jobs/ProjectCanonicalGraphV2.php
 backend/app/Jobs/AcquireGraphV2ValidationRun.php
 backend/app/Jobs/ValidateGraphV2Import.php
 backend/app/Jobs/ReconcileVerificationQueue.php
+backend/app/Events/CanonicalGraphV2ProjectionActivated.php
+backend/app/Events/WikiCurrentRevisionActivated.php
 backend/app/Listeners/QueueGraphVerificationRequests.php
 backend/app/Listeners/QueueWikiVerificationRequest.php
 backend/app/Console/Commands/ReconcileCanonicalGraphV2.php
 backend/app/Console/Commands/CleanupCanonicalGraphV2.php
 backend/app/Console/Commands/InitializeCanonicalGraphV2Schema.php
 backend/app/Console/Commands/ReconcileVerificationQueue.php
+backend/app/Console/Commands/CleanupVerificationHistory.php
 backend/app/Console/Commands/ExportCanonicalGraphV1.php
 backend/app/Console/Commands/RetireCanonicalGraphV1.php
 backend/app/Console/Commands/RestoreCanonicalGraphV1.php
+backend/app/Console/Commands/RecoverRestoredGraphBackupWindow.php
 backend/app/Console/Commands/SetCanonicalGraphMaintenance.php
 backend/app/Services/Graph/V2/Neo4jGraphV2Schema.php
 backend/app/Models/HadesGraphImport.php
 backend/app/Models/HadesGraphImportChunk.php
 backend/app/Models/VerificationRequest.php
 backend/app/Models/GraphVerificationOverlay.php
+backend/app/Models/WikiVerificationClaim.php
+backend/app/Models/WikiGraphArtifactReference.php
+backend/app/Models/AgentWorkItem.php
 backend/app/Models/CanonicalGraphProjectionHead.php
+backend/app/Models/GraphV1Export.php
 backend/app/Models/GraphV1Retirement.php
+backend/app/Models/GraphV1Restore.php
 backend/app/Models/GraphMaintenanceWindow.php
 backend/resources/contracts/hades/graph-v2/manifest.json
 backend/resources/contracts/hades/graph-v2/*.schema.json
@@ -1585,6 +1742,7 @@ backend/resources/contracts/hades/graph-v2/golden/*.json
 backend/tests/Feature/Hades/GraphImportControllerTest.php
 backend/tests/Feature/Dashboard/GraphExplorerV2ControllerTest.php
 backend/tests/Feature/Hades/VerificationCompletionTest.php
+backend/tests/Integration/Hades/VerificationRetentionTest.php
 backend/tests/Feature/Graph/GraphV1RetirementCommandTest.php
 backend/tests/Feature/Graph/GraphV1RestoreCommandTest.php
 backend/tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php
@@ -1597,7 +1755,7 @@ Modify:
 backend/routes/api.php
 backend/routes/web.php
 backend/routes/console.php
-backend/app/Providers/EventServiceProvider.php
+backend/app/Providers/AppServiceProvider.php
 backend/app/Services/Graph/CanonicalGraphNormalizer.php
 backend/app/Services/Graph/CanonicalGraphProjectionService.php
 backend/app/Services/Graph/CanonicalGraphQueryService.php
@@ -1607,9 +1765,14 @@ backend/app/Services/Graph/Neo4jCanonicalGraphProjector.php
 backend/app/Http/Controllers/Dashboard/Api/DashboardGraphExplorerController.php
 backend/app/Http/Controllers/Plugin/GraphQueryController.php
 backend/app/Http/Controllers/Plugin/AgentWorkItemController.php
+backend/app/Http/Controllers/Hades/WikiPageController.php
+backend/app/Http/Controllers/Dashboard/Api/DashboardAgentChatController.php
+backend/app/Http/Controllers/Dashboard/Api/DashboardAgentWorkController.php
+backend/app/Services/WikiRevisionService.php
 backend/app/Services/Hades/WikiVerificationService.php
 backend/app/Services/Hades/WikiVerificationEvidencePolicy.php
-backend/app/Models/AgentWorkItem.php
+backend/app/Services/Hades/HadesKanbanTaskIntakeService.php
+backend/app/Services/ServerAgentWorkService.php
 backend/app/Services/ArtifactStorageService.php
 backend/config/devboard.php
 ```
@@ -1619,23 +1782,29 @@ Exact responsibilities:
 - `GraphImportController` is a thin authorization/validation layer for the four import endpoints.
 - `GraphV2ManifestValidator` rejects all non-v2 schemas and validates manifest counts, source identity, allowed enums, size, and project/binding.
 - `GraphV2ChunkValidator` streams decompression, verifies byte count/digest/schema/kind/order, and rejects duplicate IDs inside a chunk.
-- `GraphV2ArtifactReader` streams logical records in manifest order without building a full object in memory.
+- `GraphV2ArtifactReader` streams logical records in manifest order without building a full object in memory. Point lookup uses the durable public-ID uncertainty index, validates ordinal/chunk locators, and never performs repeated unindexed ordinal-range scans.
 - `GraphV2Normalizer` validates cross-chunk uniqueness, referential integrity, evidence, coverage, flow membership, privacy, and deterministic ordering. It has no v1 branch.
-- `complete` commits `staging→validating`; its after-commit callback invokes `GraphV2ValidationRunService` from section 8.3. That service—not `ValidateGraphV2Import`—locks the row, increments `validation_attempts`, issues/stores the token hash and lease, and dispatches the encrypted single-try job with key `graph-import:{id}:{attempt_generation}:validation:{validation_attempts}`. `AcquireGraphV2ValidationRun` is only the delayed/reconciliation wrapper around that same service. `ValidateGraphV2Import` streams the two passes, heartbeats with its supplied token at the exact cadence in section 8.3, and CAS-writes `validated` plus `validated_at` or the applicable deterministic/transient outcome; it never acquires its own lease or increments attempts. Only a successful terminal CAS and its after-commit path request projection.
+- `complete` commits `staging→validating`; its after-commit callback invokes `GraphV2ValidationRunService` from section 8.3. That service—not `ValidateGraphV2Import`—locks the row, increments `validation_attempts`, issues/stores the token hash and lease, resets the delivery claim to null, and dispatches the encrypted single-try job with key `graph-import:{id}:{attempt_generation}:validation:{validation_attempts}`. `AcquireGraphV2ValidationRun` is only the delayed/reconciliation wrapper around that same service. At entry `ValidateGraphV2Import` must win the one-shot null-to-timestamp delivery-claim CAS; only that winner streams the two passes, heartbeats with its supplied token at the exact cadence in section 8.3, and CAS-writes `validated` plus `validated_at` or the applicable deterministic/transient outcome. It never acquires its own lease or increments attempts, and a duplicate same-token delivery is a successful no-op. Only a successful terminal CAS and its after-commit path request projection.
 - `GraphV2LifecycleProjectionMapper` validates every producer-authored flow/flow-step against its base edge, structure, stage, count, and completeness records, then maps it one-to-one into Neo4j properties. It does not traverse the graph, infer membership, assign stages, or recompute backbone roles.
-- `Neo4jGraphV2Schema` idempotently creates single-property uniqueness constraints on the server-generated `namespace_key` for `CanonicalNode`, `CanonicalLifecycleFlow`, and `CanonicalLifecycleStep`, plus range indexes on `(project_id,source_scope_type,source_scope_id,projection_version)` for all three labels. `namespace_key` is SHA-256 JCS of those four namespace values plus public ID. The initializer command runs before the first v2 projection and verifies every expected constraint/index by name; application validation remains authoritative for relationships.
-- `CanonicalGraphProjectionService` retains its existing candidate/lease/active-pointer orchestration and calls v2 services for v2 imports.
+- `Neo4jGraphV2Schema` idempotently creates single-property uniqueness constraints on the server-generated incarnation-aware `namespace_key` for `CanonicalNode`, `CanonicalLifecycleFlow`, and `CanonicalLifecycleStep`, plus range indexes beginning with `(project_id,source_scope_type,source_scope_id,projection_version,projection_incarnation_id)` for all three labels. It verifies complete named definitions and supports only the explicit Task 5→Task 6 forward upgrade described in section 9.4; application validation remains authoritative for relationships.
+- `CanonicalGraphProjectionService` retains its existing candidate/lease/active-pointer orchestration and calls v2 services for v2 imports. Every reference write starts in `GraphArtifactReferenceLock`. A successful head CAS captures its exact values and emits one `CanonicalGraphV2ProjectionActivated` only after commit; failed, stale/no-op, already-active, and rolled-back paths emit none.
 - `CanonicalGraphRepository` resolves only the exact active v2 projection for v2 API calls; no repository/workspace fallback.
 - `DashboardGraphExplorerService` implements the protocol in section 10.
 - `DashboardGraphSearchSnapshot` owns the bounded session/project/projection-bound vector candidate cache; cursors never access it without validating the enclosing graph context.
-- `GraphQueryController` exposes the same v2 semantics to the service-gated Hades plugin; vector search may rank graph handles but topology comes only from the current projection.
-- `GraphMaintenanceService` gates only graph import/query/UI routes. `hades:graph-v2:maintenance --global|--project=... --on --reason=... --ttl=SECONDS` returns a one-time token; `--off --token=... --require-neo4j-healthy` closes it. Non-graph project/backend features remain available.
-- `VerificationQueueService` creates/deduplicates/stales work and returns bounded counts.
-- `QueueGraphVerificationRequests` listens only after a projection-head CAS publishes v2; `QueueWikiVerificationRequest` listens only after a Wiki current-revision CAS. Both dispatch the coalesced reconciliation job after commit. `ReconcileVerificationQueue` takes optional project/binding/domain filters, uses one unique queue key per project/binding/domain, and calls the same service. `routes/console.php` schedules graph projection reconciliation every minute, verification reconciliation every five minutes, and graph cleanup hourly with `withoutOverlapping()` and one-server locking.
-- `VerificationCompletionService` validates a structured result and applies the domain result in the same PostgreSQL transaction that completes the work item.
-- `GraphVerificationOverlayService` never mutates an artifact. It creates version-bound overlays and requests a coalesced new projection.
-- `WikiVerificationService` retains its current full-content, revision-CAS, and claim-to-evidence ledger for `verified`; it gains explicit `contradicted` and `deferred` resolution paths.
-- Export/retire/restore commands are thin argument/confirmation adapters. `GraphV1ExportService`, `GraphV1RetirementService`, and `GraphV1RestoreService` implement sections 14.2–14.4 through existing graph models, `ArtifactStorageService`, the persistent retirement state machine, and a project/scope-filtered Neo4j repository; they do not issue unscoped deletes or restores.
+- Dashboard, plugin, and Hades `GraphQueryController` adapters all call the same principal-aware v2 service. Vector search may rank graph handles, but topology comes only from the exact current projection. No controller accepts client-supplied principal/scope fields.
+- `GraphMaintenanceService` gates only graph import/query/UI routes and graph mutations. A project read/mutation lease acquires shared global then shared project PostgreSQL session advisory locks on dedicated connections and holds them through the complete callback, including Neo4j/object-store I/O. Global begin/end acquires exclusive global; project begin/end acquires shared global then exclusive project. Begin writes the active row while locks remain held; later readers/writers acquire and reject. Same-scope nesting is reentrant; scope widening or cross-project nesting fails. `hades:graph-v2:maintenance --global|--project=... --on --reason=... --ttl=SECONDS` returns a one-time token; `--off --token=... --require-neo4j-healthy` closes an unbound window. Export/retirement/restore instead use only the section 9.1 typed, generation-fenced `MaintenanceAuthority`; raw authority tokens never enter receipts, manifests, logs, jobs, or the database. Non-graph project/backend features remain available.
+- Every graph read holds `withinReadLease()` across context resolution and the complete Neo4j read. Import upload/finalization, validation acquisition/execution/CAS, desired-head writes, projection/reconcile/operator retry, graph-reference writers, schema mutation, namespace cleanup, artifact cleanup, and every `ArtifactStorageService` deletion path hold `withinMutationLease()` before external access. Maintenance deferral consumes no validation/projection attempt. Only `withinCutoverSchemaLease()` may bypass availability, and only for an unexpired raw token matching an active global `reason=cutover` row.
+- `ArtifactStorageMaintenanceGuard` is called inside `ArtifactStorageService` before every public delete, replace, move-overwrite, and cleanup mutation, not merely by selected callers. Global backup rejects every destructive storage mutation; a bound project retirement/restore authority permits only manifest-selected graph keys for its exact project and stage. Immutable creation is allowed only when the destination is absent or byte-identical. A static architecture test rejects raw destructive filesystem/object-store calls outside `ArtifactStorageService` and the scoped restore adapter. `GraphArtifactInventoryService` streams deterministic records `{relative_key,bytes,etag|null,sha256}`, rejects traversal/duplicate keys, verifies every PostgreSQL-reachable graph key, permits unrelated extras, and fails on a missing or mismatched reachable object. Backup, scoped export, retirement, and restore all call this one inventory path.
+- `GraphArtifactReferenceLock`, its invocation guard, the fail-closed reachability aggregator, and the three fixed concrete providers implement the retention contract above. `AppServiceProvider::register()` contains one tag call listing each currently implemented provider exactly once plus one `giveTagged()` binding; this is an internal closed set, not plugin discovery.
+- `AgentWorkItemStateService` is the single locked state/version mutation path used by existing dashboard/plugin/server writers and new verification code; every create begins at one and every committed claim/lease/result/status/terminal change increments once.
+- `VerificationScopeLock` requires an open transaction and acquires `pg_advisory_xact_lock(hashtextextended(key,0))` for canonical key `hades:verification:v2:{project_id}:{workspace_binding_id}`. `VerificationQueueService` creates/deduplicates/stales work and returns bounded `VerificationSummary` counts. It reads candidate import IDs, enters the outer reference lock, takes the scope lock, then locks/revalidates domain rows.
+- `WikiRevisionService` performs the current-revision CAS and emits `WikiCurrentRevisionActivated` after commit. `QueueGraphVerificationRequests` and `QueueWikiVerificationRequest` are registered through `Event::listen()` in `AppServiceProvider::boot()`. Events are wake-ups rather than trusted snapshots: listeners reread the actual projection head and current Wiki revision. A graph activation dispatches Wiki freshness as well as graph reconciliation; a Wiki event delayed across a graph change evaluates the new source. Current `needs_verification` queues, matching-source certification is quiet, stale certification queues only when active=desired, active!=desired queues nothing, and both-null is unavailable. Matching duplicates coalesce, and the periodic sweep runs the same rules for lost-event liveness.
+- `ReconcileVerificationQueue` takes optional project/binding/domain filters and one unique queue key per scope/domain. `routes/console.php` schedules graph projection reconciliation every minute, verification reconciliation every five minutes, graph cleanup hourly, and verification-history cleanup hourly with `withoutOverlapping()` and one-server locking.
+- `VerificationCompletionService` validates/canonicalizes result bytes and builds all potentially slow graph/Wiki drafts before acquiring any graph-import, scope, head, or domain lock. It then uses one outer reference lock and the fixed scope/head/work/request/domain row order to revalidate source currency, apply the already-built draft, and complete the item in one bounded PostgreSQL transaction. `HadesAuthenticatedPrincipal` is constructible only from authenticated middleware attributes; even identical-result replay repeats agent/device/project/binding/capability authorization and the same lock path. `VerificationCompletion` is the closed response DTO.
+- `GraphVerificationOverlayService::prepareDraft()` performs artifact reads, locator/evidence checks, and deterministic derivation outside locks; `commitDraftWithinCurrentTransaction()` performs bounded DB-only revalidation/inserts with the supplied guard. It never mutates an artifact or reacquires the outer lock. A committed overlay writes exact desired/projection membership provenance and requests a coalesced projection only after completion commits.
+- `WikiRevisionService` and `WikiVerificationService` have the same prepare/commit split through immutable `WikiRevisionDraft`. Markdown/evidence/digest/ledger construction and source reads happen before locks; the commit path is DB-only, consumes the guard when source is available, preserves full content/current-revision CAS, and writes immutable normalized claims/evidence for `verified|contradicted`. `deferred` creates no Wiki revision. The legacy direct Hades Wiki verify mutation route/client/CLI action is removed; queue completion is the only automated verification write.
+- `VerificationRetentionService` applies the 90-day whole-retry-chain algorithm above; `CleanupVerificationHistory` is its bounded operator/scheduler adapter.
+- Export/retire/restore commands are thin argument/confirmation adapters. `GraphV1ExportService`, `GraphV1RetirementService`, and `GraphV1RestoreService` implement sections 14.2–14.4 only through typed bound maintenance authority, existing graph models, guarded `ArtifactStorageService`, the persistent export/retirement/restore state machines, and a project/scope-filtered Neo4j repository. They do not issue unscoped deletes/restores, close ordinary maintenance directly, or trust a recovered raw token.
 
 ## 10. Dashboard Graph API v2
 
@@ -1644,6 +1813,15 @@ Keep the existing authenticated endpoint:
 ```text
 POST /projects/{project}/graph/query
 ```
+
+Expose the identical closed query/result protocol through the existing service-gated machine surfaces:
+
+```text
+POST /api/plugin/v1/graph/query
+POST /api/hades/v1/graph/query
+```
+
+The Hades route requires the existing project-scoped `project_inspection` capability; graph verification work separately requires `verify_project_graph`. The authenticated token/agent/device/workspace-binding records determine the caller principal, project, and scope. Those values are forbidden in the body because the query schema has `additionalProperties:false`. Remove `GET /api/hades/v1/graph/traverse`, its controller, capability/health/OpenAPI advertisement, Agent caller, memory-plugin fallback, and every v1 response adapter. A missing v2 route is an explicit compatibility/deployment error, never permission to synthesize topology from memory.
 
 Every request uses:
 
@@ -1666,7 +1844,7 @@ Every success response uses:
     "state": "ready",
     "completeness": "partial",
     "generated_at": "ISO-8601",
-    "source_label": "Carnovali workspace"
+    "source_label": "Project workspace"
   },
   "data": {}
 }
@@ -1685,7 +1863,7 @@ search, detail, neighborhood, impact, path
 
 ### 10.1 Handles, cursors, and closed DTOs
 
-Entity handles and cursors are opaque base64url JCS payloads signed with the same HMAC service as `graph_context`; raw public IDs are returned only inside `technical_summary` when the caller explicitly sets `include_technical=true`. A handle contains exactly `v=2`, `type=node|edge|entrypoint|flow|branch_group|collapsed_group`, `public_id`, project ID, scope type/ID, projection version, and expiry. A cursor contains exactly `v=2`, query type, project/scope/projection, `filters_sha256`, last stable sort tuple, nullable `search_snapshot_id`, and expiry. Both expire with their graph context. Invalid signature/type/filter returns `422 graph_handle_invalid` or `graph_cursor_invalid`; a valid token for an inactive projection returns `409 graph_context_stale`.
+Entity handles and cursors are opaque base64url JCS payloads signed by the exact-context HKDF key from section 9.3; raw public IDs are returned only inside `technical_summary` when the caller explicitly sets `include_technical=true`. A handle contains exactly `{v:2,type,public_id,project_id,scope_type:"workspace_binding",scope_id,projection_id,projection_version,expires_at}`. A cursor contains exactly `{v:2,query_type,project_id,scope_type:"workspace_binding",scope_id,projection_id,projection_version,filters_sha256,last_sort_tuple,search_snapshot_id,expires_at}`. Principal fields are not duplicated because the derived key already binds the exact principal/context. Both expire no later than their graph context. Invalid signature/type/filter/tuple shape returns `422 graph_handle_invalid` or `graph_cursor_invalid`; a valid token for an inactive incarnation returns `409 graph_context_stale`.
 
 Pagination order is fixed and never score-unstable:
 
@@ -1943,6 +2121,8 @@ Server-side and client-side filters are both mandatory:
 - the verification worker allows only those two kinds;
 - status and quality reports aggregate Kanban and verification separately.
 
+`work_kind=verification` is a list-only aggregate filter alias that expands server-side to the exact stored kinds `hades.verification.graph.v1|hades.verification.wiki.v1`. It is never stored in `agent_work_items`, never appears in a payload, and is rejected on show, claim, heartbeat, complete, retry, or generic worker dispatch. Cursor identity includes the normalized two-kind filter set, so a cursor minted for `verification` cannot be replayed with one exact kind or with `general`. Contract tests freeze alias expansion, authorization, pagination, cursor mismatch, and the prohibition on mutating endpoints.
+
 ### 11.2 Work payload
 
 The payload schema is `hades.verification_work.v1`:
@@ -1984,7 +2164,7 @@ The payload schema is `hades.verification_work.v1`:
 }
 ```
 
-`source_snapshot` is a discriminated union: available has exactly `{state:"available",artifact_graph_version:"64-hex",tree_sha256:"64-hex"}`; unavailable has exactly `{state:"unavailable",artifact_graph_version:null,tree_sha256:null}`. Graph work always uses available. Wiki items use `kind=hades.verification.wiki.v1`, target type `wiki_page`, target ID equal to page ID, and target version equal to the exact current revision ID. The Wiki revision metadata must carry its originating `workspace_binding_id`; that binding selects the current active v2 artifact, or unavailable when none exists. There is one Wiki item per page/revision/source snapshot, not one per claim. With unavailable source it can complete only as deferred `source_unavailable`. A legacy/current revision lacking an authorized originating binding creates no item and records reconciliation diagnostic `wiki_workspace_binding_missing`; the service never guesses among project bindings.
+`source_snapshot` is a discriminated union: available has exactly `{state:"available",artifact_graph_version:"64-hex",tree_sha256:"64-hex"}`; unavailable has exactly `{state:"unavailable",artifact_graph_version:null,tree_sha256:null}`. Graph work always uses available. Wiki items use `kind=hades.verification.wiki.v1`, target type `wiki_page`, target ID equal to page ID, and target version equal to the exact current revision ID. The Wiki revision's normalized `workspace_binding_id` column selects the current active v2 artifact, or unavailable when none exists. There is one Wiki item per page/revision/source snapshot, not one per claim. A verifiable revision has 1–80 normalized claims; zero claims records `wiki_no_verifiable_claims`, and 81–512 records `wiki_page_requires_split`, with no work item. With unavailable source it can complete only as deferred `source_unavailable`. A legacy/current revision lacking an authorized originating binding creates no item and records reconciliation diagnostic `wiki_workspace_binding_missing`; the service never guesses among project bindings. These diagnostics use the existing audit logger and are coalesced under the locked page/revision; no diagnostic invents a completed/deferred queue row.
 
 A Wiki work payload is exactly:
 
@@ -2034,10 +2214,13 @@ For graph requests, `assertion_fingerprint` is the uncertainty fingerprint. For 
 
 Queue creation is event driven:
 
-- after a graph projection becomes active, `VerificationQueueService` upserts one item for every current artifact uncertainty, reconciles Wiki pages still needing verification against the new source snapshot, and stales queued/claimed/running graph or Wiki items bound to older artifact/source versions;
+- after a graph projection becomes active, `VerificationQueueService` upserts one item for every current artifact uncertainty, reconciles Wiki certification freshness against the new source snapshot, and stales only live items whose exact target/source is no longer current;
 - after a Wiki revision with `source_status=needs_verification` becomes current, the service upserts one page/revision item and stales queued/claimed/running items for older revisions;
-- after a Wiki revision becomes `verified_from_code`, `developer_provided`, or `conflict_with_code`, no new item is created for that revision;
+- a current `verified_from_code|conflict_with_code` revision is quiet only while its normalized certification source import equals the locked current source import; a different current source makes certification `stale`, visible to the user, and queues one page/revision/source item. `developer_provided` remains human-owned and does not auto-queue;
+- when active and desired graph imports differ, reconciliation starts no new Wiki verification against either snapshot; the next projection-activation event/sweep retries after publication. Derived certification freshness is exactly `current|stale|unavailable`;
 - periodic reconciliation repeats both upserts idempotently so a transient event failure cannot lose work.
+
+`ReconcileVerificationQueue` serializes only scalar project/binding/domain/phase/target values, implements `ShouldBeUniqueUntilProcessing`, has three broker tries with backoff `[10,30]`, hard timeout 60 seconds, and `uniqueFor=240`. Its exact unique ID is `verification-reconcile:{project_id}:{workspace_binding_id}:{domain}`; phase and target hints never enter identity, so listener, sweep, and continuation wake-ups for one scope/domain coalesce. Each execution commits at most 250 upserts or stale transitions and dispatches its same-key continuation only after commit; the lock has already released on processing start, and a five-minute sweep recovers a lost/coalesced continuation from durable state. Graph pages select durable uncertainty-index public IDs in indexed order, then call `GraphV2ArtifactReader::recordsByPublicIds()` for at most that page and verify every stored chunk/ordinal locator. It never depends on disposable validation tables or holds locks while loading a complete artifact. A binding-less operator command expands authorized concrete bindings outside transactions; it never creates a null lock key or one transaction spanning bindings.
 
 Reconciliation first opens a transaction, locks the complete request chain for the exact project/binding/domain/target/version/source/assertion fingerprint, reports `verification_chain_live_conflict` without mutation if more than one live `queued|claimed|running` row exists, and otherwise evaluates **only** the row with maximum `attempt_generation`. Historical generations never block or revive the latest generation. The latest-row state table is normative:
 
@@ -2158,7 +2341,7 @@ The Wiki payload is exactly:
 }
 ```
 
-Markdown is UTF-8 NFC, at most 512 KiB, and its digest covers exact UTF-8 bytes. The revision metadata stores a closed `WikiClaimDto` ledger; each record has exactly:
+Markdown is UTF-8 NFC, at most 512 KiB, and its digest covers exact UTF-8 bytes. `wiki_revisions.content_sha256` stores the digest and the normalized `wiki_verification_claims` table stores the closed `WikiClaimDto` ledger returned by APIs; each record has exactly:
 
 ```json
 {
@@ -2194,7 +2377,12 @@ lease expiry → existing release/reclaim policy, with an expiry event
 
 - Claim verifies agent/device registration, project membership, workspace binding, requested work kind, and target currency.
 - The existing server lease duration remains authoritative. The verification worker heartbeats every 30 seconds and also before starting completion; if the server reports less than 15 seconds remaining, it heartbeats before running another evidence operation. A lost/rejected heartbeat aborts the specialist and never submits a result.
-- Completion first canonicalizes the submitted result and computes `result_digest=SHA-256(JCS(result))`, then locks the work item and verification request in one transaction. If the item is already `completed`, it compares the digest before any lease check: identical returns HTTP 200 with the previously stored canonical result; different returns `409 verification_result_conflict`. This idempotent replay works after the original lease has expired.
+- A local specialist is additionally bounded by two parent-owned monotonic deadlines measured from `Process.start()`: a 900-second hard deadline and a 300-second meaningful-progress deadline. Meaningful progress is only a child-ready envelope, successful skill resolution, completed model turn, completed tool call, or final result envelope, each carrying a strictly increasing sequence number. Heartbeats, log/stdout activity, partial streaming, and tool-start notifications do not reset either deadline. The hard deadline never resets; meaningful progress resets only the 300-second deadline. Expiry stops future server heartbeats, emits the local reason `specialist_hard_deadline` or `specialist_progress_deadline`, invokes the process-tree teardown below, and sends no completion/failure/retry mutation. The same CLI invocation must not reclaim that work-item ID; later invocations rely on the authoritative lease and ten-attempt policy.
+- A specialist cannot execute until it is inside a mandatory OS containment provider and the server has CAS-created its global specialist fence. Linux uses a delegated cgroup-v2 subtree; Windows uses a kill-on-close Job Object; Darwin uses a run-scoped container with its own PID namespace. A launcher child starts blocked, the parent attaches it to the domain, calls the authenticated fence-start endpoint with a hash of the opaque containment ID, receives a one-time 256-bit fence token (hash stored), and only then releases the child to construct `AIAgent`. If no supported provider is available, `work` returns `specialist_containment_unavailable` before claim/model execution. Descendants cannot escape the domain; terminal tools may not use host PID namespace, privileged mode, nested container sockets, daemonization, or detach.
+- The parent still tracks `(pid,create_time)` identities and progress, but teardown is authoritative at the containment-domain boundary. On every normal exit, cancellation, exception, deadline, or `KeyboardInterrupt`, it sets cancellation/calls public `interrupt()` and waits 10 seconds, terminates the whole domain, waits 5 seconds, kills the whole domain, waits 5 seconds, joins/closes IPC, and asks the provider to prove the domain empty/destroyed. A zero-exit valid result may clear the server fence with its one-time token only after that proof. Any abnormal exit first CAS-marks the already-active server fence `quarantined`; even if that notification fails, the existing active fence remains globally blocking. It may clear only after a later explicit containment proof using the same fence token, or an authenticated human-admin clearance that records host/device/domain evidence. Claim/reclaim/lease-expiry handling on every host rejects `active|quarantined`; the attempts counter does not advance while fenced.
+- If domain emptiness cannot be proved, the parent leaves the server fence active/quarantined and atomically writes a mode-0600 `$HERMES_HOME/run/hades-verification-<scope-hash>.quarantine.json` containing only work-item/fence IDs, local reason, containment kind/ID hash, and unresolved identities. The next local invocation checks both server and local quarantine before list/claim and cannot delete either merely because a PID disappeared. PID reuse is never evidence. A crashed parent cannot strand an unfenced specialist because server fencing precedes launcher release; a remote profile/host cannot reclaim while that fence exists.
+- Completion canonicalizes the submitted result, computes `result_digest=SHA-256(JCS(result))`, validates source/evidence, and builds the complete immutable graph/Wiki draft outside every reference/scope/head/domain lock. It then pre-reads the draft's complete import-ID set. For an available source, the transaction enters `GraphArtifactReferenceLock`, scope lock, projection-head lock, then work/request/domain rows. It requires `active_graph_import_id == desired_graph_import_id == draft.base_graph_import_id`; overlay-source imports may differ only by an exactly equal artifact version and remain separately referenced. A valid Wiki `source_unavailable` completion has an empty set, may be only deferred, requires both active and desired import IDs null under the head lock, and opens an ordinary transaction without a guard. Any source/import/head difference aborts with `verification_source_changed`; it never adds an incremental lock. Commit methods perform DB-only work and consume the same guard. No source/artifact/object-store/model I/O occurs while locks are held.
+- If the item is already `completed`, an identical stored digest returns HTTP 200 with the previous canonical result without another domain write, but only after reconstructing the server-authenticated principal, repeating token/agent/device/project/binding/capability authorization, and traversing the same locked current-chain path. A different digest returns `409 verification_result_conflict`. This authorized idempotent replay works after the original lease expired; it is never an unauthenticated fast path.
 - Only `claimed|running` may perform a first completion. For those states the service rechecks lease, project, binding, artifact/revision, and source snapshot. `queued` returns `409 verification_not_claimed`; `failed|canceled|stale` returns `409 verification_item_terminal` and applies nothing.
 - A superseded graph artifact or Wiki revision makes queued/claimed/running work stale. In the same transaction, the backend clears the claim/lease fields, writes the stale event, and prevents later completion. Stale completion is rejected without applying evidence.
 - On first success, the service computes JCS bytes/digest before JSONB encoding; `agent_work_items.result` and `verification_requests.result` receive semantically equal JSONB values, and both `result_digest` columns receive that same JCS digest in the same transaction. PostgreSQL JSONB is not claimed to preserve byte order/whitespace. Domain effects, resolution/resolved time, queue completion state, and audit event commit in that transaction. A transaction test rejects one-sided, JSONB-unequal, or digest-divergent storage.
@@ -2213,6 +2401,8 @@ For graph work:
 
 In the effective graph, a verified or contradicted overlay removes its base uncertainty from the unresolved set and queue-visible unresolved counts; it remains queryable in audit with `verification_state=verified|contradicted`, result/evidence, and immutable base assertion. A deferred result creates no overlay, leaves `verification_state=needs_verification`, and remains counted as unresolved even though its work attempt is terminal. All affected `CountKnowledge` values are recalculated from effective records without upgrading the immutable completeness capability.
 
+Overlay eligibility is semantic-artifact scoped, not import-row scoped. A byte-identical reimport with the same `artifact_graph_version` may reuse an overlay only after server revalidation of the exact assertion/public IDs; desired/projection membership then stores the new `base_graph_import_id` and the original `overlay_source_graph_import_id`. A different artifact version never inherits an overlay implicitly. This preserves useful verification without confusing evidence provenance or artifact retention.
+
 The server, not the client, builds the stored overlay with schema `hades.graph_overlay.v1` and exactly these fields: `schema`, `artifact_graph_version`, `uncertainty_id`, `assertion_fingerprint`, `operation`, nullable `subject_edge_id`, sorted `promoted_edge_ids`, sorted `suppressed_edge_ids`, sorted `suppressed_node_ids`, sorted `suppressed_structure_ids`, sorted `target_node_ids`, sorted `effective_edge_ids`, sorted `effective_structure_ids`, nullable `effective_entrypoint_handler_node_id`, `evidence_digest`, and `result_digest`. `subject_edge_id` equals the immutable uncertainty subject for every edge-target semantic kind and is null for `call_target`, regardless of operation. For verified `resolve_candidate_set`, `target_node_ids` is derived from the worker-selected promoted invocation/candidate edges **before** companion expansion and `effective_edge_ids` is the promoted expanded closure; both are empty for its contradicted form. For `resolve_call_targets|resolve_edge_targets`, target nodes equal the validated result targets and effective edges are every newly derived target/invocation/return edge. For rejection all target/effective arrays are empty. `effective_entrypoint_handler_node_id` is non-null exactly for a verified semantic `entrypoint_handler` resolution—including `resolve_candidate_set`—and equals its single effective target. Every promoted or derived effective edge/structure view has `uncertainty_id=null`; the immutable base audit record is unchanged. Base referenced IDs must exist in the claimed immutable artifact; effective edge/structure IDs and all array closures are rederived and verified by the server using the rules above.
 
 Structure arrays are not inferred by generic orphan detection. A contradicted complete multi-candidate set places its assertion-exclusive base `dynamic_dispatch` group in `suppressed_structure_ids`; verified selection leaves `suppressed_structure_ids=[]` and places that same base group in `effective_structure_ids` with the agent-verified evidence view, even when only one candidate remains promoted. A verified non-complete multi-target resolution places its newly derived dynamic group in `effective_structure_ids`. One-target non-complete resolution and rejection leave both arrays empty. Projection removes only explicitly suppressed groups and otherwise follows these effective IDs. The overlay object—including `suppressed_structure_ids`—participates in `verification_set_hash`, count deltas, JSON Schema/golden vectors, and projection retry identity.
@@ -2221,11 +2411,13 @@ Structure arrays are not inferred by generic orphan detection. A contradicted co
 
 For Wiki work, `deferred` leaves the page `needs_verification` and records only the resolution attempt. A `verified|contradicted` completion performs this exact immutable-revision transaction:
 
-1. Lock the page/current revision and require it still equals the claimed source revision; allocate a new revision ULID.
+1. Under the completion transaction's existing import guard, lock the page/current revision and require it still equals the claimed source revision; allocate a new revision ULID.
 2. Copy the exact NFC Markdown, content digest, each locator, and each `normalized_text`. Recompute **every** claim fingerprint with the section 11.3 formula using the new revision ID; copied old fingerprints are forbidden.
 3. Translate each result classification/evidence mapping from the claimed ledger to the new ledger by the exact key `(ordinal,byte_start,byte_end,normalized_text)`, requiring a total one-to-one match. Store the original result and old fingerprints unchanged only on the verification-request/work-item audit records.
-4. Write the new revision as `verified_from_code` for a fully supported result or `conflict_with_code` when at least one claim is contradicted. Its metadata includes `verification_source_revision_id=<claimed revision ULID>`, the recomputed ledger, translated evidence mapping, and result digest.
-5. CAS the page's current revision from the claimed ID to the new ID in the same verification-completion transaction.
+4. Write the new revision as `verified_from_code` for a fully supported result or `conflict_with_code` when at least one claim is contradicted. Store `verification_source_revision_id`, result digest, recomputed normalized claim rows, translated evidence mapping, and normalized graph references; no duplicate ledger copy becomes a second source of truth.
+5. CAS the page's current revision from the claimed ID to the new ID in the same verification-completion transaction. `WikiRevisionService` captures the successful page/revision pair and emits `WikiCurrentRevisionActivated` only after commit. Its listener always rereads the page's actual current revision and the locked graph projection head: `needs_verification` queues the current source snapshot; `verified_from_code|conflict_with_code` stays quiet only when its normalized certification source equals that current snapshot; a differing current source marks certification stale and queues exactly that new source. A stale event for a superseded revision is therefore harmless, but an event delayed across a graph change cannot suppress required re-verification.
+
+`CanonicalGraphV2ProjectionActivated` also dispatches Wiki-freshness reconciliation after commit. It locks and rereads the actual projection head plus current Wiki revision, and marks/queues a certified current revision only when `active_graph_import_id == desired_graph_import_id` and that import differs from the stored certification source. While active and desired differ it queues nothing; when both are null freshness is `unavailable`. The periodic sweep executes the same two reread algorithms, so event loss and either delivery order converge to the same state without a certification loop.
 
 Full content, `content_truncated=false`, revision CAS, and claim-to-evidence coverage remain mandatory. Golden tests prove every new fingerprint validates against the new revision ID and that a stale CAS writes neither revision, ledger, evidence, nor completed work state.
 
@@ -2245,6 +2437,8 @@ Normal `hades backend sync` fetches only this bounded read-only summary:
 
 Sync caches and displays the counts plus the next command. It does not list full payloads, claim work, run a model, inject a synthetic user message, or alter the conversation system prompt. Failure to fetch the summary is fail-open for ordinary sync and is reported as a backend warning.
 
+`verification_high_priority` counts only live queued verification requests whose request priority is `high|critical` (transport `high|urgent`). It excludes low/normal, non-queued/terminal work, and generic urgent Kanban work. Sync requests the summary for every linked project/binding even when no graph projection exists; optional projection version validates graph counts but never suppresses source-unavailable Wiki counts.
+
 Add these exact CLI commands:
 
 ```text
@@ -2256,9 +2450,11 @@ hades backend verification work --all
 hades backend verification retry WORK_ITEM_ID --reason "HUMAN_REASON"
 ```
 
-Common options are `--domain all|graph|wiki`, `--status`, `--priority`, `--limit`, and `--json`. `--once` processes at most one item. `--all` pages until `next_cursor=null`, but still claims and completes one item at a time and rechecks target currency before every claim. `retry` is an explicit mutation requiring an authenticated human project admin, a 1–500 byte reason, a selected work item with status `failed|canceled` or `completed` plus result verdict `deferred`, and a still-current target/source snapshot. The command calls `POST /api/hades/v1/agent-work-items/{item}/retry-verification`; agent/device tokens alone cannot invoke it.
+Common options are `--domain all|graph|wiki`, `--status`, `--priority`, `--limit`, and `--json`. `--once` processes at most one item. `--all` pages until `next_cursor=null`, but still claims and completes one item at a time and rechecks target currency before every claim. `retry` is an explicit mutation requiring a 1–500 byte reason, a selected work item with status `failed|canceled` or `completed` plus result verdict `deferred`, and a still-current target/source snapshot. It calls `POST /api/plugin/v1/agent-work-items/{item}/retry-verification` with a separate unbound API token carrying `verification.retry`; the token owner must be a current project Admin. Hades auto-issued device credentials never receive this scope. The CLI requires an interactive confirmation and loads only `backend.human_admin_token_env_key`; it never falls back to the worker token, and workers/skills never call retry.
 
-The endpoint locks the selected item's entire exact request chain and applies this algorithm. If latest is live `queued|claimed|running`, return `409 verification_retry_existing_live`. If latest is the selected eligible terminal row, create generation `latest+1` linked to latest. If latest is `stale`, the selected row is an eligible terminal ancestor, and this exact A target/source is current again, the human retry coalesces with A→B→A reactivation: create generation `latest+1` linked to the latest stale row and record the admin reason plus selected ancestor ID in the audit event. In every other selected-non-latest case return `409 verification_retry_not_latest`; a stale selected item is never itself retry-eligible. Creation writes both retry FKs and the new deduplication generation atomically. Reconciliation and this endpoint use the same chain lock/unique key, so a race creates exactly one successor; the loser returns the existing-live conflict rather than another generation.
+The endpoint rejects device-bound tokens and performs authorization plus a read-only pre-read of selected/latest IDs, current target/source identity, and the complete candidate import set before acquiring any mutable domain lock. For a nonempty set it then enters `GraphArtifactReferenceLock`; a still-current source-unavailable Wiki target opens an ordinary transaction and constructs no guard. Both retry and reconciliation use this single total order: verification scope advisory lock; exact projection-head row; complete work/request chain in ascending `(attempt_generation,id)`; then later overlay/Wiki/domain rows. The available-source path takes the outer reference lock before that order; the source-unavailable path starts directly at the scope lock. Neither path acquires an import/reference lock after a scope/head/domain lock.
+
+Under those locks, the service rereads the selected row, latest chain row, current target/source, head, and complete import set. Any difference from the pre-read aborts the whole transaction with `409 verification_source_changed`; the caller may restart only from outside all locks, never by incrementally widening or retrying under a domain lock. If latest is live `queued|claimed|running`, return `409 verification_retry_existing_live`. If latest is the selected eligible terminal row, create generation `latest+1` linked to latest. If latest is `stale`, the selected row is an eligible terminal ancestor, and this exact A target/source is current again, human retry coalesces with A→B→A reactivation: create generation `latest+1` linked to the latest stale row and record the admin reason plus selected ancestor ID in the audit event. In every other selected-non-latest case return `409 verification_retry_not_latest`; a stale selected item is never itself retry-eligible. Creation writes both retry FKs and the new deduplication generation atomically. Reconciliation takes the identical lock order and unique key, so a race creates exactly one successor; the loser rereads and returns the existing-live conflict rather than another generation.
 
 Add project-scoped capability `verify_project_graph`. Preserve `verify_project_wiki`. Admin user authentication may authorize management, but agent/device capability and project/binding checks still apply to automated claim/complete calls.
 
@@ -2279,7 +2475,7 @@ Update the existing `hades-wiki-verify` and `hades-wiki-push` skills.
 
 For Wiki work, after claim and before specialist execution, `hades_verification_worker.py` calls the existing authenticated Wiki show/read API through `hades_backend_client.py` with page ID, exact target revision ID, and `full=true`. The typed response used by the worker has exactly `page_id`, `revision_id`, `workspace_binding_id`, `source_status`, full `content_markdown`, `content_sha256`, `content_truncated`, and the exact sorted claim ledger. The worker requires page/revision/binding to match the claim, `content_truncated=false`, content digest equality, and the current source snapshot from the work item; mismatch/later revision aborts specialist output and lets reconciliation/stale CAS handle it.
 
-The Wiki specialist receives that immutable read snapshot, re-reads source evidence, and returns only `hades.verification_result.v1`. It MUST NOT call the legacy/direct `wiki verify` mutation, edit the page, or update source status. The sole write is the verification complete endpoint, which applies Wiki revision/evidence and work-item completion atomically as section 11.5 requires. Direct invocation of `hades-wiki-verify` routes the user to `hades backend verification work --domain wiki`; any retained legacy manual verification command is a separate human-only path and is never called by the queue worker. Tests change the current revision after show but before completion and prove that no Wiki revision, ledger, or completed work state is written.
+The Wiki specialist receives that immutable read snapshot, re-reads source evidence, and returns only `hades.verification_result.v1`. It MUST NOT edit the page or update source status. The sole write is the verification complete endpoint, which applies Wiki revision/evidence and work-item completion atomically as section 11.5 requires. Direct invocation of `hades-wiki-verify` routes the user to `hades backend verification work --domain wiki`. The legacy direct Wiki verify backend route, client method, CLI subcommand, action branch, skill fallback, and tests are removed completely; there is no retained human or automated bypass. Tests change the current revision after show but before completion and prove that no Wiki revision, ledger, evidence, or completed work state is written.
 
 No new core model tool is added. The feature is CLI + skill + already service-gated Hades backend plugin surface.
 
@@ -2287,7 +2483,7 @@ No new core model tool is added. The feature is CLI + skill + already service-ga
 
 The existing `hades-wiki-push` path remains the creator; no second Wiki generator is introduced. When a project has no current Wiki pages, `hades-wiki-push` runs in bootstrap mode and proposes this fixed initial page set only when evidence exists: `Overview`, `Architecture`, `Entrypoints and lifecycles`, `Domain and data`, `External integrations`, and `Operations`. It reads the current v2 graph first, then current project memory/Wiki context for terminology; vector retrieval may locate evidence but cannot certify a claim.
 
-Every created page stores full Markdown intended for a human: title, short purpose, prose sections, tables/lists where useful, and source-relative links. Machine metadata (claim fingerprints, graph handles, source fingerprints, source snapshot, evidence ledger, generator version) is stored in the existing revision metadata JSON and is not dumped into visible Markdown. A generated factual page is `needs_verification`; only the queue workflow above can promote it. Pages with no evidence are omitted rather than filled with speculation. Re-running bootstrap updates by revision CAS and stable page slug, never creates duplicate titles, and never overwrites `developer_provided` content without an explicit human-approved edit path.
+Every created page stores full Markdown intended for a human: title, short purpose, prose sections, tables/lists where useful, and source-relative links. Machine data is not dumped into visible Markdown: claim fingerprints/locators live in `wiki_verification_claims`, graph/source references in `wiki_graph_artifact_references`, binding/digest on `wiki_revisions`, and evidence in normalized reference rows. `generator_metadata` contains only bounded generator name/version, source snapshot descriptors, and page-template identifier—never claim ledgers, source excerpts, graph blobs, prompts, or model reasoning. A generated factual page has 1–80 claims and `needs_verification`; exactly one request covers the complete revision ledger, never one request per claim. Pages with no evidence are omitted rather than filled with speculation. Re-running bootstrap updates by revision CAS and stable page slug, never creates duplicate titles, and never overwrites `developer_provided` content without an explicit human-approved edit path.
 
 ## 12. Hades Agent implementation map
 
@@ -2483,7 +2679,7 @@ uv.lock
 tests/test_project_metadata.py
 ```
 
-Add exactly `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, and `tree-sitter-python==0.25.0` to the mandatory project dependencies. They are not an optional extra and are never lazy-installed. The four grammar wheels total less than 1 MB on supported macOS and Linux platforms and avoid role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary. No grammar may be downloaded at graph-index runtime. The TypeScript wheel's `language_tsx` factory is mandatory and canary-tested alongside `language_typescript`.
+Add exactly `jsonschema==4.26.0`, `tree-sitter==0.26.0`, `tree-sitter-javascript==0.25.0`, `tree-sitter-typescript==0.23.2`, `tree-sitter-php==0.24.1`, `tree-sitter-python==0.25.0`, and `filelock==3.24.3` to the mandatory project dependencies. They are not optional extras and are never lazy-installed. The four grammar wheels total less than 1 MB on supported macOS and Linux platforms and avoid role-specific installation states; a PM-only agent pays only that disk cost because parser loading and the canary occur exclusively at the explicit graph-index boundary. No grammar may be downloaded at graph-index runtime. The TypeScript wheel's `language_tsx` factory is mandatory and canary-tested alongside `language_typescript`.
 
 Before indexing any supported source language, the graph producer runs a real in-memory parse canary for every detected supported language. A missing package, missing grammar, incompatible parser, or failed canary is an installation failure and blocks graph publication; it is never reported as a partial graph. After the canary passes, a parse failure confined to one ordinary source file produces a typed per-file partial coverage event and indexing continues. Tests assert the exact dependency pins, absence of a `hades-indexer` extra/lazy group, all supported canaries, global fail-fast behavior, and per-file partial behavior.
 
@@ -2511,8 +2707,8 @@ Required changes:
 - Source-slice priority becomes entrypoint root, middleware/security/input, branch/unresolved points, domain/data/integration, then tests.
 - Gnothi never marks a partial graph fully current or falls back to v1 structures.
 - The benchmark fixture includes more than 5,000 nodes, 10,000 edges, and 500 routes and asserts either full chunked delivery or explicit partial reasons.
-- The memory plugin removes graph v1 schemas from `GRAPH_ARTIFACT_SCHEMAS`. `_local_graph_artifacts()` selects the exact active/current v2 artifact by project, binding, source identity, and artifact version; it never deduplicates by schema alone.
-- Vector retrieval can return candidate graph handles but calls the exact v2 graph query for topology.
+- `HadesBackendClient` replaces v1 `GET graph/traverse` with `POST graph/query` carrying exactly the closed v2 query body; its typed response requires protocol/context/completeness fields. Client-supplied project/scope/principal fields, 404 fallback, and v1 response adaptation are forbidden.
+- The memory plugin removes graph v1 schemas and every local/repository topology fallback. It may retain upload/cache bookkeeping for the producer, but callers/dependencies/lifecycle/impact/path come only from the backend's active v2 projection. Vector retrieval can return candidate graph handles and must resolve topology through the exact v2 query.
 
 ### 12.5 Verification client and worker
 
@@ -2544,10 +2740,14 @@ Exact behavior:
 - `hades_verification_worker.py` implements claim, heartbeat, specialist execution, result validation, and complete for one item at a time.
 - Work-item client list/claim methods accept kind, project/repository, binding, priority, status, cursor, and limit. Completion accepts typed `result`.
 - Generic plugin task and worker paths exclude verification work twice: request filter and local payload check.
-- The local SQLite work-item cache adds `workspace_binding_id`, `subject_type`, `subject_id`, `subject_version`, `deduplication_key`, `priority`, `lease_expires_at`, `result_json`, `remote_state_version`, and `remote_updated_at`. A response with a lower version is ignored; an equal version must be JSON-semantically equal for all cached remote fields or is logged as `verification_cache_version_conflict` and ignored. A greater version may apply only a server-valid transition. `queued→claimed→running` and live→terminal are normal. `claimed|running→queued` is accepted only at a greater version with remote claim/lease fields cleared (the lease-expired reclaim); any `completed|failed|canceled|stale` row can never regress at any later response. Human retry/reactivation uses a new work-item row. Tests deliver list responses out of order around claim, heartbeat, lease reclaim, and completion and prove terminal state cannot regress.
+- The local SQLite work-item cache uses idempotent `add_column_if_missing` for `workspace_binding_id TEXT`, `subject_type TEXT`, `subject_id TEXT`, `subject_version TEXT`, `deduplication_key TEXT`, `priority TEXT`, `execution_attempts INTEGER NOT NULL DEFAULT 0`, `lease_expires_at TEXT`, `result_json TEXT`, `remote_state_version INTEGER NOT NULL DEFAULT 0`, and `remote_updated_at TEXT`, with indexes supporting project/binding/kind/state/version lookups. Opening an old database twice is harmless. A response with a lower version is ignored; an equal version must be JSON-semantically equal for all cached remote fields or is logged as `verification_cache_version_conflict` and ignored. A greater version may apply only a server-valid transition. `queued→claimed→running` and live→terminal are normal. `claimed|running→queued` is accepted only at a greater version with remote claim/lease fields cleared (lease-expired reclaim); any `completed|failed|canceled|stale` row can never regress. Wire `canceled` maps to existing local `cancelled` only at this storage boundary. Human retry/reactivation uses a new row.
 - Backend status prints separate `task_work` and `verification_work` sections. Pending verification is actionable, not backend degradation; transport/auth failures are degradation.
 - Quality reports never apply Kanban shared-memory metrics to verification items.
 - Command dispatch implements exactly the commands in section 11.6 and adds no core model tool.
+- `_detect_default_capabilities()` explicitly advertises `verify_project_graph` when the installed Agent supports this workflow, while preserving `verify_project_wiki`; the backend still requires explicit registration/grant and never treats a legacy null capability set as a graph-verification grant.
+- Add mandatory direct dependency `filelock==3.24.3`. Before list/claim, acquire nonblocking `$HERMES_HOME/run/hades-verification-{sha256(profile+project_id+workspace_binding_id)}.lock` and hold it through the entire `--once|--all` run, heartbeat, and completion, releasing in `finally`. A same-profile/scope concurrent process exits `already_running`; the backend lease/CAS remains authoritative across machines.
+- `SkillVerificationSpecialistRunner` uses a fresh child per item; that child creates a fresh `AIAgent` and session ID, resolves exactly the graph or Wiki specialist via `agent.skill_commands.get_skill_commands()`, injects the selected skill plus immutable server work/evidence contract as the user task, and may return only one closed result JSON envelope. It uses configured verification credentials/model and a 40-iteration budget. Heartbeats remain in the parent. The parent enforces the section 11.4 monotonic 900-second hard deadline, 300-second meaningful-progress deadline, strict progress sequence, and no-same-invocation reclaim rule. Before releasing the blocked launcher, it establishes the mandatory Linux cgroup-v2, Windows Job Object, or Darwin run-scoped-container provider and the server-side specialist fence. Teardown kills/proves that whole domain; the server fence blocks every host until explicit proof-backed clear and a local marker is diagnostic only. Unsupported containment fails before claim. Lease/CAS loss or either local deadline sends no completion/failure mutation; a later invocation may rely on the server lease/ten-attempt policy only after both global and local quarantine safety pass. Interactive conversation and cross-item transcript/process state are never reused.
+- Remove `hades backend wiki verify`, `HadesBackendClient.verify_wiki_page()`, and the direct mutation action. Keep read/show operations. Human retry remains a distinct interactive admin-token operation and is never invoked by a worker/skill.
 
 ### 12.6 OpenAPI and Hades documentation
 
@@ -2561,6 +2761,12 @@ docs/backend-agent-coordination.md
 ```
 
 The OpenAPI `PluginAgentWorkItem.payload` becomes a discriminator-based `oneOf` containing the existing Kanban payload and `VerificationWorkPayload`. Add `VerificationResult`, graph import endpoints, chunk contracts, verification filters, and completion result. Remove statements that v1 graph schemas remain valid for the v2 pipeline or that a legacy adapter can feed the current graph.
+
+### 12.7 Standalone Codex plugin
+
+The Codex integration remains a standalone repository at `/Users/gabriele/plugins/hades-backend`, never a directory in Hades Agent and never an edit under `/Users/gabriele/.codex/plugins/cache`. It owns exactly five user-facing skills after this release: the existing backend, Wiki push, and Wiki verify skills plus `hades-graph-explore` and `hades-verify`. Every skill delegates to the separately installed `hades` executable; none implements HTTP, tokens, graph schemas/parsers, claim/retry state, or Wiki mutation itself.
+
+Plugin contract tests parse the manifest and every skill fully, require unique names and nonempty descriptions of at most 60 Unicode code points, reject v1 `graph/traverse`, direct `wiki verify`, private endpoint logic, token literals, and unsupported commands, and permit automatic execution only for same-project read-only status/list/show/query. Publish/install by bumping to a strictly newer `0.2.0+codex.YYYYMMDDHHMMSS` version through the personal marketplace. Because a running Codex task has an immutable skill catalog, installation acceptance occurs in a fresh task and records plugin SHA, source digest, installed version, task ID, and smoke output. If no plugin Git remote exists, commit locally and report that push is unconfigured; never invent a remote.
 
 ## 13. React frontend implementation
 
@@ -2780,24 +2986,26 @@ When a family is incomplete, the card says `Unknown — this part of the graph i
 
 Use this exact order:
 
-1. Create a dedicated backend feature branch and a dedicated local-agent feature branch.
-2. Capture and verify the disaster-recovery dumps and scoped v1 graph export in section 14.2.
-3. Deploy a frontend build whose `/graph` route is an explicit graph-only maintenance screen controlled by `VITE_GRAPH_V2_MAINTENANCE=true`; verify the rest of the site remains active. This build makes no graph API request.
-4. While that screen is active, deploy backend migrations, v2-only ingestion/projection/verification/API, Neo4j v2 constraints, and remove the v1 graph query controller/service from the deployed application. There is no dual-protocol graph endpoint.
-5. Deploy Hades Agent v2 producer, chunk uploader, verification CLI, contracts, and skills.
-6. Import Carnovali from `/Users/gabriele/Dev/sinervis/carnovali/` into project `01KXJD0SV73EBGWKNE2EK3M4KD`, binding `01KXJD1BDMQ2TFABMVJV6EFE8Q`.
-7. Validate artifact, projection, entrypoint list, route lifecycle, search, partial reasons, verification work, and all API contracts while `/graph` still shows maintenance.
-8. Deploy the React Graph Explorer v2 with `VITE_GRAPH_V2_MAINTENANCE=false`; this is the only moment the graph UI becomes available again. Run desktop/mobile/browser acceptance against the ready Carnovali v2 projection.
-9. Keep the scoped v1 export and immediately previous ready v2 namespace during the acceptance/rollback window.
-10. After every acceptance gate passes and the user accepts the result, run the receipt-bound scoped v1 retirement command and verify unrelated data counts.
-11. Merge backend and agent branches to main and push only after final review and tests.
+1. Integrate each independently reviewed task/slice into its current `main`, smoke and push before branching the dependent slice; assemble the release manifest from those exact integrated SHAs without rewriting task history.
+2. In a new server Git worktree, create a uniquely labeled Docker Compose acceptance project with disposable PostgreSQL/Neo4j/Redis/artifact volumes, loopback-only free ports, and no Traefik route; production remains untouched.
+3. Run forward migrations, the real user seeder, token-bound Neo4j schema initialization, and health checks in that isolated stack. Create only run-scoped project/binding/agent/device credentials and a temporary Mac `HERMES_HOME`.
+4. Import a pinned read-only Symfony Demo, interrupt/resume one chunked upload, and validate artifact, projection incarnation, entrypoint lifecycle, search, partial reasons, Wiki/verification work, Agent CLI, Codex plugin, and desktop/mobile UI.
+5. Run every automated gate and fresh review, compare all isolated truth stores, prove production inventory unchanged, and let the user test the loopback frontend through an SSH tunnel.
+6. Revoke all acceptance credentials and remove only run-labeled disposable resources after evidence is sealed. Ask separately whether the reviewed candidate may be promoted to production.
+7. Only after production-promotion approval, prove each current `main` contains the exact reviewed release-manifest SHAs, capture/verify the DR snapshot and scoped v1 export, and deploy a maintenance frontend whose `/graph` makes no graph request.
+8. While production graph maintenance is active, deploy forward migrations, v2-only ingestion/projection/verification/API, token-bound Neo4j schema upgrade, dedicated workers, Hades Agent v2, and finally the React Graph Explorer. There is no dual-protocol route or v1/local fallback.
+9. Run production read-only smoke and unrelated-count/admin-login comparisons; keep scoped v1 export and previous ready data throughout the rollback window.
+10. Ask a second explicit question for v1 retirement. Only an affirmative answer authorizes the receipt-bound scoped `retire-v1 --confirm`; declining preserves rollback data.
+11. Carnovali may be scheduled later as an explicit elapsed/RSS-monitored scale gate. It is not a release blocker and is never modified or logged by this platform work.
+
+The executable release contract is Plan 5's checked-in closed schemas for `hades.graph_v2_release_manifest.v1` plus `hades.graph_v2_production_command_plan.v1`, sealed only after isolated evidence integration, stored outside Git under `/home/ubuntu/graph-v2-release-control/<RUN_ID>/`, and bound by byte SHA-256 in the forward-only driver journal. The release manifest includes an exact absolute-path/SHA-256 executable allowlist. The command plan contains only validated argv arrays and the exact phases `preflight`, `refresh_dr`, `maintenance_frontend`, `migrate`, `neo4j_schema`, `workers_scheduler`, `agent`, `final_frontend`, `smoke`, `retirement_dry_run`, `retirement_confirm`, `status`, and `rollback`; argv may use only closed manifest placeholders or Plan 5's phase-gated, digest-revalidated journal placeholders produced by successful preflight/DR/retirement phases, and the driver uses no shell evaluation or ad-hoc argument construction. Its executable `rollback` phase freezes one mode: before completed retirement it restores exact pre-v2 artifacts and the retained v1 pointer without graph-data restore; after completed retirement and recorded P2 it consumes the sealed scoped v1 export through the forward restore, then restores pre-v2 artifacts. Both modes are resumable under graph maintenance and never perform whole-system DR or down-migrate the schema. Promotion, retirement, and whole-system DR each require their own exact mode-0600, owner-only, non-symlink, single-line approval file through `record-promotion-approval`, `record-retirement-approval`, or `record-dr-approval`. The journal retains only approval digest/timestamp/operator/bindings, never the raw approval. No plan or operator edits that journal manually.
 
 ### 14.2 Required backups
 
 Before any graph retirement or migration that can delete data, create two different backup classes:
 
 - **Disaster recovery only:** create a PostgreSQL custom-format backup and verify `pg_restore -l`; stop the pinned Neo4j 5.26.27 Community service during the graph maintenance window, dump `system` and `neo4j` with `neo4j-admin database dump`, restart it, inspect both archives with `neo4j-admin database load ... --info`, and smoke-restore into a disposable volume using the same image. Snapshot the exact configured filesystem/object-storage disk used by `ArtifactStorageService`; write a key/path, byte-size, ETag-if-available, and SHA-256 inventory and verify a sample plus all graph-reachable objects after restore into a disposable disk/prefix. One common DR manifest binds PostgreSQL, both Neo4j dumps, artifact-storage inventory/snapshot, image versions, timestamps, and every digest. These whole-system backups are never used as an ordinary graph rollback because they could erase unrelated writes made after the dump.
-- **Feature rollback:** run `php artisan hades:graph-v2:export-v1 --project=PROJECT_ULID --output=/backups/PROJECT/v1-graph`. The command exports only project/scope v1 projection rows and attempts through their existing models, referenced graph artifact metadata/blob bytes through `ArtifactStorageService`, graph-search rows, and Neo4j nodes/relationships whose project/scope/version match those rows. It writes newline-delimited JCS records plus a manifest containing table/model family, IDs, counts, source scopes, projection versions, constraints/index metadata, file digests, and one whole-export digest. It also records exact pre-v2 backend/frontend image digests and Git commits plus the Hades Agent commit and installable artifact digest/path. It refuses any record not reachable from the selected project's graph roots.
+- **Feature rollback:** run `php artisan hades:graph-v2:export-v1 --project=PROJECT_ULID --output=/backups/PROJECT/v1-graph`. The command begins or resumes a project `reason=retirement`, owner-kind `v1_export` bound maintenance operation and drains ordinary graph leases before its first capture; it never exports changing v1 state. The forward export state is `prepared→postgres_captured→neo4j_captured→artifacts_captured→sealed→verified`. PostgreSQL capture uses one `REPEATABLE READ` snapshot and streams only project/scope v1 projection rows/attempts, graph-search rows, artifact metadata, active-pointer mappings, and exact IDs. While the same generation-fenced authority remains held, it captures matching Neo4j namespaces and guarded artifact bytes through the common inventory service. It writes newline-delimited JCS records plus a manifest containing export/window/scope/authority generations, snapshot identity, table/model family, IDs, counts, source scopes, projection versions, constraints/index metadata, file digests, and one whole-export digest. It also records exact pre-v2 backend/frontend image digests and Git commits plus the Hades Agent commit and installable artifact digest/path. It refuses anything unreachable or cross-project. A pre-seal failure leaves maintenance active and resumes the same export; after disposable restore marks it `verified`, `completeBoundProjectOperation` closes that export window. Later retirement starts its own bound operation and revalidates that sealed snapshot against the human-approved receipt/current selection.
 - Record timestamp, server, database/image versions, Git commits, file sizes, row/node/relationship counts, and SHA-256 digests for both classes. Validate the scoped export by importing it into disposable PostgreSQL schemas and a disposable Neo4j database/volume and comparing every manifest count/digest. Validate the DR class by restoring all three truth stores—PostgreSQL, Neo4j, and artifact storage—into disposable targets and resolving a retained graph artifact through `ArtifactStorageService`.
 - Retain both classes until the user explicitly accepts v2 and the v1 retirement window closes.
 
@@ -2820,7 +3028,11 @@ docs/operations/disaster-recovery.md
 
 Use an encrypted, content-addressed Restic repository so every hourly snapshot transfers/stores only changed blocks even when a logical dump file is regenerated. Secrets (`RESTIC_PASSWORD_FILE` and remote repository credentials) live only in a root-readable systemd credential/environment file with mode `0600`; schedules, retention, paths, service names, and safety behavior live in `ops/backup/hades-backup.example.yaml`, copied to `/etc/hades-backup/config.yaml`. No credential enters Git or Laravel/Hades normal config.
 
-`hades-backup` acquires `/run/lock/hades-backup.lock`, creates a mode-0700 timestamped staging directory, and captures one consistency set in this exact order: call `php artisan hades:graph-v2:maintenance --global --on --reason=backup --ttl=3600 --json`; hold its one-time raw token only in process memory or a mode-0600 staging file excluded from the manifest; create the PostgreSQL custom-format dump and verify `pg_restore -l`; cleanly stop pinned Neo4j Community; dump `system` and `neo4j`; restart Neo4j and pass the configured health check; call `php artisan hades:graph-v2:maintenance --global --off --token=TOKEN --require-neo4j-healthy`; snapshot/inventory the ArtifactStorageService disk; then write the common JCS manifest and SHA-256 tree. Turning maintenance on before the PostgreSQL snapshot freezes graph heads/imports/overlays while unrelated backend features remain available, so the later Neo4j dump corresponds to retained graph metadata. Any maintenance, Neo4j stop/dump/restart, health, or off-token failure keeps/fails graph maintenance safe, exits nonzero, and requires operator recovery; it never continues with a falsely successful set. Restic snapshots the complete set with tags `hades`, `hourly`, and timestamp, then verifies snapshot presence before deleting staging.
+`hades-backup` acquires `/run/lock/hades-backup.lock`, creates a mode-0700 timestamped staging directory, and captures one consistency set in this exact order: enable global graph maintenance with `reason=backup`, retaining the one-time raw token only in memory or a mode-0600 staging file excluded from the manifest; drain all read/mutation leases; create the PostgreSQL custom-format dump and verify `pg_restore -l`; cleanly stop pinned Neo4j Community; dump `system` and `neo4j`; restart Neo4j and pass health; while maintenance is **still active**, snapshot/inventory the complete configured `ArtifactStorageService` disk/prefix, verify every graph-reachable object against the PostgreSQL snapshot, and write/seal the common JCS manifest plus SHA-256 tree; only after that seal call maintenance off with the raw token and required Neo4j health. Restic then snapshots the sealed complete set with tags `hades`, `hourly`, and timestamp and verifies snapshot presence before deleting staging.
+
+Because the PostgreSQL dump necessarily contains that active backup window while the raw token is intentionally absent, every common manifest binds a random consistency-set ID plus the captured window ID, `reason=backup`, start time, token hash, and captured verification-execution epoch. It may also contain claims/fences whose source process domain is not part of backup truth. After loading a consistency set and before starting any worker/reconciliation, `hades:graph-v2:recover-restored-backup-window` performs the only tokenless recovery permitted anywhere. Under the exclusive global session advisory lock it requires a regular non-symlink owner-only mode-0600 restore-target descriptor that identifies either a disposable rehearsal target or a separately DR-approved target; exact manifest bytes/digest and consistency/window fields; verified PostgreSQL, both Neo4j, and artifact-storage digests; and Neo4j health. It first rotates the singleton verification execution epoch and clears/requeues or exhausts copied older-epoch nonterminal ownership exactly as section 9.1 specifies, then CAS-closes only that captured active backup row and writes bound audit records. Stale source-epoch heartbeat/fence/completion calls fail. A production target without the independently recorded consistency-set-bound DR approval, a different/current window or epoch, digest mismatch, unhealthy store, or replay fails closed. No raw maintenance/fence token is backed up and no generic tokenless maintenance-off/epoch-rotation operation exists.
+
+The active global window is enforced centrally by `ArtifactStorageMaintenanceGuard` inside every destructive `ArtifactStorageService` entry point—delete, replace, move-overwrite, and cleanup—including callers outside graph cleanup. Immutable creation is allowed only at an absent key or when bytes are identical. `GraphArtifactInventoryService` streams deterministic `{relative_key,bytes,etag|null,sha256}` rows, rejects traversal/duplicates, and verifies every graph-reachable object from the PostgreSQL snapshot; extra unreachable bytes are harmless while missing/mismatched reachable bytes fail. A static architecture test rejects direct destructive disk/object-store calls outside the guarded service/scoped restore adapter. Graph maintenance remains active through all three truth-store captures; unrelated non-graph backend features remain available. Any maintenance, lease drain, PostgreSQL verification, Neo4j stop/dump/restart/health, artifact inventory, manifest seal, or off-token failure exits nonzero and leaves graph maintenance fail-safe for operator recovery; it never labels an inconsistent set successful.
 
 The timer uses `OnCalendar=hourly`, `Persistent=true`, `RandomizedDelaySec=300`, and no overlapping run. Retention is exactly 72 hourly, 35 daily, 12 monthly snapshots, applied only after the new snapshot and `restic check` metadata pass; the last known successful snapshot is never pruned by a failed run. The job writes `/var/lib/hades-backup/status.json` atomically with last attempt/success, snapshot ID, per-store digests, duration, and safe failure code; backend operations/status reads it read-only and alerts on more than 90 minutes since success.
 
@@ -2872,27 +3084,28 @@ php artisan hades:graph-v2:retire-v1 --project=PROJECT_ULID --confirm \
 - the project ULID matches exactly;
 - no selected v2 projection or non-graph record would be deleted.
 
-`GraphV1RetirementService` acquires one PostgreSQL advisory lock keyed by project and creates/loads the unique retirement row. Its resumable state machine is exact:
+`GraphV1RetirementService` receives the verified sealed export, revalidates the approved receipt/current selection, and starts or resumes its own `v1_retirement` bound project operation before any delete. Its state machine is exact:
 
-1. `prepared`: persist validated receipt/selection, backup references, pre-v2 deployment metadata, and enable project graph maintenance. Delete only selected v1 Neo4j nodes/relationships in bounded batches, verify zero selected records and unchanged unrelated counts, then commit state `neo4j_deleted`.
-2. `neo4j_deleted`: in one PostgreSQL transaction delete only selected v1 projection/artifact metadata/search rows, preserving blob bytes for retention/backup cleanup; verify selected rows are zero and unrelated/v2 counts unchanged, then commit state `postgres_deleted`.
-3. `postgres_deleted`: rerun manifest/namespace/count checks, record the audit completion, and set `completed`/`completed_at`. Only then disable project graph maintenance.
-4. A process error records safe `last_error`/`failed_at` without moving past the last completed state. Rerunning `--confirm` resumes that state idempotently. It never repeats an already verified destructive step.
+1. `prepared`: persist validated receipt/selection, sealed export/backup references, pre-v2 deployment metadata, window/scope/authority generations, and operation ID. Under `withinAuthorizedMutation`, fenced-mark each selected v1 Neo4j batch started with ordinal/selection/pre-state digest before deletion, record its completion/post-state digest afterward, verify zero selected records and unchanged unrelated counts, then fenced-CAS `neo4j_deleted`.
+2. `neo4j_deleted`: under the same bound authority, fenced-mark the selected PostgreSQL mutation before one transaction deletes only v1 projection/artifact metadata/search rows, preserving blob bytes for retention/backup cleanup; record post-state digest, verify selected rows are zero and unrelated/v2 counts unchanged, then fenced-CAS `postgres_deleted`.
+3. `postgres_deleted`: rerun manifest/namespace/count checks, record audit completion, set `completed`/`completed_at`, then `completeBoundProjectOperation(...requireNeo4jHealthy=true...)` closes maintenance atomically with the verified terminal state.
+4. A process error records safe `last_error`/`failed_at` without moving past the last completed state. After TTL, rerunning `--confirm` calls `resumeBoundProjectOperation` for the exact nonterminal retirement, increments authority generation, rotates the token, and resumes idempotently. A stale owner cannot heartbeat, delete, advance, transfer, or close.
 
-The service never deletes v2 or unrelated data. The project graph route stays in maintenance while state is `prepared|neo4j_deleted|postgres_deleted`, including after a crash. It can leave maintenance only after `completed` or after `GraphV1RestoreService` verifies the scoped restore and marks `restored`. Unreferenced retained blob bytes are eligible for normal reachability cleanup only after the rollback window closes.
+The service never deletes v2 or unrelated data. The project graph route stays in bound maintenance while state is `prepared|neo4j_deleted|postgres_deleted`, including after a crash or token loss. An ordinary off command cannot release it. It can close only after verified `completed`, or transfer to a restore that reaches verified `completed` and then marks the retirement `restored`. Unreferenced retained blob bytes are eligible for normal reachability cleanup only after the rollback window closes.
 
 ### 14.4 Rollback
 
 Before v1 retirement, rollback first activates the graph-only maintenance screen, then redeploys the previous backend/frontend images and repoints to the retained v1 active graph; the graph route is reopened only after its v1 smoke tests pass. A failed v2 candidate needs no data rollback because the active pointer never changes.
 
-After retirement, the exact rollback order is mandatory:
+After retirement, preserve the v2 operator artifact/worktree that contains the restore command; do not deploy it away before restoration completes. The exact rollback order is mandatory:
 
-1. Enable graph-only maintenance for the project and acquire the retirement advisory lock.
-2. Redeploy the exact pre-v2 backend and frontend image digests from the scoped manifest; verify their recorded Git commits. Restore/install the recorded pre-v2 Hades Agent artifact only if an agent-side compatibility smoke requires it.
-3. Run `php artisan hades:graph-v2:restore-v1 --project=PROJECT_ULID --scoped-backup-manifest=... --scoped-backup-sha256=...`. The service imports only scoped records, artifact blobs, search rows, and Neo4j namespaces; it refuses collisions with unrelated/project-v2 records and verifies every count/digest.
-4. Restore and verify the exact v1 active pointer/source-scope mapping captured by the backup.
-5. Run authenticated v1 API, graph query, and desktop/mobile `/graph` smoke tests and compare unrelated project/user/memory/Wiki/Kanban counts.
-6. Mark the retirement `restored`, then and only then reopen `/graph`.
+1. Begin a new project `reason=retirement`, owner-kind `v1_restore` bound operation for a completed retirement, or transfer the still-bound nonterminal retirement to `v1_restore`; validate the exact sealed export/manifest/selection and persist `prepared` in `graph_v1_restores`.
+2. Under `withinAuthorizedMutation`, restore only absent or byte-identical selected artifact objects through the scoped guarded adapter; verify digest/count and fenced-CAS `artifacts_restored`.
+3. Restore only absent or byte-identical scoped PostgreSQL records/search rows; refuse any different collision or v2/unrelated selection and fenced-CAS `postgres_restored`.
+4. Restore only the exact scoped Neo4j namespace, verify counts/digests/unrelated invariants, and fenced-CAS `neo4j_restored`.
+5. Restore and verify the exact v1 active pointer/source-scope mapping captured by the export, then fenced-CAS `pointer_restored`.
+6. Redeploy the exact pre-v2 backend/frontend image digests and verify commits; install the recorded pre-v2 Hades Agent artifact only if required. Run authenticated v1 API, graph query, desktop/mobile `/graph`, Neo4j health, and unrelated project/user/memory/Wiki/Kanban checks; fenced-CAS `smoke_verified`.
+7. Set restore `completed`, mark retirement `restored`, and call `completeBoundProjectOperation(...requireNeo4jHealthy=true...)`; only then reopen `/graph`. A crash resumes the exact forward stage with a rotated authority and never overwrites different bytes.
 
 Whole PostgreSQL/Neo4j/artifact-storage restore is reserved for declared disaster recovery with a global write freeze and explicit human approval; it is never the normal feature rollback.
 
@@ -2929,12 +3142,12 @@ Implementation follows red-green TDD. Each row is a release gate, not an optiona
 | L04 | Staging/projecting data is invisible; `ready+partial` publishes atomically. | projection concurrency tests |
 | L05 | Injected validation/Neo4j failure leaves the old active version fully readable. | failure-injection tests |
 | L06 | Zero is returned only with `absence_verified`; partial families return null/unknown. | API contract tests |
-| L07 | Duplicate projectors/retries are idempotent and cannot steal an active lease. | projection lease tests |
+| L07 | Duplicate deliveries are idempotent; only an expired fenced lease can be reclaimed, every domain retry gets a fresh incarnation, and a late owner cannot publish, delete the winner, or create/recreate records after its own incarnation is retired. | projection lease/Neo4j-fence concurrency tests |
 | L08 | New artifact or overlay creates a new projection version and invalidates old context/cursors without mixing responses. | graph-context tests |
 | L09 | Producer flow membership includes every unique verified-reachable or uncertainty-frontier `(edge, stage_from, stage_to, async_context)` state once, never traverses an uncertain target, and backend projection applies the exact overlay substitution rules. | lifecycle traversal and projection-mapper tests |
 | L10 | Entrypoint/lifecycle/expand/search/detail/impact/path protocol v2 responses match the schema and remain bounded. | dashboard graph controller/service tests |
 | L11 | Gzip wire bytes, single-member/trailing-byte/bomb limits, descriptor order, staging uniqueness/references, and semantic-manifest replay behave exactly as section 8. | import transport/adversarial tests |
-| L12 | A projection generation blocked only after its fourth total attempt is not reconciled again until a new generation or explicit retry. | projection reconcile failure tests |
+| L12 | Four single-delivery domain attempts use fresh rows/incarnations and 10/30/90 delays; a generation blocked only after attempt four is not reconciled again until a new generation or explicit retry. | projection reconcile/queue-runtime tests |
 | L13 | Vector search pages reuse one session/project/projection-bound snapshot and fail cleanly after its TTL; no later page reruns similarity. | dashboard search snapshot tests |
 | L14 | Stale desired-generation jobs cannot publish after a newer artifact/overlay wins the head CAS. | projection concurrency tests |
 | L15 | Graph validation uses two bounded streaming passes, four separately tokenized single-try runs, exact heartbeat CAS, and a reclaimed old worker can never commit. | import validation lease/failure-injection tests |
@@ -2946,14 +3159,14 @@ Implementation follows red-green TDD. Each row is a release gate, not an optiona
 | V01 | Graph and Wiki work payloads contain exact project/binding/target version/question/evidence/dedupe fields and validate against OpenAPI. | local contract + backend request tests |
 | V02 | Identical uncertainty/page revision creates one work item; a new target version creates a new item and stales the old. | dedupe/stale tests |
 | V03 | Cross-project, cross-binding, wrong device, missing capability, or wrong kind claim/complete is rejected. | authorization tests |
-| V04 | Lease, heartbeat, expiry, state-versioned reclaim, and idempotent completion preserve current queue behavior and out-of-order DTOs cannot regress cache state. | worker/backend lease tests |
+| V04 | Lease, heartbeat, expiry, state-versioned reclaim, authorized idempotent completion, and the ten-execution ceiling preserve queue behavior; out-of-order DTOs cannot regress cache state. | worker/backend lease tests |
 | V05 | Free prose cannot complete verification; only a valid structured verdict can. | verification worker tests |
 | V06 | Stale artifact/revision CAS applies no evidence and cannot later issue a second fail completion. | concurrency/worker tests |
 | V07 | Deferred is completed and quiet; it does not requeue until new evidence/version/manual action. | queue/status tests |
 | V08 | Wiki verification keeps the full-content gate, exact source-revision CAS and ledger, then allocates a new immutable revision and recomputes its complete claim ledger. | Wiki service/skill tests |
 | V09 | Graph verification creates immutable overlays; contradicted facts disappear only from a new effective projection and remain auditable. | overlay/projection tests |
 | V10 | Sync fetches/caches/displays counts only; it never claims, invokes a model, or injects conversation messages. | sync/conversation tests |
-| V11 | `work --once` handles at most one item; `--all` paginates one-at-a-time with target recheck. | command/worker tests |
+| V11 | `work --once` handles at most one item; `--all` paginates one-at-a-time with target recheck; heartbeat cannot hide a hung specialist; hard/progress deadlines, mandatory OS containment, and the server fence prevent zombie work, cross-host reclaim, and same-run reclaim. | command/worker containment tests |
 | V12 | Generic Kanban worker cannot claim verification even against a backend that ignores requested filters. | generic worker tests |
 | V13 | Local cache compares remote state versions, accepts only the versioned lease-reclaim transition, rejects equal-version conflicts, and never regresses terminal state. | backend DB/cache tests |
 | V14 | Status/quality separate work domains and capabilities remain project scoped. | status/quality/client tests |
@@ -2961,6 +3174,7 @@ Implementation follows red-green TDD. Each row is a release gate, not an optiona
 | V16 | Wiki verified/contradicted results preserve Markdown/locators/text, reject missing claims, and recompute every fingerprint against the newly allocated revision ID while retaining the old result in audit. | Wiki result adversarial tests |
 | V17 | Graph results cannot inject arbitrary records; node/edge/structure suppression, evidence locators, frontier FlowSteps, entrypoint effective view and materialization gaps are server-derived exactly from the claimed artifact. | graph overlay schema/service tests |
 | V18 | Empty-project Wiki bootstrap creates only evidence-backed human Markdown pages with at most 80 claims each, stores machine metadata separately, is slug/CAS-idempotent, and queues generated claims for verification. | Wiki push job/skill integration tests |
+| V19 | The standalone Codex plugin delegates only to the installed Hades v2 graph and verification CLI, exposes all five skills in a fresh task, and contains no private HTTP/v1/direct-Wiki implementation. | `/Users/gabriele/plugins/hades-backend/tests/test_plugin_contract.py` |
 
 ### 15.4 Frontend
 
@@ -2979,32 +3193,26 @@ Implementation follows red-green TDD. Each row is a release gate, not an optiona
 | U11 | Project/scope/entrypoint/mode changes abort old requests; generation/context guards ignore late responses and stale URL handles are removed. | reducer/hook race tests |
 | U12 | Layout golden fixtures are deterministic; branch expansion preserves existing coordinates and LRU collapse never exceeds 200 canonical nodes. | `lifecycleLayout.test.ts`, reducer/canvas tests |
 
-### 15.5 Live Carnovali gate
+### 15.5 Isolated live acceptance gate
 
-The final live test uses:
-
-```text
-workspace: /Users/gabriele/Dev/sinervis/carnovali/
-project:   01KXJD0SV73EBGWKNE2EK3M4KD
-binding:   01KXJD1BDMQ2TFABMVJV6EFE8Q
-route:     /generale/soggetti-attivi/
-symbol:    AdminControllerBulkDeleteBehavior
-```
+The final acceptance fixture is a pinned, read-only Symfony Demo in a run-labeled disposable Compose project. The frozen fixture preflight requires route `/en/blog/` and symbol `App\\Controller\\BlogController::index`; changing the pinned commit requires updating and reviewing those expectations before execution. Generated project/binding/device identifiers and the temporary Mac `HERMES_HOME` are recorded in the run manifest and must not equal any existing/production identifier. Carnovali is excluded from this gate.
 
 Acceptance requires:
 
 1. Fresh v2 import and chunk upload completes without v1 fallback.
-2. The route is discoverable by URI, meaningful segment, route name, and natural-language query candidate followed by graph resolution.
+2. `/en/blog/` is discoverable by URI, meaningful segment, route name, and natural-language query candidate followed by graph resolution.
 3. Selecting the route shows ordered Symfony lifecycle stages through handler and at least one terminal response/error outcome.
 4. At least one conditional branch can be expanded and both alternatives are represented.
 5. Callers/dependencies/impact are either supported values or honest unknowns; no false zero.
-6. The named symbol is searchable and shows the entrypoint flows that include it when evidence supports membership.
-7. Any unresolved dynamic target creates a visible graph verification item.
+6. `App\\Controller\\BlogController::index` is searchable and shows the entrypoint flows that include it when evidence supports membership.
+7. Any real unresolved dynamic target creates a visible graph verification item; if Symfony Demo has none, an already-reviewed deterministic fixture proves this in a second disposable project rather than injecting a row into Symfony Demo.
 8. A Wiki page still marked `needs_verification` creates or exposes exactly one page/revision item.
 9. `hades backend sync` reports verification counts without processing them.
 10. One graph and one Wiki verification item can be completed end-to-end with valid structured results.
-11. Browser desktop and mobile views have no black screen, 404, dead action, mixed version, or uncaught console error.
-12. PostgreSQL/Neo4j active projection and counts agree with the manifest and unrelated project/user/memory/Wiki/Kanban counts are unchanged.
+11. Hades Agent and all five standalone Codex plugin skills use the same disposable backend project; the plugin delegates only to the v2 CLI.
+12. Browser desktop and mobile views have no black screen, unexpected 401/404/405/500, dead action, mixed version, or uncaught console error.
+13. PostgreSQL/Neo4j/artifact active incarnation and counts/digests agree with the manifest; production resources and unrelated data are unchanged.
+14. Acceptance credentials are revoked before label-scoped teardown, the disposable user seeder/admin login are reverified, and Traefik was never modified.
 
 ## 16. Documentation and operator handoff
 
@@ -3023,7 +3231,7 @@ No entry is written to `LOGBOOK_CARNOVALI` because this is Hades platform work, 
 The work is complete only when all of the following are true:
 
 - every G, L, V, and U acceptance row is automated and green;
-- the live Carnovali gate passes on the deployed backend/frontend;
+- the isolated Symfony Demo gate passes, its run-scoped resources are safely revoked/removed, and production inventory remains unchanged;
 - v2 artifacts and APIs contain no v1 compatibility path;
 - graph and Wiki verification work end-to-end;
 - partial data cannot appear as verified absence;
