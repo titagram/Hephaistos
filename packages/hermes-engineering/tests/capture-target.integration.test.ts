@@ -29,6 +29,7 @@ import type {
 } from "../src/protocol.js";
 
 const roots: string[] = [];
+let fixtureSequence = 0;
 
 const gitEnvironment = {
   ...process.env,
@@ -36,6 +37,8 @@ const gitEnvironment = {
   GIT_AUTHOR_EMAIL: "hermes@example.test",
   GIT_COMMITTER_NAME: "Hermes Test",
   GIT_COMMITTER_EMAIL: "hermes@example.test",
+  GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
   GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
 };
@@ -44,16 +47,16 @@ class FixtureRepo {
   readonly path: string;
   readonly artifactRoot: string;
 
-  constructor(root: string) {
+  constructor(root: string, identity: number) {
     this.path = join(root, "repo");
     this.artifactRoot = join(root, "review-run");
     mkdirSync(this.path);
     mkdirSync(this.artifactRoot, { mode: 0o700 });
     chmodSync(this.artifactRoot, 0o700);
     this.git("init", "-q", "-b", "main");
-    this.write("tracked.ts", "initial\n");
+    this.write("tracked.ts", `initial fixture ${identity}\n`);
     this.git("add", "tracked.ts");
-    this.git("commit", "-q", "-m", "initial");
+    this.git("commit", "-q", "-m", `initial fixture ${identity}`);
   }
 
   git(...args: string[]): string {
@@ -89,7 +92,8 @@ class FixtureRepo {
 const fixtureRepo = (): FixtureRepo => {
   const root = mkdtempSync(join(tmpdir(), "hermes-capture-target-"));
   roots.push(root);
-  return new FixtureRepo(root);
+  fixtureSequence += 1;
+  return new FixtureRepo(root, fixtureSequence);
 };
 
 const request = (repo: FixtureRepo, input: CaptureInput): EngineRequest => ({
@@ -168,7 +172,10 @@ const configureAuthoritativePr = (
   baseSha: string;
   headSha: string;
   wrongSha: string;
+  sourceRootSha: string;
+  authoritativeRootSha: string;
 } => {
+  const sourceRootSha = source.git("rev-list", "--max-parents=0", "HEAD");
   source.git("switch", "-q", "-c", "wrong-pull-7");
   const wrongSha = source.commit("wrong.ts", "wrong repository\n");
   source.git("switch", "-q", "main");
@@ -176,6 +183,11 @@ const configureAuthoritativePr = (
   source.git("remote", "add", "origin", source.path);
 
   const authoritative = fixtureRepo();
+  const authoritativeRootSha = authoritative.git(
+    "rev-list",
+    "--max-parents=0",
+    "HEAD",
+  );
   authoritative.git("switch", "-q", "-c", "maintenance/1.x");
   const baseSha = authoritative.commit("maintenance.ts", "maintenance base\n");
   authoritative.git("switch", "-q", "-c", "pull-7");
@@ -192,6 +204,8 @@ const configureAuthoritativePr = (
     baseSha,
     headSha,
     wrongSha,
+    sourceRootSha,
+    authoritativeRootSha,
     context: {
       url: "https://github.com/owner/repo/pull/7",
       headRefName: "pull-7",
@@ -453,8 +467,14 @@ describe("captureTarget with real Git repositories", () => {
 
   it("uses authoritative PR repository and non-default base context", async () => {
     const repo = fixtureRepo();
-    const { context, baseSha, headSha, wrongSha } =
-      configureAuthoritativePr(repo);
+    const {
+      context,
+      baseSha,
+      headSha,
+      wrongSha,
+      sourceRootSha,
+      authoritativeRootSha,
+    } = configureAuthoritativePr(repo);
     const before = repo.statusPorcelain();
 
     const output = await withFakeGh(repo, context, () =>
@@ -464,6 +484,7 @@ describe("captureTarget with real Git repositories", () => {
     );
 
     expect(repo.statusPorcelain().equals(before)).toBe(true);
+    expect(authoritativeRootSha).not.toBe(sourceRootSha);
     expect(output.headRef).toBe(headSha);
     expect(output.headRef).not.toBe(wrongSha);
     expect(output.baseRef).toBe(baseSha);
