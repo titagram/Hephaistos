@@ -26,7 +26,10 @@ if (sourceFile.parseDiagnostics.length > 0) {
 }
 
 const specifiers = [];
-const literalText = node => (ts.isStringLiteral(node) ? node.text : null);
+const literalText = node =>
+  ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+    ? node.text
+    : null;
 const add = node => {
   const text = node && literalText(node);
   if (typeof text === 'string') specifiers.push(text);
@@ -43,9 +46,11 @@ const visit = node => {
   } else if (
     ts.isCallExpression(node) &&
     node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-    node.arguments.length === 1
+    node.arguments.length >= 1
   ) {
     add(node.arguments[0]);
+  } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+    add(node.argument.literal);
   }
   ts.forEachChild(node, visit);
 };

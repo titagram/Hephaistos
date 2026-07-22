@@ -161,6 +161,31 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
         sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
 
+def test_sync_accepts_declared_package_import_type(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER
+            + "export type Parsed = import('yargs').Argv;\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        """{
+  "repository": "https://github.com/QwenLM/qwen-code.git",
+  "files": ["LICENSE", "src/review.ts"],
+  "importExceptions": {
+    "relative": [],
+    "packages": [{"specifier": "yargs", "dependency": "yargs@17.7.2"}]
+  }
+}
+"""
+    )
+
+    sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
 @pytest.mark.parametrize(
     ("statement", "error"),
     [
@@ -170,6 +195,14 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
         ),
         (
             "export const message = `${import('./outside.js')}`;\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "export const load = () => import(`./outside.js`);\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "export const load = () => import('./outside.js', { with: { type: 'json' } });\n",
             "unallowlisted upstream file src/outside.ts",
         ),
         (
@@ -192,15 +225,22 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
             "import type outside = require('./outside.js');\n",
             "unallowlisted upstream file src/outside.ts",
         ),
+        (
+            "type Outside = import('./outside.js').Outside;\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
     ],
     ids=(
         "dynamic-comments",
         "template-expression",
+        "dynamic-template-literal",
+        "dynamic-import-attributes",
         "import-require",
         "static-comments",
         "export-named-comments",
         "export-star-comments",
         "import-type-require",
+        "import-type-relative",
     ),
 )
 def test_sync_rejects_undeclared_relative_import_syntax(
