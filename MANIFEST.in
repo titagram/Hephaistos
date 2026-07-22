@@ -7,5 +7,10 @@ graft locales
 # below covers the wheel; this covers the sdist. See #34034 / #28149.
 recursive-include plugins plugin.yaml plugin.yml
 recursive-include hermes_cli/hades_graph_v2/contracts *.schema.json
+include third_party/qwen-code/LICENSE
+include third_party/qwen-code/NOTICE
+include third_party/qwen-code/UPSTREAM.json
+recursive-include third_party/qwen-code/packages/cli/src/commands/review *.ts
+recursive-include third_party/qwen-code/packages/cli/src/services review-worktree-lease*.ts
 global-exclude __pycache__
 global-exclude *.py[cod]

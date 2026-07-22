@@ -20,7 +20,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.14"
 authors = [{ name = "Hades Agent" }]
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "third_party/qwen-code/LICENSE"]
 dependencies = [
   # Core — every direct dep is exact-pinned to ==X.Y.Z (no ranges).
   # Rationale: ranges allow PyPI to ship a fresh version of a transitive

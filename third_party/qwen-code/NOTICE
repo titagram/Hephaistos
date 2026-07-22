@@ -1,0 +1,13 @@
+Qwen Code review-engine source slice
+
+Source: https://github.com/QwenLM/qwen-code.git
+Commit: d064bd7dcf98e0255283068a775f6e49d70db8aa
+
+This directory contains only the files listed in UPSTREAM.json: the Qwen Code
+LICENSE, packages/cli/src/commands/review/ TypeScript sources and tests, and
+packages/cli/src/services/review-worktree-lease TypeScript source and test.
+The copied Qwen material is Apache-2.0 licensed; see LICENSE and UPSTREAM.json
+for the exact source paths and content hashes.
+
+Hermes adapter files are separate MIT-licensed code, except for any
+explicitly-attributed Qwen-derived shims recorded in UPSTREAM.json.
