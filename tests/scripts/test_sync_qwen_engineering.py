@@ -161,6 +161,58 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
         sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
 
+@pytest.mark.parametrize(
+    ("statement", "error"),
+    [
+        (
+            "export const load = () => import /* comment */ ('./outside.js');\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "export const message = `${import('./outside.js')}`;\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "import outside = require('./outside.js');\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "import { outside } from /* comment */ './outside.js';\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "export const load = () => import(pathFor('./outside.js'));\n",
+            "unable to safely classify relative import expression",
+        ),
+    ],
+    ids=(
+        "dynamic-comments",
+        "template-expression",
+        "import-require",
+        "static-comments",
+        "unclassified-relative-expression",
+    ),
+)
+def test_sync_rejects_undeclared_relative_import_syntax(
+    tmp_path: Path, statement: str, error: str
+) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER + statement,
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts"]}'
+    )
+
+    with pytest.raises(SyncError, match=error):
+        sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
 def test_resync_removes_only_previously_manifested_files(tmp_path: Path) -> None:
     upstream = make_git_upstream(
         tmp_path,

@@ -148,24 +148,42 @@ def _import_specifiers(source: str) -> list[str]:
 
 
 def _literal_dynamic_import_specifiers(source: str) -> list[str]:
-    """Find ``import('literal')`` calls while ignoring comments and strings."""
+    """Find import expressions without treating fixture strings as code."""
+
+    specifiers, _ = _scan_javascript_code(source, 0)
+    return specifiers
+
+
+def _scan_javascript_code(
+    source: str, index: int, *, stop_at_closing_brace: bool = False
+) -> tuple[list[str], int]:
+    """Lex code conservatively, recursively entering template expressions."""
 
     specifiers: list[str] = []
-    index = 0
     length = len(source)
+    nested_braces = 0
     while index < length:
+        cursor = _skip_javascript_ignored(source, index)
+        if cursor != index:
+            index = cursor
+            continue
         character = source[index]
-        if character == "/" and index + 1 < length:
-            if source[index + 1] == "/":
-                newline = source.find("\n", index + 2)
-                index = length if newline == -1 else newline + 1
-                continue
-            if source[index + 1] == "*":
-                end = source.find("*/", index + 2)
-                index = length if end == -1 else end + 2
-                continue
-        if character in {"'", '"', "`"}:
+        if character in {"'", '"'}:
             index = _skip_javascript_string(source, index)
+            continue
+        if character == "`":
+            nested_specifiers, index = _scan_javascript_template(source, index)
+            specifiers.extend(nested_specifiers)
+            continue
+        if stop_at_closing_brace and character == "}":
+            if nested_braces == 0:
+                return specifiers, index + 1
+            nested_braces -= 1
+            index += 1
+            continue
+        if stop_at_closing_brace and character == "{":
+            nested_braces += 1
+            index += 1
             continue
         if (
             source.startswith("import", index)
@@ -175,26 +193,161 @@ def _literal_dynamic_import_specifiers(source: str) -> list[str]:
                 or not _javascript_identifier_character(source[index + len("import")])
             )
         ):
-            cursor = index + len("import")
-            while cursor < length and source[cursor].isspace():
-                cursor += 1
-            if cursor < length and source[cursor] == "(":
-                cursor += 1
-                while cursor < length and source[cursor].isspace():
-                    cursor += 1
-                if cursor < length and source[cursor] in {"'", '"'}:
-                    specifier, index = _read_javascript_string(source, cursor)
-                    specifiers.append(specifier)
-                    continue
+            imported, index = _scan_import_expression(source, index + len("import"))
+            specifiers.extend(imported)
+            continue
         index += 1
-    return specifiers
+    return specifiers, index
+
+
+def _scan_javascript_template(source: str, index: int) -> tuple[list[str], int]:
+    """Skip template text but lex every ``${...}`` expression as code."""
+
+    specifiers: list[str] = []
+    index += 1
+    while index < len(source):
+        if source[index] == "\\":
+            index += 2
+            continue
+        if source[index] == "`":
+            return specifiers, index + 1
+        if source.startswith("${", index):
+            nested, index = _scan_javascript_code(
+                source, index + 2, stop_at_closing_brace=True
+            )
+            specifiers.extend(nested)
+            continue
+        index += 1
+    return specifiers, index
+
+
+def _scan_import_expression(source: str, index: int) -> tuple[list[str], int]:
+    """Recognize dynamic imports and TypeScript ``import x = require(...)``."""
+
+    cursor = _skip_javascript_ignored(source, index)
+    if cursor < len(source) and source[cursor] == "(":
+        return _scan_literal_import_argument(source, cursor + 1)
+
+    if cursor < len(source) and source[cursor] in {"'", '"'}:
+        return _scan_literal_import_argument(source, cursor)
+
+    identifier_end = _skip_javascript_identifier(source, cursor)
+    if identifier_end == cursor:
+        return _scan_static_import_specifier(source, cursor)
+    cursor = _skip_javascript_ignored(source, identifier_end)
+    if cursor >= len(source) or source[cursor] != "=":
+        return _scan_static_import_specifier(source, cursor)
+    cursor = _skip_javascript_ignored(source, cursor + 1)
+    if not source.startswith("require", cursor) or (
+        cursor + len("require") < len(source)
+        and _javascript_identifier_character(source[cursor + len("require")])
+    ):
+        return _scan_static_import_specifier(source, cursor)
+    cursor = _skip_javascript_ignored(source, cursor + len("require"))
+    if cursor >= len(source) or source[cursor] != "(":
+        return _scan_static_import_specifier(source, cursor)
+    return _scan_literal_import_argument(source, cursor + 1)
+
+
+def _scan_static_import_specifier(source: str, index: int) -> tuple[list[str], int]:
+    """Find ``from 'literal'`` while allowing comments inside declarations."""
+
+    cursor = index
+    while cursor < len(source):
+        cursor = _skip_javascript_ignored(source, cursor)
+        if cursor >= len(source) or source[cursor] == ";":
+            return [], cursor
+        if (
+            source.startswith("from", cursor)
+            and (cursor == 0 or not _javascript_identifier_character(source[cursor - 1]))
+            and (
+                cursor + len("from") == len(source)
+                or not _javascript_identifier_character(source[cursor + len("from")])
+            )
+        ):
+            return _scan_literal_import_argument(source, cursor + len("from"))
+        if source[cursor] in {"'", '"'}:
+            cursor = _skip_javascript_string(source, cursor)
+            continue
+        if source[cursor] == "`":
+            _, cursor = _scan_javascript_template(source, cursor)
+            continue
+        cursor += 1
+    return [], cursor
+
+
+def _scan_literal_import_argument(source: str, index: int) -> tuple[list[str], int]:
+    cursor = _skip_javascript_ignored(source, index)
+    if cursor < len(source) and source[cursor] in {"'", '"'}:
+        specifier, end, closed = _read_javascript_string(source, cursor)
+        if not closed and specifier.startswith("."):
+            raise SyncError("unable to safely classify relative import expression")
+        return [specifier] if closed else [], end
+    if cursor < len(source) and source[cursor] == "`":
+        specifier, end, literal = _read_template_import_argument(source, cursor)
+        if specifier.startswith(".") and not literal:
+            raise SyncError("unable to safely classify relative import expression")
+        return [specifier] if literal else [], end
+    if _relative_looking(source, cursor):
+        raise SyncError("unable to safely classify relative import expression")
+    return [], cursor
+
+
+def _read_template_import_argument(source: str, index: int) -> tuple[str, int, bool]:
+    """Read a template argument only when it contains no interpolation."""
+
+    characters: list[str] = []
+    index += 1
+    while index < len(source):
+        if source[index] == "\\" and index + 1 < len(source):
+            characters.append(source[index + 1])
+            index += 2
+            continue
+        if source[index] == "`":
+            return "".join(characters), index + 1, True
+        if source.startswith("${", index):
+            return "".join(characters), index + 2, False
+        characters.append(source[index])
+        index += 1
+    return "".join(characters), index, False
+
+
+def _relative_looking(source: str, index: int) -> bool:
+    closing_parenthesis = source.find(")", index)
+    expression = source[index:] if closing_parenthesis == -1 else source[index:closing_parenthesis]
+    return "./" in expression or "../" in expression
+
+
+def _skip_javascript_ignored(source: str, index: int) -> int:
+    while index < len(source):
+        if source[index].isspace():
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline == -1 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            return len(source) if end == -1 else _skip_javascript_ignored(source, end + 2)
+        return index
+    return index
+
+
+def _skip_javascript_identifier(source: str, index: int) -> int:
+    if index >= len(source) or not _javascript_identifier_character(source[index]):
+        return index
+    index += 1
+    while index < len(source) and _javascript_identifier_character(source[index]):
+        index += 1
+    return index
 
 
 def _javascript_identifier_character(character: str) -> bool:
     return character.isalnum() or character in {"_", "$"}
 
 
-def _read_javascript_string(source: str, start: int) -> tuple[str, int]:
+def _read_javascript_string(source: str, start: int) -> tuple[str, int, bool]:
     quote = source[start]
     characters: list[str] = []
     index = start + 1
@@ -205,14 +358,14 @@ def _read_javascript_string(source: str, start: int) -> tuple[str, int]:
             index += 2
             continue
         if character == quote:
-            return "".join(characters), index + 1
+            return "".join(characters), index + 1, True
         characters.append(character)
         index += 1
-    return "".join(characters), index
+    return "".join(characters), index, False
 
 
 def _skip_javascript_string(source: str, start: int) -> int:
-    _, end = _read_javascript_string(source, start)
+    _, end, _ = _read_javascript_string(source, start)
     return end
 
 
