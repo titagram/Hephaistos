@@ -87,6 +87,7 @@ describe("parseCaptureInput", () => {
     { kind: "range", range: "" },
     { kind: "pr", number: 0, ownerRepo: "owner/repo" },
     { kind: "pr", number: 1, ownerRepo: "not-a-repository" },
+    { kind: "pr", number: 1, ownerRepo: "owner/repo?redirect=other" },
   ])("rejects an invalid capture input %#", (input) => {
     expect(() => parseCaptureInput(input)).toThrow();
   });

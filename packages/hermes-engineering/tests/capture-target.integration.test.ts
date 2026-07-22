@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -113,6 +113,94 @@ const captureWithoutMutation = async (
 
 const planFor = (output: CaptureTargetOutput): Record<string, unknown> =>
   JSON.parse(readFileSync(output.planPath, "utf8")) as Record<string, unknown>;
+
+interface FakePrContext {
+  url: string;
+  headRefName: string;
+  headRefOid: string;
+  baseRefName: string;
+  baseRefOid: string;
+}
+
+const withFakeGh = async <T>(
+  repo: FixtureRepo,
+  context: FakePrContext,
+  action: () => Promise<T>,
+): Promise<T> => {
+  const bin = join(dirname(repo.path), `fake-gh-${Date.now()}`);
+  const executable = join(bin, "gh");
+  mkdirSync(bin);
+  const expectedArgs = [
+    "pr",
+    "view",
+    "7",
+    "--repo",
+    "owner/repo",
+    "--json",
+    "url,headRefName,headRefOid,baseRefName,baseRefOid",
+  ];
+  writeFileSync(
+    executable,
+    `#!${process.execPath}\n` +
+      `const actual = process.argv.slice(2);\n` +
+      `const expected = ${JSON.stringify(expectedArgs)};\n` +
+      `if (JSON.stringify(actual) !== JSON.stringify(expected)) {\n` +
+      `  process.stderr.write(JSON.stringify(actual));\n` +
+      `  process.exit(2);\n` +
+      `}\n` +
+      `process.stdout.write(${JSON.stringify(JSON.stringify(context))});\n`,
+  );
+  chmodSync(executable, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  try {
+    return await action();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+};
+
+const configureAuthoritativePr = (
+  source: FixtureRepo,
+): {
+  context: FakePrContext;
+  baseSha: string;
+  headSha: string;
+  wrongSha: string;
+} => {
+  source.git("switch", "-q", "-c", "wrong-pull-7");
+  const wrongSha = source.commit("wrong.ts", "wrong repository\n");
+  source.git("switch", "-q", "main");
+  source.git("update-ref", "refs/pull/7/head", wrongSha);
+  source.git("remote", "add", "origin", source.path);
+
+  const authoritative = fixtureRepo();
+  authoritative.git("switch", "-q", "-c", "maintenance/1.x");
+  const baseSha = authoritative.commit("maintenance.ts", "maintenance base\n");
+  authoritative.git("switch", "-q", "-c", "pull-7");
+  const headSha = authoritative.commit(
+    "pull.ts",
+    "authoritative pull request\n",
+  );
+  authoritative.git("switch", "-q", "main");
+  authoritative.git("update-ref", "refs/pull/7/head", headSha);
+
+  const repositoryUrl = "https://github.com/owner/repo.git";
+  source.git("config", `url.${authoritative.path}.insteadOf`, repositoryUrl);
+  return {
+    baseSha,
+    headSha,
+    wrongSha,
+    context: {
+      url: "https://github.com/owner/repo/pull/7",
+      headRefName: "pull-7",
+      headRefOid: headSha,
+      baseRefName: "maintenance/1.x",
+      baseRefOid: baseSha,
+    },
+  };
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -363,22 +451,22 @@ describe("captureTarget with real Git repositories", () => {
     );
   });
 
-  it("fetches a PR head into a disposable worktree and never removes its source checkout", async () => {
+  it("uses authoritative PR repository and non-default base context", async () => {
     const repo = fixtureRepo();
-    repo.git("switch", "-q", "-c", "pull-7");
-    const head = repo.commit("pull.ts", "pull request\n");
-    repo.git("switch", "-q", "main");
-    repo.git("update-ref", "refs/pull/7/head", head);
-    repo.git("remote", "add", "origin", repo.path);
+    const { context, baseSha, headSha, wrongSha } =
+      configureAuthoritativePr(repo);
     const before = repo.statusPorcelain();
 
-    const output = await captureTarget(
-      request(repo, { kind: "pr", number: 7, ownerRepo: "owner/repo" }),
+    const output = await withFakeGh(repo, context, () =>
+      captureTarget(
+        request(repo, { kind: "pr", number: 7, ownerRepo: "owner/repo" }),
+      ),
     );
 
     expect(repo.statusPorcelain().equals(before)).toBe(true);
-    expect(output.headRef).toBe(head);
-    expect(output.baseRef).toBe(repo.git("rev-parse", "main"));
+    expect(output.headRef).toBe(headSha);
+    expect(output.headRef).not.toBe(wrongSha);
+    expect(output.baseRef).toBe(baseSha);
     expect(output.worktreePath).not.toBe(repo.path);
     expect(
       resolve(output.diffPath).startsWith(realpathSync(repo.artifactRoot)),
@@ -387,6 +475,9 @@ describe("captureTarget with real Git repositories", () => {
       resolve(output.planPath).startsWith(realpathSync(repo.artifactRoot)),
     ).toBe(true);
     const diff = readFileSync(output.diffPath);
+    expect(diff.toString("utf8")).toContain("pull.ts");
+    expect(diff.toString("utf8")).not.toContain("maintenance.ts");
+    expect(diff.toString("utf8")).not.toContain("wrong.ts");
     expect(planFor(output)).toMatchObject({
       hermes: {
         schemaVersion: 1,
@@ -394,7 +485,17 @@ describe("captureTarget with real Git repositories", () => {
         targetKind: "pr",
         requestedTarget: { kind: "pr", number: 7, ownerRepo: "owner/repo" },
         baseRef: output.baseRef,
-        headRef: head,
+        headRef: headSha,
+        prContext: {
+          ownerRepo: "owner/repo",
+          number: 7,
+          url: context.url,
+          headRefName: context.headRefName,
+          headSha,
+          baseRefName: context.baseRefName,
+          baseSha,
+        },
+        resolvedIdentity: { baseRef: baseSha, headRef: headSha },
         diffSha256: createHash("sha256").update(diff).digest("hex"),
       },
       diffPathAbsolute: output.diffPath,
@@ -403,5 +504,30 @@ describe("captureTarget with real Git repositories", () => {
     await cleanupCapture(output);
     expect(existsSync(repo.path)).toBe(true);
     expect(existsSync(output.worktreePath!)).toBe(false);
+  });
+
+  it("fails before fetch when gh context does not prove ownerRepo identity", async () => {
+    const repo = fixtureRepo();
+    const { context, wrongSha } = configureAuthoritativePr(repo);
+    const before = repo.statusPorcelain();
+
+    const response = await withFakeGh(
+      repo,
+      { ...context, url: "https://github.com/other/repo/pull/7" },
+      () =>
+        dispatch(
+          request(repo, { kind: "pr", number: 7, ownerRepo: "owner/repo" }),
+        ),
+    );
+
+    expect(repo.statusPorcelain().equals(before)).toBe(true);
+    expect(response).toMatchObject({
+      status: "failed",
+      diagnostics: [{ code: "pr_repository_mismatch" }],
+    });
+    expect(repo.git("rev-parse", "refs/pull/7/head")).toBe(wrongSha);
+    expect(repo.git("worktree", "list", "--porcelain")).not.toContain(
+      ".hermes-review-",
+    );
   });
 });

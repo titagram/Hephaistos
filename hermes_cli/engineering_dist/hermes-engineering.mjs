@@ -875,7 +875,7 @@ function parseCaptureInput(value) {
       throw new TypeError("number must be a positive integer");
     }
     const ownerRepo = requiredString(value, "ownerRepo");
-    if (!/^[^/\s]+\/[^/\s]+$/.test(ownerRepo)) {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(ownerRepo)) {
       throw new TypeError('ownerRepo must look like "owner/repo"');
     }
     return { kind, number: value.number, ownerRepo };
@@ -948,6 +948,14 @@ var gitTextOptional = (cwd, ...args) => {
     return gitText(cwd, ...args);
   } catch {
     return null;
+  }
+};
+var gitSucceeds = (cwd, ...args) => {
+  try {
+    gitText(cwd, ...args);
+    return true;
+  } catch {
+    return false;
   }
 };
 var gitRaw2 = (cwd, ...args) => execFileSync2("git", args, gitOptions(cwd));
@@ -1197,60 +1205,142 @@ var captureRange = (input, repoRoot, runId) => {
     throw cause;
   }
 };
-var remoteDefaultBranch = (repoRoot, remote) => {
-  const advertised = gitText(repoRoot, "ls-remote", "--symref", remote, "HEAD");
-  const match = /^ref:\s+refs\/heads\/([^\t\n]+)\s+HEAD$/m.exec(advertised);
-  if (!match?.[1]) {
+var pullRequestContext = (repoRoot, input) => {
+  let parsed;
+  try {
+    const raw = execFileSync2(
+      "gh",
+      [
+        "pr",
+        "view",
+        String(input.number),
+        "--repo",
+        input.ownerRepo,
+        "--json",
+        "url,headRefName,headRefOid,baseRefName,baseRefOid"
+      ],
+      {
+        cwd: repoRoot,
+        env: process.env,
+        encoding: "utf8",
+        timeout: GIT_TIMEOUT_MS2,
+        maxBuffer: 16 * 1024 * 1024
+      }
+    );
+    parsed = JSON.parse(raw);
+  } catch (cause) {
     throw new CaptureTargetError(
-      "pr_base_unresolved",
-      `could not resolve the default branch for remote ${remote}`
+      "pr_context_unresolved",
+      `could not resolve ${input.ownerRepo}#${input.number} with gh: ${cause.message}`
     );
   }
-  return match[1];
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new CaptureTargetError(
+      "pr_context_unresolved",
+      "gh PR context must be an object"
+    );
+  }
+  const value = parsed;
+  const field = (name) => {
+    const candidate = value[name];
+    if (typeof candidate !== "string" || candidate.length === 0) {
+      throw new CaptureTargetError(
+        "pr_context_unresolved",
+        `gh PR context field ${name} must be a non-empty string`
+      );
+    }
+    return candidate;
+  };
+  const context = {
+    url: field("url"),
+    headRefName: field("headRefName"),
+    headRefOid: field("headRefOid").toLowerCase(),
+    baseRefName: field("baseRefName"),
+    baseRefOid: field("baseRefOid").toLowerCase()
+  };
+  if (!/^[0-9a-f]{40,64}$/.test(context.headRefOid) || !/^[0-9a-f]{40,64}$/.test(context.baseRefOid) || !gitSucceeds(
+    repoRoot,
+    "check-ref-format",
+    `refs/heads/${context.headRefName}`
+  ) || !gitSucceeds(
+    repoRoot,
+    "check-ref-format",
+    `refs/heads/${context.baseRefName}`
+  )) {
+    throw new CaptureTargetError(
+      "pr_context_unresolved",
+      "gh PR context contains an invalid ref name or object ID"
+    );
+  }
+  let actualUrl;
+  try {
+    actualUrl = new URL(context.url);
+  } catch {
+    throw new CaptureTargetError(
+      "pr_repository_mismatch",
+      "gh PR context returned an invalid repository URL"
+    );
+  }
+  const expectedPath = `/${input.ownerRepo}/pull/${input.number}`.toLowerCase();
+  if (actualUrl.protocol !== "https:" || actualUrl.hostname.toLowerCase() !== "github.com" || actualUrl.pathname.replace(/\/$/u, "").toLowerCase() !== expectedPath) {
+    throw new CaptureTargetError(
+      "pr_repository_mismatch",
+      `gh resolved ${context.url}, not ${input.ownerRepo}#${input.number}`
+    );
+  }
+  return context;
+};
+var fetchVerifiedRef = (repoRoot, repositoryUrl, ref, expectedSha, mismatchCode) => {
+  try {
+    gitText(repoRoot, "fetch", "--quiet", "--no-tags", repositoryUrl, ref);
+  } catch (cause) {
+    throw new CaptureTargetError(
+      "pr_fetch_failed",
+      `could not fetch ${ref} from the validated PR repository: ${cause.message}`
+    );
+  }
+  const fetchedSha = resolveCommit(repoRoot, "FETCH_HEAD");
+  if (fetchedSha !== expectedSha) {
+    throw new CaptureTargetError(
+      mismatchCode,
+      `fetched ${ref} at ${fetchedSha}, but gh resolved ${expectedSha}`
+    );
+  }
+  return fetchedSha;
 };
 var capturePullRequest = (input, repoRoot, runId) => {
-  const remote = "origin";
-  if (!gitTextOptional(repoRoot, "remote", "get-url", remote)) {
-    throw new CaptureTargetError(
-      "pr_remote_missing",
-      "Git remote origin is not configured"
-    );
-  }
-  const requestedRef = `refs/pull/${input.number}/head`;
-  const advertised = gitText(repoRoot, "ls-remote", remote, requestedRef);
-  const headRef = advertised.split(/\s+/u)[0];
-  if (!headRef || !/^[0-9a-fA-F]{40,64}$/.test(headRef)) {
-    throw new CaptureTargetError(
-      "pr_head_unresolved",
-      `could not resolve ${input.ownerRepo}#${input.number}`
-    );
-  }
-  gitText(repoRoot, "fetch", "--quiet", "--no-tags", remote, headRef);
-  const fetched = resolveCommit(repoRoot, "FETCH_HEAD");
-  if (fetched !== headRef) {
-    throw new CaptureTargetError(
-      "pr_head_changed",
-      `fetched PR head ${fetched} does not match advertised SHA ${headRef}`
-    );
-  }
-  const baseName = remoteDefaultBranch(repoRoot, remote);
+  const context = pullRequestContext(repoRoot, input);
+  const repositoryUrl = `https://github.com/${input.ownerRepo}.git`;
+  const headRef = fetchVerifiedRef(
+    repoRoot,
+    repositoryUrl,
+    `refs/pull/${input.number}/head`,
+    context.headRefOid,
+    "pr_head_changed"
+  );
+  const baseSha = fetchVerifiedRef(
+    repoRoot,
+    repositoryUrl,
+    `refs/heads/${context.baseRefName}`,
+    context.baseRefOid,
+    "pr_base_changed"
+  );
+  const remoteIdentity = input.ownerRepo;
   const probe = {
-    fetch: (remoteName, ref) => gitTextOptional(
-      repoRoot,
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      remoteName,
-      ref
-    ) !== null,
-    refExists: (ref) => gitTextOptional(repoRoot, "rev-parse", "--verify", "--quiet", ref) !== null,
-    mergeBase: (left, right) => gitTextOptional(repoRoot, "merge-base", left, right)
+    fetch: (remoteName, ref) => remoteName === remoteIdentity && ref === context.baseRefName,
+    refExists: (ref) => ref === `${remoteIdentity}/${context.baseRefName}`,
+    mergeBase: (_left, right) => right === headRef ? gitTextOptional(repoRoot, "merge-base", baseSha, headRef) : null
   };
-  const mergeBase = resolveMergeBase(remote, baseName, headRef, probe);
+  const mergeBase = resolveMergeBase(
+    remoteIdentity,
+    context.baseRefName,
+    headRef,
+    probe
+  );
   if (!mergeBase.sha) {
     throw new CaptureTargetError(
       "pr_base_unresolved",
-      `could not resolve the merge base of ${baseName} and ${headRef}`
+      `could not resolve the merge base of ${context.baseRefName} and ${headRef}`
     );
   }
   const worktreePath = worktreePathFor(repoRoot, runId);
@@ -1269,7 +1359,16 @@ var capturePullRequest = (input, repoRoot, runId) => {
       ),
       worktreePath,
       postImageRoot: worktreePath,
-      skipped: []
+      skipped: [],
+      prContext: {
+        ownerRepo: input.ownerRepo,
+        number: input.number,
+        url: context.url,
+        headRefName: context.headRefName,
+        headSha: context.headRefOid,
+        baseRefName: context.baseRefName,
+        baseSha: context.baseRefOid
+      }
     };
   } catch (cause) {
     removeWorktree(worktreePath);
@@ -1367,6 +1466,13 @@ async function captureTarget(request) {
         requestedTarget: input,
         baseRef: captured.baseRef,
         headRef: captured.headRef,
+        ...captured.prContext ? {
+          prContext: captured.prContext,
+          resolvedIdentity: {
+            baseRef: captured.baseRef,
+            headRef: captured.headRef
+          }
+        } : {},
         diffSha256: createHash("sha256").update(captured.diff).digest("hex"),
         skippedFiles
       },

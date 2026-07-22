@@ -148,7 +148,7 @@ export function parseCaptureInput(value: unknown): CaptureInput {
       throw new TypeError("number must be a positive integer");
     }
     const ownerRepo = requiredString(value, "ownerRepo");
-    if (!/^[^/\s]+\/[^/\s]+$/.test(ownerRepo)) {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(ownerRepo)) {
       throw new TypeError('ownerRepo must look like "owner/repo"');
     }
     return { kind, number: value.number as number, ownerRepo };
