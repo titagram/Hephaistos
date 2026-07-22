@@ -181,6 +181,18 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
             "unallowlisted upstream file src/outside.ts",
         ),
         (
+            "export { outside } from /* gap */ './outside.js';\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "export * from /* gap */ './outside.js';\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
+            "import type outside = require('./outside.js');\n",
+            "unallowlisted upstream file src/outside.ts",
+        ),
+        (
             "export const load = () => import(pathFor('./outside.js'));\n",
             "unable to safely classify relative import expression",
         ),
@@ -190,6 +202,9 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
         "template-expression",
         "import-require",
         "static-comments",
+        "export-named-comments",
+        "export-star-comments",
+        "import-type-require",
         "unclassified-relative-expression",
     ),
 )
