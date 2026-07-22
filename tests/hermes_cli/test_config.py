@@ -131,6 +131,18 @@ class TestLoadConfigDefaults:
                 "test_timeout_seconds": 900,
             }
 
+    def test_managed_negative_review_retention_uses_default(self, tmp_path, monkeypatch):
+        from hermes_cli import managed_scope
+
+        managed = tmp_path / "managed"
+        managed.mkdir()
+        (managed / "config.yaml").write_text("review:\n  retention_runs: -9\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+        managed_scope.invalidate_managed_cache()
+
+        assert load_config()["review"]["retention_runs"] == 30
+
 
 class TestLoadConfigParseFailure:
     """A YAML parse failure must NOT silently fall back to defaults.

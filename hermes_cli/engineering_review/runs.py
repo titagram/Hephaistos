@@ -85,10 +85,8 @@ def _secure_directory(path: Path, *, create: bool = False) -> None:
     if not stat.S_ISDIR(info.st_mode):
         raise ReviewRunError(f"expected directory: {path}")
     _owned_by_current_user(path, info)
-    try:
-        os.chmod(path, 0o700)
-    except OSError as exc:
-        raise ReviewRunError(f"could not secure {path}") from exc
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise ReviewRunError(f"directory is not private: {path}")
 
 
 def _secure_file(path: Path) -> None:
@@ -315,14 +313,42 @@ class ReviewRun:
         ).encode("utf-8")
         self._atomic_write(_METADATA_NAME, encoded, allow_metadata=True)
 
+    def _assert_hierarchy(self) -> Path:
+        """Bind a mutable instance to its current profile-local run root."""
+        run_id = _validate_run_id(self.run_id)
+        session_id = _validate_session_id(self.session_id)
+        home = _canonical_home()
+        session_root = _session_root(home, session_id, create=False)
+        expected_root = session_root / run_id
+        try:
+            supplied_root = Path(self.root)
+        except TypeError as exc:
+            raise ReviewRunError("review run root is invalid") from exc
+        if supplied_root != expected_root:
+            raise ReviewRunError("review run root is outside its canonical hierarchy")
+        _secure_directory(expected_root)
+        return expected_root
+
+    def _validated_loaded(self) -> ReviewRun:
+        """Return the on-disk run only when this instance has its identity."""
+        self._assert_hierarchy()
+        loaded = self.load(self.run_id, self.session_id)
+        if (
+            self.workspace != loaded.workspace
+            or self.target != loaded.target
+            or self.effort != loaded.effort
+        ):
+            raise ReviewRunError("review run identity does not match its metadata")
+        return loaded
+
     def _atomic_write(self, name: str, data: bytes, *, allow_metadata: bool = False) -> Path:
         if not allow_metadata:
             name = _artifact_name(name)
-        _secure_directory(self.root)
-        destination = self.root / name
+        root = self._assert_hierarchy()
+        destination = root / name
         if destination.exists() or destination.is_symlink():
             _secure_file(destination)
-        temporary = self.root / f".{name}.{secrets.token_urlsafe(12)}.tmp"
+        temporary = root / f".{name}.{secrets.token_urlsafe(12)}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -341,7 +367,7 @@ class ReviewRun:
             os.chmod(temporary, 0o600)
             os.replace(temporary, destination)
             os.chmod(destination, 0o600)
-            directory_descriptor = os.open(self.root, os.O_RDONLY)
+            directory_descriptor = os.open(root, os.O_RDONLY)
             try:
                 os.fsync(directory_descriptor)
             finally:
@@ -358,11 +384,12 @@ class ReviewRun:
         """Atomically persist a private artifact directly under this run root."""
         if not isinstance(data, bytes):
             raise TypeError("artifact data must be bytes")
-        return self._atomic_write(_artifact_name(name), data)
+        loaded = self._validated_loaded()
+        return loaded._atomic_write(_artifact_name(name), data)
 
     def mark_complete(self) -> ReviewRun:
         """Transition an active run to its terminal complete state."""
-        loaded = self.load(self.run_id, self.session_id)
+        loaded = self._validated_loaded()
         if loaded.status == "complete":
             return loaded
         if loaded.status != "active":
@@ -439,16 +466,15 @@ def prune_completed_runs(home: Path, keep: int) -> list[Path]:
             # A failed cleanup is a terminal state too: do not repeatedly risk
             # deleting an ambiguous directory on later retention passes.
             try:
-                cleanup_root = tombstone if tombstone.exists() else root
+                if tombstone.exists():
+                    os.replace(tombstone, root)
                 run = ReviewRun._from_metadata(
-                    cleanup_root, run_id=root.name, session_id=root.parent.name
+                    root, run_id=root.name, session_id=root.parent.name
                 )
                 metadata = run._metadata()
                 metadata["status"] = "cleanup_failed"
                 metadata["updated_at"] = _now()
                 run._write_metadata(metadata)
-                if cleanup_root == tombstone:
-                    os.replace(tombstone, root)
             except (OSError, ReviewRunError):
                 pass
             continue

@@ -38,6 +38,27 @@ def test_run_root_is_profile_local_private_and_atomic(fake_home: Path, tmp_path:
     assert not list(run.root.glob(".plan.json.*.tmp"))
 
 
+def test_forged_run_cannot_write_outside_profile_review_root(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    actual = ReviewRun.create(tmp_path, target="local", effort="medium", session_id="s1")
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    forged = ReviewRun(
+        run_id=actual.run_id,
+        root=outside,
+        workspace=actual.workspace,
+        target="local",
+        effort="medium",
+        session_id="s1",
+    )
+
+    with pytest.raises(ReviewRunError, match="hierarchy"):
+        forged.atomic_artifact("escaped.json", b"{}")
+
+    assert not (outside / "escaped.json").exists()
+
+
 def test_load_rejects_wrong_session_and_symlinked_run_root(fake_home: Path, tmp_path: Path) -> None:
     run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
 
@@ -49,6 +70,79 @@ def test_load_rejects_wrong_session_and_symlinked_run_root(fake_home: Path, tmp_
 
     with pytest.raises(ReviewRunError, match="symlink"):
         ReviewRun.load(run.run_id, session_id="s1")
+
+
+def test_load_rejects_metadata_session_mismatch(fake_home: Path, tmp_path: Path) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    metadata_path = run.root / "run.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["session_id"] = "s2"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ReviewRunError, match="session"):
+        ReviewRun.load(run.run_id, session_id="s1")
+
+
+def test_load_rejects_metadata_schema_mismatch(fake_home: Path, tmp_path: Path) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    metadata_path = run.root / "run.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["schema_version"] = 99
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ReviewRunError, match="schema"):
+        ReviewRun.load(run.run_id, session_id="s1")
+
+
+def test_load_rejects_symlinked_metadata_and_artifact(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    metadata_target = tmp_path / "metadata-target.json"
+    metadata_target.write_text("{}", encoding="utf-8")
+    metadata = run.root / "run.json"
+    metadata.unlink()
+    metadata.symlink_to(metadata_target)
+
+    with pytest.raises(ReviewRunError, match="symlink"):
+        ReviewRun.load(run.run_id, session_id="s1")
+
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    artifact_target = tmp_path / "artifact-target.json"
+    artifact_target.write_bytes(b"before")
+    artifact = run.root / "plan.json"
+    artifact.symlink_to(artifact_target)
+
+    with pytest.raises(ReviewRunError, match="symlink"):
+        run.atomic_artifact("plan.json", b"after")
+    assert artifact_target.read_bytes() == b"before"
+
+
+def test_artifact_rejects_mismatched_owner(fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    import hermes_cli.engineering_review.runs as runs_module
+
+    original_owner_check = runs_module._owned_by_current_user
+
+    def reject_run_root(path: Path, info: object) -> None:
+        if path == run.root:
+            raise ReviewRunError("run root is not owned by the current user")
+        original_owner_check(path, info)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runs_module, "_owned_by_current_user", reject_run_root)
+
+    with pytest.raises(ReviewRunError, match="owned"):
+        run.atomic_artifact("plan.json", b"{}")
+    assert not (run.root / "plan.json").exists()
+
+
+def test_artifact_rejects_nonprivate_run_root(fake_home: Path, tmp_path: Path) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="low", session_id="s1")
+    run.root.chmod(0o755)
+
+    with pytest.raises(ReviewRunError, match="private"):
+        run.atomic_artifact("plan.json", b"{}")
+    assert not (run.root / "plan.json").exists()
 
 
 def test_load_rejects_unknown_state_and_root_escape(fake_home: Path, tmp_path: Path) -> None:
@@ -118,6 +212,19 @@ def test_concurrent_pruners_do_not_delete_active_runs(fake_home: Path, tmp_path:
     assert sum(len(result) for result in results) == 2
     assert all(not run.root.exists() for run in completed)
     assert active.root.exists()
+
+
+def test_failed_cleanup_is_preserved_as_terminal_state(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = ReviewRun.create(tmp_path, target="local", effort="medium", session_id="s1").mark_complete()
+    import hermes_cli.engineering_review.runs as runs_module
+
+    monkeypatch.setattr(runs_module.shutil, "rmtree", lambda _: (_ for _ in ()).throw(OSError("disk busy")))
+
+    assert prune_completed_runs(fake_home, keep=0) == []
+    assert run.root.exists()
+    assert ReviewRun.load(run.run_id, session_id="s1").status == "cleanup_failed"
 
 
 @pytest.mark.parametrize("value", [-1, "bad", None])
