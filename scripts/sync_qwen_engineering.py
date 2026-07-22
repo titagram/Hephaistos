@@ -148,7 +148,17 @@ def _tokenize_typescript(
     tokens: list[tuple[str, str]] = []
     nested_braces = 0
     while index < len(source):
-        index = _skip_typescript_ignored(source, index)
+        if source.startswith("//", index) or source.startswith("/*", index):
+            index = _skip_typescript_ignored(source, index)
+            continue
+        if source[index] == "/" and _regular_expression_can_start(tokens):
+            _, index, closed = _read_typescript_regular_expression(source, index)
+            tokens.append(("regular_expression" if closed else "unterminated_regexp", ""))
+            continue
+        skipped = _skip_typescript_ignored(source, index)
+        if skipped != index:
+            index = skipped
+            continue
         if index >= len(source):
             break
         character = source[index]
@@ -303,6 +313,13 @@ def _typescript_identifier_character(character: str) -> bool:
     return character.isalnum() or character in {"_", "$"}
 
 
+def _regular_expression_can_start(tokens: list[tuple[str, str]]) -> bool:
+    if not tokens:
+        return True
+    kind, value = tokens[-1]
+    return kind == "punctuation" and value in {"=", "(", "[", "{", ",", ":", "?", ";"}
+
+
 def _read_typescript_string(source: str, start: int) -> tuple[str, int, bool]:
     quote = source[start]
     characters: list[str] = []
@@ -318,6 +335,35 @@ def _read_typescript_string(source: str, start: int) -> tuple[str, int, bool]:
         characters.append(character)
         index += 1
     return "".join(characters), index, False
+
+
+def _read_typescript_regular_expression(source: str, start: int) -> tuple[str, int, bool]:
+    """Read a regex literal, preserving escapes and character-class boundaries."""
+
+    index = start + 1
+    character_class = False
+    while index < len(source):
+        character = source[index]
+        if character == "\\" and index + 1 < len(source):
+            index += 2
+            continue
+        if character == "[":
+            character_class = True
+            index += 1
+            continue
+        if character == "]":
+            character_class = False
+            index += 1
+            continue
+        if character == "/" and not character_class:
+            index += 1
+            while index < len(source) and _typescript_identifier_character(source[index]):
+                index += 1
+            return "", index, True
+        if character in {"\n", "\r"}:
+            return "", index, False
+        index += 1
+    return "", index, False
 
 
 def _relative_target(origin: str, specifier: str) -> str:

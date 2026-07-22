@@ -228,6 +228,52 @@ def test_sync_rejects_undeclared_relative_import_syntax(
         sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "const matcher = /[/*]/; import('./outside.js');\n",
+        'export const text = `${/[}]/.test(x) ? import("./outside.js") : ""}`;\n',
+    ],
+    ids=("regex-character-class", "regex-in-template-expression"),
+)
+def test_sync_rejects_import_after_regular_expression(tmp_path: Path, statement: str) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER + statement,
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts"]}'
+    )
+
+    with pytest.raises(SyncError, match="unallowlisted upstream file src/outside.ts"):
+        sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
+def test_sync_accepts_division_before_allowlisted_dynamic_import(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER
+            + "const ratio = left / right;\n"
+            + "export const load = () => import('./allowed.js');\n",
+            "src/allowed.ts": HEADER + "export const allowed = true;\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts","src/allowed.ts"]}'
+    )
+
+    sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
 def test_resync_removes_only_previously_manifested_files(tmp_path: Path) -> None:
     upstream = make_git_upstream(
         tmp_path,
