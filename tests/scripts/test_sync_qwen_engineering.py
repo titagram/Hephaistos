@@ -88,6 +88,14 @@ def test_sync_rejects_path_traversal_and_missing_apache_header(tmp_path: Path) -
         validate_allowlist(["../outside.ts"])
     with pytest.raises(SyncError, match="SPDX-License-Identifier: Apache-2.0"):
         validate_typescript_header("export const x = 1")
+    with pytest.raises(SyncError, match="SPDX-License-Identifier: Apache-2.0"):
+        validate_typescript_header(
+            "export const license = 'SPDX-License-Identifier: Apache-2.0';\n"
+        )
+    with pytest.raises(SyncError, match="SPDX-License-Identifier: Apache-2.0"):
+        validate_typescript_header(
+            "export const x = 1;\n// SPDX-License-Identifier: Apache-2.0\n"
+        )
 
 
 def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) -> None:
@@ -132,3 +140,51 @@ def test_sync_requires_declared_import_shims_and_dependencies(tmp_path: Path) ->
     )
     with pytest.raises(SyncError, match="package import 'yargs'"):
         sync(upstream, tmp_path / "rejected", git_head(upstream), allowlist)
+
+
+def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER
+            + "export const load = () => import('./outside.js');\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts"]}'
+    )
+
+    with pytest.raises(SyncError, match="unallowlisted upstream file src/outside.ts"):
+        sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
+def test_resync_removes_only_previously_manifested_files(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/keep.ts": HEADER + "export const keep = true;\n",
+            "src/remove.ts": HEADER + "export const remove = true;\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/keep.ts","src/remove.ts"]}'
+    )
+    destination = tmp_path / "out"
+    sync(upstream, destination, git_head(upstream), allowlist)
+    unmanaged = destination / "operator-note.txt"
+    unmanaged.write_text("do not delete\n")
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/keep.ts"]}'
+    )
+
+    sync(upstream, destination, git_head(upstream), allowlist)
+
+    assert not (destination / "src/remove.ts").exists()
+    assert unmanaged.read_text() == "do not delete\n"

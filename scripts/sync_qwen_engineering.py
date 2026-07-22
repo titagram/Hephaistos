@@ -17,6 +17,10 @@ from pathlib import Path, PurePosixPath
 REPOSITORY = "https://github.com/QwenLM/qwen-code.git"
 MANIFEST_NAME = "UPSTREAM.json"
 APACHE_SPDX = "SPDX-License-Identifier: Apache-2.0"
+HEADER_COMMENT = re.compile(
+    r"\A(?:\ufeff)?(?:[ \t\r\n]+|//[^\n]*(?:\n|$)|/\*.*?\*/)*",
+    re.DOTALL,
+)
 
 
 class SyncError(ValueError):
@@ -83,7 +87,8 @@ def validate_allowlist(entries: object) -> list[str]:
 
 
 def validate_typescript_header(source: str) -> None:
-    if APACHE_SPDX not in source:
+    header = HEADER_COMMENT.match(source)
+    if header is None or APACHE_SPDX not in header.group(0):
         raise SyncError(f"TypeScript source is missing {APACHE_SPDX}")
 
 
@@ -115,7 +120,7 @@ def _read_allowlist(path: Path) -> tuple[list[str], dict[str, list[dict[str, str
 
 
 def _import_specifiers(source: str) -> list[str]:
-    """Return ES module specifiers from declarations, not fixture strings."""
+    """Return static and literal dynamic module specifiers, not fixture strings."""
 
     declarations: list[str] = []
     pending: list[str] = []
@@ -139,7 +144,76 @@ def _import_specifiers(source: str) -> list[str]:
         bare = re.match(r"^\s*import\s*['\"]([^'\"]+)['\"]", declaration)
         if bare:
             specifiers.append(bare.group(1))
+    return specifiers + _literal_dynamic_import_specifiers(source)
+
+
+def _literal_dynamic_import_specifiers(source: str) -> list[str]:
+    """Find ``import('literal')`` calls while ignoring comments and strings."""
+
+    specifiers: list[str] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        character = source[index]
+        if character == "/" and index + 1 < length:
+            if source[index + 1] == "/":
+                newline = source.find("\n", index + 2)
+                index = length if newline == -1 else newline + 1
+                continue
+            if source[index + 1] == "*":
+                end = source.find("*/", index + 2)
+                index = length if end == -1 else end + 2
+                continue
+        if character in {"'", '"', "`"}:
+            index = _skip_javascript_string(source, index)
+            continue
+        if (
+            source.startswith("import", index)
+            and (index == 0 or not _javascript_identifier_character(source[index - 1]))
+            and (
+                index + len("import") == length
+                or not _javascript_identifier_character(source[index + len("import")])
+            )
+        ):
+            cursor = index + len("import")
+            while cursor < length and source[cursor].isspace():
+                cursor += 1
+            if cursor < length and source[cursor] == "(":
+                cursor += 1
+                while cursor < length and source[cursor].isspace():
+                    cursor += 1
+                if cursor < length and source[cursor] in {"'", '"'}:
+                    specifier, index = _read_javascript_string(source, cursor)
+                    specifiers.append(specifier)
+                    continue
+        index += 1
     return specifiers
+
+
+def _javascript_identifier_character(character: str) -> bool:
+    return character.isalnum() or character in {"_", "$"}
+
+
+def _read_javascript_string(source: str, start: int) -> tuple[str, int]:
+    quote = source[start]
+    characters: list[str] = []
+    index = start + 1
+    while index < len(source):
+        character = source[index]
+        if character == "\\" and index + 1 < len(source):
+            characters.append(source[index + 1])
+            index += 2
+            continue
+        if character == quote:
+            return "".join(characters), index + 1
+        characters.append(character)
+        index += 1
+    return "".join(characters), index
+
+
+def _skip_javascript_string(source: str, start: int) -> int:
+    _, end = _read_javascript_string(source, start)
+    return end
 
 
 def _relative_target(origin: str, specifier: str) -> str:
