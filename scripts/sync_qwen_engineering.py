@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 REPOSITORY = "https://github.com/QwenLM/qwen-code.git"
 MANIFEST_NAME = "UPSTREAM.json"
 APACHE_SPDX = "SPDX-License-Identifier: Apache-2.0"
+IMPORT_HELPER = Path(__file__).with_name("qwen_engineering_imports.mjs")
 HEADER_COMMENT = re.compile(
     r"\A(?:\ufeff)?(?:[ \t\r\n]+|//[^\n]*(?:\n|$)|/\*.*?\*/)*",
     re.DOTALL,
@@ -119,251 +120,37 @@ def _read_allowlist(path: Path) -> tuple[list[str], dict[str, list[dict[str, str
     return paths, result
 
 
-def _import_specifiers(source: str) -> list[str]:
-    """Return module specifiers from a conservative TypeScript token stream."""
+def _import_specifiers(source: str, relative: str) -> list[str]:
+    """Extract literal module specifiers with the TypeScript compiler AST."""
 
-    tokens = _typescript_tokens(source)
-    specifiers: list[str] = []
-    for index, token in enumerate(tokens):
-        kind, value = token
-        if kind != "identifier":
-            continue
-        if value == "import":
-            specifiers.extend(_import_specifier_from_tokens(tokens, index + 1))
-        elif value == "export":
-            specifiers.extend(_export_specifier_from_tokens(tokens, index + 1))
-    return specifiers
-
-
-def _typescript_tokens(source: str) -> list[tuple[str, str]]:
-    tokens, _ = _tokenize_typescript(source, 0)
-    return tokens
-
-
-def _tokenize_typescript(
-    source: str, index: int, *, stop_at_closing_brace: bool = False
-) -> tuple[list[tuple[str, str]], int]:
-    """Tokenize code, skipping comments and recursively lexing `${...}` code."""
-
-    tokens: list[tuple[str, str]] = []
-    nested_braces = 0
-    while index < len(source):
-        if source.startswith("//", index) or source.startswith("/*", index):
-            index = _skip_typescript_ignored(source, index)
-            continue
-        if source[index] == "/" and _regular_expression_can_start(tokens):
-            _, index, closed = _read_typescript_regular_expression(source, index)
-            tokens.append(("regular_expression" if closed else "unterminated_regexp", ""))
-            continue
-        skipped = _skip_typescript_ignored(source, index)
-        if skipped != index:
-            index = skipped
-            continue
-        if index >= len(source):
-            break
-        character = source[index]
-        if stop_at_closing_brace and character == "}":
-            if nested_braces == 0:
-                return tokens, index + 1
-            nested_braces -= 1
-            tokens.append(("punctuation", character))
-            index += 1
-            continue
-        if stop_at_closing_brace and character == "{":
-            nested_braces += 1
-        if character in {"'", '"'}:
-            value, index, closed = _read_typescript_string(source, index)
-            tokens.append(("string" if closed else "unterminated_string", value))
-            continue
-        if character == "`":
-            template_tokens, index = _tokenize_typescript_template(source, index)
-            tokens.extend(template_tokens)
-            continue
-        if _typescript_identifier_character(character):
-            end = index + 1
-            while end < len(source) and _typescript_identifier_character(source[end]):
-                end += 1
-            tokens.append(("identifier", source[index:end]))
-            index = end
-            continue
-        tokens.append(("punctuation", character))
-        index += 1
-    return tokens, index
-
-
-def _tokenize_typescript_template(source: str, index: int) -> tuple[list[tuple[str, str]], int]:
-    """Emit a template token and recurse into every interpolation expression."""
-
-    characters: list[str] = []
-    nested_tokens: list[tuple[str, str]] = []
-    literal = True
-    index += 1
-    while index < len(source):
-        if source[index] == "\\" and index + 1 < len(source):
-            characters.append(source[index + 1])
-            index += 2
-            continue
-        if source[index] == "`":
-            kind = "template" if literal else "template_expression"
-            return [(kind, "".join(characters)), *nested_tokens], index + 1
-        if source.startswith("${", index):
-            literal = False
-            expression_tokens, index = _tokenize_typescript(
-                source, index + 2, stop_at_closing_brace=True
-            )
-            nested_tokens.extend(expression_tokens)
-            continue
-        characters.append(source[index])
-        index += 1
-    return [("template_expression", "".join(characters)), *nested_tokens], index
-
-
-def _import_specifier_from_tokens(tokens: list[tuple[str, str]], start: int) -> list[str]:
-    if start >= len(tokens):
-        return []
-    kind, value = tokens[start]
-    if kind in {"string", "unterminated_string", "template", "template_expression"}:
-        return _literal_module_specifier(tokens, start, start + 1)
-    if kind == "punctuation" and value == "(":
-        return _literal_module_specifier(
-            tokens, start + 1, _matching_token(tokens, start, "(", ")")
+    try:
+        completed = subprocess.run(
+            ["node", str(IMPORT_HELPER), relative],
+            input=source,
+            text=True,
+            capture_output=True,
+            check=False,
         )
-
-    end = _statement_end(tokens, start)
-    for index in range(start, end - 2):
-        if tokens[index] != ("punctuation", "="):
-            continue
-        if tokens[index + 1] != ("identifier", "require"):
-            continue
-        if tokens[index + 2] != ("punctuation", "("):
-            continue
-        return _literal_module_specifier(
-            tokens, index + 3, _matching_token(tokens, index + 2, "(", ")")
-        )
-    for index in range(start, end - 1):
-        if tokens[index] == ("identifier", "from"):
-            return _literal_module_specifier(tokens, index + 1, end)
-    return []
-
-
-def _export_specifier_from_tokens(tokens: list[tuple[str, str]], start: int) -> list[str]:
-    end = _statement_end(tokens, start)
-    for index in range(start, end - 1):
-        if tokens[index] == ("identifier", "from"):
-            return _literal_module_specifier(tokens, index + 1, end)
-    return []
-
-
-def _literal_module_specifier(
-    tokens: list[tuple[str, str]], start: int, end: int
-) -> list[str]:
-    if start < end:
-        kind, value = tokens[start]
-        if kind in {"string", "template"}:
-            return [value]
-        if kind in {"unterminated_string", "template_expression"} and value.startswith("."):
-            raise SyncError("unable to safely classify relative import expression")
-    if any(
-        kind in {"string", "unterminated_string", "template", "template_expression"}
-        and value.startswith(".")
-        for kind, value in tokens[start:end]
+    except OSError as error:
+        raise SyncError(f"unable to run TypeScript import helper: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise SyncError(f"TypeScript import helper failed for {relative}: {detail}")
+    lines = completed.stdout.splitlines()
+    if len(lines) != 1:
+        raise SyncError(f"TypeScript import helper emitted invalid output for {relative}")
+    try:
+        response = json.loads(lines[0])
+    except json.JSONDecodeError as error:
+        raise SyncError(f"TypeScript import helper emitted invalid JSON for {relative}") from error
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"specifiers"}
+        or not isinstance(response["specifiers"], list)
+        or not all(isinstance(specifier, str) for specifier in response["specifiers"])
     ):
-        raise SyncError("unable to safely classify relative import expression")
-    return []
-
-
-def _matching_token(
-    tokens: list[tuple[str, str]], start: int, opening: str, closing: str
-) -> int:
-    depth = 0
-    for index in range(start, len(tokens)):
-        if tokens[index] == ("punctuation", opening):
-            depth += 1
-        elif tokens[index] == ("punctuation", closing):
-            depth -= 1
-            if depth == 0:
-                return index
-    return len(tokens)
-
-
-def _statement_end(tokens: list[tuple[str, str]], start: int) -> int:
-    for index in range(start, len(tokens)):
-        if tokens[index] == ("punctuation", ";"):
-            return index
-    return len(tokens)
-
-
-def _skip_typescript_ignored(source: str, index: int) -> int:
-    while index < len(source):
-        if source[index].isspace():
-            index += 1
-            continue
-        if source.startswith("//", index):
-            newline = source.find("\n", index + 2)
-            index = len(source) if newline == -1 else newline + 1
-            continue
-        if source.startswith("/*", index):
-            end = source.find("*/", index + 2)
-            return len(source) if end == -1 else _skip_typescript_ignored(source, end + 2)
-        return index
-    return index
-
-
-def _typescript_identifier_character(character: str) -> bool:
-    return character.isalnum() or character in {"_", "$"}
-
-
-def _regular_expression_can_start(tokens: list[tuple[str, str]]) -> bool:
-    if not tokens:
-        return True
-    kind, value = tokens[-1]
-    return kind == "punctuation" and value in {"=", "(", "[", "{", ",", ":", "?", ";"}
-
-
-def _read_typescript_string(source: str, start: int) -> tuple[str, int, bool]:
-    quote = source[start]
-    characters: list[str] = []
-    index = start + 1
-    while index < len(source):
-        character = source[index]
-        if character == "\\" and index + 1 < len(source):
-            characters.append(source[index + 1])
-            index += 2
-            continue
-        if character == quote:
-            return "".join(characters), index + 1, True
-        characters.append(character)
-        index += 1
-    return "".join(characters), index, False
-
-
-def _read_typescript_regular_expression(source: str, start: int) -> tuple[str, int, bool]:
-    """Read a regex literal, preserving escapes and character-class boundaries."""
-
-    index = start + 1
-    character_class = False
-    while index < len(source):
-        character = source[index]
-        if character == "\\" and index + 1 < len(source):
-            index += 2
-            continue
-        if character == "[":
-            character_class = True
-            index += 1
-            continue
-        if character == "]":
-            character_class = False
-            index += 1
-            continue
-        if character == "/" and not character_class:
-            index += 1
-            while index < len(source) and _typescript_identifier_character(source[index]):
-                index += 1
-            return "", index, True
-        if character in {"\n", "\r"}:
-            return "", index, False
-        index += 1
-    return "", index, False
+        raise SyncError(f"TypeScript import helper emitted invalid schema for {relative}")
+    return response["specifiers"]
 
 
 def _relative_target(origin: str, specifier: str) -> str:
@@ -397,7 +184,7 @@ def _validate_imports(
     for origin, source in sources.items():
         if not origin.endswith(".ts"):
             continue
-        for specifier in _import_specifiers(source):
+        for specifier in _import_specifiers(source, origin):
             if specifier.startswith("."):
                 target = _relative_target(origin, specifier)
                 if target not in allowed and target not in relative:

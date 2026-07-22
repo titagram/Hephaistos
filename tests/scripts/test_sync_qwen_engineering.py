@@ -192,10 +192,6 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
             "import type outside = require('./outside.js');\n",
             "unallowlisted upstream file src/outside.ts",
         ),
-        (
-            "export const load = () => import(pathFor('./outside.js'));\n",
-            "unable to safely classify relative import expression",
-        ),
     ],
     ids=(
         "dynamic-comments",
@@ -205,7 +201,6 @@ def test_sync_rejects_undeclared_literal_dynamic_relative_import(tmp_path: Path)
         "export-named-comments",
         "export-star-comments",
         "import-type-require",
-        "unclassified-relative-expression",
     ),
 )
 def test_sync_rejects_undeclared_relative_import_syntax(
@@ -233,8 +228,21 @@ def test_sync_rejects_undeclared_relative_import_syntax(
     [
         "const matcher = /[/*]/; import('./outside.js');\n",
         'export const text = `${/[}]/.test(x) ? import("./outside.js") : ""}`;\n',
+        "const matcher = () => /[/*]/; import('./outside.js');\n",
+        "const matcher = !/[/*]/.test(value); import('./outside.js');\n",
+        "function load() { return /[/*]/.test(value) ? import('./outside.js') : null; }\n",
+        "function fail() { throw /[/*]/.test(value) ? import('./outside.js') : Error(); }\n",
+        "const matcher = /['\"]/; import('./outside.js');\n",
     ],
-    ids=("regex-character-class", "regex-in-template-expression"),
+    ids=(
+        "regex-character-class",
+        "regex-in-template-expression",
+        "regex-after-arrow",
+        "regex-after-unary",
+        "regex-after-return",
+        "regex-after-throw",
+        "quote-containing-regex",
+    ),
 )
 def test_sync_rejects_import_after_regular_expression(tmp_path: Path, statement: str) -> None:
     upstream = make_git_upstream(
@@ -272,6 +280,44 @@ def test_sync_accepts_division_before_allowlisted_dynamic_import(tmp_path: Path)
     )
 
     sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
+def test_sync_ignores_import_text_in_ordinary_strings_and_comments(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER
+            + 'const fake = "import(\'./outside.js\')";\n'
+            + "// import('./outside.js')\n"
+            + "/* export * from './outside.js'; */\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts"]}'
+    )
+
+    sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
+
+
+def test_sync_fails_closed_when_typescript_cannot_parse_source(tmp_path: Path) -> None:
+    upstream = make_git_upstream(
+        tmp_path,
+        {
+            "LICENSE": "Apache License Version 2.0\n",
+            "src/review.ts": HEADER + "const = ;\n",
+        },
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        '{"repository":"https://github.com/QwenLM/qwen-code.git",'
+        '"files":["LICENSE","src/review.ts"]}'
+    )
+
+    with pytest.raises(SyncError, match="TypeScript import helper failed"):
+        sync(upstream, tmp_path / "out", git_head(upstream), allowlist)
 
 
 def test_resync_removes_only_previously_manifested_files(tmp_path: Path) -> None:
