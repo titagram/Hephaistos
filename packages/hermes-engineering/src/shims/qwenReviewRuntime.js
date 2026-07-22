@@ -1,5 +1,10 @@
 export { buildDiffPlan } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/diff-plan.js";
 export {
+  classifyProbeRun,
+  planTestEfficacy,
+  safeRmWithin,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/test-efficacy.js";
+export {
   LITERAL_PATHSPECS,
   PINNED_DIFF_CONFIG,
   PINNED_DIFF_FLAGS,
@@ -10,3 +15,11 @@ export {
   buildPlanReport,
   stringifyPlanReport,
 } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/report.js";
+export {
+  affectedWorkspaces,
+  buildSetFor,
+  hasUnmodeledWorkspaceGlob,
+  readRootPackage,
+  readWorkspaceGlobs,
+  readWorkspacePackages,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/workspaces.js";

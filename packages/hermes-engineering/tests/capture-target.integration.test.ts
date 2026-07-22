@@ -465,6 +465,46 @@ describe("captureTarget with real Git repositories", () => {
     );
   });
 
+  it("records Qwen-scoped build and test commands in the shared plan", async () => {
+    const repo = fixtureRepo();
+    repo.write(
+      "package.json",
+      JSON.stringify({
+        name: "captured-package",
+        private: true,
+        scripts: { build: "node build.mjs", test: "vitest run" },
+      }),
+    );
+    repo.write("src/app.ts", "export const value = 1;\n");
+    repo.git("add", "package.json", "src/app.ts");
+    repo.git("commit", "-q", "-m", "add package");
+    repo.write("src/app.ts", "export const value = 2;\n");
+
+    const output = await captureWithoutMutation(repo, { kind: "local" });
+
+    expect(planFor(output)).toMatchObject({
+      hermes: {
+        buildTest: {
+          packageManager: "npm",
+          commands: [
+            {
+              phase: "build",
+              executable: "npm",
+              args: ["run", "build"],
+              cwd: ".",
+            },
+            {
+              phase: "test",
+              executable: "npm",
+              args: ["run", "test"],
+              cwd: ".",
+            },
+          ],
+        },
+      },
+    });
+  });
+
   it("uses authoritative PR repository and non-default base context", async () => {
     const repo = fixtureRepo();
     const {

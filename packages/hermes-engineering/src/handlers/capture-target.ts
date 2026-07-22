@@ -42,6 +42,7 @@ import {
   type CaptureTargetOutput,
   type EngineRequest,
 } from "../protocol.js";
+import { discoverBuildTestPlan } from "./build-test.js";
 
 const GIT_TIMEOUT_MS = 120_000;
 const DIFF_NAME = "target.diff";
@@ -744,6 +745,10 @@ export async function captureTarget(
           : {}),
         diffSha256: createHash("sha256").update(captured.diff).digest("hex"),
         skippedFiles,
+        buildTest: discoverBuildTestPlan(
+          captured.postImageRoot,
+          reportBase.files,
+        ),
       },
       diffPathAbsolute: diffPath,
     };

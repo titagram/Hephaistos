@@ -22,5 +22,6 @@ export default defineConfig({
       "tests/**/*.test.ts",
       resolve(root, "third_party/qwen-code/packages/cli/src/**/*.test.ts"),
     ],
+    exclude: ["tests/fixtures/**"],
   },
 });

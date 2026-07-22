@@ -83,3 +83,49 @@ export function resolveMergeBase(
     mergeBase(left: string, right: string): string | null;
   },
 ): { sha: string | null; baseFetchFailed: boolean };
+
+export interface EfficacyFileEntry {
+  path: string;
+  kind: string;
+}
+
+export interface EfficacyPlan {
+  unreachable: string[];
+  probes: string[];
+  revert: string[];
+}
+
+export type ProbeVerdict = "gated" | "inert" | "inconclusive";
+
+export function planTestEfficacy(
+  files: EfficacyFileEntry[],
+  workspaceGlobs: string[],
+): EfficacyPlan;
+export function classifyProbeRun(
+  exitCode: number,
+  stdout: string,
+  probes: string[],
+  stderr?: string,
+): Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
+export function safeRmWithin(worktree: string, relPath: string): void;
+export function readWorkspaceGlobs(root: string): string[];
+
+export interface WorkspacePackage {
+  dir: string;
+  name: string;
+  scripts: string[];
+  deps: string[];
+}
+
+export function affectedWorkspaces(
+  changedFiles: string[],
+  workspaceGlobs: string[],
+): string[];
+export function buildSetFor(
+  affected: string[],
+  packages: WorkspacePackage[],
+  alsoBuild?: string[],
+): string[];
+export function hasUnmodeledWorkspaceGlob(globs: string[]): boolean;
+export function readRootPackage(root: string): WorkspacePackage | null;
+export function readWorkspacePackages(root: string): WorkspacePackage[];

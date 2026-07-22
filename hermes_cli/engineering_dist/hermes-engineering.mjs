@@ -1,32 +1,10 @@
 // packages/hermes-engineering/src/main.ts
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync6 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// packages/hermes-engineering/src/handlers/capture-target.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  lstatSync as lstatSync2,
-  openSync,
-  readFileSync,
-  realpathSync as realpathSync2,
-  renameSync,
-  unlinkSync,
-  writeFileSync
-} from "node:fs";
-import {
-  basename,
-  dirname,
-  isAbsolute as isAbsolute2,
-  join as join2,
-  relative as relative2,
-  resolve as resolve3,
-  sep as sep2
-} from "node:path";
+// packages/hermes-engineering/src/handlers/build-test.ts
+import { existsSync as existsSync3, lstatSync as lstatSync3, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "node:fs";
+import { isAbsolute as isAbsolute3, relative as relative2, resolve as resolve3, sep as sep3 } from "node:path";
 
 // packages/hermes-engineering/src/shims/qwenCore.ts
 function unquoteCStylePath(s) {
@@ -457,6 +435,277 @@ function chunksCoverDiff(chunks, diffLines) {
   return expected === diffLines + 1;
 }
 
+// third_party/qwen-code/packages/cli/src/commands/review/test-efficacy.ts
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync as readFileSync2,
+  rmSync,
+  lstatSync,
+  existsSync as existsSync2
+} from "node:fs";
+import { dirname, join as join3, isAbsolute, sep } from "node:path";
+
+// packages/hermes-engineering/src/shims/stdioHelpers.ts
+var writeStdoutLine = (line) => void process.stdout.write(`${line}
+`);
+var writeStderrLine = (line) => void process.stderr.write(`${line}
+`);
+
+// third_party/qwen-code/packages/cli/src/commands/review/lib/paths.ts
+import { join, resolve } from "node:path";
+var REVIEW_TMP_DIR = join(".qwen", "tmp");
+var REVIEWS_DIR = join(".qwen", "reviews");
+var REVIEW_CACHE_DIR = join(".qwen", "review-cache");
+
+// third_party/qwen-code/packages/cli/src/commands/review/lib/workspaces.ts
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join as join2 } from "node:path";
+function isWorkspaceMember(filePath, workspaceGlobs) {
+  return workspaceDirFor(filePath, workspaceGlobs) !== null;
+}
+function workspaceDirFor(filePath, workspaceGlobs) {
+  const norm = filePath.replace(/^\.\//, "");
+  let owner = null;
+  for (const glob of workspaceGlobs) {
+    const negated = glob.startsWith("!");
+    const g = glob.replace(/^!/, "").replace(/\/$/, "");
+    let dir = null;
+    if (g.endsWith("/*")) {
+      const base = g.slice(0, -2);
+      if (norm.startsWith(`${base}/`)) {
+        const seg = norm.slice(base.length + 1).split("/")[0];
+        if (seg) dir = `${base}/${seg}`;
+      }
+    } else if (norm === g || norm.startsWith(`${g}/`)) {
+      dir = g;
+    }
+    if (dir === null) continue;
+    owner = negated ? null : dir;
+  }
+  return owner;
+}
+function hasUnmodeledWorkspaceGlob(globs) {
+  return globs.some((glob) => {
+    const g = glob.replace(/^!/, "");
+    if (!g.includes("*")) return false;
+    return !/^[^*]+\/\*$/.test(g);
+  });
+}
+function readWorkspaceGlobs(root) {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join2(root, "package.json"), "utf8")
+    );
+    const ws = pkg.workspaces;
+    const globs = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : [];
+    return globs.filter((g) => typeof g === "string");
+  } catch {
+    return [];
+  }
+}
+function readRootPackage(root) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join2(root, "package.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const scripts = Object.keys(pkg.scripts ?? {});
+  if (!scripts.includes("build") && !scripts.includes("test")) return null;
+  return {
+    dir: ".",
+    name: typeof pkg.name === "string" && pkg.name ? pkg.name : "root",
+    scripts,
+    deps: []
+  };
+}
+function readWorkspacePackages(root) {
+  const globs = readWorkspaceGlobs(root);
+  const dirs = /* @__PURE__ */ new Set();
+  for (const glob of globs) {
+    if (glob.startsWith("!")) continue;
+    const g = glob.replace(/\/$/, "");
+    if (g.endsWith("/*")) {
+      const base = g.slice(0, -2);
+      let entries;
+      try {
+        entries = readdirSync(join2(root, base), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch {
+        continue;
+      }
+      for (const e of entries) dirs.add(`${base}/${e}`);
+    } else {
+      dirs.add(g);
+    }
+  }
+  const pkgs = [];
+  for (const dir of dirs) {
+    if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) continue;
+    const manifest = join2(root, dir, "package.json");
+    if (!existsSync(manifest)) continue;
+    let pkg;
+    try {
+      pkg = JSON.parse(readFileSync(manifest, "utf8"));
+    } catch {
+      continue;
+    }
+    if (typeof pkg.name !== "string" || !pkg.name) continue;
+    pkgs.push({
+      dir,
+      name: pkg.name,
+      scripts: Object.keys(pkg.scripts ?? {}),
+      deps: [
+        ...Object.keys(pkg.dependencies ?? {}),
+        ...Object.keys(pkg.devDependencies ?? {}),
+        ...Object.keys(pkg.peerDependencies ?? {})
+      ]
+    });
+  }
+  return pkgs.sort((a, b) => a.dir.localeCompare(b.dir));
+}
+function affectedWorkspaces(changedFiles, workspaceGlobs) {
+  const dirs = /* @__PURE__ */ new Set();
+  for (const f of changedFiles) {
+    const d = workspaceDirFor(f, workspaceGlobs);
+    if (d) dirs.add(d);
+  }
+  return [...dirs].sort();
+}
+function buildSetFor(affected, packages, alsoBuild = []) {
+  const byDir = new Map(packages.map((p) => [p.dir, p]));
+  const byName = new Map(packages.map((p) => [p.name, p]));
+  const dependsOn = /* @__PURE__ */ new Map();
+  for (const p of packages) {
+    dependsOn.set(
+      p.dir,
+      p.deps.map((d) => byName.get(d)?.dir).filter((d) => !!d && d !== p.dir)
+    );
+  }
+  const consumers = new Set(affected.filter((a) => byDir.has(a)));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const p of packages) {
+      if (consumers.has(p.dir)) continue;
+      if ((dependsOn.get(p.dir) ?? []).some((d) => consumers.has(d))) {
+        consumers.add(p.dir);
+        grew = true;
+      }
+    }
+  }
+  const wanted = /* @__PURE__ */ new Set();
+  const addDeps = (dir) => {
+    if (wanted.has(dir)) return;
+    wanted.add(dir);
+    for (const d of dependsOn.get(dir) ?? []) addDeps(d);
+  };
+  for (const c of consumers) addDeps(c);
+  for (const extra of alsoBuild) if (byDir.has(extra)) addDeps(extra);
+  const order = [];
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (dir) => {
+    if (seen.has(dir)) return;
+    seen.add(dir);
+    for (const d of dependsOn.get(dir) ?? []) {
+      if (wanted.has(d)) visit(d);
+    }
+    order.push(dir);
+  };
+  for (const dir of alsoBuild.filter((d) => wanted.has(d)).sort()) visit(dir);
+  for (const dir of [...wanted].sort()) visit(dir);
+  return order;
+}
+
+// third_party/qwen-code/packages/cli/src/commands/review/test-efficacy.ts
+var FIXTURE_DIR_RE = /(^|\/)(__fixtures__|__mocks__|__snapshots__|fixtures)\//;
+function planTestEfficacy(files, workspaceGlobs) {
+  const tests = files.filter((f) => f.kind === "test").map((f) => f.path);
+  const revert = files.filter((f) => f.kind === "source" && !FIXTURE_DIR_RE.test(f.path)).map((f) => f.path);
+  const unreachable = tests.filter(
+    (t) => !isWorkspaceMember(t, workspaceGlobs)
+  );
+  const reachable = tests.filter((t) => isWorkspaceMember(t, workspaceGlobs));
+  return {
+    unreachable,
+    probes: revert.length > 0 ? reachable : [],
+    revert
+  };
+}
+function classifyProbeRun(exitCode, stdout, probes, stderr = "") {
+  let parsed;
+  const start = stdout.indexOf("{");
+  if (start >= 0) {
+    try {
+      parsed = JSON.parse(stdout.slice(start));
+    } catch {
+      parsed = void 0;
+    }
+  }
+  if (!parsed) {
+    const why = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300);
+    return probes.map((file) => ({
+      file,
+      verdict: "inconclusive",
+      detail: `runner produced no parseable JSON (exit ${exitCode})${why ? `: ${why}` : ""}`
+    }));
+  }
+  const byFile = parsed.testResults ?? [];
+  return probes.map((file) => {
+    const result = byFile.find(
+      (r) => (r.name ?? "").endsWith(`/${file}`) || r.name === file
+    );
+    const assertions = result?.assertionResults ?? [];
+    const failed = assertions.filter((a) => a.status === "failed").length;
+    const passed = assertions.filter((a) => a.status === "passed").length;
+    if (!result || assertions.length === 0) {
+      return {
+        file,
+        verdict: "inconclusive",
+        detail: `collected no tests with the source reverted (run exit ${exitCode}) \u2014 likely a compile or import error, which is not evidence either way`
+      };
+    }
+    if (failed > 0) {
+      return {
+        file,
+        verdict: "gated",
+        detail: `${failed} assertion(s) failed with the source reverted \u2014 this test catches the change`
+      };
+    }
+    if (passed === 0) {
+      return {
+        file,
+        verdict: "inconclusive",
+        detail: `${assertions.length} test(s) collected but none executed with the source reverted (all skipped) \u2014 not evidence either way`
+      };
+    }
+    return {
+      file,
+      verdict: "inert",
+      detail: `all ${passed} test(s) still PASSED with the source change reverted \u2014 this test does not gate the change`
+    };
+  });
+}
+function safeRmWithin(worktree, relPath) {
+  const parts = relPath.split(/[/\\]+/).filter((s) => s && s !== ".");
+  let cur = worktree;
+  for (let i = 0; i < parts.length; i++) {
+    cur = join3(cur, parts[i]);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      return;
+    }
+    if (st.isSymbolicLink() && i < parts.length - 1) {
+      throw new Error(
+        `refusing to delete through a symlink: ${relPath} (ancestor ${parts.slice(0, i + 1).join("/")} is a symlink)`
+      );
+    }
+  }
+  rmSync(cur, { force: true });
+}
+
 // third_party/qwen-code/packages/cli/src/commands/review/lib/diff-flags.ts
 var PINNED_DIFF_CONFIG = [
   "-c",
@@ -478,8 +727,8 @@ var NULL_DEVICE = process.platform === "win32" ? "NUL" : "/dev/null";
 var LITERAL_PATHSPECS = "--literal-pathspecs";
 
 // third_party/qwen-code/packages/cli/src/commands/review/lib/local-diff.ts
-import { lstatSync, statSync, realpathSync } from "node:fs";
-import { join, relative, resolve, isAbsolute, sep } from "node:path";
+import { lstatSync as lstatSync2, statSync, realpathSync } from "node:fs";
+import { join as join4, relative, resolve as resolve2, isAbsolute as isAbsolute2, sep as sep2 } from "node:path";
 
 // third_party/qwen-code/packages/cli/src/commands/review/lib/git.ts
 import { execFileSync } from "node:child_process";
@@ -555,19 +804,19 @@ function describeUndiffable(abs, st) {
   return null;
 }
 function toRepoPathspec(repoRoot, file) {
-  let abs = resolve(process.cwd(), file);
+  let abs = resolve2(process.cwd(), file);
   try {
     abs = realpathSync(abs);
   } catch {
   }
   const rel = relative(repoRoot, abs);
-  const escapes = rel === "" || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel);
+  const escapes = rel === "" || rel === ".." || rel.startsWith(".." + sep2) || isAbsolute2(rel);
   if (escapes) {
     throw new Error(
       `--file ${file} resolves to ${abs}, which is outside the repository at ${repoRoot}.`
     );
   }
-  return rel.split(sep).join("/");
+  return rel.split(sep2).join("/");
 }
 function isBinarySection(section) {
   return /^(Binary files .* differ|GIT binary patch)$/m.test(
@@ -647,8 +896,8 @@ function captureLocalDiff(opts) {
       for (const path of candidates) {
         let bytes;
         try {
-          const abs = join(repoRoot, path);
-          const st = lstatSync(abs);
+          const abs = join4(repoRoot, path);
+          const st = lstatSync2(abs);
           const kind = describeUndiffable(abs, st);
           if (kind) {
             skipped.push({ path, bytes: null, reason: kind });
@@ -726,21 +975,15 @@ function captureLocalDiff(opts) {
 }
 
 // third_party/qwen-code/packages/cli/src/commands/review/lib/merge-base.ts
-function resolveMergeBase(remote, baseRefName, headRef, git2) {
-  const baseFetchFailed = !git2.fetch(remote, baseRefName);
+function resolveMergeBase(remote, baseRefName, headRef, git3) {
+  const baseFetchFailed = !git3.fetch(remote, baseRefName);
   for (const candidate of [`${remote}/${baseRefName}`, baseRefName]) {
-    if (!git2.refExists(candidate)) continue;
-    const mb = git2.mergeBase(candidate, headRef);
+    if (!git3.refExists(candidate)) continue;
+    const mb = git3.mergeBase(candidate, headRef);
     if (mb) return { sha: mb, baseFetchFailed };
   }
   return { sha: null, baseFetchFailed };
 }
-
-// packages/hermes-engineering/src/shims/stdioHelpers.ts
-var writeStdoutLine = (line) => void process.stdout.write(`${line}
-`);
-var writeStderrLine = (line) => void process.stderr.write(`${line}
-`);
 
 // third_party/qwen-code/packages/cli/src/commands/review/lib/heavy.ts
 var HEAVY_MIN_PRE_LINES = 300;
@@ -814,8 +1057,418 @@ function stringifyPlanReport(report) {
   ) + "\n";
 }
 
+// packages/hermes-engineering/src/runners/types.ts
+import { spawn, spawnSync } from "node:child_process";
+var MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
+var killProcessTree = (pid) => {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+    }
+  }
+};
+var appendBounded = (chunks, chunk, captured) => {
+  if (captured.bytes >= MAX_CAPTURE_BYTES) return;
+  const remaining = MAX_CAPTURE_BYTES - captured.bytes;
+  const kept = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+  chunks.push(kept);
+  captured.bytes += kept.length;
+};
+var NodeProcessRunner = class {
+  async run(invocation, timeoutMs) {
+    const started = Date.now();
+    return await new Promise((resolve8) => {
+      const stdout = [];
+      const stderr = [];
+      const stdoutSize = { bytes: 0 };
+      const stderrSize = { bytes: 0 };
+      let timedOut = false;
+      let spawnError;
+      let settled = false;
+      const child = spawn(invocation.executable, [...invocation.args], {
+        cwd: invocation.cwd,
+        detached: process.platform !== "win32",
+        env: invocation.env ?? process.env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      });
+      child.stdout.on(
+        "data",
+        (chunk) => appendBounded(stdout, chunk, stdoutSize)
+      );
+      child.stderr.on(
+        "data",
+        (chunk) => appendBounded(stderr, chunk, stderrSize)
+      );
+      child.on("error", (error) => {
+        spawnError = error;
+      });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (child.pid !== void 0) killProcessTree(child.pid);
+      }, timeoutMs);
+      timer.unref();
+      const finish = (exitCode) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const result = {
+          exitCode,
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+          timedOut,
+          durationMs: Date.now() - started
+        };
+        if (spawnError !== void 0) result.error = spawnError.message;
+        resolve8(result);
+      };
+      child.on("close", finish);
+    });
+  }
+};
+
+// packages/hermes-engineering/src/handlers/build-test.ts
+var PACKAGE_MANAGERS = /* @__PURE__ */ new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "bun"
+]);
+var COMPILE_OR_IMPORT_RE = /(?:Cannot find module|Could not resolve|failed to (?:load|resolve)|SyntaxError|TypeError:.*(?:import|export)|TS\d{4}:|Transform failed|RollupError|ERR_MODULE_NOT_FOUND|No test suite found|test suite failed to run)/i;
+var OUTPUT_LIMIT = 8e3;
+function discoverBuildTestPlan(workspace, files) {
+  const root = realpathSync2(workspace);
+  let declaredManager;
+  try {
+    const manifest = JSON.parse(
+      readFileSync3(resolve3(root, "package.json"), "utf8")
+    );
+    if (typeof manifest.packageManager === "string") {
+      declaredManager = manifest.packageManager.split("@")[0];
+    }
+  } catch {
+    return null;
+  }
+  const alternateLock = [
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+  ].some((name) => existsSync3(resolve3(root, name)));
+  if (declaredManager !== void 0 && declaredManager !== "npm" || declaredManager === void 0 && alternateLock && !existsSync3(resolve3(root, "package-lock.json"))) {
+    return null;
+  }
+  const globs = readWorkspaceGlobs(root);
+  if (globs.length > 0 && hasUnmodeledWorkspaceGlob(globs)) return null;
+  let packages = readWorkspacePackages(root);
+  let affected;
+  if (globs.length === 0) {
+    const rootPackage = readRootPackage(root);
+    if (rootPackage === null) return null;
+    packages = [rootPackage];
+    affected = files.length > 0 ? ["."] : [];
+  } else {
+    if (packages.length === 0) return null;
+    affected = affectedWorkspaces(
+      files.map((file) => file.path),
+      globs
+    );
+  }
+  const byDir = new Map(packages.map((entry) => [entry.dir, entry]));
+  if (affected.some((dir) => !byDir.has(dir))) return null;
+  const commands = [];
+  for (const dir of buildSetFor(affected, packages)) {
+    if (!byDir.get(dir)?.scripts.includes("build")) continue;
+    commands.push({
+      phase: "build",
+      executable: "npm",
+      args: dir === "." ? ["run", "build"] : ["run", "build", "--workspace", dir],
+      cwd: "."
+    });
+  }
+  for (const dir of affected) {
+    if (!byDir.get(dir)?.scripts.includes("test")) continue;
+    const testFiles = files.filter((file) => file.kind === "test").map((file) => file.path).filter(
+      (path) => dir === "." || path === dir || path.startsWith(`${dir}/`)
+    );
+    commands.push({
+      phase: "test",
+      executable: "npm",
+      args: dir === "." ? ["run", "test"] : ["run", "test", "--workspace", dir],
+      cwd: ".",
+      ...testFiles.length > 0 ? { testFiles } : {}
+    });
+  }
+  return { packageManager: "npm", commands };
+}
+var asRecord = (value, label) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value;
+};
+var within = (root, candidate) => {
+  const rel = relative2(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep3}`) && rel !== ".." && !isAbsolute3(rel);
+};
+var validatePlanPath = (request, value) => {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("planPath must be a non-empty string");
+  }
+  const artifactRoot = realpathSync2(request.artifactRoot);
+  const planPath = realpathSync2(resolve3(value));
+  if (!within(artifactRoot, planPath))
+    throw new TypeError("planPath must be inside artifactRoot");
+  if (!lstatSync3(planPath).isFile())
+    throw new TypeError("planPath must be a file");
+  return planPath;
+};
+var parseInput = (request) => {
+  const input = asRecord(request.input, "input");
+  const unknown = Object.keys(input).find(
+    (key) => !["planPath", "timeoutMs"].includes(key)
+  );
+  if (unknown !== void 0)
+    throw new TypeError(`unknown build-test input field: ${unknown}`);
+  const timeoutMs = input.timeoutMs ?? 3e5;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 6e5) {
+    throw new TypeError("timeoutMs must be an integer between 1 and 600000");
+  }
+  return {
+    planPath: validatePlanPath(request, input.planPath),
+    timeoutMs
+  };
+};
+var strings = (value, label) => {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`${label} must be an array of strings`);
+  }
+  if (value.length > 64 || value.some((item) => item.length > 4096 || item.includes("\0"))) {
+    throw new TypeError(
+      `${label} is too large or contains an invalid argument`
+    );
+  }
+  return [...value];
+};
+var parseRecordedPlan = (planPath, workspace) => {
+  const plan = asRecord(
+    JSON.parse(readFileSync3(planPath, "utf8")),
+    "plan"
+  );
+  const hermes = asRecord(plan.hermes, "plan.hermes");
+  const buildTest = asRecord(hermes.buildTest, "plan.hermes.buildTest");
+  if (typeof buildTest.packageManager !== "string" || !PACKAGE_MANAGERS.has(buildTest.packageManager)) {
+    throw new TypeError(
+      "plan.hermes.buildTest.packageManager is not supported"
+    );
+  }
+  if (!Array.isArray(buildTest.commands) || buildTest.commands.length > 64) {
+    throw new TypeError(
+      "plan.hermes.buildTest.commands must contain at most 64 recorded commands"
+    );
+  }
+  const packageManager = buildTest.packageManager;
+  const commands = buildTest.commands.map((raw, index) => {
+    const command = asRecord(raw, `command ${index}`);
+    if (command.phase !== "build" && command.phase !== "test") {
+      throw new TypeError(`command ${index} phase must be build or test`);
+    }
+    if (command.executable !== packageManager) {
+      throw new TypeError(
+        `command ${index} must use the recorded package-manager executable`
+      );
+    }
+    const args = strings(command.args, `command ${index} args`);
+    if (args.length === 0)
+      throw new TypeError(`command ${index} has no arguments`);
+    if (args[0] !== "run" && !(packageManager === "npm" && args[0] === "test")) {
+      throw new TypeError(
+        `command ${index} must invoke a recorded package script, not an arbitrary executable`
+      );
+    }
+    if (typeof command.cwd !== "string" || command.cwd.length === 0 || isAbsolute3(command.cwd)) {
+      throw new TypeError(`command ${index} cwd must be repository-relative`);
+    }
+    const cwd = resolve3(workspace, command.cwd);
+    if (!within(workspace, cwd))
+      throw new TypeError(`command ${index} cwd escapes the workspace`);
+    const canonicalCwd = realpathSync2(cwd);
+    if (!within(workspace, canonicalCwd) || !lstatSync3(canonicalCwd).isDirectory()) {
+      throw new TypeError(`command ${index} cwd must be a workspace directory`);
+    }
+    const testFiles = command.testFiles === void 0 ? [] : strings(command.testFiles, `command ${index} testFiles`);
+    for (const file of testFiles) {
+      if (isAbsolute3(file) || !within(workspace, resolve3(workspace, file))) {
+        throw new TypeError(`command ${index} test file escapes the workspace`);
+      }
+    }
+    return {
+      phase: command.phase,
+      executable: packageManager,
+      args,
+      cwd: relative2(workspace, canonicalCwd) || ".",
+      testFiles
+    };
+  });
+  return { packageManager, commands };
+};
+var boundedOutput = (run) => {
+  const value = `${run.stdout}${run.stderr}`.trim();
+  if (value.length <= OUTPUT_LIMIT) return value;
+  return `${value.slice(0, 2e3)}
+... [output truncated] ...
+${value.slice(-6e3)}`;
+};
+var classifyCommand = (command, run) => {
+  if (run.timedOut) {
+    return {
+      outcome: "inconclusive",
+      detail: `command timed out after ${run.durationMs}ms`
+    };
+  }
+  if (run.error || run.exitCode === null) {
+    return {
+      outcome: "inconclusive",
+      detail: `command could not run${run.error ? `: ${run.error}` : ""}`
+    };
+  }
+  if (run.exitCode === 0)
+    return { outcome: "passed", detail: "command exited 0" };
+  const combined = `${run.stdout}
+${run.stderr}`;
+  if (command.phase === "build") {
+    return {
+      outcome: "inconclusive",
+      detail: "the build failed; compilation and infrastructure failures are not a verified test finding"
+    };
+  }
+  if (command.testFiles.length > 0) {
+    const classified = classifyProbeRun(
+      run.exitCode,
+      run.stdout,
+      command.testFiles,
+      run.stderr
+    );
+    if (classified.some((test) => test.verdict === "gated")) {
+      return {
+        outcome: "failed",
+        detail: "one or more test assertions failed"
+      };
+    }
+    return {
+      outcome: "inconclusive",
+      detail: classified.map((test) => test.detail).join("; ")
+    };
+  }
+  if (COMPILE_OR_IMPORT_RE.test(combined)) {
+    return {
+      outcome: "inconclusive",
+      detail: "test collection, compilation, or import failed"
+    };
+  }
+  return {
+    outcome: "inconclusive",
+    detail: "the test command failed without structured per-file assertion evidence"
+  };
+};
+async function runBuildTest(request, processes = new NodeProcessRunner()) {
+  const input = parseInput(request);
+  const workspace = realpathSync2(request.workspace);
+  let recorded;
+  try {
+    recorded = parseRecordedPlan(input.planPath, workspace);
+  } catch (cause) {
+    return {
+      status: "inconclusive",
+      output: { packageManager: null, commands: [] },
+      diagnostics: [
+        {
+          code: "invalid_build_plan",
+          message: cause instanceof Error ? cause.message : String(cause)
+        }
+      ]
+    };
+  }
+  const commands = [];
+  for (const command of recorded.commands) {
+    const run = await processes.run(
+      {
+        executable: command.executable,
+        args: command.args,
+        cwd: resolve3(workspace, command.cwd),
+        env: {
+          ...process.env,
+          CI: "1",
+          NO_COLOR: "1",
+          npm_config_yes: "true",
+          QWEN_SKIP_PREPARE: "1"
+        }
+      },
+      input.timeoutMs
+    );
+    const classification = classifyCommand(command, run);
+    commands.push({
+      phase: command.phase,
+      executable: command.executable,
+      args: [...command.args],
+      cwd: command.cwd,
+      exitCode: run.exitCode,
+      timedOut: run.timedOut,
+      durationMs: run.durationMs,
+      outcome: classification.outcome,
+      detail: classification.detail,
+      output: boundedOutput(run)
+    });
+  }
+  const status = commands.some(
+    (command) => command.outcome === "failed"
+  ) ? "failed" : commands.some((command) => command.outcome === "inconclusive") ? "inconclusive" : "passed";
+  return {
+    status,
+    output: { packageManager: recorded.packageManager, commands },
+    diagnostics: []
+  };
+}
+
+// packages/hermes-engineering/src/handlers/capture-target.ts
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  existsSync as existsSync4,
+  fsyncSync,
+  lstatSync as lstatSync4,
+  openSync,
+  readFileSync as readFileSync4,
+  realpathSync as realpathSync3,
+  renameSync,
+  unlinkSync,
+  writeFileSync as writeFileSync2
+} from "node:fs";
+import {
+  basename,
+  dirname as dirname2,
+  isAbsolute as isAbsolute4,
+  join as join5,
+  relative as relative3,
+  resolve as resolve5,
+  sep as sep4
+} from "node:path";
+
 // packages/hermes-engineering/src/protocol.ts
-import { resolve as resolve2 } from "node:path";
+import { resolve as resolve4 } from "node:path";
 var MAX_REQUEST_BYTES = 1024 * 1024;
 var REQUEST_KEYS = /* @__PURE__ */ new Set([
   "protocolVersion",
@@ -915,8 +1568,8 @@ function parseRequest(value) {
     protocolVersion: 1,
     requestId: requiredString(value, "requestId"),
     command,
-    workspace: resolve2(requiredString(value, "workspace")),
-    artifactRoot: resolve2(requiredString(value, "artifactRoot")),
+    workspace: resolve4(requiredString(value, "workspace")),
+    artifactRoot: resolve4(requiredString(value, "artifactRoot")),
     input: value.input
   };
 }
@@ -960,13 +1613,13 @@ var gitSucceeds = (cwd, ...args) => {
 };
 var gitRaw2 = (cwd, ...args) => execFileSync2("git", args, gitOptions(cwd));
 var escaped = (root, candidate) => {
-  const rel = relative2(root, candidate);
-  return rel === ".." || rel.startsWith(`..${sep2}`) || isAbsolute2(rel);
+  const rel = relative3(root, candidate);
+  return rel === ".." || rel.startsWith(`..${sep4}`) || isAbsolute4(rel);
 };
 var validatedDirectory = (path, label) => {
   let stat;
   try {
-    stat = lstatSync2(path);
+    stat = lstatSync4(path);
   } catch (cause) {
     throw new CaptureTargetError(
       "invalid_path",
@@ -979,11 +1632,11 @@ var validatedDirectory = (path, label) => {
       `${label} must be a real directory, not a symlink`
     );
   }
-  return realpathSync2(path);
+  return realpathSync3(path);
 };
 var validatedArtifactRoot = (path) => {
   const root = validatedDirectory(path, "artifactRoot");
-  if (process.platform !== "win32" && (lstatSync2(root).mode & 63) !== 0) {
+  if (process.platform !== "win32" && (lstatSync4(root).mode & 63) !== 0) {
     throw new CaptureTargetError(
       "invalid_artifact_root",
       "artifactRoot must be private to the current user"
@@ -1004,7 +1657,7 @@ var repositoryFor = (workspace) => {
       "workspace is not a Git repository"
     );
   }
-  const repoRoot = realpathSync2(rawRoot);
+  const repoRoot = realpathSync3(rawRoot);
   if (escaped(repoRoot, canonicalWorkspace)) {
     throw new CaptureTargetError(
       "invalid_repository",
@@ -1014,13 +1667,13 @@ var repositoryFor = (workspace) => {
   return { repoRoot, workspace: canonicalWorkspace };
 };
 var validateRelativeFile = (workspace, repoRoot, path) => {
-  if (path.length === 0 || isAbsolute2(path) || path.includes("\0")) {
+  if (path.length === 0 || isAbsolute4(path) || path.includes("\0")) {
     throw new CaptureTargetError(
       "invalid_target",
       "file path must be a non-empty repository-relative path"
     );
   }
-  const absolute = resolve3(workspace, path);
+  const absolute = resolve5(workspace, path);
   if (escaped(repoRoot, absolute) || absolute === repoRoot) {
     throw new CaptureTargetError(
       "invalid_target",
@@ -1028,11 +1681,11 @@ var validateRelativeFile = (workspace, repoRoot, path) => {
     );
   }
   let existing = absolute;
-  while (!existsSync(existing) && existing !== repoRoot)
-    existing = dirname(existing);
+  while (!existsSync4(existing) && existing !== repoRoot)
+    existing = dirname2(existing);
   let canonicalExisting;
   try {
-    canonicalExisting = realpathSync2(existing);
+    canonicalExisting = realpathSync3(existing);
   } catch (cause) {
     throw new CaptureTargetError(
       "invalid_target",
@@ -1045,7 +1698,7 @@ var validateRelativeFile = (workspace, repoRoot, path) => {
       "file path resolves outside the repository"
     );
   }
-  return relative2(repoRoot, absolute).split(sep2).join("/");
+  return relative3(repoRoot, absolute).split(sep4).join("/");
 };
 var resolveCommit = (repoRoot, ref) => {
   if (ref.length === 0 || ref.startsWith("-") || /[\0\r\n]/.test(ref)) {
@@ -1161,10 +1814,10 @@ var rangeIdentity = (repoRoot, range) => {
 };
 var worktreePathFor = (repoRoot, runId) => {
   const suffix = createHash("sha256").update(`${repoRoot}\0${runId}`).digest("hex").slice(0, 16);
-  return join2(dirname(repoRoot), `${WORKTREE_PREFIX}${suffix}`);
+  return join5(dirname2(repoRoot), `${WORKTREE_PREFIX}${suffix}`);
 };
 var addWorktree = (repoRoot, worktreePath, headRef) => {
-  if (existsSync(worktreePath)) {
+  if (existsSync4(worktreePath)) {
     throw new CaptureTargetError(
       "worktree_exists",
       `disposable worktree path already exists: ${worktreePath}`
@@ -1376,12 +2029,12 @@ var capturePullRequest = (input, repoRoot, runId) => {
   }
 };
 var lineCount = (root, path) => {
-  const absolute = resolve3(root, path);
+  const absolute = resolve5(root, path);
   if (escaped(root, absolute)) return 0;
   try {
-    const stat = lstatSync2(absolute);
+    const stat = lstatSync4(absolute);
     if (!stat.isFile()) return 0;
-    const contents = readFileSync(absolute);
+    const contents = readFileSync4(absolute);
     if (contents.length === 0) return 0;
     let lines = 0;
     for (const byte of contents) if (byte === 10) lines++;
@@ -1391,21 +2044,21 @@ var lineCount = (root, path) => {
   }
 };
 var atomicWrite = (root, name, contents) => {
-  const destination = join2(root, name);
-  if (dirname(destination) !== root) {
+  const destination = join5(root, name);
+  if (dirname2(destination) !== root) {
     throw new CaptureTargetError(
       "invalid_artifact",
       "artifact path escapes run root"
     );
   }
-  const temporary = join2(
+  const temporary = join5(
     root,
     `.${name}.${randomBytes(12).toString("hex")}.tmp`
   );
   let descriptor;
   try {
     descriptor = openSync(temporary, "wx", 384);
-    writeFileSync(descriptor, contents);
+    writeFileSync2(descriptor, contents);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = void 0;
@@ -1474,7 +2127,11 @@ async function captureTarget(request) {
           }
         } : {},
         diffSha256: createHash("sha256").update(captured.diff).digest("hex"),
-        skippedFiles
+        skippedFiles,
+        buildTest: discoverBuildTestPlan(
+          captured.postImageRoot,
+          reportBase.files
+        )
       },
       diffPathAbsolute: diffPath
     };
@@ -1519,22 +2176,22 @@ var removeWorktree = (worktreePath) => {
       "refusing to remove an unknown worktree"
     );
   }
-  if (!existsSync(worktreePath)) return;
-  const stat = lstatSync2(worktreePath);
+  if (!existsSync4(worktreePath)) return;
+  const stat = lstatSync4(worktreePath);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new CaptureTargetError(
       "unsafe_cleanup",
       "worktree path is not a real directory"
     );
   }
-  const canonical = realpathSync2(worktreePath);
-  if (canonical !== resolve3(worktreePath)) {
+  const canonical = realpathSync3(worktreePath);
+  if (canonical !== resolve5(worktreePath)) {
     throw new CaptureTargetError(
       "unsafe_cleanup",
       "worktree path is not canonical"
     );
   }
-  const gitEntry = lstatSync2(join2(canonical, ".git"));
+  const gitEntry = lstatSync4(join5(canonical, ".git"));
   if (!gitEntry.isFile() || gitEntry.isSymbolicLink()) {
     throw new CaptureTargetError(
       "unsafe_cleanup",
@@ -1542,7 +2199,7 @@ var removeWorktree = (worktreePath) => {
     );
   }
   const common = gitText(canonical, "rev-parse", "--git-common-dir");
-  const commonDirectory = realpathSync2(resolve3(canonical, common));
+  const commonDirectory = realpathSync3(resolve5(canonical, common));
   execFileSync2(
     "git",
     [
@@ -1552,18 +2209,572 @@ var removeWorktree = (worktreePath) => {
       "--force",
       canonical
     ],
-    gitOptions(dirname(canonical))
+    gitOptions(dirname2(canonical))
   );
   gitTextOptional(
-    dirname(canonical),
+    dirname2(canonical),
     `--git-dir=${commonDirectory}`,
     "worktree",
     "prune"
   );
 };
 
+// packages/hermes-engineering/src/handlers/test-efficacy.ts
+import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
+import { createHash as createHash2 } from "node:crypto";
+import {
+  existsSync as existsSync6,
+  lstatSync as lstatSync5,
+  readFileSync as readFileSync6,
+  realpathSync as realpathSync5,
+  rmSync as rmSync2
+} from "node:fs";
+import { isAbsolute as isAbsolute6, join as join6, relative as relative5, resolve as resolve7, sep as sep6 } from "node:path";
+
+// packages/hermes-engineering/src/runners/vitest.ts
+import { existsSync as existsSync5, readFileSync as readFileSync5, realpathSync as realpathSync4 } from "node:fs";
+import { dirname as dirname3, isAbsolute as isAbsolute5, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
+var CONFIG_NAMES = [
+  "vitest.config.ts",
+  "vitest.config.js",
+  "vitest.config.mts",
+  "vitest.config.mjs"
+];
+var within2 = (root, candidate) => {
+  const rel = relative4(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep5}`) && rel !== ".." && !isAbsolute5(rel);
+};
+var manifestSignalsVitest = (workspace) => {
+  try {
+    const parsed = JSON.parse(
+      readFileSync5(resolve6(workspace, "package.json"), "utf8")
+    );
+    if ("vitest" in (parsed.dependencies ?? {})) return true;
+    if ("vitest" in (parsed.devDependencies ?? {})) return true;
+    return Object.values(parsed.scripts ?? {}).some(
+      (script) => typeof script === "string" && /(^|\s)vitest(?:\s|$)/.test(script)
+    );
+  } catch {
+    return false;
+  }
+};
+var planSignalsVitest = (workspace, plan) => {
+  const root = resolve6(workspace);
+  for (const file of plan.files) {
+    if (file.kind !== "test" || isAbsolute5(file.path)) continue;
+    const absolute = resolve6(root, file.path);
+    if (!within2(root, absolute)) continue;
+    let cursor = dirname3(absolute);
+    for (; ; ) {
+      if (CONFIG_NAMES.some((name) => existsSync5(resolve6(cursor, name))) || manifestSignalsVitest(cursor)) {
+        return true;
+      }
+      if (cursor === root) break;
+      const parent = dirname3(cursor);
+      if (parent === cursor || !within2(root, parent)) break;
+      cursor = parent;
+    }
+  }
+  return false;
+};
+var resolveVitestModule = (workspace) => {
+  let cursor = resolve6(workspace);
+  for (; ; ) {
+    const candidate = resolve6(cursor, "node_modules/vitest/vitest.mjs");
+    if (existsSync5(candidate)) return candidate;
+    const parent = dirname3(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+};
+var parseCollectedFiles = (workspace, stdout) => {
+  const parsed = JSON.parse(stdout);
+  if (!Array.isArray(parsed))
+    throw new Error("Vitest collection output is not an array");
+  const files = /* @__PURE__ */ new Set();
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      continue;
+    const file = entry.file;
+    if (typeof file !== "string") continue;
+    const absolute = resolve6(workspace, file);
+    if (!within2(resolve6(workspace), absolute)) continue;
+    files.add(relative4(resolve6(workspace), absolute).split(sep5).join("/"));
+  }
+  return files;
+};
+var VitestRunner = class {
+  constructor(processes = new NodeProcessRunner()) {
+    this.processes = processes;
+  }
+  processes;
+  id = "vitest";
+  async detect(workspace, plan) {
+    const configured = CONFIG_NAMES.some(
+      (name) => existsSync5(resolve6(workspace, name))
+    );
+    return configured || manifestSignalsVitest(workspace) || planSignalsVitest(workspace, plan) ? "yes" : "no";
+  }
+  async collectedFiles(workspace) {
+    const modulePath = resolveVitestModule(workspace);
+    if (modulePath === null)
+      throw new Error("a local Vitest installation was not found");
+    const run = await this.processes.run(
+      {
+        executable: process.execPath,
+        args: [
+          modulePath,
+          "list",
+          "--filesOnly",
+          "--configLoader=runner",
+          "--no-cache",
+          "--json"
+        ],
+        cwd: workspace,
+        env: { ...process.env, CI: "1", NO_COLOR: "1" }
+      },
+      6e4
+    );
+    if (run.timedOut) throw new Error("Vitest collection timed out");
+    if (run.error)
+      throw new Error(`Vitest collection could not start: ${run.error}`);
+    if (run.exitCode !== 0) {
+      throw new Error(`Vitest collection failed: ${run.stderr.trim()}`);
+    }
+    return parseCollectedFiles(workspace, run.stdout);
+  }
+  async runFile(workspace, relativePath, timeoutMs) {
+    if (isAbsolute5(relativePath))
+      throw new Error("test path must be repository-relative");
+    const target = resolve6(workspace, relativePath);
+    if (!within2(resolve6(workspace), target)) {
+      throw new Error("test path escapes the workspace");
+    }
+    if (existsSync5(target) && !within2(resolve6(workspace), realpathSync4(target))) {
+      throw new Error("test path resolves outside the workspace");
+    }
+    const modulePath = resolveVitestModule(workspace);
+    if (modulePath === null) {
+      return {
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        durationMs: 0,
+        error: "a local Vitest installation was not found"
+      };
+    }
+    return await this.processes.run(
+      {
+        executable: process.execPath,
+        args: [
+          modulePath,
+          "run",
+          "--reporter=json",
+          "--configLoader=runner",
+          "--no-cache",
+          relativePath
+        ],
+        cwd: workspace,
+        env: { ...process.env, CI: "1", NO_COLOR: "1" }
+      },
+      timeoutMs
+    );
+  }
+};
+
+// packages/hermes-engineering/src/handlers/test-efficacy.ts
+var asRecord2 = (value) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("input must be an object");
+  }
+  return value;
+};
+var within3 = (root, candidate) => {
+  const rel = relative5(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute6(rel);
+};
+var validatedPlanPath = (request, raw) => {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new TypeError("planPath must be a non-empty string");
+  }
+  const artifactRoot = realpathSync5(request.artifactRoot);
+  const path = realpathSync5(resolve7(raw));
+  if (!within3(artifactRoot, path)) {
+    throw new TypeError("planPath must be inside artifactRoot");
+  }
+  if (!lstatSync5(path).isFile()) throw new TypeError("planPath must be a file");
+  return path;
+};
+var parseInput2 = (request) => {
+  const input = asRecord2(request.input);
+  const unknown = Object.keys(input).find(
+    (key) => !["planPath", "baseRef", "runner", "timeoutMs"].includes(key)
+  );
+  if (unknown !== void 0)
+    throw new TypeError(`unknown test-efficacy input field: ${unknown}`);
+  const planPath = validatedPlanPath(request, input.planPath);
+  if (typeof input.baseRef !== "string" || !/^[0-9a-fA-F]{40,64}$/.test(input.baseRef)) {
+    throw new TypeError("baseRef must be a full Git object ID");
+  }
+  if (!["auto", "vitest", "pytest"].includes(input.runner)) {
+    throw new TypeError("runner must be auto, vitest, or pytest");
+  }
+  const timeoutMs = input.timeoutMs ?? 3e5;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 6e5) {
+    throw new TypeError("timeoutMs must be an integer between 1 and 600000");
+  }
+  return {
+    planPath,
+    baseRef: input.baseRef,
+    runner: input.runner,
+    timeoutMs
+  };
+};
+var parsePlan = (path) => {
+  const parsed = JSON.parse(readFileSync6(path, "utf8"));
+  const record = asRecord2(parsed);
+  if (!Array.isArray(record.files))
+    throw new TypeError("plan.files must be an array");
+  const files = record.files.map((entry) => {
+    const file = asRecord2(entry);
+    if (typeof file.path !== "string" || typeof file.kind !== "string") {
+      throw new TypeError(
+        "every plan file requires string path and kind fields"
+      );
+    }
+    return { path: file.path, kind: file.kind };
+  });
+  return { ...record, files };
+};
+var emptyOutput = (availableRunners) => ({
+  runner: null,
+  tests: [],
+  unreachable: [],
+  gated: [],
+  inert: [],
+  inconclusive: [],
+  availableRunners,
+  probeWorktreePath: null,
+  cleanupFailure: null
+});
+async function selectRunner(selection, workspace, plan, runners) {
+  if (selection !== "auto") {
+    const runner = runners.find((candidate) => candidate.id === selection);
+    if (runner === void 0) return { code: "no_runner", available: [] };
+    const detected = await runner.detect(workspace, plan);
+    return detected === "no" ? { code: "no_runner", available: [] } : { runner, available: [runner.id] };
+  }
+  const detections = await Promise.all(
+    runners.map(async (runner) => ({
+      runner,
+      detection: await runner.detect(workspace, plan)
+    }))
+  );
+  const yes = detections.filter(({ detection }) => detection === "yes").map(({ runner }) => runner);
+  const ambiguous = detections.filter(({ detection }) => detection === "ambiguous").map(({ runner }) => runner);
+  const available = [
+    ...new Set([...yes, ...ambiguous].map((runner) => runner.id))
+  ];
+  if (yes.length === 1 && ambiguous.length === 0)
+    return { runner: yes[0], available };
+  if (yes.length === 0 && ambiguous.length === 0)
+    return { code: "no_runner", available };
+  return { code: "ambiguous_runner", available };
+}
+var git2 = (cwd, args) => execFileSync3("git", [...args], {
+  cwd,
+  encoding: "utf8",
+  env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  timeout: 12e4,
+  maxBuffer: 64 * 1024 * 1024
+}).trim();
+var existsAtBase = (cwd, baseRef, path) => {
+  const result = spawnSync2("git", ["cat-file", "-e", `${baseRef}:${path}`], {
+    cwd,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    stdio: "ignore",
+    timeout: 12e4
+  });
+  if (result.error !== void 0) throw result.error;
+  return result.status === 0;
+};
+var safeRelativePath = (workspace, path) => {
+  if (path.length === 0 || path.includes("\0") || isAbsolute6(path)) {
+    throw new Error(`unsafe plan path: ${JSON.stringify(path)}`);
+  }
+  const normalized = path.split("\\").join("/");
+  if (normalized.split("/").some((segment) => segment === ".." || segment === ".")) {
+    throw new Error(`unsafe plan path segment: ${JSON.stringify(path)}`);
+  }
+  const target = resolve7(workspace, normalized);
+  if (!within3(resolve7(workspace), target)) {
+    throw new Error(
+      `plan path escapes the probe worktree: ${JSON.stringify(path)}`
+    );
+  }
+  return normalized;
+};
+var probeTreePath = (workspace, requestId) => {
+  const suffix = createHash2("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
+  return join6(workspace, `.hermes-efficacy-${suffix}`);
+};
+var createProbeTree = (workspace, probeTree) => {
+  const head = git2(workspace, ["rev-parse", "HEAD"]);
+  git2(workspace, ["worktree", "add", "--detach", probeTree, head]);
+};
+var revertProduction = (probeTree, baseRef, revert) => {
+  const modified = [];
+  const added = [];
+  for (const rawPath of revert) {
+    const path = safeRelativePath(probeTree, rawPath);
+    if (existsAtBase(probeTree, baseRef, path)) {
+      modified.push(path);
+    } else {
+      added.push(path);
+    }
+  }
+  if (modified.length > 0)
+    git2(probeTree, ["checkout", baseRef, "--", ...modified]);
+  for (const path of added) safeRmWithin(probeTree, path);
+};
+var cleanupProbeTree = (workspace, probeTree) => {
+  if (!within3(resolve7(workspace), resolve7(probeTree)) || !probeTree.includes(".hermes-efficacy-")) {
+    return "refusing to clean an unrecognized probe worktree";
+  }
+  let failure = null;
+  try {
+    git2(workspace, ["worktree", "remove", "--force", probeTree]);
+  } catch (cause) {
+    failure = cause instanceof Error ? cause.message : String(cause);
+  }
+  try {
+    if (existsSync6(probeTree))
+      rmSync2(probeTree, { recursive: true, force: true });
+    git2(workspace, ["worktree", "prune"]);
+  } catch (cause) {
+    failure ??= cause instanceof Error ? cause.message : String(cause);
+  }
+  return existsSync6(probeTree) ? failure ?? `could not remove ${probeTree}` : null;
+};
+var inconclusiveForRun = (file, run, phase) => ({
+  path: file,
+  verdict: "inconclusive",
+  detail: run.timedOut ? `${phase} timed out after ${run.durationMs}ms` : `${phase} could not run${run.error ? `: ${run.error}` : ""}`
+});
+var group = (tests, verdict) => tests.filter((test) => test.verdict === verdict).map((test) => test.path);
+async function runTestEfficacy(request, runners = [new VitestRunner()]) {
+  const input = parseInput2(request);
+  const workspace = realpathSync5(request.workspace);
+  const plan = parsePlan(input.planPath);
+  const choice = await selectRunner(input.runner, workspace, plan, runners);
+  if ("code" in choice) {
+    const output2 = emptyOutput(choice.available);
+    const choices = choice.available.length > 0 ? choice.available.map((id) => `runner=${id}`).join(", ") : "vitest or pytest";
+    return {
+      status: "inconclusive",
+      output: output2,
+      diagnostics: [
+        {
+          code: choice.code,
+          message: choice.code === "ambiguous_runner" ? `multiple test runners apply; retry explicitly with ${choices}` : `no applicable test runner was found; retry explicitly with ${choices}`
+        }
+      ]
+    };
+  }
+  const runner = choice.runner;
+  const planned = planTestEfficacy(plan.files, readWorkspaceGlobs(workspace));
+  const tests = planned.unreachable.map((path) => ({
+    path,
+    verdict: "unreachable",
+    detail: "the changed test is outside every npm workspace"
+  }));
+  const scheduled = /* @__PURE__ */ new Set([...planned.unreachable, ...planned.probes]);
+  for (const file of plan.files) {
+    if (file.kind === "test" && !scheduled.has(file.path)) {
+      tests.push({
+        path: file.path,
+        verdict: "inconclusive",
+        detail: "the diff has no production source change to revert, so test efficacy cannot be probed"
+      });
+    }
+  }
+  let actualProbeTree = null;
+  let cleanupFailure = null;
+  let probes = [];
+  try {
+    if (planned.probes.length > 0) {
+      actualProbeTree = probeTreePath(workspace, request.requestId);
+      createProbeTree(workspace, actualProbeTree);
+    }
+    if (planned.probes.length > 0) {
+      let collected;
+      try {
+        collected = await runner.collectedFiles(actualProbeTree ?? workspace);
+      } catch (cause) {
+        const detail = `test collection failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+        tests.push(
+          ...planned.probes.map((path) => ({
+            path,
+            verdict: "inconclusive",
+            detail
+          }))
+        );
+        probes = [];
+        collected = /* @__PURE__ */ new Set();
+      }
+      if (tests.length === planned.unreachable.length) {
+        probes = planned.probes.filter((path) => {
+          if (collected.has(path)) return true;
+          tests.push({
+            path,
+            verdict: "unreachable",
+            detail: "Vitest did not collect the changed test file"
+          });
+          return false;
+        });
+      }
+    }
+    const baselinePassed = [];
+    for (const file of probes) {
+      const run = await runner.runFile(
+        actualProbeTree ?? workspace,
+        file,
+        input.timeoutMs
+      );
+      if (run.timedOut || run.error || run.exitCode === null) {
+        tests.push(inconclusiveForRun(file, run, "baseline test run"));
+      } else if (run.exitCode !== 0) {
+        tests.push({
+          path: file,
+          verdict: "inconclusive",
+          detail: "the changed test does not pass before the production revert"
+        });
+      } else {
+        baselinePassed.push(file);
+      }
+    }
+    if (baselinePassed.length > 0 && planned.revert.length > 0) {
+      if (actualProbeTree === null)
+        throw new Error("probe worktree was not created");
+      revertProduction(actualProbeTree, input.baseRef, planned.revert);
+      for (const file of baselinePassed) {
+        const run = await runner.runFile(
+          actualProbeTree,
+          file,
+          input.timeoutMs
+        );
+        if (run.timedOut || run.error || run.exitCode === null) {
+          tests.push(inconclusiveForRun(file, run, "revert probe"));
+          continue;
+        }
+        const classified = classifyProbeRun(
+          run.exitCode,
+          run.stdout,
+          [file],
+          run.stderr
+        )[0];
+        tests.push({
+          path: file,
+          verdict: classified?.verdict ?? "inconclusive",
+          detail: classified?.detail ?? "the revert probe returned no file classification"
+        });
+      }
+    }
+  } catch (cause) {
+    const classified = new Set(tests.map((test) => test.path));
+    for (const file of planned.probes) {
+      if (!classified.has(file)) {
+        tests.push({
+          path: file,
+          verdict: "inconclusive",
+          detail: `probe could not run: ${cause instanceof Error ? cause.message : String(cause)}`
+        });
+      }
+    }
+  } finally {
+    if (actualProbeTree !== null)
+      cleanupFailure = cleanupProbeTree(workspace, actualProbeTree);
+  }
+  if (cleanupFailure !== null) {
+    for (const test of tests) {
+      if (test.verdict !== "unreachable") {
+        test.verdict = "inconclusive";
+        test.detail = `probe cleanup failed: ${cleanupFailure}`;
+      }
+    }
+  }
+  const output = {
+    runner: runner.id,
+    tests,
+    unreachable: group(tests, "unreachable"),
+    gated: group(tests, "gated"),
+    inert: group(tests, "inert"),
+    inconclusive: group(tests, "inconclusive"),
+    availableRunners: choice.available,
+    probeWorktreePath: actualProbeTree,
+    cleanupFailure
+  };
+  const status = output.inconclusive.length > 0 ? "inconclusive" : output.unreachable.length > 0 || output.inert.length > 0 ? "failed" : "passed";
+  return {
+    status,
+    output,
+    diagnostics: cleanupFailure === null ? [] : [{ code: "cleanup_failed", message: cleanupFailure }]
+  };
+}
+
 // packages/hermes-engineering/src/handlers/index.ts
 async function dispatch(request) {
+  if (request.command === "build-test") {
+    try {
+      const result = await runBuildTest(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: result.status,
+        output: { ...result.output },
+        diagnostics: result.diagnostics
+      };
+    } catch (cause) {
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "invalid_build_test_input", message: cause.message }
+          ]
+        };
+      }
+      throw cause;
+    }
+  }
+  if (request.command === "test-efficacy") {
+    try {
+      const result = await runTestEfficacy(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: result.status,
+        output: { ...result.output },
+        diagnostics: result.diagnostics
+      };
+    } catch (cause) {
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "invalid_test_efficacy_input", message: cause.message }
+          ]
+        };
+      }
+      throw cause;
+    }
+  }
   if (request.command === "capture-target") {
     try {
       const output = await captureTarget(request);
@@ -1731,7 +2942,7 @@ async function main(options = {}) {
   process.exitCode = result.exitCode;
 }
 var entrypoint = process.argv[1];
-if (entrypoint && realpathSync3(fileURLToPath(import.meta.url)) === realpathSync3(entrypoint)) {
+if (entrypoint && realpathSync6(fileURLToPath(import.meta.url)) === realpathSync6(entrypoint)) {
   await main();
 }
 export {
