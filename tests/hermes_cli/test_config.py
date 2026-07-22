@@ -110,6 +110,27 @@ class TestLoadConfigDefaults:
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
 
+    def test_review_defaults_include_bounded_retention(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+            assert config["review"] == {
+                "retention_runs": 30,
+                "default_effort": "medium",
+                "engine_timeout_seconds": 120,
+                "test_timeout_seconds": 900,
+            }
+
+    def test_invalid_review_section_keeps_review_defaults(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text("review: invalid\n", encoding="utf-8")
+
+            assert load_config()["review"] == {
+                "retention_runs": 30,
+                "default_effort": "medium",
+                "engine_timeout_seconds": 120,
+                "test_timeout_seconds": 900,
+            }
+
 
 class TestLoadConfigParseFailure:
     """A YAML parse failure must NOT silently fall back to defaults.
