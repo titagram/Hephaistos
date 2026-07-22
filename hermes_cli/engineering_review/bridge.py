@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import os
@@ -10,8 +11,9 @@ import subprocess
 import tempfile
 import threading
 import time
+from ctypes import wintypes
 from pathlib import Path
-from typing import BinaryIO, Mapping
+from typing import BinaryIO, Mapping, Protocol
 
 from hermes_constants import find_node_executable, with_hermes_node_path
 
@@ -40,6 +42,183 @@ class EngineCancelledError(EngineExecutionError):
 
 class EngineOutputLimitError(EngineExecutionError):
     """The engine exceeded a bounded output channel."""
+
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+        ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", wintypes.ULARGE_INTEGER),
+        ("WriteOperationCount", wintypes.ULARGE_INTEGER),
+        ("OtherOperationCount", wintypes.ULARGE_INTEGER),
+        ("ReadTransferCount", wintypes.ULARGE_INTEGER),
+        ("WriteTransferCount", wintypes.ULARGE_INTEGER),
+        ("OtherTransferCount", wintypes.ULARGE_INTEGER),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _WindowsJobApiProtocol(Protocol):
+    def create_kill_on_close_job(self) -> object: ...
+
+    def assign_process(self, job_handle: object, process_handle: object) -> None: ...
+
+    def close_handle(self, job_handle: object) -> None: ...
+
+
+class _CtypesWindowsJobApi:
+    """Small ctypes wrapper around the Win32 Job Object calls we require."""
+
+    def __init__(self) -> None:
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if os.name != "nt" or win_dll is None:
+            raise OSError("Windows Job Objects are unavailable on this platform")
+        self._kernel32 = win_dll("kernel32", use_last_error=True)
+        self._kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        self._kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self._kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        self._kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        self._kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        self._kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+    @staticmethod
+    def _error(operation: str) -> OSError:
+        get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
+        error_code = int(get_last_error())
+        return OSError(error_code, f"{operation} failed with Win32 error {error_code}")
+
+    def create_kill_on_close_job(self) -> object:
+        handle = self._kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise self._error("CreateJobObjectW")
+        information = _JobObjectExtendedLimitInformation()
+        information.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        if not self._kernel32.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            error = self._error("SetInformationJobObject")
+            self._kernel32.CloseHandle(handle)
+            raise error
+        return handle
+
+    def assign_process(self, job_handle: object, process_handle: object) -> None:
+        if not self._kernel32.AssignProcessToJobObject(job_handle, process_handle):
+            raise self._error("AssignProcessToJobObject")
+
+    def close_handle(self, job_handle: object) -> None:
+        if not self._kernel32.CloseHandle(job_handle):
+            raise self._error("CloseHandle")
+
+
+class _WindowsJobObject:
+    """Own a kill-on-close Job Object assigned to one engine process tree."""
+
+    def __init__(self, api: _WindowsJobApiProtocol, handle: object) -> None:
+        self._api = api
+        self._handle: object | None = handle
+
+    @classmethod
+    def create(
+        cls,
+        process: subprocess.Popen[bytes] | object,
+        *,
+        api: _WindowsJobApiProtocol | None = None,
+    ) -> _WindowsJobObject:
+        try:
+            job_api = api if api is not None else _CtypesWindowsJobApi()
+            handle = job_api.create_kill_on_close_job()
+        except OSError as exc:
+            raise EngineProcessError(
+                f"could not establish Windows Job Object containment: {exc}"
+            ) from exc
+        job = cls(job_api, handle)
+        process_handle = getattr(process, "_handle", None)
+        if not process_handle:
+            try:
+                job.close()
+            finally:
+                raise EngineProcessError(
+                    "could not establish Windows Job Object containment: "
+                    "child process handle is unavailable"
+                )
+        try:
+            job_api.assign_process(handle, process_handle)
+        except OSError as exc:
+            try:
+                job.close()
+            except EngineProcessError:
+                pass
+            raise EngineProcessError(
+                f"could not establish Windows Job Object containment: {exc}"
+            ) from exc
+        return job
+
+    def close(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            self._api.close_handle(handle)
+        except OSError as exc:
+            raise EngineProcessError(
+                f"could not close Windows Job Object containment: {exc}"
+            ) from exc
+        self._handle = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _create_windows_job(
+    process: subprocess.Popen[bytes],
+) -> _WindowsJobObject | None:
+    if os.name != "nt":
+        return None
+    return _WindowsJobObject.create(process)
 
 
 def bundle_path() -> Path:
@@ -110,42 +289,45 @@ def _read_bounded(stream: BinaryIO, *, limit: int, channel: str) -> bytes:
     return stream.read(limit + 1)
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes], *, grace: float) -> None:
-    """Terminate and then kill the complete isolated child process group."""
-    if os.name == "nt":
-        try:
-            process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            pass
+def _terminate_windows_process_tree(
+    process: subprocess.Popen[bytes] | object,
+    *,
+    job: _WindowsJobObject | None,
+    grace: float,
+) -> None:
+    """Stop a Windows engine tree, using Job close as the enforcement boundary."""
+    cleanup_error: EngineProcessError | None = None
+    if job is not None:
         if process.poll() is None:
             try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                    timeout=max(grace, 0.1),
-                    env=sanitized_engine_env(with_hermes_node_path()),
-                )
-            except (OSError, subprocess.SubprocessError):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-    else:
+                process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except OSError:
-            pass
-        if grace:
-            time.sleep(grace)
+            job.close()
+        except EngineProcessError as exc:
+            cleanup_error = exc
+    elif process.poll() is None:
+        # This path is used only while failing an invocation because enforceable
+        # Job containment could not be established. Kill the tree immediately;
+        # never continue an engine run with direct-PID-only cleanup semantics.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                timeout=max(grace, 0.1),
+                env=sanitized_engine_env(with_hermes_node_path()),
+            )
+        except (OSError, subprocess.SubprocessError):
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     try:
         process.wait(timeout=max(grace, 0.1))
@@ -158,6 +340,63 @@ def _terminate_process_group(process: subprocess.Popen[bytes], *, grace: float) 
             process.wait(timeout=max(grace, 0.1))
         except subprocess.TimeoutExpired:
             pass
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    grace: float,
+    windows_job: _WindowsJobObject | None = None,
+) -> None:
+    """Terminate and then kill the complete isolated child process group."""
+    if os.name == "nt":
+        _terminate_windows_process_tree(process, job=windows_job, grace=grace)
+        return
+
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        if grace:
+            time.sleep(grace)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+        try:
+            process.wait(timeout=max(grace, 0.1))
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=max(grace, 0.1))
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def _cleanup_started_process(
+    process: subprocess.Popen[bytes],
+    *,
+    windows_job: _WindowsJobObject | None,
+    grace: float,
+) -> None:
+    """Stop a live child and always release its optional Job Object handle."""
+    try:
+        if process.poll() is None:
+            _terminate_process_group(
+                process,
+                grace=grace,
+                windows_job=windows_job,
+            )
+    finally:
+        if windows_job is not None:
+            windows_job.close()
 
 
 def _parse_single_response(raw: bytes, request_id: str) -> EngineResponse:
@@ -238,6 +477,17 @@ class EngineeringReviewBridge:
                     f"could not start engineering engine: {exc}"
                 ) from exc
 
+            windows_job: _WindowsJobObject | None = None
+            try:
+                windows_job = _create_windows_job(process)
+            except EngineProcessError:
+                _terminate_process_group(
+                    process,
+                    grace=self.termination_grace,
+                    windows_job=None,
+                )
+                raise
+
             write_errors: list[BaseException] = []
 
             def write_request() -> None:
@@ -253,12 +503,20 @@ class EngineeringReviewBridge:
                     except OSError:
                         pass
 
-            writer = threading.Thread(
-                target=write_request,
-                name="engineering-review-stdin",
-                daemon=True,
-            )
-            writer.start()
+            try:
+                writer = threading.Thread(
+                    target=write_request,
+                    name="engineering-review-stdin",
+                    daemon=True,
+                )
+                writer.start()
+            except BaseException:
+                _cleanup_started_process(
+                    process,
+                    windows_job=windows_job,
+                    grace=self.termination_grace,
+                )
+                raise
             deadline = time.monotonic() + float(timeout)
             failure: EngineExecutionError | None = None
             try:
@@ -289,7 +547,11 @@ class EngineeringReviewBridge:
                     time.sleep(min(self.poll_interval, remaining))
 
                 if failure is not None:
-                    _terminate_process_group(process, grace=self.termination_grace)
+                    _terminate_process_group(
+                        process,
+                        grace=self.termination_grace,
+                        windows_job=windows_job,
+                    )
                     raise failure
 
                 writer.join(timeout=max(self.termination_grace, 0.1))
@@ -311,5 +573,8 @@ class EngineeringReviewBridge:
                     )
                 return _parse_single_response(stdout, request.request_id)
             finally:
-                if process.poll() is None:
-                    _terminate_process_group(process, grace=self.termination_grace)
+                _cleanup_started_process(
+                    process,
+                    windows_job=windows_job,
+                    grace=self.termination_grace,
+                )

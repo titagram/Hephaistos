@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -448,3 +451,243 @@ while True:
     else:
         os.kill(child_pid, signal.SIGKILL)
         pytest.fail("descendant process survived bridge timeout")
+
+
+class FakeWindowsJobApi:
+    def __init__(self, *, assignment_error: OSError | None = None) -> None:
+        self.assignment_error = assignment_error
+        self.events: list[tuple[str, object]] = []
+
+    def create_kill_on_close_job(self) -> object:
+        handle = object()
+        self.events.append(("create", handle))
+        return handle
+
+    def assign_process(self, job_handle: object, process_handle: object) -> None:
+        self.events.append(("assign", (job_handle, process_handle)))
+        if self.assignment_error is not None:
+            raise self.assignment_error
+
+    def close_handle(self, job_handle: object) -> None:
+        self.events.append(("close", job_handle))
+
+
+def test_ctypes_job_api_configures_kill_on_close_limit() -> None:
+    observed: dict[str, object] = {}
+
+    class FakeKernel32:
+        @staticmethod
+        def CreateJobObjectW(_security: object, _name: object) -> int:
+            return 123
+
+        @staticmethod
+        def SetInformationJobObject(
+            handle: object,
+            information_class: int,
+            information_pointer: object,
+            size: int,
+        ) -> int:
+            information = ctypes.cast(
+                information_pointer,
+                ctypes.POINTER(bridge._JobObjectExtendedLimitInformation),
+            ).contents
+            observed.update(
+                handle=handle,
+                information_class=information_class,
+                limit_flags=information.BasicLimitInformation.LimitFlags,
+                size=size,
+            )
+            return 1
+
+        @staticmethod
+        def CloseHandle(_handle: object) -> int:
+            return 1
+
+    api = bridge._CtypesWindowsJobApi.__new__(bridge._CtypesWindowsJobApi)
+    api._kernel32 = FakeKernel32()
+
+    assert api.create_kill_on_close_job() == 123
+    assert observed == {
+        "handle": 123,
+        "information_class": 9,
+        "limit_flags": 0x00002000,
+        "size": ctypes.sizeof(bridge._JobObjectExtendedLimitInformation),
+    }
+
+
+def test_windows_job_object_is_created_assigned_and_closed() -> None:
+    api = FakeWindowsJobApi()
+    process = SimpleNamespace(_handle=1234)
+
+    job = bridge._WindowsJobObject.create(process, api=api)
+    job.close()
+    job.close()
+
+    handle = api.events[0][1]
+    assert api.events == [
+        ("create", handle),
+        ("assign", (handle, 1234)),
+        ("close", handle),
+    ]
+
+
+def test_windows_job_assignment_failure_closes_handle_and_fails_closed() -> None:
+    api = FakeWindowsJobApi(assignment_error=OSError("assignment denied"))
+    process = SimpleNamespace(_handle=1234)
+
+    with pytest.raises(EngineProcessError, match="Job Object containment"):
+        bridge._WindowsJobObject.create(process, api=api)
+
+    assert [event for event, _value in api.events] == ["create", "assign", "close"]
+
+
+def test_windows_teardown_closes_job_after_direct_parent_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeWindowsJobApi()
+    process = SimpleNamespace(_handle=1234)
+    job = bridge._WindowsJobObject.create(process, api=api)
+
+    class ExitedProcess:
+        pid = 99
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float) -> int:
+            return 0
+
+        @staticmethod
+        def send_signal(sig: int) -> None:
+            pytest.fail(f"exited parent must not be signalled: {sig}")
+
+        @staticmethod
+        def kill() -> None:
+            pytest.fail("direct-process fallback must not replace Job Object cleanup")
+
+    taskkill_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda command, **_kwargs: taskkill_calls.append(command),
+    )
+
+    bridge._terminate_windows_process_tree(ExitedProcess(), job=job, grace=0)
+
+    assert [event for event, _value in api.events] == ["create", "assign", "close"]
+    assert taskkill_calls == []
+
+
+def test_bridge_retains_windows_job_until_normal_teardown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    node = make_fake_node(tmp_path, stdout=json.dumps(PASSED_RESPONSE) + "\n")
+    install_fake_node(monkeypatch, node)
+    api = FakeWindowsJobApi()
+    attached_jobs: list[object] = []
+
+    def attach(process: object) -> object:
+        job = bridge._WindowsJobObject.create(SimpleNamespace(_handle=5678), api=api)
+        attached_jobs.append(job)
+        return job
+
+    monkeypatch.setattr(bridge, "_create_windows_job", attach)
+
+    response = EngineeringReviewBridge(bundle=tmp_path / "engine.mjs").invoke(
+        request(tmp_path), timeout=2
+    )
+
+    assert response.status == "passed"
+    assert len(attached_jobs) == 1
+    assert [event for event, _value in api.events] == ["create", "assign", "close"]
+
+
+def test_bridge_closes_windows_job_when_writer_setup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    api = FakeWindowsJobApi()
+    job = bridge._WindowsJobObject.create(SimpleNamespace(_handle=5678), api=api)
+    fake_process = SimpleNamespace(stdin=object(), pid=99, poll=lambda: None)
+    monkeypatch.setattr(bridge, "find_node_executable", lambda _name: "node")
+    monkeypatch.setattr(
+        bridge.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+    monkeypatch.setattr(bridge, "_create_windows_job", lambda _process: job)
+    monkeypatch.setattr(
+        bridge.threading.Thread,
+        "start",
+        lambda _thread: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+    terminated: list[object] = []
+
+    def terminate(process: object, **_kwargs: object) -> None:
+        terminated.append(process)
+        job.close()
+
+    monkeypatch.setattr(bridge, "_terminate_process_group", terminate)
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        EngineeringReviewBridge(bundle=tmp_path / "engine.mjs").invoke(
+            request(tmp_path), timeout=2
+        )
+
+    assert terminated == [fake_process]
+    assert [event for event, _value in api.events] == ["create", "assign", "close"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Job Object test")
+def test_native_windows_job_close_kills_descendant(tmp_path: Path) -> None:
+    child_pid_file = tmp_path / "windows-child.pid"
+    parent_script = """
+import subprocess
+import sys
+import time
+
+sys.stdin.readline()
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(str(child.pid))
+while True:
+    time.sleep(1)
+"""
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_script, str(child_pid_file)],
+        stdin=subprocess.PIPE,
+        creationflags=bridge.windows_process_group_flags(),
+        text=True,
+    )
+    job = bridge._WindowsJobObject.create(parent)
+    try:
+        assert parent.stdin is not None
+        parent.stdin.write("spawn\n")
+        parent.stdin.flush()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not child_pid_file.exists():
+            time.sleep(0.02)
+        assert child_pid_file.is_file()
+        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+
+        job.close()
+        parent.wait(timeout=5)
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        synchronize = 0x00100000
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(synchronize, False, child_pid)
+        if handle:
+            try:
+                assert kernel32.WaitForSingleObject(handle, 5000) == 0
+            finally:
+                kernel32.CloseHandle(handle)
+    finally:
+        job.close()
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
