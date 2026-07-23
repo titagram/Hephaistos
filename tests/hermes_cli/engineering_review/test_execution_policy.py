@@ -9,7 +9,7 @@ from hermes_cli.engineering_review.execution_policy import (
     decide_execution,
     target_kind_for,
 )
-from hermes_cli.engineering_review.protocol import EngineResponse
+from hermes_cli.engineering_review.protocol import EngineDiagnostic, EngineResponse
 from hermes_cli.engineering_review.terminal_execution import SandboxSource
 
 
@@ -288,6 +288,92 @@ def test_authority_routes_sandboxed_checks_to_terminal_executor_not_host_bridge(
         assert response["status"] == "passed"
     finally:
         authority.close()
+
+
+def test_authority_persists_blocked_sandbox_cleanup_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    workspace = tmp_path / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/bin"},
+    )
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="https://github.com/o/r/pull/1",
+        effort="low",
+        session_id="session-1",
+        execution_decision=decision,
+    )
+
+    class PassingCleanupBridge:
+        def invoke(self, request: object, **_kwargs: object) -> EngineResponse:
+            return EngineResponse(
+                request_id=request.request_id,  # type: ignore[attr-defined]
+                status="passed",
+                output={},
+                diagnostics=(),
+            )
+
+    class RecoveryRequiredExecutor:
+        def invoke(
+            self,
+            request: object,
+            *,
+            timeout: float,
+            source: SandboxSource | None,
+        ) -> EngineResponse:
+            del timeout, source
+            return EngineResponse(
+                request_id=request.request_id,  # type: ignore[attr-defined]
+                status="inconclusive",
+                output={},
+                diagnostics=(
+                    EngineDiagnostic(
+                        code="cleanup_failed",
+                        message="sandbox cleanup recovery is required",
+                    ),
+                ),
+            )
+
+        def shutdown(self) -> None:
+            return None
+
+    authority._bridge = PassingCleanupBridge()  # type: ignore[assignment]
+    authority._sandbox_executor = RecoveryRequiredExecutor()  # type: ignore[assignment]
+    authority._sandbox_source = SandboxSource(
+        worktree=workspace,
+        base_ref="1" * 40,
+        head_ref="2" * 40,
+    )
+
+    response = authority._dispatch({
+        "version": 1,
+        "action": "invoke",
+        "request": {
+            "protocolVersion": 1,
+            "requestId": "recovery-required",
+            "command": "build-test",
+            "workspace": str(workspace),
+            "artifactRoot": str(authority.run.root),
+            "input": {
+                "planPath": str(authority.run.root / "plan.json"),
+                "execution": decision.to_wire(),
+            },
+        },
+        "timeout": 5,
+    })
+    authority.close()
+
+    assert response["status"] == "inconclusive"
+    assert response["diagnostics"][0]["code"] == "cleanup_failed"
+    assert authority.run.status == "cleanup_failed"
 
 
 def test_authority_close_retries_registered_capture_cleanup(

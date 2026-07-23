@@ -496,6 +496,90 @@ def test_cleanup_failure_is_observed_and_records_public_recovery(
     assert recovery["taskId"] == f"review-{run.run_id}"
 
 
+def test_cleanup_failure_blocks_later_sandbox_without_overwriting_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    created: list[str] = []
+
+    class CleanupFailureEnvironment:
+        cleanup_error = "docker rm -f exited 1"
+
+        def __init__(self, name: str, container_id: str) -> None:
+            self.name = name
+            self.container_id = container_id
+
+        def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
+            request = json.loads(str(kwargs["stdin_data"]))
+            return {
+                "returncode": 0,
+                "output": json.dumps({
+                    "protocolVersion": 1,
+                    "requestId": request["requestId"],
+                    "status": "passed",
+                    "output": {"packageManager": None, "commands": []},
+                    "diagnostics": [],
+                }),
+            }
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {
+                "containerId": self.container_id,
+                "containerName": f"hermes-review-{self.name}",
+                "taskId": f"review-{run.run_id}",
+            }
+
+    environments = [
+        CleanupFailureEnvironment("first", "a" * 64),
+        CleanupFailureEnvironment("second", "b" * 64),
+    ]
+
+    def factory(**_kwargs: object) -> CleanupFailureEnvironment:
+        environment = environments[len(created)]
+        created.append(environment.name)
+        return environment
+
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=factory,
+        snapshot_builder=_write_fake_bundle,
+    )
+
+    first = executor.invoke(_request(run), timeout=30, source=_source(run))
+    second = executor.invoke(_request(run), timeout=30, source=_source(run))
+
+    assert first.status == "inconclusive"
+    assert first.diagnostics[0].code == "cleanup_failed"
+    assert second.status == "inconclusive"
+    assert second.diagnostics[0].code == "cleanup_failed"
+    assert f"hermes review cleanup --run {run.run_id}" in second.diagnostics[0].message
+    assert created == ["first"]
+    recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert recovery["containerId"] == "a" * 64
+    assert recovery["containerName"] == "hermes-review-first"
+
+
 def test_distinct_environments_cannot_share_teardown_result_when_ids_are_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

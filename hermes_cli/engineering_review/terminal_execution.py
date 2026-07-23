@@ -514,6 +514,16 @@ class SandboxTerminalExecutor:
                         "sandbox_execution_cancelled",
                         "sandbox execution was cancelled by the review authority",
                     )
+                if self._cleanup_failure is not None:
+                    return _inconclusive(
+                        request,
+                        "cleanup_failed",
+                        (
+                            "sandbox cleanup recovery is required before another "
+                            f"check; recovery: hermes review cleanup --run "
+                            f"{self._run.run_id}"
+                        ),
+                    )
                 self._idle.clear()
             try:
                 return self._invoke_once(request, timeout=timeout, source=source)
