@@ -180,7 +180,7 @@ def test_new_store_root_fsyncs_its_inode_then_parent_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
     parent = tmp_path / "evolution"
-    parent.mkdir()
+    parent.mkdir(mode=0o700)
     root = parent / "generations"
     parent_inode = parent.stat().st_ino
     directory_fsyncs: list[int] = []
@@ -199,6 +199,88 @@ def test_new_store_root_fsyncs_its_inode_then_parent_directory(
     assert root_inode in directory_fsyncs
     assert parent_inode in directory_fsyncs
     assert directory_fsyncs.index(root_inode) < directory_fsyncs.index(parent_inode)
+
+
+def test_absent_default_evolution_hierarchy_is_private_and_ledger_compatible(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import hermes_cli.evolution.store as store_module
+    from hermes_cli.evolution.ledger import EvolutionLedger
+
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    monkeypatch.setattr(store_module, "get_hermes_home", lambda: hermes_home)
+
+    store = store_module.GenerationStore()
+    store._secure_root()
+
+    assert stat.S_IMODE((hermes_home / "evolution").stat().st_mode) == 0o700
+    assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
+    ledger = EvolutionLedger(hermes_home / "evolution" / "evolution.db")
+    ledger.connection.close()
+
+
+def test_first_use_fsyncs_each_new_hierarchy_dirent_in_durable_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    root = hermes_home / "evolution" / "generations"
+    directory_fsyncs: list[int] = []
+    original_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode):
+            directory_fsyncs.append(info.st_ino)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    GenerationStore(root)._secure_root()
+
+    evolution_inode = (hermes_home / "evolution").stat().st_ino
+    generations_inode = root.stat().st_ino
+    assert directory_fsyncs == [
+        evolution_inode,
+        hermes_home.stat().st_ino,
+        generations_inode,
+        evolution_inode,
+    ]
+
+
+@pytest.mark.parametrize("hostile_kind", ["mode", "symlink", "file"])
+def test_hostile_existing_intermediate_hierarchy_fails_closed(
+    tmp_path: Path, hostile_kind: str
+) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    evolution = hermes_home / "evolution"
+    if hostile_kind == "mode":
+        evolution.mkdir(mode=0o700)
+        evolution.chmod(0o755)
+    elif hostile_kind == "symlink":
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        evolution.symlink_to(target, target_is_directory=True)
+    else:
+        evolution.write_text("not a directory")
+
+    with pytest.raises(ValueError, match="integrity"):
+        GenerationStore(evolution / "generations")._secure_root()
+    if hostile_kind == "mode":
+        assert stat.S_IMODE(evolution.stat().st_mode) == 0o755
+
+
+def test_managed_hierarchy_owner_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(mode=0o700)
+    actual_uid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: actual_uid + 1)
+
+    with pytest.raises(ValueError, match="ownership"):
+        GenerationStore(hermes_home / "evolution" / "generations")._secure_root()
 
 
 def test_existing_hostile_store_root_is_not_chmod_repaired(

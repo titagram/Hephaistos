@@ -233,6 +233,7 @@ def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
     [
         "python /Users/alice/private/check.py --verify",
         r"python C:\Users\alice\private\check.py --verify",
+        r"check --path=\\server\share",
     ],
 )
 def test_verification_commands_reject_embedded_local_paths(
@@ -257,6 +258,8 @@ def test_verification_commands_reject_embedded_local_paths(
         "tool_stderr",
         "captured_output",
         "rawoutput",
+        "toolOutput",
+        "systemPromptBody",
     ],
 )
 def test_manifest_rejects_evidence_bearing_keys_anywhere(
@@ -277,11 +280,23 @@ def test_manifest_accepts_normal_commands_and_nonopaque_digest_labels() -> None:
         "python -m package.check --verify",
         "hello --profile safe",
         "probe --endpoint https://example.test/health",
+        "install --package owner/package@1.2.3",
+        "check --path-mode safe --output=json",
     ]
     manifest["build_environment"]["digest"] = "sha256"  # type: ignore[index]
     manifest["build_environment"]["artifact_digest"] = "sha256"  # type: ignore[index]
 
     validate_manifest(manifest)
+
+
+def test_manifest_rejects_whitespace_wrapped_opaque_credential_material() -> None:
+    manifest = _manifest()
+    manifest["build_environment"]["authorization"] = (  # type: ignore[index]
+        "Bearer aB3dE5gH7jK9mN2pQ4rS6tV8"
+    )
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
 
 
 def test_root_validation_normalizes_unsupported_dir_fd_operations(
@@ -299,6 +314,39 @@ def test_root_validation_normalizes_unsupported_dir_fd_operations(
     monkeypatch.setattr("hermes_cli.evolution.manifest.os.open", unsupported_dir_fd_open)
 
     with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest, tmp_path)
+
+
+def test_root_validation_normalizes_dir_fd_keyword_type_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _manifest()
+    _stage(tmp_path, manifest)
+    original_open = __import__("os").open
+
+    def open_without_dir_fd(path, flags, mode=0o777):
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr("hermes_cli.evolution.manifest.os.open", open_without_dir_fd)
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest, tmp_path)
+
+
+def test_root_validation_does_not_hide_programming_type_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import hermes_cli.evolution.manifest as module
+
+    manifest = _manifest()
+    _stage(tmp_path, manifest)
+
+    def programming_error(*args, **kwargs):
+        raise TypeError("programming defect involving dir_fd")
+
+    monkeypatch.setattr(module, "_validate_files_at", programming_error)
+
+    with pytest.raises(TypeError, match="programming defect involving dir_fd"):
         validate_manifest(manifest, tmp_path)
 
 

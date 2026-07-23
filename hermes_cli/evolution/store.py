@@ -56,6 +56,15 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+def _validate_private_directory(info: os.stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise _error("managed hierarchy is unsafe")
+    if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+        raise _error("managed hierarchy ownership")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise _error("managed hierarchy is not private")
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, _directory_flags())
     try:
@@ -187,35 +196,125 @@ class GenerationStore:
     """Publish validated overlay bytes through same-filesystem directory rename."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else get_hermes_home() / "evolution" / "generations"
+        self._trusted_anchor: Path | None = None
+        if root is None:
+            self._trusted_anchor = Path(get_hermes_home())
+            self.root = self._trusted_anchor / "evolution" / "generations"
+        else:
+            self.root = Path(root)
+
+    def _hierarchy_anchor(self) -> tuple[Path, tuple[str, ...]]:
+        if self._trusted_anchor is not None:
+            anchor = self._trusted_anchor
+            parts = self.root.relative_to(anchor).parts
+        else:
+            anchor = self.root.parent
+            parts = (self.root.name,)
+
+        while True:
+            try:
+                anchor.lstat()
+                return anchor, parts
+            except FileNotFoundError:
+                parent = anchor.parent
+                if parent == anchor:
+                    raise _error("managed hierarchy has no trusted ancestor")
+                parts = (anchor.name, *parts)
+                anchor = parent
+            except OSError as error:
+                raise _error("managed hierarchy is unsafe") from error
+
+    @staticmethod
+    def _open_private_child(parent_descriptor: int, name: str) -> int:
+        created = False
+        created_info: os.stat_result | None = None
+        try:
+            try:
+                path_info = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+                    created = True
+                    created_info = os.stat(
+                        name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    pass
+                path_info = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+
+            _validate_private_directory(path_info)
+            descriptor = os.open(
+                name,
+                _directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+        except ValueError:
+            raise
+        except (OSError, NotImplementedError, TypeError) as error:
+            raise _error("managed hierarchy is unsafe") from error
+
+        try:
+            descriptor_info = os.fstat(descriptor)
+            if not _same_inode(path_info, descriptor_info):
+                raise _error("managed hierarchy changed during validation")
+            if created_info is not None and not _same_inode(
+                created_info,
+                descriptor_info,
+            ):
+                raise _error("created directory changed during validation")
+            if created:
+                os.fchmod(descriptor, 0o700)
+                descriptor_info = os.fstat(descriptor)
+                path_info = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if not _same_inode(path_info, descriptor_info):
+                    raise _error("created directory changed during validation")
+            _validate_private_directory(descriptor_info)
+            os.fsync(descriptor)
+            os.fsync(parent_descriptor)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     def _secure_root(self) -> None:
         self._require_posix()
         try:
-            self.root.mkdir(parents=True, mode=0o700)
-            created = True
-        except FileExistsError:
-            created = False
-        if created:
-            descriptor = os.open(self.root, _directory_flags())
-            try:
-                info = os.fstat(descriptor)
-                if not stat.S_ISDIR(info.st_mode):
-                    raise _error("store root is unsafe")
-                os.fchmod(descriptor, 0o700)
-                os.fsync(descriptor)
-                if not _same_inode(self.root.lstat(), info):
-                    raise _error("store root changed during creation")
-            finally:
+            anchor, parts = self._hierarchy_anchor()
+            anchor_info = anchor.lstat()
+            _validate_private_directory(anchor_info)
+            descriptor = os.open(anchor, _directory_flags())
+        except ValueError:
+            raise
+        except (OSError, NotImplementedError, TypeError) as error:
+            raise _error("managed hierarchy is unsafe") from error
+
+        try:
+            descriptor_info = os.fstat(descriptor)
+            if not _same_inode(anchor_info, descriptor_info):
+                raise _error("managed hierarchy changed during validation")
+            _validate_private_directory(descriptor_info)
+            for name in parts:
+                child = self._open_private_child(descriptor, name)
                 os.close(descriptor)
-        info = self.root.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise _error("store root is unsafe")
-        if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
-            raise _error("store root ownership")
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            raise _error("store root is not private")
-        _fsync_directory(self.root.parent)
+                descriptor = child
+            if not _same_inode(self.root.lstat(), os.fstat(descriptor)):
+                raise _error("store root changed during validation")
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _require_posix() -> None:
@@ -225,6 +324,7 @@ class GenerationStore:
             "fsync",
             "fstat",
             "listdir",
+            "mkdir",
             "open",
             "stat",
         )
@@ -237,6 +337,7 @@ class GenerationStore:
             and all(hasattr(os, name) for name in required_functions)
             and os.open in supports_dir_fd
             and os.stat in supports_dir_fd
+            and os.mkdir in supports_dir_fd
             and os.listdir in supports_fd
         )
         try:

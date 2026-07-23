@@ -37,14 +37,10 @@ _COMPONENT_FIELDS = frozenset(
 _LOCKFILE_FIELDS = frozenset({"path", "digest"})
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._+-]+)?\Z", re.ASCII)
-_SENSITIVE = re.compile(
-    r"(?:^|[_-])(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|stdout|stderr|output|rawoutput)(?:$|[_-])",
-    re.I,
-)
 _SECRET = re.compile(r"(?:sk|pk)[_-](?:live|test|proj)[_-]|ghp[_-]|github[_-]pat[_-]|glpat[_-]|xox[bp][_-]|akia", re.I)
 _HTTPS_URL = re.compile(r"https://[^\s\"'`]+", re.I)
 _WINDOWS_PATH = re.compile(
-    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])\\\\[^\s\"'`]+"
+    r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"'`]+|(?<![A-Za-z0-9_])\\\\[^\s\"'`]+"
 )
 _POSIX_PATH = re.compile(r"(?<![:/])/(?:[^/\s\"'`]+/)*[^/\s\"'`]+")
 _EXPLICIT_RELATIVE_PATH = re.compile(
@@ -52,6 +48,12 @@ _EXPLICIT_RELATIVE_PATH = re.compile(
 )
 _BARE_RELATIVE_PATH = re.compile(
     r"[^\s/\\\"'`]+(?:[/\\][^\s/\\\"'`]+)+\Z"
+)
+_PACKAGE_COORDINATE = re.compile(
+    r"(?<![A-Za-z0-9._-])[a-z0-9][a-z0-9._-]*/"
+    r"[a-z0-9][a-z0-9._-]*@[a-z0-9._+-]+"
+    r"(?![A-Za-z0-9._+-])",
+    re.ASCII,
 )
 _MAX_ITEMS = 64
 _MAX_TEXT = 512
@@ -118,14 +120,40 @@ def _looks_like_local_path(value: str, *, slot: str) -> bool:
     if slot in {"declared_path", "component_source"}:
         return False
     without_urls = _HTTPS_URL.sub("", value)
+    without_urls_or_packages = _PACKAGE_COORDINATE.sub("", without_urls)
     return any(
-        pattern.search(without_urls) is not None
+        pattern.search(without_urls_or_packages) is not None
         for pattern in (
             _WINDOWS_PATH,
             _POSIX_PATH,
             _EXPLICIT_RELATIVE_PATH,
             _BARE_RELATIVE_PATH,
         )
+    )
+
+
+def _is_sensitive_key(key: str) -> bool:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    tokens = tuple(
+        token
+        for token in re.sub(r"[^A-Za-z0-9]+", "_", separated).lower().split("_")
+        if token
+    )
+    compact = "".join(tokens)
+    forbidden_tokens = {
+        "secret",
+        "password",
+        "prompt",
+        "transcript",
+        "stdout",
+        "stderr",
+        "output",
+    }
+    return (
+        bool(forbidden_tokens.intersection(tokens))
+        or "apikey" in compact
+        or "accesstoken" in compact
+        or "rawoutput" in compact
     )
 
 
@@ -142,7 +170,7 @@ def _privacy(
     budget[0] += 1
     if depth > _MAX_DEPTH or budget[0] > _MAX_NODES:
         _fail()
-    if key and _SENSITIVE.search(key) and key != "credential_references":
+    if key and _is_sensitive_key(key) and key != "credential_references":
         _fail()
     if isinstance(value, str):
         _text(value)
@@ -162,11 +190,7 @@ def _privacy(
             or "file://" in value.lower()
             or _SECRET.search(value)
             or _looks_like_local_path(value, slot=slot)
-            or (
-                opaque
-                and not any(character.isspace() for character in value)
-                and _looks_like_credential_material(value)
-            )
+            or (opaque and _looks_like_credential_material(value))
         ):
             _fail()
     elif isinstance(value, Mapping):
@@ -367,6 +391,21 @@ def _same_inode(path: Path, descriptor: int) -> bool:
     )
 
 
+def _is_unsupported_descriptor_type_error(error: TypeError) -> bool:
+    message = str(error).lower()
+    descriptor_keywords = ("dir_fd", "follow_symlinks")
+    unsupported_signatures = (
+        "unexpected keyword",
+        "invalid keyword",
+        "not supported",
+        "unsupported",
+        "unavailable",
+    )
+    return any(keyword in message for keyword in descriptor_keywords) and any(
+        signature in message for signature in unsupported_signatures
+    )
+
+
 def identity_payload(manifest: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in _mapping(manifest).items() if key not in _EXCLUDED}
 
@@ -419,6 +458,10 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
                     _fail()
             finally:
                 os.close(root_descriptor)
+        except TypeError as error:
+            if _is_unsupported_descriptor_type_error(error):
+                _fail()
+            raise
         except (OSError, NotImplementedError):
             _fail()
 
@@ -434,5 +477,9 @@ def _validate_manifest_at_fd(
     validate_manifest(manifest)
     try:
         _validate_files_at(manifest, root_descriptor, published=published)
+    except TypeError as error:
+        if _is_unsupported_descriptor_type_error(error):
+            _fail()
+        raise
     except (OSError, NotImplementedError):
         _fail()
