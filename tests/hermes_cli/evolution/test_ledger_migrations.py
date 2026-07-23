@@ -176,10 +176,8 @@ def test_two_connections_that_preflight_v1_concurrently_both_open_v2(
     _create_valid_v1_database(path)
     barrier = threading.Barrier(2)
     original_preflight = ledger_module._preflight_existing
-    original_wal = ledger_module.apply_wal_with_fallback
     outcomes: list[object] = []
     lock = threading.Lock()
-    wal_lock = threading.Lock()
 
     def synchronized_preflight(candidate_path, guard):
         version = original_preflight(candidate_path, guard)
@@ -190,12 +188,14 @@ def test_two_connections_that_preflight_v1_concurrently_both_open_v2(
         ledger_module, "_preflight_existing", synchronized_preflight
     )
 
-    def serialized_wal(connection, *, db_label):
-        with wal_lock:
-            return original_wal(connection, db_label=db_label)
+    def skip_unrelated_wal_transition(_connection, *, db_label):
+        assert db_label == "evolution.db"
+        return "delete"
 
     monkeypatch.setattr(
-        ledger_module, "apply_wal_with_fallback", serialized_wal
+        ledger_module,
+        "apply_wal_with_fallback",
+        skip_unrelated_wal_transition,
     )
 
     def open_ledger() -> None:

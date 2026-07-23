@@ -29,36 +29,36 @@ _HOST_PATTERN = re.compile(
     re.ASCII,
 )
 _HEX_SECRET_PATTERN = re.compile(r"[0-9a-f]{24,}\Z", re.ASCII)
-_SENSITIVE_SYMBOL_PARTS = frozenset(
-    {
-        "api",
-        "auth",
-        "bearer",
-        "credential",
-        "credentials",
-        "key",
-        "password",
-        "secret",
-        "token",
-    }
-)
 _CREDENTIAL_PREFIXES = (
-    "akia",
-    "akia-",
-    "ghp_",
-    "ghp-",
     "github_pat_",
     "github-pat-",
-    "pk_",
-    "pk-",
-    "sk_",
-    "sk-",
+    "glpat-",
+    "sk_live_",
+    "sk-live-",
+    "sk_test_",
+    "sk-test-",
+    "sk_proj_",
+    "sk-proj-",
+    "pk_live_",
+    "pk-live-",
+    "pk_test_",
+    "pk-test-",
     "xoxb_",
     "xoxb-",
     "xoxp_",
     "xoxp-",
+    "ghp_",
+    "ghp-",
+    "hf_",
+    "ya29.",
     "ya29_",
     "ya29-",
+    "akia-",
+    "akia",
+    "pk_",
+    "pk-",
+    "sk_",
+    "sk-",
 )
 _FILE_SUFFIXES = frozenset(
     {
@@ -158,31 +158,70 @@ def _plain(value: object) -> object:
     return value
 
 
-def _privacy_safe_symbolic(
+def _syntax_safe_symbolic(
     value: object, *, code: str, limit: int = 64
 ) -> str:
     if not isinstance(value, str):
         raise AuthorizationError(code)
     normalized = unicodedata.normalize("NFC", value)
-    parts = frozenset(re.split(r"[._-]", value))
     suffix = value.rpartition(".")[2] if "." in value else ""
     if (
         normalized != value
         or not 1 <= len(value) <= limit
         or _TOKEN_PATTERN.fullmatch(value) is None
-        or parts & _SENSITIVE_SYMBOL_PARTS
-        or value.startswith(_CREDENTIAL_PREFIXES)
         or suffix in _FILE_SUFFIXES
-        or _HEX_SECRET_PATTERN.fullmatch(value) is not None
-        or (
-            len(value) >= 24
-            and not any(separator in value for separator in "._-")
-            and any(character.isalpha() for character in value)
-            and any(character.isdigit() for character in value)
-        )
     ):
         raise AuthorizationError(code)
     return value
+
+
+def _compact_material(value: str) -> str:
+    return value.translate(str.maketrans("", "", "._-"))
+
+
+def _looks_like_credential_material(value: str) -> bool:
+    compact = _compact_material(value)
+    if _HEX_SECRET_PATTERN.fullmatch(compact) is not None:
+        return True
+
+    unique = len(set(compact))
+    has_alpha = any(character.isalpha() for character in compact)
+    has_digit = any(character.isdigit() for character in compact)
+    has_separator = any(separator in value for separator in "._-")
+    if (
+        not has_separator
+        and len(compact) >= 32
+        and unique >= 10
+        and has_alpha
+        and has_digit
+    ):
+        return True
+    if not has_separator and len(compact) >= 40 and unique >= 14:
+        return True
+
+    for prefix in _CREDENTIAL_PREFIXES:
+        if not value.startswith(prefix):
+            continue
+        payload = _compact_material(value[len(prefix) :])
+        payload_unique = len(set(payload))
+        return len(payload) >= 16 and (
+            (
+                payload_unique >= 8
+                and any(character.isalpha() for character in payload)
+                and any(character.isdigit() for character in payload)
+            )
+            or (len(payload) >= 24 and payload_unique >= 12)
+        )
+    return False
+
+
+def _privacy_safe_symbolic(
+    value: object, *, code: str, limit: int = 64
+) -> str:
+    symbolic = _syntax_safe_symbolic(value, code=code, limit=limit)
+    if _looks_like_credential_material(symbolic):
+        raise AuthorizationError(code)
+    return symbolic
 
 
 def _canonical_token(value: object) -> str:
@@ -223,6 +262,10 @@ def _domains(value: object) -> tuple[str, ...]:
             not isinstance(domain, str)
             or unicodedata.normalize("NFC", domain) != domain
             or _HOST_PATTERN.fullmatch(domain) is None
+            or any(
+                _looks_like_credential_material(label)
+                for label in domain.split(".")
+            )
         ):
             raise AuthorizationError("invalid_scope")
         result.append(domain)
@@ -667,8 +710,8 @@ def deny_authorization_request(
         request_id, code="request_unavailable"
     )
     decider = _privacy_safe_symbolic(decided_by, code="invalid_approver")
-    created_at = _now()
     with ledger.transaction() as connection:
+        created_at = _now()
         row = connection.execute(
             """
             SELECT request.*

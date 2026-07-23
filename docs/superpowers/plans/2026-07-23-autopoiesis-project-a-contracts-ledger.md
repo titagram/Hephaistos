@@ -329,13 +329,16 @@ update the issued grant row. Use compare-and-set SQL predicates
 exactly one. Append each matching lifecycle authorization event in the same
 transaction.
 
-Read the issue/consume clock only after `BEGIN IMMEDIATE` acquires the write
-lock. Validate all nested scope symbols and actor identifiers with the same
-privacy-safe symbolic policy before persistence. Enforce exact
-request-to-decision-to-grant coherence in SQLite so direct SQL cannot invent or
-reshape authority, and validate canonical UUID lookup identifiers before any
-query. After acquiring the migration lock, re-read the schema version so two
-connections that independently preflight v1 can migrate idempotently.
+Read the issue/deny/consume clock only after `BEGIN IMMEDIATE` acquires the
+write lock. Validate all nested scope symbols and actor identifiers
+syntactically, then apply a separate bounded credential-material detector;
+apply the material detector to every hostname label without rejecting ordinary
+semantic vocabulary. Enforce exact request-to-decision-to-grant coherence,
+including decision/grant audit timestamps, in SQLite so direct SQL cannot
+invent or reshape authority, and validate canonical UUID lookup identifiers
+before any query. After acquiring the migration lock, re-read the schema
+version so two connections that independently preflight v1 can migrate
+idempotently.
 
 - [ ] **Step 5: Prove concurrency behavior**
 

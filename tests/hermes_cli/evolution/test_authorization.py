@@ -11,6 +11,7 @@ import pytest
 
 from hermes_cli.evolution import authorization
 from hermes_cli.evolution.authorization import (
+    AuthorizationDecision,
     AuthorizationError,
     AuthorizationGrant,
     create_authorization_request,
@@ -23,6 +24,7 @@ from hermes_cli.evolution.ledger import EvolutionLedger, LifecycleEvent
 
 
 NOW = "2026-07-23T10:00:00.000000Z"
+AFTER_LOCK = "2026-07-23T10:01:00.000000Z"
 LATER = "2026-07-23T10:02:01.000000Z"
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -717,12 +719,126 @@ def test_consume_rechecks_expiry_after_waiting_for_sqlite_write_lock(
     ).fetchone()[0] == 0
 
 
+def test_denial_rechecks_expiry_after_waiting_for_sqlite_write_lock(
+    tmp_path, monkeypatch
+) -> None:
+    clock = {"value": NOW}
+    monkeypatch.setattr(authorization, "_now", lambda: clock["value"])
+    path = tmp_path / "evolution.db"
+    first = EvolutionLedger(path)
+    attempt_id = first.create_attempt("manual", "ticket-1")
+    request = create_authorization_request(
+        first,
+        attempt_id=attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=60,
+    )
+    second = EvolutionLedger(path)
+    entered = threading.Event()
+    original_transaction = second.transaction
+
+    @contextmanager
+    def marked_transaction():
+        entered.set()
+        with original_transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(second, "transaction", marked_transaction)
+    outcome: list[str] = []
+    first.connection.execute("BEGIN IMMEDIATE")
+
+    def blocked_denial() -> None:
+        try:
+            deny_authorization_request(
+                second,
+                request_id=request.request_id,
+                decided_by="local-operator",
+            )
+        except AuthorizationError as exc:
+            outcome.append(exc.code)
+        else:
+            outcome.append("denied")
+
+    thread = threading.Thread(target=blocked_denial)
+    thread.start()
+    assert entered.wait(timeout=5)
+    clock["value"] = LATER
+    first.connection.commit()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert outcome == ["request_unavailable"]
+    assert first.connection.execute(
+        "SELECT COUNT(*) FROM authorization_decisions"
+    ).fetchone()[0] == 0
+
+
+def test_denial_audit_timestamp_is_read_after_waiting_for_write_lock(
+    tmp_path, monkeypatch
+) -> None:
+    clock = {"value": NOW}
+    monkeypatch.setattr(authorization, "_now", lambda: clock["value"])
+    path = tmp_path / "evolution.db"
+    first = EvolutionLedger(path)
+    attempt_id = first.create_attempt("manual", "ticket-1")
+    request = create_authorization_request(
+        first,
+        attempt_id=attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=120,
+    )
+    second = EvolutionLedger(path)
+    entered = threading.Event()
+    original_transaction = second.transaction
+
+    @contextmanager
+    def marked_transaction():
+        entered.set()
+        with original_transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(second, "transaction", marked_transaction)
+    decisions: list[AuthorizationDecision] = []
+    first.connection.execute("BEGIN IMMEDIATE")
+
+    def blocked_denial() -> None:
+        decisions.append(
+            deny_authorization_request(
+                second,
+                request_id=request.request_id,
+                decided_by="local-operator",
+            )
+        )
+
+    thread = threading.Thread(target=blocked_denial)
+    thread.start()
+    assert entered.wait(timeout=5)
+    clock["value"] = AFTER_LOCK
+    first.connection.commit()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert len(decisions) == 1
+    assert decisions[0].created_at == AFTER_LOCK
+    event = first.history()[-1]
+    assert event.event_type == "authorization_denied"
+    assert event.created_at == AFTER_LOCK
+
+
 @pytest.mark.parametrize(
     ("kind", "scope"),
     [
         (
             "research",
-            research_scope(source_classes=["api-token"]),
+            research_scope(
+                source_classes=[
+                    "sk-proj-a1b2c3d4e5f60718293a4b5c6d7e8f90"
+                ]
+            ),
         ),
         (
             "research",
@@ -733,18 +849,6 @@ def test_consume_rechecks_expiry_after_waiting_for_sqlite_write_lock(
         (
             "build",
             build_scope(source_families=["policy.yaml"]),
-        ),
-        (
-            "build",
-            build_scope(isolation_policy={"credential": "deny"}),
-        ),
-        (
-            "build",
-            build_scope(isolation_policy={"network": "secret"}),
-        ),
-        (
-            "build",
-            build_scope(resource_limits={"password": 1}),
         ),
     ],
 )
@@ -768,8 +872,12 @@ def test_nested_scope_symbols_reject_credentials_files_and_secret_material(
     ("decision", "actor"),
     [
         ("approve", "operator notes"),
-        ("approve", "sk-live-credential"),
-        ("approve", "sk_live"),
+        (
+            "approve",
+            "ghp_a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        ),
+        ("approve", "hf_a1b2c3d4e5f60718"),
+        ("deny", "glpat-a1b2c3d4e5f60718"),
         ("deny", "config.yaml"),
         ("deny", "a1b2c3d4e5f60718293a4b5c6d7e8f90"),
     ],
@@ -816,11 +924,24 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
         kind="build",
         subject_digest=DIGEST_A,
         scope=build_scope(
-            source_families=["official-docs", "signed-release"],
-            dependency_families=["python3", "sqlite"],
+            source_families=[
+                "official-docs",
+                "api-client",
+                "token-broker",
+                "sk-live-credential",
+                "sk_live",
+                "authorization-protocol-version-2026",
+            ],
+            dependency_families=["python3", "sqlite", "key-rotation"],
             isolation_policy={
                 "network-access": "deny",
                 "sandbox-profile": "strict",
+                "credential-access": "deny",
+                "secret-handling": "deny",
+            },
+            resource_limits={
+                "duration_seconds": 120,
+                "password-retries": 2,
             },
         ),
         ttl_seconds=120,
@@ -833,11 +954,53 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
     grant = issue_grant(
         ledger,
         request_id=request.request_id,
-        approved_by="local-operator",
+        approved_by="auth-operator",
         confirmation_digest=confirmation,
     )
 
-    assert grant.approved_by == "local-operator"
+    assert grant.approved_by == "auth-operator"
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "sk-proj-a1b2c3d4e5f60718293a4b5c6d7e8f90.example.com",
+        "a1b2c3d4e5f60718293a4b5c6d7e8f90.example.org",
+    ],
+)
+def test_domain_labels_reject_credential_and_high_entropy_material(
+    ledger: EvolutionLedger,
+    domain: str,
+) -> None:
+    with pytest.raises(AuthorizationError, match="invalid_scope"):
+        create_authorization_request(
+            ledger,
+            attempt_id=ledger.attempt_id,
+            kind="research",
+            subject_digest=DIGEST_A,
+            scope=research_scope(domains=[domain]),
+            ttl_seconds=120,
+        )
+
+
+def test_semantic_domain_labels_remain_valid(
+    ledger: EvolutionLedger,
+) -> None:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(
+            domains=["api.example.com", "auth.example.org"]
+        ),
+        ttl_seconds=120,
+    )
+
+    assert request.scope["domains"] == (
+        "api.example.com",
+        "auth.example.org",
+    )
 
 
 @pytest.mark.parametrize(
@@ -931,6 +1094,7 @@ def _insert_raw_grant(
         "expires_at": request.expires_at,
         "approved_by": "local-operator",
         "confirmation_digest": confirmation,
+        "created_at": NOW,
     }
     values.update(changes)
     grant_id = str(uuid.uuid4())
@@ -953,7 +1117,7 @@ def _insert_raw_grant(
             values["expires_at"],
             values["approved_by"],
             values["confirmation_digest"],
-            NOW,
+            values["created_at"],
         ),
     )
 
@@ -972,6 +1136,7 @@ def _insert_raw_grant(
         ("expires_at", LATER),
         ("approved_by", "other-operator"),
         ("confirmation_digest", DIGEST_B),
+        ("created_at", LATER),
     ],
 )
 def test_sqlite_rejects_grant_incoherent_with_request_or_approved_decision(

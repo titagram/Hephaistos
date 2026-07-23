@@ -486,6 +486,7 @@ _V2_AUTH_SCHEMA_STATEMENTS = (
           AND decision.decision = 'approved'
           AND decision.decided_by = NEW.approved_by
           AND decision.confirmation_digest = NEW.confirmation_digest
+          AND decision.created_at = NEW.created_at
     )
     BEGIN
         SELECT RAISE(ABORT, 'authorization_grant_coherence');
