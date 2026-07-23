@@ -4,9 +4,11 @@ import inspect
 import sqlite3
 import threading
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
+from hermes_cli.evolution import ledger as ledger_module
 from hermes_cli.evolution.ledger import (
     EvolutionLedger,
     EvolutionLedgerError,
@@ -31,7 +33,7 @@ def event(*, event_id: str, attempt_id: str, reason_summary: str = "started") ->
         authorization_id=None,
         reason_code="created",
         reason_summary=reason_summary,
-        created_at="2026-07-23T00:00:00Z",
+        created_at="2026-07-23T00:00:00.000000Z",
     )
 
 
@@ -112,7 +114,6 @@ def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
         ("actor", "operator\nsecret"),
         ("authorization_id", "x" * 257),
         ("reason_code", "x" * 129),
-        ("created_at", "x" * 65),
     ],
 )
 def test_append_rejects_unbounded_or_noncanonical_identity_fields(
@@ -128,6 +129,71 @@ def test_append_rejects_unbounded_or_noncanonical_identity_fields(
     with pytest.raises(EvolutionLedgerError, match="invalid_event"):
         ledger.append_event(malformed)
     assert ledger.history() == []
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "2026-07-23T00:00:00Z",
+        "2026-07-23T00:00:00.1Z",
+        "2026-07-23T00:00:00.12345Z",
+        "2026-07-23T00:00:00.1234567Z",
+        "2026-07-23T00:00:00.000000+00:00",
+        "2026-07-23T00:00:00.000000z",
+        " 2026-07-23T00:00:00.000000Z",
+        "2026-07-23 00:00:00.000000Z",
+        "2026-02-30T00:00:00.000000Z",
+        "2026-07-23T24:00:00.000000Z",
+        "x" * 65,
+        None,
+    ],
+)
+def test_append_rejects_noncanonical_or_invalid_timestamp(
+    tmp_path, created_at: object
+) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    malformed = replace(
+        event(event_id="event-1", attempt_id=attempt_id),
+        created_at=created_at,
+    )
+
+    with pytest.raises(
+        EvolutionLedgerError, match="invalid_event_timestamp"
+    ):
+        ledger.append_event(malformed)
+    assert ledger.history() == []
+
+
+def test_generated_timestamp_has_canonical_utc_microseconds(monkeypatch) -> None:
+    class FrozenDateTime:
+        @classmethod
+        def now(cls, timezone):
+            assert timezone is UTC
+            return datetime(2026, 7, 23, 0, 0, 0, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(ledger_module, "datetime", FrozenDateTime)
+
+    generated = ledger_module._now()
+
+    assert generated == "2026-07-23T00:00:00.000000Z"
+
+
+def test_canonical_timestamp_round_trips_through_hash_chain(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    expected = "2026-07-23T12:34:56.123456Z"
+
+    stored = ledger.append_event(
+        replace(
+            event(event_id="event-1", attempt_id=attempt_id),
+            created_at=expected,
+        )
+    )
+
+    assert stored.created_at == expected
+    assert ledger.history()[0].created_at == expected
+    assert ledger.verify_chain() == []
 
 
 def test_append_bounds_digest_count(tmp_path) -> None:

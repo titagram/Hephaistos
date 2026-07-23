@@ -27,6 +27,11 @@ SCHEMA_VERSION = 1
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+_TIMESTAMP_PATTERN = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z",
+    re.ASCII,
+)
 _STATES = (
     "draft",
     "research_authorized",
@@ -91,7 +96,20 @@ class _PathGuard:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _require_timestamp(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or _TIMESTAMP_PATTERN.fullmatch(value) is None
+    ):
+        raise EvolutionLedgerError("invalid_event_timestamp")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except (ValueError, OverflowError):
+        raise EvolutionLedgerError("invalid_event_timestamp") from None
+    return value
 
 
 def _id_check(column: str, limit: int = 256) -> str:
@@ -915,9 +933,7 @@ class EvolutionLedger:
                 code="invalid_event",
                 collapse_whitespace=True,
             ),
-            created_at=_normalize_text(
-                event.created_at, limit=64, code="invalid_event"
-            ),
+            created_at=_require_timestamp(event.created_at),
         )
 
     def _payload(
