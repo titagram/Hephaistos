@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import stat
 import uuid
 from dataclasses import dataclass
@@ -18,7 +19,12 @@ import hermes_constants
 from hermes_cli.profiles import get_active_profile_name
 
 from .contract import canonical_json_bytes, content_digest, require_digest
-from .ledger import EvolutionLedger, LifecycleEvent, StoredEvent
+from .ledger import (
+    EvolutionLedger,
+    EvolutionLedgerError,
+    LifecycleEvent,
+    StoredEvent,
+)
 from .store import (
     GenerationStore,
     PublishedGeneration,
@@ -243,6 +249,8 @@ def validate_pointer(
     """Validate a pointer against the complete chain and immutable generation."""
 
     try:
+        if ledger.connection.in_transaction:
+            _fail()
         pointer = _document(document)
         if pointer.profile_id != _active_profile():
             _fail()
@@ -261,12 +269,20 @@ def validate_pointer(
             )
         ):
             _fail()
+        if ledger.prove_committed_event(event) != event:
+            _fail()
         descriptor = store.verified_manifest_descriptor(
             pointer.generation_id
         )
         if descriptor.manifest_digest != pointer.manifest_digest:
             _fail()
-    except (PointerError, ValueError, OSError):
+    except (
+        EvolutionLedgerError,
+        PointerError,
+        sqlite3.Error,
+        ValueError,
+        OSError,
+    ):
         raise PointerError("invalid_evolution_pointer") from None
     return pointer
 
@@ -584,6 +600,8 @@ def initialize_baseline_pointers(
     """Create exactly one baseline designation and its verified pointer views."""
 
     try:
+        if ledger.connection.in_transaction:
+            _fail()
         descriptor = _verified_baseline(store, baseline)
         profile_id = _active_profile()
         root = store.root.parent
@@ -624,6 +642,8 @@ def initialize_baseline_pointers(
                 or coherent.designated_at != event.created_at
             ):
                 _fail()
+            if ledger.prove_committed_event(event) != event:
+                _fail()
             if active is None:
                 atomic_write_pointer(active_path, coherent)
                 active = coherent
@@ -659,11 +679,19 @@ def initialize_baseline_pointers(
                     created_at=timestamp,
                 )
             )
+        if ledger.prove_committed_event(event) != event:
+            _fail()
         pointer = _new_document(event, descriptor, profile_id)
         atomic_write_pointer(active_path, pointer)
         atomic_write_pointer(lkg_path, pointer)
         return pointer, pointer
-    except (PointerError, ValueError, OSError):
+    except (
+        EvolutionLedgerError,
+        PointerError,
+        sqlite3.Error,
+        ValueError,
+        OSError,
+    ):
         raise PointerError(
             "baseline_pointer_initialization_failed"
         ) from None

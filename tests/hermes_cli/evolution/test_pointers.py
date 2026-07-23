@@ -127,6 +127,33 @@ def _baseline_inputs(
     )
 
 
+def _baseline_lifecycle_event(
+    generation_id: str,
+    manifest_digest: str,
+    profile_id: str,
+    *,
+    created_at: str = "2026-07-23T01:02:03.000000Z",
+) -> LifecycleEvent:
+    return LifecycleEvent(
+        event_id=str(uuid.uuid4()),
+        attempt_id=None,
+        generation_id=None,
+        event_type="baseline_designated",
+        prior_state=None,
+        next_state=None,
+        actor="system",
+        input_digests=_baseline_inputs(
+            generation_id,
+            manifest_digest,
+            profile_id,
+        ),
+        authorization_id=None,
+        reason_code="baseline",
+        reason_summary="baseline designation",
+        created_at=created_at,
+    )
+
+
 def _append_baseline_designation(
     ledger: EvolutionLedger,
     generation_id: str,
@@ -136,22 +163,10 @@ def _append_baseline_designation(
     created_at: str = "2026-07-23T01:02:03.000000Z",
 ) -> StoredEvent:
     return ledger.append_event(
-        LifecycleEvent(
-            event_id=str(uuid.uuid4()),
-            attempt_id=None,
-            generation_id=None,
-            event_type="baseline_designated",
-            prior_state=None,
-            next_state=None,
-            actor="system",
-            input_digests=_baseline_inputs(
-                generation_id,
-                manifest_digest,
-                profile_id,
-            ),
-            authorization_id=None,
-            reason_code="baseline",
-            reason_summary="baseline designation",
+        _baseline_lifecycle_event(
+            generation_id,
+            manifest_digest,
+            profile_id,
             created_at=created_at,
         )
     )
@@ -385,6 +400,145 @@ def test_baseline_initialization_has_only_one_designation_ledger_side_effect(
     assert event.event_type == "baseline_designated"
     assert event.generation_id is None
     assert event.attempt_id is None
+
+
+def test_validate_pointer_rejects_an_uncommitted_baseline_event(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "evolution" / "generations")
+    ledger = EvolutionLedger(tmp_path / "evolution" / "evolution.db")
+    baseline = _baseline(store)
+    descriptor = store.verified_manifest_descriptor(
+        baseline.generation_id
+    )
+    profile_id = pointer_module._active_profile()
+    accepted = False
+
+    class RollbackOuterTransaction(Exception):
+        pass
+
+    try:
+        with ledger.transaction() as connection:
+            event = ledger._append(
+                connection,
+                _baseline_lifecycle_event(
+                    baseline.generation_id,
+                    descriptor.manifest_digest,
+                    profile_id,
+                ),
+            )
+            document = _document_for(
+                event,
+                baseline.generation_id,
+                descriptor.manifest_digest,
+                profile_id,
+            )
+            try:
+                validate_pointer(document.to_mapping(), ledger, store)
+            except PointerError:
+                pass
+            else:
+                accepted = True
+            raise RollbackOuterTransaction
+    except RollbackOuterTransaction:
+        pass
+
+    active_path, lkg_path = _pointer_paths(store)
+    assert not accepted
+    assert ledger.history() == []
+    assert not active_path.exists()
+    assert not lkg_path.exists()
+
+
+def test_initialize_rejects_an_uncommitted_event_without_pointer_side_effects(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "evolution" / "generations")
+    ledger = EvolutionLedger(tmp_path / "evolution" / "evolution.db")
+    baseline = _baseline(store)
+    descriptor = store.verified_manifest_descriptor(
+        baseline.generation_id
+    )
+    profile_id = pointer_module._active_profile()
+    accepted = False
+
+    class RollbackOuterTransaction(Exception):
+        pass
+
+    try:
+        with ledger.transaction() as connection:
+            ledger._append(
+                connection,
+                _baseline_lifecycle_event(
+                    baseline.generation_id,
+                    descriptor.manifest_digest,
+                    profile_id,
+                ),
+            )
+            try:
+                initialize_baseline_pointers(ledger, store, baseline)
+            except PointerError:
+                pass
+            else:
+                accepted = True
+            raise RollbackOuterTransaction
+    except RollbackOuterTransaction:
+        pass
+
+    active_path, lkg_path = _pointer_paths(store)
+    assert not accepted
+    assert ledger.history() == []
+    assert not active_path.exists()
+    assert not lkg_path.exists()
+
+
+def test_new_event_is_proved_committed_before_first_pointer_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = GenerationStore(tmp_path / "evolution" / "generations")
+    ledger = EvolutionLedger(tmp_path / "evolution" / "evolution.db")
+    baseline = _baseline(store)
+    original_proof = getattr(
+        ledger,
+        "prove_committed_event",
+        lambda event: event,
+    )
+    original_write = pointer_module.atomic_write_pointer
+    proved: list[StoredEvent] = []
+    writes = 0
+
+    def record_proof(event: StoredEvent) -> StoredEvent:
+        assert not ledger.connection.in_transaction
+        assert ledger.history()[-1] == event
+        result = original_proof(event)
+        proved.append(result)
+        return result
+
+    def record_write(path: Path, document: PointerDocument) -> None:
+        nonlocal writes
+        writes += 1
+        assert proved
+        assert proved[-1].event_sequence == document.lifecycle_sequence
+        assert proved[-1].event_digest == document.ledger_event_digest
+        original_write(path, document)
+
+    monkeypatch.setattr(
+        ledger,
+        "prove_committed_event",
+        record_proof,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pointer_module,
+        "atomic_write_pointer",
+        record_write,
+    )
+
+    initialize_baseline_pointers(ledger, store, baseline)
+
+    assert len(proved) >= 1
+    assert writes == 2
 
 
 def test_reentry_paginates_complete_history_past_one_thousand_events(
@@ -951,15 +1105,25 @@ def test_atomic_write_directory_fsync_failure_leaves_complete_new_document(
 
 def test_atomic_write_fchmods_new_file_to_exact_mode_under_hostile_umask(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, store, _, active, _ = _initialized(tmp_path)
     path = store.root.parent / "umask-pointer.json"
-    old_umask = os.umask(0)
+    original_fchmod = os.fchmod
+    reached: list[int] = []
+
+    def record_fchmod(descriptor: int, mode: int) -> None:
+        reached.append(mode)
+        original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(pointer_module.os, "fchmod", record_fchmod)
+    old_umask = os.umask(0o777)
     try:
         atomic_write_pointer(path, active)
     finally:
         os.umask(old_umask)
 
+    assert reached == [0o600]
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 

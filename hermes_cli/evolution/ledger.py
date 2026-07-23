@@ -714,6 +714,82 @@ def _open_protected_path(path: Path) -> _PathGuard:
         raise
 
 
+def _open_readonly_protected_path(path: Path) -> _PathGuard:
+    """Retain existing path handles without creating or opening for mutation."""
+
+    parent = path.parent
+    if not path.name:
+        raise EvolutionLedgerError("unsafe_ledger_path")
+
+    directory_info = _secure_lstat(parent, directory=True)
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    directory_fd: int | None = None
+    try:
+        try:
+            directory_fd = os.open(parent, directory_flags)
+        except (TypeError, NotImplementedError):
+            directory_fd = None
+        except OSError as exc:
+            raise EvolutionLedgerError("unsafe_ledger_path") from exc
+        if directory_fd is not None:
+            opened_directory_info = os.fstat(directory_fd)
+            _check_owner_and_mode(opened_directory_info, directory=True)
+            if not _same_file(directory_info, opened_directory_info):
+                raise EvolutionLedgerError("unsafe_ledger_path")
+            directory_info = opened_directory_info
+
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        if directory_fd is not None:
+            try:
+                file_fd = os.open(
+                    path.name,
+                    file_flags,
+                    dir_fd=directory_fd,
+                )
+            except (TypeError, NotImplementedError):
+                os.close(directory_fd)
+                directory_fd = None
+                current_directory = _secure_lstat(parent, directory=True)
+                if not _same_file(directory_info, current_directory):
+                    raise EvolutionLedgerError("unsafe_ledger_path")
+                file_fd = os.open(path, file_flags)
+        else:
+            file_fd = os.open(path, file_flags)
+        try:
+            file_info = os.fstat(file_fd)
+            _check_owner_and_mode(file_info, directory=False)
+            linked_info = _secure_lstat(path, directory=False)
+            current_directory = _secure_lstat(parent, directory=True)
+            if (
+                not _same_file(file_info, linked_info)
+                or not _same_file(directory_info, current_directory)
+            ):
+                raise EvolutionLedgerError("unsafe_ledger_path")
+            return _PathGuard(
+                directory_fd=directory_fd,
+                file_fd=file_fd,
+                directory_info=directory_info,
+                created=False,
+            )
+        except BaseException:
+            os.close(file_fd)
+            raise
+    except EvolutionLedgerError:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise
+    except (OSError, TypeError, NotImplementedError) as exc:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise EvolutionLedgerError("unsafe_ledger_path") from exc
+
+
 def _verify_retained_identity(
     path: Path,
     guard: _PathGuard,
@@ -812,6 +888,25 @@ def _connect(
     after = _open_file_descriptors()
     opened = None if before is None or after is None else after - before
     return connection, opened
+
+
+def _connect_committed_readonly(
+    path: Path,
+) -> tuple[sqlite3.Connection, set[int] | None]:
+    """Open a read-only SQLite view that includes committed WAL records."""
+
+    connection = sqlite3.connect(
+        f"{path.absolute().as_uri()}?mode=ro",
+        uri=True,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    # PRAGMA database_list is correlated to the retained inode below. Avoid
+    # process-wide FD deltas here: descriptor-number reuse makes them unstable
+    # across repeated short-lived proof connections.
+    return connection, None
 
 
 def _object_snapshot(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
@@ -1482,3 +1577,86 @@ class EvolutionLedger:
                         iter((record,)), previous=previous, errors=errors
                     )
         return errors
+
+    def prove_committed_event(self, expected: StoredEvent) -> StoredEvent:
+        """Prove one exact event and its full chain from a committed snapshot."""
+
+        if not isinstance(expected, StoredEvent):
+            raise EvolutionLedgerError("invalid_committed_event")
+
+        guard: _PathGuard | None = None
+        connection: sqlite3.Connection | None = None
+        with self._lock:
+            try:
+                if self.connection.in_transaction:
+                    raise EvolutionLedgerError(
+                        "uncommitted_ledger_transaction"
+                    )
+                guard = _open_readonly_protected_path(self.path)
+                connection, connection_fds = _connect_committed_readonly(
+                    self.path
+                )
+                _verify_retained_identity(
+                    self.path,
+                    guard,
+                    connection,
+                    connection_fds,
+                )
+                connection.execute("BEGIN")
+                _validate_schema(connection)
+
+                errors: list[str] = []
+                previous: str | None = None
+                proved: StoredEvent | None = None
+                cursor = connection.execute(
+                    "SELECT * FROM lifecycle_events ORDER BY event_sequence"
+                )
+                while True:
+                    rows = cursor.fetchmany(_VERIFY_BATCH_SIZE)
+                    if not rows:
+                        break
+                    for row in rows:
+                        try:
+                            record = self._stored(row)
+                        except (
+                            ValueError,
+                            TypeError,
+                            json.JSONDecodeError,
+                        ):
+                            errors.append(str(row["event_sequence"]))
+                            previous = (
+                                row["event_digest"]
+                                if isinstance(row["event_digest"], str)
+                                else None
+                            )
+                            continue
+                        previous = self._verify_records(
+                            iter((record,)),
+                            previous=previous,
+                            errors=errors,
+                        )
+                        if record.event_sequence == expected.event_sequence:
+                            proved = record
+
+                _verify_retained_identity(
+                    self.path,
+                    guard,
+                    connection,
+                    connection_fds,
+                )
+                if errors or proved != expected:
+                    raise EvolutionLedgerError(
+                        "uncommitted_ledger_evidence"
+                    )
+                return proved
+            except EvolutionLedgerError:
+                raise
+            except sqlite3.DatabaseError as exc:
+                raise EvolutionLedgerError(
+                    "uncommitted_ledger_evidence"
+                ) from exc
+            finally:
+                if connection is not None:
+                    connection.close()
+                if guard is not None:
+                    guard.close()
