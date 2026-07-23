@@ -673,11 +673,11 @@ class SandboxTerminalExecutor:
                 allow_implicit_env_passthrough=False,
             )
             with self._environment_lock:
-                if self._cancelled.is_set():
-                    raise RuntimeError("sandbox execution was cancelled")
                 self._active_environment = environment
                 environment_identity = self._recovery_identity(environment)
                 self._active_identity = environment_identity
+                if self._cancelled.is_set():
+                    raise RuntimeError("sandbox execution was cancelled")
 
             runtime_probe = environment.execute(
                 "node --version",

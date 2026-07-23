@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import hermes_cli.engineering_review.terminal_execution as terminal_execution
+from hermes_cli.engineering_review import recovery
 from hermes_cli.engineering_review.execution_policy import decide_execution
 from hermes_cli.engineering_review.protocol import EngineRequest
 from hermes_cli.engineering_review.runs import ReviewRun
@@ -830,6 +831,119 @@ def test_shutdown_waits_for_inflight_teardown_before_releasing_environment(
     assert recovery["containerId"] == "c" * 64
     gc.collect()
     assert references[0]() is None
+
+
+def test_shutdown_during_factory_records_identity_for_public_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    shutdown_returned = threading.Event()
+    container_id = "d" * 64
+
+    class Environment:
+        cleanup_error = "forced cleanup failure"
+
+        def execute(self, _command: str, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("cancelled sandbox must not execute commands")
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            assert timeout == 60
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {
+                "containerId": container_id,
+                "containerName": "hermes-review-factory-race",
+                "taskId": f"review-{run.run_id}",
+            }
+
+    def factory(**_kwargs: object) -> Environment:
+        factory_entered.set()
+        assert release_factory.wait(timeout=5)
+        return Environment()
+
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=factory,
+        snapshot_builder=_write_fake_bundle,
+    )
+    responses: list[object] = []
+    invoke_thread = threading.Thread(
+        target=lambda: responses.append(
+            executor.invoke(_request(run), timeout=30, source=_source(run))
+        )
+    )
+    invoke_thread.start()
+    assert factory_entered.wait(timeout=5)
+
+    def shutdown() -> None:
+        executor.shutdown()
+        shutdown_returned.set()
+
+    shutdown_thread = threading.Thread(target=shutdown)
+    shutdown_thread.start()
+    assert executor._cancelled.wait(timeout=5)
+    assert not shutdown_returned.is_set()
+    release_factory.set()
+
+    invoke_thread.join(timeout=5)
+    shutdown_thread.join(timeout=5)
+    assert not invoke_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert shutdown_returned.is_set()
+    assert getattr(responses[0], "diagnostics")[0].code == "cleanup_failed"
+    recorded = json.loads(
+        (run.root / "sandbox-recovery.json").read_text("utf-8")
+    )
+    assert recorded == {
+        "backend": "docker",
+        "containerId": container_id,
+        "containerName": "hermes-review-factory-race",
+        "runId": run.run_id,
+        "schemaVersion": 1,
+        "taskId": f"review-{run.run_id}",
+    }
+
+    failed_run = run.mark_cleanup_failed()
+    recovered: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        recovery, "_repository_root", lambda _workspace: failed_run.workspace
+    )
+    monkeypatch.setattr(
+        recovery, "_remove_registered_worktree", lambda _repo, _tree: False
+    )
+
+    def recover_container(identity: dict[str, str]) -> bool:
+        recovered.append(identity)
+        return True
+
+    monkeypatch.setattr(recovery, "_recover_container", recover_container)
+
+    result = recovery.recover_review_run(failed_run.run_id)
+
+    assert recovered == [{
+        "containerId": container_id,
+        "containerName": "hermes-review-factory-race",
+        "taskId": f"review-{run.run_id}",
+    }]
+    assert result["removed"] == [f"docker:{container_id}"]
+    assert result["status"] == "complete"
 
 
 def test_snapshot_failure_is_inconclusive_and_removes_runtime_staging(
