@@ -29,7 +29,7 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"(\s*[:=]\s*)(?:bearer\s+)?"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
 )
-_COOKIE_HEADER = re.compile(r"(?im)^([ \t]*cookie[ \t]*:[ \t]*)[^\r\n]*")
+_COOKIE_HEADER = re.compile(r"(?im)^([ \t]*(?:[<>][ \t]*)?cookie[ \t]*:[ \t]*)[^\r\n]*")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
 _CANCELLED_RESULT = re.compile(
     r"(?i)^\[?\s*(?:(?:tool\s+(?:execution|call)|execution|operation|task)\s+)?"
@@ -57,6 +57,15 @@ def _sanitized(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
+        stripped = value.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if isinstance(parsed, (Mapping, list)):
+                    return _sanitized(parsed)
         return _redact_text(value)
     if isinstance(value, Mapping):
         return {

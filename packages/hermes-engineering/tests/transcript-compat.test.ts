@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -64,18 +64,20 @@ result = {
             {"id": "denied", "function": {"name": "read_file", "arguments": json.dumps({"file_path": "/denied"})}},
             {"id": "cancelled", "function": {"name": "read_file", "arguments": json.dumps({"file_path": "/cancelled"})}},
             {"id": "native-error", "function": {"name": "read_file", "arguments": json.dumps({"file_path": str(diff), "offset": 4, "limit": 1})}},
+            {"id": "json-result", "function": {"name": "read_file", "arguments": json.dumps({"file_path": str(root / "result.json")})}},
         ]},
         {"role": "tool", "tool_call_id": "diff", "content": "two\nthree\nfour"},
         {"role": "tool", "tool_call_id": "brief", "content": "Review the chunk."},
         {"role": "tool", "tool_call_id": "denied", "content": "Denied by the approval policy"},
         {"role": "tool", "tool_call_id": "cancelled", "content": "[Tool execution cancelled — read_file was skipped due to user interrupt]"},
         {"role": "tool", "tool_call_id": "native-error", "content": "Error executing tool 'read_file': permission denied"},
+        {"role": "tool", "tool_call_id": "json-result", "content": json.dumps({"api_key": "json-secret", "environment": {"OPENAI_API_KEY": "env-secret"}, "value": "kept"})},
     ],
 }
 path = write_reviewer_transcript("parent", child, result)
 if path is None:
     raise SystemExit("transcript was not written")
-print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brief), "prompt": prompt}))
+print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brief), "prompt": prompt, "transcript": str(path)}))
 `;
     const proc = spawnSync(pythonExecutable(), ["-c", script, testRoot], {
       cwd: repositoryRoot,
@@ -88,7 +90,12 @@ print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brie
       diff: string;
       brief: string;
       prompt: string;
+      transcript: string;
     };
+    const transcript = readFileSync(fixture.transcript, "utf8");
+    expect(transcript).not.toContain("json-secret");
+    expect(transcript).not.toContain("env-secret");
+    expect(transcript).not.toContain('"environment"');
 
     const records = readTranscripts(
       undefined,
@@ -103,7 +110,7 @@ print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brie
     if (!record) throw new Error("Python transcript was not parsed");
 
     expect(record.launchPrompt).toBe(fixture.prompt);
-    expect(record.successfulToolCalls).toBe(2);
+    expect(record.successfulToolCalls).toBe(3);
     expect(record.diffToolCalls).toBe(1);
     expect(record.diffReads).toEqual([[2, 4]]);
     expect(record.successfulCallArgs).toContain(

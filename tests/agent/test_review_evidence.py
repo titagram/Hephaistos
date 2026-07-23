@@ -97,6 +97,13 @@ def _child_result() -> dict[str, object]:
                             }),
                         },
                     },
+                    {
+                        "id": "json-result-read",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"file_path": "/tmp/result.json"}),
+                        },
+                    },
                 ],
             },
             {
@@ -109,8 +116,17 @@ def _child_result() -> dict[str, object]:
                     "ANTHROPIC_API_KEY: sk-anthropic-result\n"
                     "HERMES_TOKEN=hermes-token-result\n"
                     "AWS_SECRET_ACCESS_KEY=aws-secret-result\n"
-                    "Cookie: sid=first-cookie; csrf=second-cookie"
+                    "> Cookie: sid=first-cookie; csrf=second-cookie"
                 ),
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "json-result-read",
+                "content": json.dumps({
+                    "api_key": "json-secret",
+                    "environment": {"OPENAI_API_KEY": "env-secret"},
+                    "value": "kept",
+                }),
             },
             {
                 "role": "tool",
@@ -184,6 +200,11 @@ def test_only_active_registered_review_markers_create_private_evidence(
     assert "cancelled-read" not in raw
     assert "native-error-read" not in raw
     assert "native-tool-error-detail" not in raw
+    assert "json-secret" not in raw
+    assert "env-secret" not in raw
+    assert '"environment"' not in raw
+    assert "diff contents" in raw
+    assert "brief contents" in raw
 
     records = [json.loads(line) for line in raw.splitlines()]
     assert records[0]["type"] == "user"
@@ -198,9 +219,20 @@ def test_only_active_registered_review_markers_create_private_evidence(
         for part in record["message"]["parts"]
         if "functionCall" in part
     ]
-    assert [call["id"] for call in calls] == ["diff-read", "brief-read"]
+    assert [call["id"] for call in calls] == [
+        "diff-read",
+        "json-result-read",
+        "brief-read",
+    ]
     assert "api_key" not in calls[0]["args"]
     assert "environment" not in calls[0]["args"]
+    json_result = next(
+        part["functionResponse"]
+        for record in records
+        for part in record["message"]["parts"]
+        if part.get("functionResponse", {}).get("id") == "json-result-read"
+    )
+    assert json_result["response"]["output"] == {"value": "kept"}
     assert records[-1]["type"] == "assistant"
     assert records[-1]["message"]["parts"] == [
         {"text": "Review complete. password=[REDACTED]"}
