@@ -86,16 +86,18 @@ def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
     ledger.connection.execute(
         """
         INSERT INTO authorization_requests(
-            request_id, attempt_id, grant_kind, subject_digest, scope_json,
+            request_id, attempt_id, grant_kind, subject_digest, request_digest,
+            scope_json,
             ttl_seconds, expires_at, created_at
         ) VALUES (
-            'request-1', ?, 'research', ?, ?, 60,
+            'request-1', ?, 'research', ?, ?, ?, 60,
             '2026-07-23T00:01:00.000000Z',
             '2026-07-23T00:00:00.000000Z'
         )
         """,
         (
             attempt_id,
+            DIGEST,
             DIGEST,
             '{"domains":[],"duration":60,"operations":["search","retrieve"],'
             '"source_classes":["documentation"]}',

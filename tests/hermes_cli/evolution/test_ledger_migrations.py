@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,59 @@ def test_v1_migration_rolls_back_every_schema_change_on_failure(
         "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
     ).fetchone()[0] == "ticket-v1"
     check.close()
+
+
+def test_two_connections_that_preflight_v1_concurrently_both_open_v2(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v1_database(path)
+    barrier = threading.Barrier(2)
+    original_preflight = ledger_module._preflight_existing
+    original_wal = ledger_module.apply_wal_with_fallback
+    outcomes: list[object] = []
+    lock = threading.Lock()
+    wal_lock = threading.Lock()
+
+    def synchronized_preflight(candidate_path, guard):
+        version = original_preflight(candidate_path, guard)
+        barrier.wait(timeout=10)
+        return version
+
+    monkeypatch.setattr(
+        ledger_module, "_preflight_existing", synchronized_preflight
+    )
+
+    def serialized_wal(connection, *, db_label):
+        with wal_lock:
+            return original_wal(connection, db_label=db_label)
+
+    monkeypatch.setattr(
+        ledger_module, "apply_wal_with_fallback", serialized_wal
+    )
+
+    def open_ledger() -> None:
+        try:
+            ledger = EvolutionLedger(path)
+        except EvolutionLedgerError as exc:
+            outcome: object = str(exc)
+        else:
+            outcome = ledger.schema_version
+            ledger.connection.close()
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=open_ledger) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert outcomes == [
+        ledger_module.SCHEMA_VERSION,
+        ledger_module.SCHEMA_VERSION,
+    ]
 
 
 def test_current_schema_initializes_and_reopens_with_private_storage(tmp_path) -> None:

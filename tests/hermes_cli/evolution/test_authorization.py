@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 
 import pytest
 
@@ -17,7 +19,7 @@ from hermes_cli.evolution.authorization import (
     consume_grant,
 )
 from hermes_cli.evolution.contract import canonical_json_bytes, content_digest
-from hermes_cli.evolution.ledger import EvolutionLedger
+from hermes_cli.evolution.ledger import EvolutionLedger, LifecycleEvent
 
 
 NOW = "2026-07-23T10:00:00.000000Z"
@@ -601,3 +603,566 @@ def test_two_connections_racing_to_consume_have_exactly_one_winner(
         "SELECT COUNT(*) FROM authorization_consumptions"
     ).fetchone()[0] == 1
     assert first.verify_chain() == []
+
+
+def test_issue_rechecks_expiry_after_waiting_for_sqlite_write_lock(
+    tmp_path, monkeypatch
+) -> None:
+    clock = {"value": NOW}
+    monkeypatch.setattr(authorization, "_now", lambda: clock["value"])
+    path = tmp_path / "evolution.db"
+    first = EvolutionLedger(path)
+    attempt_id = first.create_attempt("manual", "ticket-1")
+    request = create_authorization_request(
+        first,
+        attempt_id=attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=60,
+    )
+    confirmation = content_digest(
+        request.canonical_payload(),
+        domain="hades-evolution-authorization-request-v1",
+    )
+    second = EvolutionLedger(path)
+    entered = threading.Event()
+    original_transaction = second.transaction
+
+    @contextmanager
+    def marked_transaction():
+        entered.set()
+        with original_transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(second, "transaction", marked_transaction)
+    outcome: list[str] = []
+    first.connection.execute("BEGIN IMMEDIATE")
+
+    def blocked_issue() -> None:
+        try:
+            issue_grant(
+                second,
+                request_id=request.request_id,
+                approved_by="local-operator",
+                confirmation_digest=confirmation,
+            )
+        except AuthorizationError as exc:
+            outcome.append(exc.code)
+        else:
+            outcome.append("issued")
+
+    thread = threading.Thread(target=blocked_issue)
+    thread.start()
+    assert entered.wait(timeout=5)
+    clock["value"] = LATER
+    first.connection.commit()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert outcome == ["request_unavailable"]
+    assert first.connection.execute(
+        "SELECT COUNT(*) FROM authorization_grants"
+    ).fetchone()[0] == 0
+
+
+def test_consume_rechecks_expiry_after_waiting_for_sqlite_write_lock(
+    tmp_path, monkeypatch
+) -> None:
+    clock = {"value": NOW}
+    monkeypatch.setattr(authorization, "_now", lambda: clock["value"])
+    path = tmp_path / "evolution.db"
+    first = EvolutionLedger(path)
+    first.attempt_id = first.create_attempt("manual", "ticket-1")
+    _, grant = request_and_issue(first)
+    second = EvolutionLedger(path)
+    entered = threading.Event()
+    original_transaction = second.transaction
+
+    @contextmanager
+    def marked_transaction():
+        entered.set()
+        with original_transaction() as connection:
+            yield connection
+
+    monkeypatch.setattr(second, "transaction", marked_transaction)
+    outcome: list[str] = []
+    first.connection.execute("BEGIN IMMEDIATE")
+
+    def blocked_consume() -> None:
+        try:
+            consume_grant(
+                second,
+                grant_id=grant.grant_id,
+                expected_kind="research",
+                expected_subject_digest=DIGEST_A,
+                required_scope=research_scope(duration=30),
+            )
+        except AuthorizationError as exc:
+            outcome.append(exc.code)
+        else:
+            outcome.append("consumed")
+
+    thread = threading.Thread(target=blocked_consume)
+    thread.start()
+    assert entered.wait(timeout=5)
+    clock["value"] = LATER
+    first.connection.commit()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert outcome == ["grant_unavailable"]
+    assert first.connection.execute(
+        "SELECT COUNT(*) FROM authorization_consumptions"
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "scope"),
+    [
+        (
+            "research",
+            research_scope(source_classes=["api-token"]),
+        ),
+        (
+            "research",
+            research_scope(
+                source_classes=["abcdef0123456789abcdef0123456789"]
+            ),
+        ),
+        (
+            "build",
+            build_scope(source_families=["policy.yaml"]),
+        ),
+        (
+            "build",
+            build_scope(isolation_policy={"credential": "deny"}),
+        ),
+        (
+            "build",
+            build_scope(isolation_policy={"network": "secret"}),
+        ),
+        (
+            "build",
+            build_scope(resource_limits={"password": 1}),
+        ),
+    ],
+)
+def test_nested_scope_symbols_reject_credentials_files_and_secret_material(
+    ledger: EvolutionLedger,
+    kind: str,
+    scope: dict[str, object],
+) -> None:
+    with pytest.raises(AuthorizationError, match="invalid_scope"):
+        create_authorization_request(
+            ledger,
+            attempt_id=ledger.attempt_id,
+            kind=kind,
+            subject_digest=DIGEST_A,
+            scope=scope,
+            ttl_seconds=120,
+        )
+
+
+@pytest.mark.parametrize(
+    ("decision", "actor"),
+    [
+        ("approve", "operator notes"),
+        ("approve", "sk-live-credential"),
+        ("approve", "sk_live"),
+        ("deny", "config.yaml"),
+        ("deny", "a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+    ],
+)
+def test_persisted_decision_actor_must_be_privacy_safe_symbol(
+    ledger: EvolutionLedger,
+    decision: str,
+    actor: str,
+) -> None:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=120,
+    )
+    with pytest.raises(AuthorizationError, match="invalid_approver"):
+        if decision == "approve":
+            confirmation = content_digest(
+                request.canonical_payload(),
+                domain="hades-evolution-authorization-request-v1",
+            )
+            issue_grant(
+                ledger,
+                request_id=request.request_id,
+                approved_by=actor,
+                confirmation_digest=confirmation,
+            )
+        else:
+            deny_authorization_request(
+                ledger,
+                request_id=request.request_id,
+                decided_by=actor,
+            )
+
+
+def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
+    ledger: EvolutionLedger,
+) -> None:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="build",
+        subject_digest=DIGEST_A,
+        scope=build_scope(
+            source_families=["official-docs", "signed-release"],
+            dependency_families=["python3", "sqlite"],
+            isolation_policy={
+                "network-access": "deny",
+                "sandbox-profile": "strict",
+            },
+        ),
+        ttl_seconds=120,
+    )
+    confirmation = content_digest(
+        request.canonical_payload(),
+        domain="hades-evolution-authorization-request-v1",
+    )
+
+    grant = issue_grant(
+        ledger,
+        request_id=request.request_id,
+        approved_by="local-operator",
+        confirmation_digest=confirmation,
+    )
+
+    assert grant.approved_by == "local-operator"
+
+
+@pytest.mark.parametrize(
+    ("decision", "confirmation"),
+    [
+        ("approved", None),
+        ("approved", DIGEST_B),
+        ("denied", DIGEST_A),
+    ],
+)
+def test_sqlite_decision_check_closes_confirmation_shape(
+    ledger: EvolutionLedger,
+    decision: str,
+    confirmation: str | None,
+) -> None:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=120,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.connection.execute(
+            """
+            INSERT INTO authorization_decisions(
+                decision_id, request_id, decision, decided_by,
+                confirmation_digest, created_at
+            ) VALUES (?, ?, ?, 'local-operator', ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                request.request_id,
+                decision,
+                confirmation,
+                NOW,
+            ),
+        )
+
+
+def _request_with_raw_approval(
+    ledger: EvolutionLedger,
+) -> tuple[object, str, str]:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=120,
+    )
+    confirmation = content_digest(
+        request.canonical_payload(),
+        domain="hades-evolution-authorization-request-v1",
+    )
+    ledger.connection.execute(
+        """
+        INSERT INTO authorization_decisions(
+            decision_id, request_id, decision, decided_by,
+            confirmation_digest, created_at
+        ) VALUES (?, ?, 'approved', 'local-operator', ?, ?)
+        """,
+        (str(uuid.uuid4()), request.request_id, confirmation, NOW),
+    )
+    scope_json = ledger.connection.execute(
+        """
+        SELECT scope_json
+        FROM authorization_requests
+        WHERE request_id = ?
+        """,
+        (request.request_id,),
+    ).fetchone()[0]
+    return request, confirmation, scope_json
+
+
+def _insert_raw_grant(
+    connection,
+    *,
+    request,
+    confirmation: str,
+    request_scope_json: str,
+    **changes: object,
+) -> None:
+    values: dict[str, object] = {
+        "attempt_id": request.attempt_id,
+        "grant_kind": request.kind,
+        "subject_digest": request.subject_digest,
+        "scope_json": request_scope_json,
+        "expires_at": request.expires_at,
+        "approved_by": "local-operator",
+        "confirmation_digest": confirmation,
+    }
+    values.update(changes)
+    grant_id = str(uuid.uuid4())
+    connection.execute(
+        """
+        INSERT INTO authorization_grants(
+            grant_id, authorization_id, request_id, attempt_id, grant_kind,
+            subject_digest, scope_json, expires_at, approved_by,
+            confirmation_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            grant_id,
+            grant_id,
+            request.request_id,
+            values["attempt_id"],
+            values["grant_kind"],
+            values["subject_digest"],
+            values["scope_json"],
+            values["expires_at"],
+            values["approved_by"],
+            values["confirmation_digest"],
+            NOW,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("attempt_id", "other-attempt"),
+        ("grant_kind", "build"),
+        ("subject_digest", DIGEST_B),
+        (
+            "scope_json",
+            '{"domains":[],"duration":60,"operations":["search","retrieve"],'
+            '"source_classes":["paper"]}',
+        ),
+        ("expires_at", LATER),
+        ("approved_by", "other-operator"),
+        ("confirmation_digest", DIGEST_B),
+    ],
+)
+def test_sqlite_rejects_grant_incoherent_with_request_or_approved_decision(
+    ledger: EvolutionLedger,
+    field: str,
+    replacement: object,
+) -> None:
+    ledger.connection.execute(
+        """
+        INSERT INTO attempts(
+            attempt_id, source_kind, source_ref, state, created_at
+        ) VALUES (
+            'other-attempt', 'manual', 'ticket-2', 'draft', ?
+        )
+        """,
+        (NOW,),
+    )
+    request, confirmation, scope_json = _request_with_raw_approval(ledger)
+
+    with pytest.raises(sqlite3.IntegrityError, match="authorization_grant"):
+        _insert_raw_grant(
+            ledger.connection,
+            request=request,
+            confirmation=confirmation,
+            request_scope_json=scope_json,
+            **{field: replacement},
+        )
+
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM authorization_grants"
+    ).fetchone()[0] == 0
+
+
+def test_sqlite_accepts_exact_request_decision_grant_coherence(
+    ledger: EvolutionLedger,
+) -> None:
+    request, confirmation, scope_json = _request_with_raw_approval(ledger)
+
+    _insert_raw_grant(
+        ledger.connection,
+        request=request,
+        confirmation=confirmation,
+        request_scope_json=scope_json,
+    )
+
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM authorization_grants"
+    ).fetchone()[0] == 1
+
+
+def test_grant_coherence_trigger_failure_rolls_back_prior_event(
+    ledger: EvolutionLedger,
+) -> None:
+    request, confirmation, scope_json = _request_with_raw_approval(ledger)
+    history_before = ledger.history()
+
+    with pytest.raises(sqlite3.IntegrityError, match="authorization_grant"):
+        with ledger.transaction() as connection:
+            ledger._append(
+                connection,
+                LifecycleEvent(
+                    event_id=str(uuid.uuid4()),
+                    attempt_id=ledger.attempt_id,
+                    generation_id=None,
+                    event_type="test_event",
+                    prior_state=None,
+                    next_state=None,
+                    actor="host",
+                    input_digests=(DIGEST_A,),
+                    authorization_id=request.request_id,
+                    reason_code="test",
+                    reason_summary="test",
+                    created_at=NOW,
+                ),
+            )
+            _insert_raw_grant(
+                connection,
+                request=request,
+                confirmation=confirmation,
+                request_scope_json=scope_json,
+                subject_digest=DIGEST_B,
+            )
+
+    assert ledger.history() == history_before
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM authorization_grants"
+    ).fetchone()[0] == 0
+
+
+def test_decision_check_failure_rolls_back_prior_event(
+    ledger: EvolutionLedger,
+) -> None:
+    request = create_authorization_request(
+        ledger,
+        attempt_id=ledger.attempt_id,
+        kind="research",
+        subject_digest=DIGEST_A,
+        scope=research_scope(),
+        ttl_seconds=120,
+    )
+    history_before = ledger.history()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with ledger.transaction() as connection:
+            ledger._append(
+                connection,
+                LifecycleEvent(
+                    event_id=str(uuid.uuid4()),
+                    attempt_id=ledger.attempt_id,
+                    generation_id=None,
+                    event_type="test_event",
+                    prior_state=None,
+                    next_state=None,
+                    actor="host",
+                    input_digests=(DIGEST_A,),
+                    authorization_id=request.request_id,
+                    reason_code="test",
+                    reason_summary="test",
+                    created_at=NOW,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO authorization_decisions(
+                    decision_id, request_id, decision, decided_by,
+                    confirmation_digest, created_at
+                ) VALUES (?, ?, 'denied', 'local-operator', ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    request.request_id,
+                    DIGEST_B,
+                    NOW,
+                ),
+            )
+
+    assert ledger.history() == history_before
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM authorization_decisions"
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_code"),
+    [
+        ("issue", "request_unavailable"),
+        ("deny", "request_unavailable"),
+        ("consume", "grant_unavailable"),
+    ],
+)
+def test_noncanonical_lookup_uuid_is_rejected_before_sql(
+    ledger: EvolutionLedger,
+    operation: str,
+    expected_code: str,
+) -> None:
+    _request, grant = request_and_issue(ledger)
+
+    def deny_select(
+        action_code,
+        _arg1,
+        _arg2,
+        _database_name,
+        _trigger_name,
+    ):
+        if action_code == sqlite3.SQLITE_SELECT:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    ledger.connection.set_authorizer(deny_select)
+    try:
+        with pytest.raises(AuthorizationError, match=expected_code):
+            if operation == "issue":
+                issue_grant(
+                    ledger,
+                    request_id="not-a-canonical-uuid",
+                    approved_by="local-operator",
+                    confirmation_digest=grant.confirmation_digest,
+                )
+            elif operation == "deny":
+                deny_authorization_request(
+                    ledger,
+                    request_id="not-a-canonical-uuid",
+                    decided_by="local-operator",
+                )
+            else:
+                consume_grant(
+                    ledger,
+                    grant_id="not-a-canonical-uuid",
+                    expected_kind="research",
+                    expected_subject_digest=DIGEST_A,
+                    required_scope=research_scope(duration=30),
+                )
+    finally:
+        ledger.connection.set_authorizer(None)

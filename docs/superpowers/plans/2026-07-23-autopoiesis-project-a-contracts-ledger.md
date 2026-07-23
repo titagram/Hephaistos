@@ -329,6 +329,14 @@ update the issued grant row. Use compare-and-set SQL predicates
 exactly one. Append each matching lifecycle authorization event in the same
 transaction.
 
+Read the issue/consume clock only after `BEGIN IMMEDIATE` acquires the write
+lock. Validate all nested scope symbols and actor identifiers with the same
+privacy-safe symbolic policy before persistence. Enforce exact
+request-to-decision-to-grant coherence in SQLite so direct SQL cannot invent or
+reshape authority, and validate canonical UUID lookup identifiers before any
+query. After acquiring the migration lock, re-read the schema version so two
+connections that independently preflight v1 can migrate idempotently.
+
 - [ ] **Step 5: Prove concurrency behavior**
 
 Use two independent ledger connections and a barrier; exactly one consumer

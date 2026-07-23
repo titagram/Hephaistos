@@ -28,6 +28,54 @@ _HOST_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z",
     re.ASCII,
 )
+_HEX_SECRET_PATTERN = re.compile(r"[0-9a-f]{24,}\Z", re.ASCII)
+_SENSITIVE_SYMBOL_PARTS = frozenset(
+    {
+        "api",
+        "auth",
+        "bearer",
+        "credential",
+        "credentials",
+        "key",
+        "password",
+        "secret",
+        "token",
+    }
+)
+_CREDENTIAL_PREFIXES = (
+    "akia",
+    "akia-",
+    "ghp_",
+    "ghp-",
+    "github_pat_",
+    "github-pat-",
+    "pk_",
+    "pk-",
+    "sk_",
+    "sk-",
+    "xoxb_",
+    "xoxb-",
+    "xoxp_",
+    "xoxp-",
+    "ya29_",
+    "ya29-",
+)
+_FILE_SUFFIXES = frozenset(
+    {
+        "crt",
+        "env",
+        "json",
+        "key",
+        "pem",
+        "py",
+        "sh",
+        "toml",
+        "txt",
+        "yaml",
+        "yml",
+        "zip",
+    }
+)
 _MAX_ITEMS = 32
 _MAX_TTL_SECONDS = 86400
 
@@ -110,13 +158,35 @@ def _plain(value: object) -> object:
     return value
 
 
-def _canonical_token(value: object) -> str:
+def _privacy_safe_symbolic(
+    value: object, *, code: str, limit: int = 64
+) -> str:
     if not isinstance(value, str):
-        raise AuthorizationError("invalid_scope")
+        raise AuthorizationError(code)
     normalized = unicodedata.normalize("NFC", value)
-    if normalized != value or _TOKEN_PATTERN.fullmatch(value) is None:
-        raise AuthorizationError("invalid_scope")
+    parts = frozenset(re.split(r"[._-]", value))
+    suffix = value.rpartition(".")[2] if "." in value else ""
+    if (
+        normalized != value
+        or not 1 <= len(value) <= limit
+        or _TOKEN_PATTERN.fullmatch(value) is None
+        or parts & _SENSITIVE_SYMBOL_PARTS
+        or value.startswith(_CREDENTIAL_PREFIXES)
+        or suffix in _FILE_SUFFIXES
+        or _HEX_SECRET_PATTERN.fullmatch(value) is not None
+        or (
+            len(value) >= 24
+            and not any(separator in value for separator in "._-")
+            and any(character.isalpha() for character in value)
+            and any(character.isdigit() for character in value)
+        )
+    ):
+        raise AuthorizationError(code)
     return value
+
+
+def _canonical_token(value: object) -> str:
+    return _privacy_safe_symbolic(value, code="invalid_scope")
 
 
 def _canonical_sequence(
@@ -333,14 +403,26 @@ def _digest(value: object, *, code: str) -> str:
         raise AuthorizationError(code) from None
 
 
-def _identity(value: object, *, code: str) -> str:
+def _lookup_uuid(value: object, *, code: str) -> str:
+    if not isinstance(value, str):
+        raise AuthorizationError(code)
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise AuthorizationError(code) from None
+    if str(parsed) != value:
+        raise AuthorizationError(code)
+    return value
+
+
+def _attempt_identity(value: object) -> str:
     if (
         not isinstance(value, str)
         or value != value.strip()
-        or not 1 <= len(value) <= 128
+        or not 1 <= len(value) <= 256
         or any(not character.isprintable() for character in value)
     ):
-        raise AuthorizationError(code)
+        raise AuthorizationError("invalid_attempt_id")
     return value
 
 
@@ -394,7 +476,7 @@ def create_authorization_request(
     created_at = _now()
     request = AuthorizationRequest(
         request_id=str(uuid.uuid4()),
-        attempt_id=_identity(attempt_id, code="invalid_attempt_id"),
+        attempt_id=_attempt_identity(attempt_id),
         kind=selected_kind,
         subject_digest=selected_subject,
         scope=selected_scope,
@@ -410,15 +492,16 @@ def create_authorization_request(
         connection.execute(
             """
             INSERT INTO authorization_requests(
-                request_id, attempt_id, grant_kind, subject_digest,
+                request_id, attempt_id, grant_kind, subject_digest, request_digest,
                 scope_json, ttl_seconds, expires_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request.request_id,
                 request.attempt_id,
                 request.kind,
                 request.subject_digest,
+                request_digest,
                 scope_json,
                 request.ttl_seconds,
                 request.expires_at,
@@ -467,12 +550,17 @@ def issue_grant(
     approved_by: str,
     confirmation_digest: str,
 ) -> AuthorizationGrant:
-    approver = _identity(approved_by, code="invalid_approver")
+    request_key = _lookup_uuid(
+        request_id, code="request_unavailable"
+    )
+    approver = _privacy_safe_symbolic(
+        approved_by, code="invalid_approver"
+    )
     confirmation = _digest(
         confirmation_digest, code="confirmation_mismatch"
     )
-    created_at = _now()
     with ledger.transaction() as connection:
+        created_at = _now()
         row = connection.execute(
             """
             SELECT request.*
@@ -483,7 +571,7 @@ def issue_grant(
               AND request.expires_at > ?
               AND decision.request_id IS NULL
             """,
-            (request_id, created_at),
+            (request_key, created_at),
         ).fetchone()
         if row is None:
             raise AuthorizationError("request_unavailable")
@@ -575,7 +663,10 @@ def deny_authorization_request(
     request_id: str,
     decided_by: str,
 ) -> AuthorizationDecision:
-    decider = _identity(decided_by, code="invalid_approver")
+    request_key = _lookup_uuid(
+        request_id, code="request_unavailable"
+    )
+    decider = _privacy_safe_symbolic(decided_by, code="invalid_approver")
     created_at = _now()
     with ledger.transaction() as connection:
         row = connection.execute(
@@ -588,7 +679,7 @@ def deny_authorization_request(
               AND request.expires_at > ?
               AND decision.request_id IS NULL
             """,
-            (request_id, created_at),
+            (request_key, created_at),
         ).fetchone()
         if row is None:
             raise AuthorizationError("request_unavailable")
@@ -697,13 +788,14 @@ def consume_grant(
     expected_subject_digest: str,
     required_scope: Mapping[str, object],
 ) -> AuthorizationGrant:
+    grant_key = _lookup_uuid(grant_id, code="grant_unavailable")
     selected_kind = _kind(expected_kind)
     selected_subject = _digest(
         expected_subject_digest, code="invalid_subject_digest"
     )
     selected_scope = _validate_scope(selected_kind, required_scope)
-    consumed_at = _now()
     with ledger.transaction() as connection:
+        consumed_at = _now()
         row = connection.execute(
             """
             SELECT grant.*, consumption.consumed_at
@@ -720,7 +812,7 @@ def consume_grant(
               AND consumption.grant_id IS NULL
             """,
             (
-                grant_id,
+                grant_key,
                 selected_kind,
                 selected_subject,
                 consumed_at,
@@ -755,7 +847,7 @@ def consume_grant(
             (
                 consumption_id,
                 consumed_at,
-                grant_id,
+                grant_key,
                 selected_kind,
                 selected_subject,
                 consumed_at,

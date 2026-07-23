@@ -362,6 +362,7 @@ _V2_AUTH_SCHEMA_STATEMENTS = (
         grant_kind TEXT NOT NULL
             CHECK(grant_kind IN ('research', 'build', 'promotion')),
         subject_digest TEXT NOT NULL CHECK(length(subject_digest) = 64),
+        request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
         scope_json TEXT NOT NULL CHECK(length(scope_json) BETWEEN 2 AND 16384),
         ttl_seconds INTEGER NOT NULL
             CHECK(typeof(ttl_seconds) = 'integer' AND ttl_seconds BETWEEN 1 AND 86400),
@@ -379,6 +380,10 @@ _V2_AUTH_SCHEMA_STATEMENTS = (
         confirmation_digest TEXT
             CHECK(confirmation_digest IS NULL OR length(confirmation_digest) = 64),
         created_at TEXT NOT NULL {_id_check("created_at", 64)},
+        CHECK(
+            (decision = 'approved' AND confirmation_digest IS NOT NULL)
+            OR (decision = 'denied' AND confirmation_digest IS NULL)
+        ),
         FOREIGN KEY(request_id) REFERENCES authorization_requests(request_id)
     )
     """,
@@ -444,6 +449,46 @@ _V2_AUTH_SCHEMA_STATEMENTS = (
     BEFORE DELETE ON authorization_decisions
     BEGIN
         SELECT RAISE(ABORT, 'immutable_authorization_decision');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_decisions_request_coherence
+    BEFORE INSERT ON authorization_decisions
+    WHEN NEW.decision = 'approved'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM authorization_requests AS request
+          WHERE request.request_id = NEW.request_id
+            AND request.request_digest = NEW.confirmation_digest
+      )
+    BEGIN
+        SELECT RAISE(ABORT, 'authorization_decision_request_mismatch');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_grants_insert_coherence
+    BEFORE INSERT ON authorization_grants
+    WHEN NOT EXISTS (
+        SELECT 1
+        FROM authorization_requests AS request
+        WHERE request.request_id = NEW.request_id
+          AND request.attempt_id = NEW.attempt_id
+          AND request.grant_kind = NEW.grant_kind
+          AND request.subject_digest = NEW.subject_digest
+          AND request.scope_json = NEW.scope_json
+          AND request.expires_at = NEW.expires_at
+          AND request.request_digest = NEW.confirmation_digest
+    )
+    OR NOT EXISTS (
+        SELECT 1
+        FROM authorization_decisions AS decision
+        WHERE decision.request_id = NEW.request_id
+          AND decision.decision = 'approved'
+          AND decision.decided_by = NEW.approved_by
+          AND decision.confirmation_digest = NEW.confirmation_digest
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'authorization_grant_coherence');
     END
     """,
     """
@@ -1068,6 +1113,17 @@ class EvolutionLedger:
         try:
             connection.execute("BEGIN IMMEDIATE")
             began = True
+            locked_version = _declared_version(connection)
+            if locked_version == SCHEMA_VERSION:
+                _validate_schema(connection)
+                connection.commit()
+                return
+            if locked_version != 1:
+                if locked_version > SCHEMA_VERSION:
+                    raise EvolutionLedgerError(
+                        "unsupported_schema_version"
+                    )
+                raise EvolutionLedgerError("invalid_ledger_database")
             _validate_schema_version(
                 connection,
                 version=1,
