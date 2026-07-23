@@ -262,6 +262,8 @@ def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
         "check --path=..\\",
         "check --path=~\\",
         "check --path=\\\\",
+        r"probe https://example.test/C:\Users\alice\secret",
+        r"probe https://example.test\\server\share",
     ],
 )
 def test_verification_commands_reject_embedded_local_paths(
@@ -317,9 +319,57 @@ def test_manifest_accepts_normal_commands() -> None:
         "verify --timeout 30 --memory 512 --retries 3 --jobs 4 --limit 10",
         "check --range=1.0..2.0 --version=3.12.1",
         "probe --endpoint=https://example.test/a/b",
+        "probe --endpoint=https://example.test/a%20b?mode=safe&next=%2Fhealth",
         "install --package=owner/package@1.2.3",
         "check --module=package.submodule --release=2.4.0",
     ]
+
+    validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        r"https://example.test/C:\Users\alice\secret",
+        r"https://example.test\\server\share",
+        "https://example.test/a b",
+        "https://example.test/a\nb",
+        "https://user@example.test/a",
+        "https://example.test/a#fragment",
+        "https://example.test/a#",
+        "https:///missing-host",
+        "https://example.test:not-a-port/a",
+        "https://example.test:65536/a",
+        "https://example.test:/a",
+        "https://-bad.example.test/a",
+        "https://example..test/a",
+        "https://999.999.999.999/a",
+        "https://example.test/a%2",
+        "https://example.test/a|b",
+        "http://example.test/a",
+    ],
+)
+def test_component_source_rejects_malformed_or_non_https_urls(source: str) -> None:
+    manifest = _manifest()
+    manifest["components"][0]["source"] = source  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://example.test",
+        "https://sub-domain.example.test:8443/releases/v1.2.3",
+        "https://example.test/a%20b?mode=safe&next=%2Fhealth",
+        "https://127.0.0.1:443/a?x=1",
+        "https://[2001:db8::1]/artifact",
+    ],
+)
+def test_component_source_accepts_strict_https_urls(source: str) -> None:
+    manifest = _manifest()
+    manifest["components"][0]["source"] = source  # type: ignore[index]
 
     validate_manifest(manifest)
 

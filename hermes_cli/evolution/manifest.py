@@ -9,6 +9,7 @@ import re
 import stat
 from collections.abc import Mapping
 from datetime import datetime
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -45,6 +46,18 @@ _OPTION_ASSIGNMENT = re.compile(
 )
 _WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]+", re.ASCII)
 _TOKEN_EDGE_CHARACTERS = "\"'`()[]{};,"
+_HTTPS_HOST_LABEL = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z",
+    re.ASCII,
+)
+_HTTPS_PATH = re.compile(
+    r"(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2})*\Z",
+    re.ASCII,
+)
+_HTTPS_QUERY = re.compile(
+    r"(?:[A-Za-z0-9._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*\Z",
+    re.ASCII,
+)
 _RESOLVED_COORDINATE = re.compile(
     r"[A-Za-z][A-Za-z0-9._-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?\Z",
@@ -160,19 +173,63 @@ def _normalize_composite_token(raw: str) -> str:
     return token
 
 
+def _is_valid_https_hostname(hostname: str) -> bool:
+    try:
+        ip_address(hostname)
+    except ValueError:
+        if (
+            not hostname
+            or len(hostname) > 253
+            or re.fullmatch(r"[0-9.]+", hostname) is not None
+        ):
+            return False
+        candidate = hostname[:-1] if hostname.endswith(".") else hostname
+        return bool(candidate) and all(
+            _HTTPS_HOST_LABEL.fullmatch(label) is not None
+            for label in candidate.split(".")
+        )
+    return True
+
+
 def _is_valid_https_url(token: str) -> bool:
+    if (
+        "\\" in token
+        or "#" in token
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in token)
+    ):
+        return False
     try:
         parsed = urlsplit(token)
         parsed.port
     except ValueError:
         return False
-    return (
-        parsed.scheme == "https"
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.fragment
-    )
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or not _is_valid_https_hostname(parsed.hostname)
+        or _HTTPS_PATH.fullmatch(parsed.path) is None
+        or _HTTPS_QUERY.fullmatch(parsed.query) is None
+    ):
+        return False
+    authority = parsed.netloc
+    if authority.startswith("["):
+        closing_bracket = authority.find("]")
+        suffix = authority[closing_bracket + 1 :]
+        return not suffix or (
+            suffix.startswith(":")
+            and len(suffix) > 1
+            and suffix[1:].isdigit()
+        )
+    if authority.count(":") > 1:
+        return False
+    if ":" not in authority:
+        return True
+    _, port = authority.rsplit(":", 1)
+    return bool(port) and port.isdigit()
 
 
 def _is_valid_package_coordinate(token: str) -> bool:
@@ -332,8 +389,7 @@ def _privacy(
 def _source(value: object) -> None:
     source = _text(value)
     if source.startswith("https://"):
-        parsed = urlsplit(source)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        if not _is_valid_https_url(source):
             _fail()
     elif _PACKAGE.fullmatch(source) is None:
         _fail()
