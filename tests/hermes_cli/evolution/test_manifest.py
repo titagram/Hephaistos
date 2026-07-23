@@ -234,6 +234,10 @@ def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
         "python /Users/alice/private/check.py --verify",
         r"python C:\Users\alice\private\check.py --verify",
         r"check --path=\\server\share",
+        "/",
+        "~",
+        "check --path=/",
+        "check --home=~",
     ],
 )
 def test_verification_commands_reject_embedded_local_paths(
@@ -260,6 +264,10 @@ def test_verification_commands_reject_embedded_local_paths(
         "rawoutput",
         "toolOutput",
         "systemPromptBody",
+        "tooloutput",
+        "systempromptbody",
+        "credentialValue",
+        "refreshToken",
     ],
 )
 def test_manifest_rejects_evidence_bearing_keys_anywhere(
@@ -274,7 +282,7 @@ def test_manifest_rejects_evidence_bearing_keys_anywhere(
         validate_manifest(manifest)
 
 
-def test_manifest_accepts_normal_commands_and_nonopaque_digest_labels() -> None:
+def test_manifest_accepts_normal_commands() -> None:
     manifest = _manifest()
     manifest["verification_commands"] = [
         "python -m package.check --verify",
@@ -282,18 +290,202 @@ def test_manifest_accepts_normal_commands_and_nonopaque_digest_labels() -> None:
         "probe --endpoint https://example.test/health",
         "install --package owner/package@1.2.3",
         "check --path-mode safe --output=json",
+        "verify --timeout 30 --memory 512 --retries 3 --jobs 4 --limit 10",
     ]
-    manifest["build_environment"]["digest"] = "sha256"  # type: ignore[index]
-    manifest["build_environment"]["artifact_digest"] = "sha256"  # type: ignore[index]
 
     validate_manifest(manifest)
 
 
-def test_manifest_rejects_whitespace_wrapped_opaque_credential_material() -> None:
+def test_verification_command_rejects_opaque_credential_token() -> None:
     manifest = _manifest()
-    manifest["build_environment"]["authorization"] = (  # type: ignore[index]
-        "Bearer aB3dE5gH7jK9mN2pQ4rS6tV8"
-    )
+    manifest["verification_commands"] = [
+        "probe --authorization Bearer aB3dE5gH7jK9mN2pQ4rS6tV8"
+    ]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("coordinate", "version"),
+    [
+        ("hello", "1.0"),
+        ("x" * 64, "1.2.3"),
+        ("logical-id_2", "2.4.0"),
+        ("owner/package", "3.1.4-rc.1+build.7"),
+    ],
+)
+def test_resolved_versions_accept_bounded_coordinates_and_semantic_versions(
+    coordinate: str, version: str
+) -> None:
+    manifest = _manifest()
+    manifest["resolved_versions"] = {coordinate: version}
+
+    validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("coordinate", "version"),
+    [
+        ("x" * 65, "1.0.0"),
+        ("owner/package/extra", "1.0.0"),
+        ("hello", ">=1.0"),
+        ("hello", "1..0"),
+        ("hello", "v1"),
+        ("hello", "1.0 " + "x" * 128),
+        ("hello", True),
+    ],
+)
+def test_resolved_versions_reject_invalid_coordinates_or_versions(
+    coordinate: str, version: object
+) -> None:
+    manifest = _manifest()
+    manifest["resolved_versions"] = {coordinate: version}
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "side_effects",
+    ["none", "read_only", "candidate-only"],
+)
+def test_canary_policy_allows_only_a_bounded_symbolic_side_effect_policy(
+    side_effects: str,
+) -> None:
+    manifest = _manifest()
+    manifest["canary_policy"] = {"side_effects": side_effects}
+
+    validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "side_effects",
+    ["", "contains whitespace", "x" * 65, True, 1, ["none"]],
+)
+def test_canary_policy_rejects_invalid_side_effect_policy(
+    side_effects: object,
+) -> None:
+    manifest = _manifest()
+    manifest["canary_policy"] = {"side_effects": side_effects}
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "minimum", "maximum"),
+    [
+        ("cpu_seconds", 1, 86_400),
+        ("wall_seconds", 1, 604_800),
+        ("memory_bytes", 1, 1 << 50),
+        ("disk_bytes", 1, 1 << 50),
+        ("network_requests", 1, 1_000_000),
+        ("process_count", 1, 4_096),
+    ],
+)
+def test_resource_ceilings_allow_each_explicit_integer_field_in_range(
+    field: str, minimum: int, maximum: int
+) -> None:
+    for value in (minimum, maximum):
+        manifest = _manifest()
+        manifest["resource_ceilings"] = {field: value}
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("cpu_seconds", 0),
+        ("cpu_seconds", 86_401),
+        ("wall_seconds", 604_801),
+        ("memory_bytes", (1 << 50) + 1),
+        ("disk_bytes", (1 << 50) + 1),
+        ("network_requests", 1_000_001),
+        ("process_count", 4_097),
+        ("cpu_seconds", True),
+        ("cpu_seconds", 1.0),
+        ("cpu_seconds", "1"),
+    ],
+)
+def test_resource_ceilings_reject_out_of_range_and_non_integer_values(
+    field: str, invalid: object
+) -> None:
+    manifest = _manifest()
+    manifest["resource_ceilings"] = {field: invalid}
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+def test_build_environment_allows_every_declared_identity_field() -> None:
+    manifest = _manifest()
+    manifest["build_environment"] = {
+        "builder": "hermes-agent",
+        "version": "0.17.0",
+        "platform": "linux",
+        "architecture": "x86_64",
+        "python": "3.12.1",
+        "environment_digest": "e" * 64,
+        "toolchain_digest": "f" * 64,
+    }
+
+    validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("required", ["builder", "version"])
+def test_build_environment_requires_builder_and_version(required: str) -> None:
+    manifest = _manifest()
+    del manifest["build_environment"][required]  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("builder", ""),
+        ("builder", "contains whitespace"),
+        ("builder", "x" * 129),
+        ("version", True),
+        ("platform", "/"),
+        ("architecture", ["x86_64"]),
+        ("python", "3.12/venv"),
+        ("environment_digest", "sha256"),
+        ("toolchain_digest", "f" * 63),
+    ],
+)
+def test_build_environment_rejects_invalid_declared_identity_values(
+    field: str, invalid: object
+) -> None:
+    manifest = _manifest()
+    manifest["build_environment"][field] = invalid  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("mapping_name", "unknown_key", "value"),
+    [
+        ("canary_policy", "sideEffects", "none"),
+        ("canary_policy", "side-effects", "none"),
+        ("resource_ceilings", "cpuSeconds", 10),
+        ("resource_ceilings", "cpu-seconds", 10),
+        ("build_environment", "environmentDigest", "e" * 64),
+        ("build_environment", "environment-digest", "e" * 64),
+        ("build_environment", "tooloutput", "captured"),
+        ("build_environment", "systempromptbody", "prompt"),
+        ("build_environment", "credentialValue", "reference"),
+        ("build_environment", "refreshToken", "reference"),
+    ],
+)
+def test_closed_nested_mappings_reject_every_unknown_key_variant(
+    mapping_name: str, unknown_key: str, value: object
+) -> None:
+    manifest = _manifest()
+    manifest[mapping_name][unknown_key] = value  # type: ignore[index]
 
     with pytest.raises(EvolutionContractError, match="invalid_manifest"):
         validate_manifest(manifest)

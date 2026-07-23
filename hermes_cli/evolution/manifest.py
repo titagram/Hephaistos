@@ -49,12 +49,50 @@ _EXPLICIT_RELATIVE_PATH = re.compile(
 _BARE_RELATIVE_PATH = re.compile(
     r"[^\s/\\\"'`]+(?:[/\\][^\s/\\\"'`]+)+\Z"
 )
+_SINGLETON_LOCAL_PATH = re.compile(
+    r"(?<![A-Za-z0-9_:/])(?:/|~)(?![A-Za-z0-9_/:])"
+)
 _PACKAGE_COORDINATE = re.compile(
     r"(?<![A-Za-z0-9._-])[a-z0-9][a-z0-9._-]*/"
     r"[a-z0-9][a-z0-9._-]*@[a-z0-9._+-]+"
     r"(?![A-Za-z0-9._+-])",
     re.ASCII,
 )
+_RESOLVED_COORDINATE = re.compile(
+    r"[A-Za-z][A-Za-z0-9._-]{0,63}"
+    r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?\Z",
+    re.ASCII,
+)
+_SEMANTIC_VERSION = re.compile(
+    r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\Z",
+    re.ASCII,
+)
+_ENVIRONMENT_IDENTITY = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z",
+    re.ASCII,
+)
+_COMMAND_CANDIDATE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._+-]*",
+    re.ASCII,
+)
+_CANARY_POLICY_FIELDS = frozenset({"side_effects"})
+_RESOURCE_CEILING_LIMITS = {
+    "cpu_seconds": 86_400,
+    "wall_seconds": 604_800,
+    "memory_bytes": 1 << 50,
+    "disk_bytes": 1 << 50,
+    "network_requests": 1_000_000,
+    "process_count": 4_096,
+}
+_BUILD_ENVIRONMENT_TEXT_FIELDS = frozenset(
+    {"builder", "version", "platform", "architecture", "python"}
+)
+_BUILD_ENVIRONMENT_DIGEST_FIELDS = frozenset(
+    {"environment_digest", "toolchain_digest"}
+)
+_BUILD_ENVIRONMENT_REQUIRED_FIELDS = frozenset({"builder", "version"})
 _MAX_ITEMS = 64
 _MAX_TEXT = 512
 _MAX_KEY = 64
@@ -69,6 +107,8 @@ _SLOT_CHILDREN = {
         "blueprint_digest": "digest",
         "stable_base": "stable_base",
         "components": "components",
+        "verification_commands": "verification_commands",
+        "build_environment": "build_environment",
     },
     "stable_base": {
         "repository_commit": "repository_commit",
@@ -84,10 +124,15 @@ _SLOT_CHILDREN = {
         "path": "declared_path",
         "digest": "digest",
     },
+    "build_environment": {
+        "environment_digest": "digest",
+        "toolchain_digest": "digest",
+    },
 }
 _SLOT_ITEMS = {
     "components": "component",
     "lockfiles": "lockfile",
+    "verification_commands": "command",
 }
 
 
@@ -128,6 +173,7 @@ def _looks_like_local_path(value: str, *, slot: str) -> bool:
             _POSIX_PATH,
             _EXPLICIT_RELATIVE_PATH,
             _BARE_RELATIVE_PATH,
+            _SINGLETON_LOCAL_PATH,
         )
     )
 
@@ -140,7 +186,11 @@ def _is_sensitive_key(key: str) -> bool:
         if token
     )
     compact = "".join(tokens)
-    forbidden_tokens = {
+    forbidden_fragments = {
+        "apikey",
+        "accesstoken",
+        "credentialvalue",
+        "refreshtoken",
         "secret",
         "password",
         "prompt",
@@ -148,13 +198,21 @@ def _is_sensitive_key(key: str) -> bool:
         "stdout",
         "stderr",
         "output",
+        "rawoutput",
     }
-    return (
-        bool(forbidden_tokens.intersection(tokens))
-        or "apikey" in compact
-        or "accesstoken" in compact
-        or "rawoutput" in compact
+    return any(
+        fragment in compact
+        for fragment in forbidden_fragments
     )
+
+
+def _contains_credential_material(value: str, *, slot: str) -> bool:
+    if slot == "command":
+        return any(
+            _looks_like_credential_material(candidate)
+            for candidate in _COMMAND_CANDIDATE.findall(value)
+        )
+    return _looks_like_credential_material(value)
 
 
 def _privacy(
@@ -190,7 +248,7 @@ def _privacy(
             or "file://" in value.lower()
             or _SECRET.search(value)
             or _looks_like_local_path(value, slot=slot)
-            or (opaque and _looks_like_credential_material(value))
+            or (opaque and _contains_credential_material(value, slot=slot))
         ):
             _fail()
     elif isinstance(value, Mapping):
@@ -237,6 +295,63 @@ def _source(value: object) -> None:
             _fail()
     elif _PACKAGE.fullmatch(source) is None:
         _fail()
+
+
+def _resolved_versions(value: object) -> None:
+    record = _mapping(value)
+    for coordinate, version in record.items():
+        if (
+            len(coordinate) > _MAX_KEY
+            or _RESOLVED_COORDINATE.fullmatch(coordinate) is None
+        ):
+            _fail()
+        semantic_version = _text(version)
+        if (
+            len(semantic_version) > 128
+            or _SEMANTIC_VERSION.fullmatch(semantic_version) is None
+        ):
+            _fail()
+
+
+def _canary_policy(value: object) -> None:
+    record = _mapping(value)
+    if set(record) != _CANARY_POLICY_FIELDS:
+        _fail()
+    side_effects = _text(record["side_effects"])
+    if _SYMBOL.fullmatch(side_effects) is None:
+        _fail()
+
+
+def _resource_ceilings(value: object) -> None:
+    record = _mapping(value)
+    if set(record) - _RESOURCE_CEILING_LIMITS.keys():
+        _fail()
+    for key, ceiling in record.items():
+        if (
+            isinstance(ceiling, bool)
+            or not isinstance(ceiling, int)
+            or not 1 <= ceiling <= _RESOURCE_CEILING_LIMITS[key]
+        ):
+            _fail()
+
+
+def _build_environment(value: object) -> None:
+    record = _mapping(value)
+    allowed = (
+        _BUILD_ENVIRONMENT_TEXT_FIELDS
+        | _BUILD_ENVIRONMENT_DIGEST_FIELDS
+    )
+    if (
+        set(record) - allowed
+        or not _BUILD_ENVIRONMENT_REQUIRED_FIELDS <= set(record)
+    ):
+        _fail()
+    for field in _BUILD_ENVIRONMENT_TEXT_FIELDS & record.keys():
+        identity = _text(record[field])
+        if _ENVIRONMENT_IDENTITY.fullmatch(identity) is None:
+            _fail()
+    for field in _BUILD_ENVIRONMENT_DIGEST_FIELDS & record.keys():
+        require_digest(record[field])
 
 
 def _files(manifest: Mapping[str, object]) -> list[tuple[str, str]]:
@@ -433,8 +548,10 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
     for key in ("dependency_constraints", "service_prerequisites", "capabilities", "invariants", "verification_commands", "incompatibility_reasons"):
         _strings(record[key])
     _strings(record["credential_references"], symbolic=True)
-    for key in ("resolved_versions", "canary_policy", "resource_ceilings", "build_environment"):
-        _mapping(record[key])
+    _resolved_versions(record["resolved_versions"])
+    _canary_policy(record["canary_policy"])
+    _resource_ceilings(record["resource_ceilings"])
+    _build_environment(record["build_environment"])
     for key in ("expected_organism_diff", "builder_version", "rollback_plan"):
         _text(record[key])
     try:
