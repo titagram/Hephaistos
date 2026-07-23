@@ -71,6 +71,17 @@ export async function dispatch(
         diagnostics: [],
       };
     } catch (cause) {
+      if (cause instanceof ReviewerEvidenceUnavailableError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "reviewer_evidence_unavailable", message: cause.message },
+          ],
+        };
+      }
       if (cause instanceof TypeError) {
         return {
           protocolVersion: 1,

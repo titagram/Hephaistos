@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -115,6 +116,7 @@ const fixture = (options: { skipped?: boolean } = {}): Fixture => {
         schemaVersion: 1,
         runId: "review-run",
         targetKind: "local",
+        diffSha256: createHash("sha256").update(diff).digest("hex"),
         skippedFiles: options.skipped
           ? [{ path: "large.ts", bytes: 1_000_001, reason: "too large" }]
           : [],
@@ -245,6 +247,12 @@ const resolveOne = async (
   findings: Array<Record<string, unknown>> = [finding()],
 ) => resolveFindingAnchors(run.request("resolve-anchors", { findings }));
 
+const replaceFindingsArtifact = (path: string, value: unknown): void => {
+  chmodSync(path, 0o600);
+  writeFileSync(path, JSON.stringify(value));
+  if (process.platform !== "win32") chmodSync(path, 0o400);
+};
+
 afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
@@ -274,7 +282,9 @@ describe("verified findings and anchors", () => {
     expect(JSON.parse(readFileSync(result.findingsPath, "utf8"))).toEqual(
       result,
     );
-    expect(statSync(result.findingsPath).mode & 0o777).toBe(0o600);
+    expect(statSync(result.findingsPath).mode & 0o777).toBe(
+      process.platform === "win32" ? 0o600 : 0o400,
+    );
   });
 
   it.each([
@@ -288,6 +298,17 @@ describe("verified findings and anchors", () => {
   ])("rejects %s", async (_label, candidate) => {
     const run = fixture();
     await expect(resolveOne(run, [candidate])).rejects.toThrow();
+  });
+
+  it("fails closed when the captured plan omits its diff hash", async () => {
+    const run = fixture();
+    const plan = JSON.parse(readFileSync(run.planPath, "utf8")) as {
+      hermes: Record<string, unknown>;
+    };
+    delete plan.hermes.diffSha256;
+    writeFileSync(run.planPath, JSON.stringify(plan), { mode: 0o600 });
+
+    await expect(resolveOne(run)).rejects.toThrow(/diffSha256/);
   });
 });
 
@@ -349,11 +370,49 @@ describe("computed verdict", () => {
       findings: Array<{ line: number }>;
     };
     stored.findings[0]!.line = 999;
-    writeFileSync(resolved.findingsPath, JSON.stringify(stored));
+    replaceFindingsArtifact(resolved.findingsPath, stored);
 
     await expect(
       composeReview(run.request("compose-review", cleanFacts)),
-    ).rejects.toThrow(/not derived from target\.diff/);
+    ).rejects.toThrow(/integrity|not derived from target\.diff/);
+  });
+
+  it.each([
+    ["severity", (entry: Record<string, unknown>) => (entry.severity = "low")],
+    [
+      "verification",
+      (entry: Record<string, unknown>) => (entry.verification = "rejected"),
+    ],
+    [
+      "reviewer ids",
+      (entry: Record<string, unknown>) =>
+        (entry.sourceReviewerIds = ["unknown-reviewer"]),
+    ],
+    [
+      "oversized title",
+      (entry: Record<string, unknown>) => (entry.title = "x".repeat(4_097)),
+    ],
+    [
+      "oversized body",
+      (entry: Record<string, unknown>) => (entry.body = "x".repeat(65_537)),
+    ],
+    [
+      "extra fields",
+      (entry: Record<string, unknown>) => (entry.callerVerdict = "APPROVE"),
+    ],
+  ])("rejects stored finding tampering of %s", async (_label, mutate) => {
+    const run = fixture();
+    const resolved = await resolveOne(run);
+    await prepareCoverage(run);
+    const stored = JSON.parse(readFileSync(resolved.findingsPath, "utf8")) as {
+      findings: Array<Record<string, unknown>>;
+    };
+    mutate(stored.findings[0]!);
+    replaceFindingsArtifact(resolved.findingsPath, stored);
+
+    await expect(
+      composeReview(run.request("compose-review", cleanFacts)),
+    ).rejects.toThrow();
   });
 
   it("derives skipped diff uncertainty from the captured plan", async () => {

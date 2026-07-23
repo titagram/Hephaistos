@@ -4953,7 +4953,10 @@ var validatedReviewArtifacts = (request) => {
   const diff = readFileSync10(diffPath, "utf8");
   const diffSha256 = createHash2("sha256").update(diff).digest("hex");
   const hermes = asRecord4(plan.hermes, "plan.hermes");
-  if (hermes.diffSha256 !== void 0 && hermes.diffSha256 !== diffSha256) {
+  if (typeof hermes.diffSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(hermes.diffSha256)) {
+    throw new TypeError("plan.hermes.diffSha256 must be a SHA-256 digest");
+  }
+  if (hermes.diffSha256 !== diffSha256) {
     throw new TypeError("target.diff does not match plan.hermes.diffSha256");
   }
   return { artifactRoot, planPath, diffPath, plan, diff, diffSha256 };
@@ -5035,7 +5038,8 @@ var knownReviewerIds = (artifacts) => {
     throw cause;
   }
 };
-var parseFindings = (value, knownReviewers) => {
+var validateVerifiedFindings = (value, artifacts) => {
+  const knownReviewers = knownReviewerIds(artifacts);
   if (!Array.isArray(value) || value.length > MAX_FINDINGS) {
     throw new TypeError(
       `findings must be an array of at most ${MAX_FINDINGS} entries`
@@ -5112,6 +5116,16 @@ var parseFindings = (value, knownReviewers) => {
     };
   });
 };
+var findingArtifactIntegrity = (value) => createHash2("sha256").update(
+  JSON.stringify({
+    schemaVersion: value.schemaVersion,
+    findingsPath: value.findingsPath,
+    diffSha256: value.diffSha256,
+    findings: value.findings,
+    unresolvedFindings: value.unresolvedFindings,
+    stats: value.stats
+  })
+).digest("hex");
 var severityRank = {
   blocker: 4,
   high: 3,
@@ -5158,7 +5172,7 @@ async function resolveFindingAnchors(request) {
   if (unknown !== void 0)
     throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
   const artifacts = validatedReviewArtifacts(request);
-  const findings = parseFindings(input.findings, knownReviewerIds(artifacts));
+  const findings = validateVerifiedFindings(input.findings, artifacts);
   const resolutions = resolveAnchors(
     artifacts.diff,
     findings.map((entry) => ({
@@ -5190,7 +5204,7 @@ async function resolveFindingAnchors(request) {
   }
   const deduplicated = deduplicate(resolved);
   const findingsPath = join10(artifacts.artifactRoot, FINDINGS_NAME);
-  const output = {
+  const payload = {
     schemaVersion: 1,
     findingsPath,
     diffSha256: artifacts.diffSha256,
@@ -5205,7 +5219,12 @@ async function resolveFindingAnchors(request) {
       deduplicated: resolved.length - deduplicated.length
     }
   };
+  const output = {
+    ...payload,
+    integritySha256: findingArtifactIntegrity(payload)
+  };
   atomicJson(artifacts.artifactRoot, FINDINGS_NAME, output);
+  if (process.platform !== "win32") chmodSync3(findingsPath, 256);
   return output;
 }
 var writePrivateJson = atomicJson;
@@ -5236,6 +5255,34 @@ var VERIFICATIONS = /* @__PURE__ */ new Set([
   "confirmed",
   "rejected",
   "uncertain"
+]);
+var VERIFIED_FINDING_KEYS = [
+  "id",
+  "severity",
+  "title",
+  "body",
+  "path",
+  "quotedCode",
+  "sourceReviewerIds",
+  "verification"
+];
+var RESOLVED_FINDING_KEYS = /* @__PURE__ */ new Set([
+  ...VERIFIED_FINDING_KEYS,
+  "startLine",
+  "line",
+  "quotedCodeSha256",
+  "matchTier",
+  "ambiguous"
+]);
+var UNRESOLVED_FINDING_KEYS = /* @__PURE__ */ new Set([...VERIFIED_FINDING_KEYS, "reason"]);
+var FINDINGS_ARTIFACT_KEYS = /* @__PURE__ */ new Set([
+  "schemaVersion",
+  "findingsPath",
+  "diffSha256",
+  "integritySha256",
+  "findings",
+  "unresolvedFindings",
+  "stats"
 ]);
 var asRecord5 = (value, label2) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -5284,43 +5331,111 @@ var parseInput3 = (request) => {
 };
 var parseFinding = (value, resolved) => {
   const finding = asRecord5(value, "stored finding");
+  const allowed = resolved ? RESOLVED_FINDING_KEYS : UNRESOLVED_FINDING_KEYS;
+  const unknown = Object.keys(finding).find((key) => !allowed.has(key));
+  if (unknown !== void 0) {
+    throw new TypeError(
+      `findings.json contains unknown finding field: ${unknown}`
+    );
+  }
   if (typeof finding.id !== "string" || typeof finding.title !== "string" || typeof finding.body !== "string" || typeof finding.path !== "string" || typeof finding.quotedCode !== "string" || !Array.isArray(finding.sourceReviewerIds) || finding.sourceReviewerIds.some((id) => typeof id !== "string") || !SEVERITIES.has(finding.severity) || !VERIFICATIONS.has(finding.verification)) {
     throw new TypeError("findings.json contains an invalid finding");
   }
-  if (resolved && (!Number.isSafeInteger(finding.startLine) || finding.startLine < 1 || !Number.isSafeInteger(finding.line) || finding.line < finding.startLine || typeof finding.quotedCodeSha256 !== "string")) {
+  if (resolved && (!Number.isSafeInteger(finding.startLine) || finding.startLine < 1 || !Number.isSafeInteger(finding.line) || finding.line < finding.startLine || typeof finding.quotedCodeSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(finding.quotedCodeSha256) || typeof finding.matchTier !== "string" || typeof finding.ambiguous !== "boolean")) {
     throw new TypeError("findings.json contains an invalid resolved range");
   }
-  if (!resolved && typeof finding.reason !== "string") {
+  if (!resolved && (typeof finding.reason !== "string" || finding.reason.length === 0 || Buffer.byteLength(finding.reason, "utf8") > 4096)) {
     throw new TypeError("findings.json contains an invalid unresolved finding");
   }
   return finding;
 };
-var readFindings = (artifactRoot, expectedDiffSha256, diff) => {
-  const findingsPath = join11(artifactRoot, "findings.json");
+var verifiedFields = (finding) => Object.fromEntries(VERIFIED_FINDING_KEYS.map((key) => [key, finding[key]]));
+var parseStats = (value, resolved, unresolved) => {
+  const stats = asRecord5(value, "findings.json.stats");
+  const unknown = Object.keys(stats).find(
+    (key) => !["total", "resolved", "unresolved", "deduplicated"].includes(key)
+  );
+  if (unknown !== void 0) {
+    throw new TypeError(`unknown findings.json.stats field: ${unknown}`);
+  }
+  for (const key of [
+    "total",
+    "resolved",
+    "unresolved",
+    "deduplicated"
+  ]) {
+    if (!Number.isSafeInteger(stats[key]) || stats[key] < 0) {
+      throw new TypeError(
+        `findings.json.stats.${key} must be a non-negative integer`
+      );
+    }
+  }
+  if (stats.resolved !== resolved || stats.unresolved !== unresolved || stats.total !== resolved + unresolved + stats.deduplicated) {
+    throw new TypeError(
+      "findings.json.stats is inconsistent with its findings"
+    );
+  }
+  return stats;
+};
+var readFindings = (artifacts) => {
+  const findingsPath = join11(artifacts.artifactRoot, "findings.json");
   const stat = lstatSync8(findingsPath);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new TypeError("findings.json must be a real file");
   }
-  const value = asRecord5(
-    JSON.parse(readFileSync11(findingsPath, "utf8")),
-    "findings.json"
+  if (process.platform !== "win32" && (stat.mode & 511) !== 256) {
+    throw new TypeError("findings.json must remain read-only and private");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync11(findingsPath, "utf8"));
+  } catch (cause) {
+    throw new TypeError(
+      `findings.json is not valid JSON: ${cause.message}`
+    );
+  }
+  const value = asRecord5(parsed, "findings.json");
+  const unknown = Object.keys(value).find(
+    (key) => !FINDINGS_ARTIFACT_KEYS.has(key)
   );
-  if (value.schemaVersion !== 1 || value.findingsPath !== findingsPath || value.diffSha256 !== expectedDiffSha256 || !Array.isArray(value.findings) || !Array.isArray(value.unresolvedFindings)) {
+  if (unknown !== void 0) {
+    throw new TypeError(`unknown findings.json field: ${unknown}`);
+  }
+  if (value.schemaVersion !== 1 || value.findingsPath !== findingsPath || value.diffSha256 !== artifacts.diffSha256 || typeof value.integritySha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.integritySha256) || !Array.isArray(value.findings) || !Array.isArray(value.unresolvedFindings)) {
     throw new TypeError("findings.json does not belong to the captured diff");
   }
+  const resolved = value.findings.map(
+    (entry) => parseFinding(entry, true)
+  );
+  const unresolved = value.unresolvedFindings.map(
+    (entry) => parseFinding(entry, false)
+  );
+  const validated = validateVerifiedFindings(
+    [...resolved, ...unresolved].map(verifiedFields),
+    artifacts
+  );
+  const storedVerified = [...resolved, ...unresolved].map(verifiedFields);
+  if (JSON.stringify(validated) !== JSON.stringify(storedVerified)) {
+    throw new TypeError(
+      "findings.json contains a non-canonical verified finding"
+    );
+  }
   const output = {
-    ...value,
-    findings: value.findings.map(
-      (entry) => parseFinding(entry, true)
-    ),
-    unresolvedFindings: value.unresolvedFindings.map(
-      (entry) => parseFinding(entry, false)
-    )
+    schemaVersion: 1,
+    findingsPath,
+    diffSha256: artifacts.diffSha256,
+    integritySha256: value.integritySha256,
+    findings: resolved,
+    unresolvedFindings: unresolved,
+    stats: parseStats(value.stats, resolved.length, unresolved.length)
   };
+  if (findingArtifactIntegrity(output) !== output.integritySha256) {
+    throw new TypeError("findings.json integrity check failed");
+  }
   const all = [...output.findings, ...output.unresolvedFindings];
   const resolvedCount = output.findings.length;
   const anchors = resolveAnchors(
-    diff,
+    artifacts.diff,
     all.map((entry) => ({
       id: entry.id,
       path: entry.path,
@@ -5330,9 +5445,9 @@ var readFindings = (artifactRoot, expectedDiffSha256, diff) => {
   for (const [index, anchor] of anchors.entries()) {
     const stored = all[index];
     if (index < resolvedCount) {
-      const resolved = stored;
-      const quoteSha256 = createHash3("sha256").update(resolved.quotedCode).digest("hex");
-      if (anchor.status !== "resolved" || anchor.startLine !== resolved.startLine || anchor.line !== resolved.line || quoteSha256 !== resolved.quotedCodeSha256) {
+      const resolved2 = stored;
+      const quoteSha256 = createHash3("sha256").update(resolved2.quotedCode).digest("hex");
+      if (anchor.status !== "resolved" || anchor.startLine !== resolved2.startLine || anchor.line !== resolved2.line || quoteSha256 !== resolved2.quotedCodeSha256) {
         throw new TypeError(
           "findings.json contains an anchor not derived from target.diff"
         );
@@ -5419,11 +5534,7 @@ async function composeReview2(request) {
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const findings = readFindings(
-    artifacts.artifactRoot,
-    artifacts.diffSha256,
-    artifacts.diff
-  );
+  const findings = readFindings(artifacts);
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(
     (entry) => entry.verification !== "rejected"
@@ -6397,6 +6508,17 @@ async function dispatch(request) {
         diagnostics: []
       };
     } catch (cause) {
+      if (cause instanceof ReviewerEvidenceUnavailableError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "reviewer_evidence_unavailable", message: cause.message }
+          ]
+        };
+      }
       if (cause instanceof TypeError) {
         return {
           protocolVersion: 1,

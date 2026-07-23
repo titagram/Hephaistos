@@ -15,10 +15,13 @@ import {
 import {
   validatedReviewArtifacts,
   validatePrivateDestination,
+  validateVerifiedFindings,
+  findingArtifactIntegrity,
   writePrivateJson,
   writePrivateText,
   type FindingSeverity,
   type FindingVerification,
+  type ReviewArtifacts,
   type ResolveFindingAnchorsOutput,
   type ResolvedFinding,
   type UnresolvedFinding,
@@ -91,6 +94,34 @@ const VERIFICATIONS = new Set<FindingVerification>([
   "rejected",
   "uncertain",
 ]);
+const VERIFIED_FINDING_KEYS = [
+  "id",
+  "severity",
+  "title",
+  "body",
+  "path",
+  "quotedCode",
+  "sourceReviewerIds",
+  "verification",
+] as const;
+const RESOLVED_FINDING_KEYS = new Set([
+  ...VERIFIED_FINDING_KEYS,
+  "startLine",
+  "line",
+  "quotedCodeSha256",
+  "matchTier",
+  "ambiguous",
+]);
+const UNRESOLVED_FINDING_KEYS = new Set([...VERIFIED_FINDING_KEYS, "reason"]);
+const FINDINGS_ARTIFACT_KEYS = new Set([
+  "schemaVersion",
+  "findingsPath",
+  "diffSha256",
+  "integritySha256",
+  "findings",
+  "unresolvedFindings",
+  "stats",
+]);
 
 const asRecord = (value: unknown, label: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -159,6 +190,13 @@ const parseFinding = <T extends ResolvedFinding | UnresolvedFinding>(
   resolved: boolean,
 ): T => {
   const finding = asRecord(value, "stored finding");
+  const allowed = resolved ? RESOLVED_FINDING_KEYS : UNRESOLVED_FINDING_KEYS;
+  const unknown = Object.keys(finding).find((key) => !allowed.has(key));
+  if (unknown !== undefined) {
+    throw new TypeError(
+      `findings.json contains unknown finding field: ${unknown}`,
+    );
+  }
   if (
     typeof finding.id !== "string" ||
     typeof finding.title !== "string" ||
@@ -178,52 +216,134 @@ const parseFinding = <T extends ResolvedFinding | UnresolvedFinding>(
       (finding.startLine as number) < 1 ||
       !Number.isSafeInteger(finding.line) ||
       (finding.line as number) < (finding.startLine as number) ||
-      typeof finding.quotedCodeSha256 !== "string")
+      typeof finding.quotedCodeSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(finding.quotedCodeSha256) ||
+      typeof finding.matchTier !== "string" ||
+      typeof finding.ambiguous !== "boolean")
   ) {
     throw new TypeError("findings.json contains an invalid resolved range");
   }
-  if (!resolved && typeof finding.reason !== "string") {
+  if (
+    !resolved &&
+    (typeof finding.reason !== "string" ||
+      finding.reason.length === 0 ||
+      Buffer.byteLength(finding.reason, "utf8") > 4_096)
+  ) {
     throw new TypeError("findings.json contains an invalid unresolved finding");
   }
   return finding as unknown as T;
 };
 
+const verifiedFields = (
+  finding: ResolvedFinding | UnresolvedFinding,
+): Record<string, unknown> =>
+  Object.fromEntries(VERIFIED_FINDING_KEYS.map((key) => [key, finding[key]]));
+
+const parseStats = (
+  value: unknown,
+  resolved: number,
+  unresolved: number,
+): ResolveFindingAnchorsOutput["stats"] => {
+  const stats = asRecord(value, "findings.json.stats");
+  const unknown = Object.keys(stats).find(
+    (key) => !["total", "resolved", "unresolved", "deduplicated"].includes(key),
+  );
+  if (unknown !== undefined) {
+    throw new TypeError(`unknown findings.json.stats field: ${unknown}`);
+  }
+  for (const key of [
+    "total",
+    "resolved",
+    "unresolved",
+    "deduplicated",
+  ] as const) {
+    if (!Number.isSafeInteger(stats[key]) || (stats[key] as number) < 0) {
+      throw new TypeError(
+        `findings.json.stats.${key} must be a non-negative integer`,
+      );
+    }
+  }
+  if (
+    stats.resolved !== resolved ||
+    stats.unresolved !== unresolved ||
+    stats.total !== resolved + unresolved + (stats.deduplicated as number)
+  ) {
+    throw new TypeError(
+      "findings.json.stats is inconsistent with its findings",
+    );
+  }
+  return stats as unknown as ResolveFindingAnchorsOutput["stats"];
+};
+
 const readFindings = (
-  artifactRoot: string,
-  expectedDiffSha256: string,
-  diff: string,
+  artifacts: ReviewArtifacts,
 ): ResolveFindingAnchorsOutput => {
-  const findingsPath = join(artifactRoot, "findings.json");
+  const findingsPath = join(artifacts.artifactRoot, "findings.json");
   const stat = lstatSync(findingsPath);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new TypeError("findings.json must be a real file");
   }
-  const value = asRecord(
-    JSON.parse(readFileSync(findingsPath, "utf8")) as unknown,
-    "findings.json",
+  if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o400) {
+    throw new TypeError("findings.json must remain read-only and private");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(findingsPath, "utf8")) as unknown;
+  } catch (cause) {
+    throw new TypeError(
+      `findings.json is not valid JSON: ${(cause as Error).message}`,
+    );
+  }
+  const value = asRecord(parsed, "findings.json");
+  const unknown = Object.keys(value).find(
+    (key) => !FINDINGS_ARTIFACT_KEYS.has(key),
   );
+  if (unknown !== undefined) {
+    throw new TypeError(`unknown findings.json field: ${unknown}`);
+  }
   if (
     value.schemaVersion !== 1 ||
     value.findingsPath !== findingsPath ||
-    value.diffSha256 !== expectedDiffSha256 ||
+    value.diffSha256 !== artifacts.diffSha256 ||
+    typeof value.integritySha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.integritySha256) ||
     !Array.isArray(value.findings) ||
     !Array.isArray(value.unresolvedFindings)
   ) {
     throw new TypeError("findings.json does not belong to the captured diff");
   }
-  const output = {
-    ...(value as unknown as ResolveFindingAnchorsOutput),
-    findings: value.findings.map((entry) =>
-      parseFinding<ResolvedFinding>(entry, true),
-    ),
-    unresolvedFindings: value.unresolvedFindings.map((entry) =>
-      parseFinding<UnresolvedFinding>(entry, false),
-    ),
+  const resolved = value.findings.map((entry) =>
+    parseFinding<ResolvedFinding>(entry, true),
+  );
+  const unresolved = value.unresolvedFindings.map((entry) =>
+    parseFinding<UnresolvedFinding>(entry, false),
+  );
+  const validated = validateVerifiedFindings(
+    [...resolved, ...unresolved].map(verifiedFields),
+    artifacts,
+  );
+  const storedVerified = [...resolved, ...unresolved].map(verifiedFields);
+  if (JSON.stringify(validated) !== JSON.stringify(storedVerified)) {
+    throw new TypeError(
+      "findings.json contains a non-canonical verified finding",
+    );
+  }
+  const output: ResolveFindingAnchorsOutput = {
+    schemaVersion: 1,
+    findingsPath,
+    diffSha256: artifacts.diffSha256,
+    integritySha256: value.integritySha256,
+    findings: resolved,
+    unresolvedFindings: unresolved,
+    stats: parseStats(value.stats, resolved.length, unresolved.length),
   };
+  if (findingArtifactIntegrity(output) !== output.integritySha256) {
+    throw new TypeError("findings.json integrity check failed");
+  }
   const all = [...output.findings, ...output.unresolvedFindings];
   const resolvedCount = output.findings.length;
   const anchors = resolveQwenAnchors(
-    diff,
+    artifacts.diff,
     all.map((entry) => ({
       id: entry.id,
       path: entry.path,
@@ -347,11 +467,7 @@ export async function composeReview(
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const findings = readFindings(
-    artifacts.artifactRoot,
-    artifacts.diffSha256,
-    artifacts.diff,
-  );
+  const findings = readFindings(artifacts);
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(
     (entry) => entry.verification !== "rejected",

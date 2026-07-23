@@ -50,6 +50,7 @@ export interface ResolveFindingAnchorsOutput {
   schemaVersion: 1;
   findingsPath: string;
   diffSha256: string;
+  integritySha256: string;
   findings: ResolvedFinding[];
   unresolvedFindings: UnresolvedFinding[];
   stats: {
@@ -192,7 +193,13 @@ export const validatedReviewArtifacts = (
   const diff = readFileSync(diffPath, "utf8");
   const diffSha256 = createHash("sha256").update(diff).digest("hex");
   const hermes = asRecord(plan.hermes, "plan.hermes");
-  if (hermes.diffSha256 !== undefined && hermes.diffSha256 !== diffSha256) {
+  if (
+    typeof hermes.diffSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(hermes.diffSha256)
+  ) {
+    throw new TypeError("plan.hermes.diffSha256 must be a SHA-256 digest");
+  }
+  if (hermes.diffSha256 !== diffSha256) {
     throw new TypeError("target.diff does not match plan.hermes.diffSha256");
   }
   return { artifactRoot, planPath, diffPath, plan, diff, diffSha256 };
@@ -292,10 +299,11 @@ const knownReviewerIds = (artifacts: ReviewArtifacts): Set<string> => {
   }
 };
 
-const parseFindings = (
+export const validateVerifiedFindings = (
   value: unknown,
-  knownReviewers: ReadonlySet<string>,
+  artifacts: ReviewArtifacts,
 ): VerifiedFinding[] => {
+  const knownReviewers = knownReviewerIds(artifacts);
   if (!Array.isArray(value) || value.length > MAX_FINDINGS) {
     throw new TypeError(
       `findings must be an array of at most ${MAX_FINDINGS} entries`,
@@ -392,6 +400,27 @@ const parseFindings = (
   });
 };
 
+export const findingArtifactIntegrity = (value: {
+  schemaVersion: 1;
+  findingsPath: string;
+  diffSha256: string;
+  findings: ResolvedFinding[];
+  unresolvedFindings: UnresolvedFinding[];
+  stats: ResolveFindingAnchorsOutput["stats"];
+}): string =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        schemaVersion: value.schemaVersion,
+        findingsPath: value.findingsPath,
+        diffSha256: value.diffSha256,
+        findings: value.findings,
+        unresolvedFindings: value.unresolvedFindings,
+        stats: value.stats,
+      }),
+    )
+    .digest("hex");
+
 const severityRank: Record<FindingSeverity, number> = {
   blocker: 4,
   high: 3,
@@ -451,7 +480,7 @@ export async function resolveFindingAnchors(
   if (unknown !== undefined)
     throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
   const artifacts = validatedReviewArtifacts(request);
-  const findings = parseFindings(input.findings, knownReviewerIds(artifacts));
+  const findings = validateVerifiedFindings(input.findings, artifacts);
   const resolutions = resolveQwenAnchors(
     artifacts.diff,
     findings.map((entry) => ({
@@ -487,8 +516,8 @@ export async function resolveFindingAnchors(
   }
   const deduplicated = deduplicate(resolved);
   const findingsPath = join(artifacts.artifactRoot, FINDINGS_NAME);
-  const output: ResolveFindingAnchorsOutput = {
-    schemaVersion: 1,
+  const payload = {
+    schemaVersion: 1 as const,
     findingsPath,
     diffSha256: artifacts.diffSha256,
     findings: deduplicated,
@@ -502,7 +531,12 @@ export async function resolveFindingAnchors(
       deduplicated: resolved.length - deduplicated.length,
     },
   };
+  const output: ResolveFindingAnchorsOutput = {
+    ...payload,
+    integritySha256: findingArtifactIntegrity(payload),
+  };
   atomicJson(artifacts.artifactRoot, FINDINGS_NAME, output);
+  if (process.platform !== "win32") chmodSync(findingsPath, 0o400);
   return output;
 }
 
