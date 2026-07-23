@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import sys
+import threading
 from types import ModuleType
 from pathlib import Path
 from types import SimpleNamespace
@@ -349,6 +350,107 @@ def test_public_pr_review_hands_approval_to_live_one_shot_chat(
         "serving",
         "closed",
     ]
+
+
+@pytest.mark.parametrize(
+    ("approval_result", "expected_allowed"),
+    [("once", True), ("deny", False)],
+)
+def test_public_pr_review_process_loop_thread_receives_local_consent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    approval_result: str,
+    expected_allowed: bool,
+) -> None:
+    """The real process-loop thread entry installs its own TLS callbacks."""
+    import cli as classic_cli
+    import tools.terminal_tool as terminal_tool
+
+    decisions: list[ExecutionDecision] = []
+    approval_threads: list[int] = []
+    process_thread_ids: list[int] = []
+    errors: list[BaseException] = []
+    global_secret_registrations: list[object] = []
+
+    class FakeAuthority:
+        def __init__(self, **kwargs: object) -> None:
+            decisions.append(kwargs["execution_decision"])  # type: ignore[arg-type]
+
+        def start_serving(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    shell = classic_cli.HermesCLI.__new__(classic_cli.HermesCLI)
+    shell._tool_callbacks_installed = False
+    shell._sudo_password_callback = lambda: ""
+    shell._secret_capture_callback = lambda *_args, **_kwargs: {}
+    shell._computer_use_approval_callback = lambda *_args, **_kwargs: "deny"
+
+    def approval(*_args: object, **_kwargs: object) -> str:
+        approval_threads.append(threading.get_ident())
+        return approval_result
+
+    shell._approval_callback = approval
+
+    def run_live_process_loop(args: argparse.Namespace) -> None:
+        def process_loop() -> None:
+            process_thread_ids.append(threading.get_ident())
+            assert terminal_tool._get_approval_callback() is approval
+            args.session_ready_callback("public-review-session")
+
+        def thread_entry() -> None:
+            try:
+                shell._run_process_loop_thread(process_loop)
+                assert terminal_tool._get_approval_callback() is None
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(
+            target=thread_entry,
+            name="process_loop",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setattr(command, "ReviewAuthority", FakeAuthority)
+    monkeypatch.setattr(command, "_prune_completed_review_runs", lambda: None)
+    monkeypatch.setattr(command, "_load_chat_command", lambda: run_live_process_loop)
+    monkeypatch.setattr(
+        classic_cli,
+        "set_secret_capture_callback",
+        global_secret_registrations.append,
+    )
+
+    # Reproduce the production ordering: run() installs callbacks on the main
+    # thread before it starts process_loop. The old object-wide boolean then
+    # made process_loop skip its own thread-local installation.
+    shell._install_tool_callbacks()
+    try:
+        command.launch_review_chat(
+            args=argparse.Namespace(),
+            workspace=tmp_path,
+            target="https://github.com/o/r/pull/42",
+            effort="medium",
+            skills=["requesting-code-review"],
+            auto_approve=False,
+            pass_session_id=True,
+            query="review",
+        )
+    finally:
+        terminal_tool.set_sudo_password_callback(None)
+        terminal_tool.set_approval_callback(None)
+
+    assert errors == []
+    assert len(process_thread_ids) == 1
+    assert approval_threads == process_thread_ids
+    assert global_secret_registrations == [shell._secret_capture_callback]
+    assert decisions[0].allowed is expected_allowed
+    assert decisions[0].mode == ("local" if expected_allowed else "denied")
 
 
 def test_cmd_chat_forwards_private_session_ready_callback(

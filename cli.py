@@ -3726,6 +3726,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Agent will be initialized on first use
         self.agent: Optional[Any] = None
+        # terminal_tool keeps approval/sudo callbacks in threading.local().
+        # Track installation per thread while retaining the existing
+        # process-wide guard for the callbacks whose implementations are
+        # genuinely global (secret capture and computer use).
+        self._tool_callbacks_tls = threading.local()
         self._tool_callbacks_installed = False
         self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
@@ -5832,10 +5837,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
     def _install_tool_callbacks(self) -> None:
         """Install tool callbacks that need the live prompt UI."""
+        callback_tls = getattr(self, "_tool_callbacks_tls", None)
+        if callback_tls is None:
+            # Some focused tests construct HermesCLI with __new__. Production
+            # instances create this in __init__ before any worker starts.
+            callback_tls = threading.local()
+            self._tool_callbacks_tls = callback_tls
+        if not getattr(callback_tls, "installed", False):
+            set_sudo_password_callback(self._sudo_password_callback)
+            set_approval_callback(self._approval_callback)
+            callback_tls.installed = True
+
         if getattr(self, "_tool_callbacks_installed", False):
             return
-        set_sudo_password_callback(self._sudo_password_callback)
-        set_approval_callback(self._approval_callback)
         set_secret_capture_callback(self._secret_capture_callback)
         try:
             from tools.computer_use_tool import set_approval_callback as _set_cu_cb
@@ -5844,6 +5858,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         except ImportError:
             pass
         self._tool_callbacks_installed = True
+
+    def _clear_thread_tool_callbacks(self) -> None:
+        """Clear callbacks installed in the current thread's TLS slots."""
+        callback_tls = getattr(self, "_tool_callbacks_tls", None)
+        if callback_tls is None or not getattr(
+            callback_tls, "installed", False
+        ):
+            return
+        try:
+            set_sudo_password_callback(None)
+        finally:
+            try:
+                set_approval_callback(None)
+            finally:
+                callback_tls.installed = False
+
+    def _run_process_loop_thread(self, process_loop: Callable[[], None]) -> None:
+        """Run the CLI input loop with callbacks scoped to its own thread."""
+        try:
+            self._install_tool_callbacks()
+            process_loop()
+        finally:
+            self._clear_thread_tool_callbacks()
 
     def _ensure_tirith_security(self) -> None:
         """Check tirith availability once before tools can run terminal commands."""
@@ -14900,7 +14937,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     logger.warning("process_loop unhandled error (msg may be lost): %s", e)
         
         # Start processing thread
-        process_thread = threading.Thread(target=process_loop, daemon=True)
+        process_thread = threading.Thread(
+            target=self._run_process_loop_thread,
+            args=(process_loop,),
+            daemon=True,
+        )
         process_thread.start()
         
         # Register atexit cleanup so resources are freed even on unexpected exit
@@ -15147,8 +15188,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             except Exception:
                 pass
             # Unregister callbacks to avoid dangling references
-            set_sudo_password_callback(None)
-            set_approval_callback(None)
+            self._clear_thread_tool_callbacks()
             set_secret_capture_callback(None)
             # Flush any in-memory turn transcript before marking the session
             # closed.  On SIGHUP/SIGTERM/window close the agent thread may not
