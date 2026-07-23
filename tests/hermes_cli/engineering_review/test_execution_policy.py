@@ -233,6 +233,8 @@ def test_authority_routes_sandboxed_checks_to_terminal_executor_not_host_bridge(
             raise AssertionError("sandboxed repository code reached the host bridge")
 
     class FakeSandboxExecutor:
+        cleanup_pending = False
+
         def invoke(
             self,
             request: object,
@@ -322,6 +324,8 @@ def test_authority_persists_blocked_sandbox_cleanup_status(
             )
 
     class RecoveryRequiredExecutor:
+        cleanup_pending = False
+
         def invoke(
             self,
             request: object,
@@ -452,6 +456,8 @@ def test_authority_close_persists_observed_sandbox_cleanup_failure(
     )
 
     class FailedCleanupExecutor:
+        cleanup_pending = False
+
         def shutdown(self) -> str:
             return "sandbox cleanup failed: container remains"
 
