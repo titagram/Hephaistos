@@ -346,6 +346,40 @@ class ReviewRun:
         return cls._from_metadata(root, run_id=run_id, session_id=session_id)
 
     @classmethod
+    def load_cleanup_failed(cls, run_id: str) -> ReviewRun:
+        """Resolve one terminal failed run without accepting a filesystem path."""
+        run_id = _validate_run_id(run_id)
+        reviews = _review_root(_canonical_home())
+        matches: list[ReviewRun] = []
+        try:
+            sessions = list(reviews.iterdir())
+        except OSError as exc:
+            raise ReviewRunError("review runs could not be enumerated") from exc
+        for session_root in sessions:
+            try:
+                session_id = _validate_session_id(session_root.name)
+                _secure_directory(session_root)
+                candidate = session_root / run_id
+                if not candidate.exists() and not candidate.is_symlink():
+                    continue
+                _secure_directory(candidate)
+                matches.append(
+                    cls._from_metadata(
+                        candidate,
+                        run_id=run_id,
+                        session_id=session_id,
+                    )
+                )
+            except ReviewRunError:
+                continue
+        if len(matches) != 1:
+            raise ReviewRunError("cleanup-failed review run was not found uniquely")
+        run = matches[0]
+        if run.status != "cleanup_failed":
+            raise ReviewRunError("only cleanup_failed review runs can be recovered")
+        return run
+
+    @classmethod
     def _from_metadata(cls, root: Path, *, run_id: str, session_id: str) -> ReviewRun:
         try:
             metadata = json.loads(_read_private_file(root / _METADATA_NAME))
@@ -476,6 +510,11 @@ class ReviewRun:
             raise TypeError("artifact data must be bytes")
         loaded = self._validated_loaded()
         return loaded._atomic_write(_artifact_name(name), data)
+
+    def read_private_artifact(self, name: str) -> bytes:
+        """Read one run-owned private artifact without following links."""
+        loaded = self._validated_loaded()
+        return _read_private_file(loaded.root / _artifact_name(name))
 
     def commit_reviewer_evidence(self, agent_id: str, data: bytes) -> str:
         """Commit an expected HMAC before harness evidence becomes authoritative.
@@ -632,6 +671,20 @@ class ReviewRun:
         loaded._write_metadata(metadata)
         _drop_capability(loaded.root)
         return replace(loaded, status="cleanup_failed")
+
+    def mark_recovered(self) -> ReviewRun:
+        """Transition a cleanup_failed run after verified resource removal."""
+        loaded = self._validated_loaded()
+        if loaded.status != "cleanup_failed":
+            raise ReviewRunError("only cleanup_failed review runs can be recovered")
+        metadata = loaded._metadata()
+        now = _now()
+        metadata["status"] = "complete"
+        metadata["updated_at"] = now
+        metadata["completed_at"] = now
+        loaded._write_metadata(metadata)
+        _drop_capability(loaded.root)
+        return replace(loaded, status="complete")
 
     def revoke_authority_capability(self) -> None:
         """Unconditionally destroy process-local authority without reading disk.

@@ -98,6 +98,7 @@ export class VitestRunner implements TestRunner {
 
   constructor(
     private readonly processes: ProcessRunner = new NodeProcessRunner(),
+    private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
 
   async detect(workspace: string, plan: DiffPlan): Promise<"yes" | "no"> {
@@ -127,7 +128,7 @@ export class VitestRunner implements TestRunner {
           "--json",
         ],
         cwd: workspace,
-        env: { ...process.env, CI: "1", NO_COLOR: "1" },
+        env: { ...this.environment, CI: "1", NO_COLOR: "1" },
       },
       60_000,
     );
@@ -180,7 +181,7 @@ export class VitestRunner implements TestRunner {
           relativePath,
         ],
         cwd: workspace,
-        env: { ...process.env, CI: "1", NO_COLOR: "1" },
+        env: { ...this.environment, CI: "1", NO_COLOR: "1" },
       },
       timeoutMs,
     );

@@ -7,7 +7,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { EngineRequest } from "../protocol.js";
 import {
@@ -25,6 +25,7 @@ import type {
 } from "../runners/types.js";
 import { PytestRunner } from "../runners/pytest.js";
 import { VitestRunner } from "../runners/vitest.js";
+import { deniedExecutionResult, parseExecutionPolicy } from "./execution.js";
 
 export type TestVerdict = ProbeVerdict | "unreachable";
 
@@ -57,6 +58,7 @@ interface TestEfficacyInput {
   baseRef: string;
   runner: "auto" | RunnerId;
   timeoutMs: number;
+  execution: ReturnType<typeof parseExecutionPolicy>;
 }
 
 const asRecord = (value: unknown): Record<string, unknown> => {
@@ -90,7 +92,10 @@ const validatedPlanPath = (request: EngineRequest, raw: unknown): string => {
 const parseInput = (request: EngineRequest): TestEfficacyInput => {
   const input = asRecord(request.input);
   const unknown = Object.keys(input).find(
-    (key) => !["planPath", "baseRef", "runner", "timeoutMs"].includes(key),
+    (key) =>
+      !["planPath", "baseRef", "runner", "timeoutMs", "execution"].includes(
+        key,
+      ),
   );
   if (unknown !== undefined)
     throw new TypeError(`unknown test-efficacy input field: ${unknown}`);
@@ -117,6 +122,7 @@ const parseInput = (request: EngineRequest): TestEfficacyInput => {
     baseRef: input.baseRef,
     runner: input.runner as TestEfficacyInput["runner"],
     timeoutMs: timeoutMs as number,
+    execution: parseExecutionPolicy(input.execution),
   };
 };
 
@@ -227,9 +233,9 @@ const safeRelativePath = (workspace: string, path: string): string => {
   return normalized;
 };
 
-const probeTreePath = (workspace: string, requestId: string): string => {
+export const probeTreePath = (workspace: string, runId: string): string => {
   const suffix = createHash("sha256")
-    .update(`${requestId}\0${Date.now()}\0${Math.random()}`)
+    .update(`${resolve(workspace)}\0${runId}`)
     .digest("hex")
     .slice(0, 16);
   return join(workspace, `.hermes-efficacy-${suffix}`);
@@ -260,7 +266,7 @@ const revertProduction = (
   for (const path of added) safeRmWithin(probeTree, path);
 };
 
-const cleanupProbeTree = (
+export const cleanupProbeTree = (
   workspace: string,
   probeTree: string,
 ): string | null => {
@@ -305,12 +311,40 @@ const group = (tests: TestEfficacyTest[], verdict: TestVerdict): string[] =>
 
 export async function runTestEfficacy(
   request: EngineRequest,
-  runners: readonly TestRunner[] = [new VitestRunner(), new PytestRunner()],
+  runners?: readonly TestRunner[],
 ): Promise<TestEfficacyResult> {
   const input = parseInput(request);
+  if (!input.execution.allowed) {
+    return {
+      ...deniedExecutionResult(input.execution),
+      output: emptyOutput([]),
+    };
+  }
+  if (input.execution.mode === "sandbox") {
+    return {
+      status: "inconclusive",
+      output: emptyOutput([]),
+      diagnostics: [
+        {
+          code: "sandbox_execution_requires_terminal_environment",
+          message:
+            "sandbox execution must be routed through the configured Hermes terminal environment",
+        },
+      ],
+    };
+  }
+  const availableRunners = runners ?? [
+    new VitestRunner(undefined, input.execution.sanitizedEnv),
+    new PytestRunner(undefined, undefined, input.execution.sanitizedEnv),
+  ];
   const workspace = realpathSync(request.workspace);
   const plan = parsePlan(input.planPath);
-  const choice = await selectRunner(input.runner, workspace, plan, runners);
+  const choice = await selectRunner(
+    input.runner,
+    workspace,
+    plan,
+    availableRunners,
+  );
   if ("code" in choice) {
     const output = emptyOutput(choice.available);
     const choices =
@@ -366,10 +400,18 @@ export async function runTestEfficacy(
   let actualProbeTree: string | null = null;
   let cleanupFailure: string | null = null;
   let probes: string[] = [];
+  const runId = basename(request.artifactRoot);
+  if (!runId) throw new TypeError("artifactRoot has no run identity");
 
   try {
     if (planned.probes.length > 0) {
-      actualProbeTree = probeTreePath(workspace, request.requestId);
+      actualProbeTree = probeTreePath(workspace, runId);
+      if (existsSync(actualProbeTree)) {
+        const retainedCleanup = cleanupProbeTree(workspace, actualProbeTree);
+        if (retainedCleanup !== null) {
+          throw new Error(`retained probe cleanup failed: ${retainedCleanup}`);
+        }
+      }
       createProbeTree(workspace, actualProbeTree);
     }
     if (planned.probes.length > 0) {

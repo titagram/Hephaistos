@@ -27,6 +27,8 @@ def _mock_subprocess_run(monkeypatch):
                 return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
             if cmd[1] == "run":
                 return subprocess.CompletedProcess(cmd, 0, stdout="fake-container-id\n", stderr="")
+            if cmd[1] == "inspect":
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not found")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(docker_env.subprocess, "run", _run)
@@ -51,6 +53,10 @@ def _make_dummy_env(**kwargs):
         env=kwargs.get("env"),
         run_as_host_user=kwargs.get("run_as_host_user", False),
         persist_across_processes=kwargs.get("persist_across_processes", True),
+        mount_hermes_resources=kwargs.get("mount_hermes_resources", True),
+        allow_implicit_env_passthrough=kwargs.get(
+            "allow_implicit_env_passthrough", True
+        ),
     )
 
 
@@ -1222,6 +1228,48 @@ def test_wait_for_cleanup_after_cleanup_returns_true(monkeypatch):
     assert env.wait_for_cleanup(timeout=5.0) is True
 
 
+def test_cleanup_records_nonzero_stop_or_remove_result(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    _mock_subprocess_run(monkeypatch)
+    _install_fake_thread(monkeypatch)
+    env = _make_dummy_env(task_id="cleanup-failure")
+    real_run = docker_env.subprocess.run
+
+    def fail_remove(cmd, **kwargs):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "rm":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="busy")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(docker_env.subprocess, "run", fail_remove)
+
+    env.cleanup(force_remove=True)
+
+    assert env.wait_for_cleanup(timeout=5.0) is True
+    assert env.cleanup_error == "docker rm -f exited 1"
+
+
+def test_cleanup_fails_when_container_is_still_inspectable(monkeypatch):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    _mock_subprocess_run(monkeypatch)
+    _install_fake_thread(monkeypatch)
+    env = _make_dummy_env(task_id="cleanup-live")
+    real_run = docker_env.subprocess.run
+
+    def container_remains(cmd, **kwargs):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "inspect":
+            return subprocess.CompletedProcess(cmd, 0, stdout="still here", stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(docker_env.subprocess, "run", container_remains)
+
+    env.cleanup(force_remove=True)
+
+    assert env.wait_for_cleanup(timeout=5.0) is True
+    assert env.cleanup_error == "container remains after docker rm -f"
+
+
 def test_cleanup_on_env_with_no_container_id_does_not_raise(monkeypatch):
     """A DockerEnvironment whose ``__init__`` failed before the container_id
     was set (image-pull error, docker daemon down) should still be safe to
@@ -1603,6 +1651,52 @@ def test_credential_mount_works_when_source_is_valid_file(monkeypatch, tmp_path)
     assert run_calls, "docker run should have been called"
     run_args_str = " ".join(run_calls[0][0])
     assert "token.json" in run_args_str
+
+
+def test_review_sandbox_can_disable_all_hermes_resource_mounts(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    calls = _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: pytest.fail("credential mounts must not be inspected"),
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_skills_directory_mount",
+        lambda: pytest.fail("skill mounts must not be inspected"),
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_cache_directory_mounts",
+        lambda: pytest.fail("cache mounts must not be inspected"),
+    )
+    monkeypatch.setenv("UNSAFE_PASSTHROUGH", "host-secret")
+    monkeypatch.setattr(
+        "tools.env_passthrough.get_all_passthrough",
+        lambda: {"UNSAFE_PASSTHROUGH"},
+    )
+
+    env = _make_dummy_env(
+        task_id="review-isolated",
+        persist_across_processes=False,
+        mount_hermes_resources=False,
+        allow_implicit_env_passthrough=False,
+        volumes=[f"{tmp_path}:/workspace"],
+        network=False,
+    )
+
+    run_calls = [
+        call
+        for call in calls
+        if isinstance(call[0], list)
+        and len(call[0]) >= 2
+        and call[0][1] == "run"
+    ]
+    run_args = run_calls[0][0]
+    assert "--network=none" in run_args
+    assert f"{tmp_path}:/workspace" in run_args
+    assert "host-secret" not in " ".join(env._init_env_args)
 
 
 # ── s6-overlay /init image handling (issue #34628) ────────────────

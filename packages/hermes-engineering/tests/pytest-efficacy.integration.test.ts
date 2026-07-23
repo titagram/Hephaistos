@@ -21,6 +21,14 @@ import type {
 } from "../src/runners/types.js";
 
 const temporaryRoots: string[] = [];
+const LOCAL_EXECUTION = {
+  mode: "local",
+  allowed: true,
+  sanitizedEnv: { PATH: process.env.PATH ?? "" },
+  network: true,
+  reason: "test fixture",
+  backend: null,
+};
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -126,6 +134,7 @@ const requestFor = (
       baseRef: fixture.baseRef,
       runner: "pytest",
       timeoutMs,
+      execution: LOCAL_EXECUTION,
     },
   };
 };

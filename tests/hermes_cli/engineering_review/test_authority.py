@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
 import sys
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -370,3 +372,73 @@ def test_unsafe_metadata_cannot_prevent_close_from_revoking_capability(
     metadata.chmod(0o600)
     with pytest.raises(ReviewRunError, match="capability is unavailable"):
         authority.run.commit_reviewer_evidence("late", b"{}")
+
+
+def test_close_shuts_down_and_releases_sandbox_executor(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="parent",
+    )
+    calls: list[str] = []
+
+    class Executor:
+        def shutdown(self) -> None:
+            calls.append("shutdown")
+
+        @property
+        def cleanup_pending(self) -> bool:
+            return False
+
+    executor = Executor()
+    reference = weakref.ref(executor)
+    authority._sandbox_executor = executor  # noqa: SLF001 - lifecycle regression
+    del executor
+
+    authority.close()
+    gc.collect()
+
+    assert calls == ["shutdown"]
+    assert authority._sandbox_executor is None  # noqa: SLF001
+    assert reference() is None
+
+
+def test_close_does_not_remove_worktree_while_sandbox_factory_is_inflight(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="parent",
+    )
+    cleanup_calls: list[str] = []
+
+    class Executor:
+        def shutdown(self) -> str:
+            return "sandbox execution did not stop"
+
+        @property
+        def cleanup_pending(self) -> bool:
+            return True
+
+    class Bridge:
+        def invoke(self, *_args: object, **_kwargs: object) -> object:
+            cleanup_calls.append("cleanup")
+            raise AssertionError("worktree cleanup must wait for sandbox factory")
+
+    authority._capture_completed = True  # noqa: SLF001 - lifecycle regression
+    authority._sandbox_executor = Executor()  # type: ignore[assignment]  # noqa: SLF001
+    authority._bridge = Bridge()  # type: ignore[assignment]  # noqa: SLF001
+
+    authority.close()
+
+    assert cleanup_calls == []
+    assert authority.run.status == "cleanup_failed"

@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import stat
 import struct
@@ -30,8 +31,19 @@ from typing import Any, Mapping
 from hermes_constants import get_hermes_home
 
 from .bridge import EngineeringReviewBridge
+from .execution_policy import (
+    ExecutionDecision,
+    canonical_capture_input,
+    decide_execution,
+    target_kind_for,
+)
 from .protocol import MAX_TRANSPORT_BYTES, EngineRequest, EngineResponse
 from .runs import Effort, ReviewRun, ReviewRunError
+from .terminal_execution import (
+    SandboxSource,
+    SandboxTerminalExecutor,
+    sandbox_source_from_capture,
+)
 
 
 _AUTHORITY_VERSION = 1
@@ -122,6 +134,7 @@ class ReviewAuthority:
         effort: Effort,
         session_id: str,
         bundle: Path | None = None,
+        execution_decision: ExecutionDecision | None = None,
     ) -> None:
         self.socket_path = _authority_socket_path(session_id)
         self._listener: socket.socket | None = None
@@ -129,6 +142,17 @@ class ReviewAuthority:
         self._stop = threading.Event()
         self._socket_identity: tuple[int, int] | None = None
         self._bridge = EngineeringReviewBridge(require_authority=True)
+        self._capture_input = canonical_capture_input(target)
+        self._execution_decision = execution_decision or decide_execution(
+            target_kind=self._capture_input["kind"],  # type: ignore[arg-type]
+            sandbox=None,
+            allow_local=False,
+        )
+        self._sandbox_executor: SandboxTerminalExecutor | None = None
+        self._sandbox_source: SandboxSource | None = None
+        self._engine_cleanup_failed = False
+        self._capture_completed = False
+        self._cleanup_completed = False
         self._closed = False
         # Run creation is deliberately last: once its capability exists there
         # are no remaining constructor steps that can fail before ownership is
@@ -288,9 +312,105 @@ class ReviewAuthority:
                 raise ReviewAuthorityUnavailable(
                     "workspace does not match the registered run"
                 )
-            return self._bridge.invoke(
+            if request.command == "capture-target":
+                if self._capture_completed:
+                    raise ReviewAuthorityUnavailable(
+                        "the registered target was already captured"
+                    )
+                # The public target persisted in run.json is the only capture
+                # authority.  Caller/model fields are discarded wholesale.
+                request = EngineRequest(
+                    request_id=request.request_id,
+                    command=request.command,
+                    workspace=request.workspace,
+                    artifact_root=request.artifact_root,
+                    input=dict(self._capture_input),
+                )
+            if request.command in {"build-test", "test-efficacy"}:
+                # The proxy/model cannot choose or weaken executable-code
+                # policy.  Replace any caller value with the authority-owned
+                # decision immediately before invoking the captured bundle.
+                trusted_input = dict(request.input)
+                trusted_input["execution"] = self._execution_decision.to_wire()
+                request = EngineRequest(
+                    request_id=request.request_id,
+                    command=request.command,
+                    workspace=request.workspace,
+                    artifact_root=request.artifact_root,
+                    input=trusted_input,
+                )
+            if (
+                request.command in {"build-test", "test-efficacy"}
+                and self._execution_decision.mode == "sandbox"
+            ):
+                executor = self._sandbox_executor
+                if executor is None:
+                    executor = SandboxTerminalExecutor(
+                        run=self.run,
+                        decision=self._execution_decision,
+                    )
+                    self._sandbox_executor = executor
+                response = executor.invoke(
+                    request,
+                    timeout=timeout,
+                    source=self._sandbox_source,
+                )
+            else:
+                response = self._bridge.invoke(
+                    request, timeout=timeout, cancel_event=self._stop
+                )
+            if request.command == "capture-target" and isinstance(
+                response.output.get("planPath"), str
+            ):
+                if response.output.get("targetKind") != self._capture_input["kind"]:
+                    raise ReviewAuthorityUnavailable(
+                        "captured target does not match the registered public target"
+                    )
+                self._capture_completed = True
+                if self._execution_decision.mode == "sandbox":
+                    try:
+                        self._sandbox_source = sandbox_source_from_capture(
+                            self.run, response.output
+                        )
+                    except ReviewRunError:
+                        self._sandbox_source = None
+            if request.command == "cleanup":
+                self._engine_cleanup_failed = (
+                    self._engine_cleanup_failed or response.status != "passed"
+                )
+                self._cleanup_completed = response.status == "passed"
+            elif any(
+                diagnostic.code == "cleanup_failed"
+                for diagnostic in response.diagnostics
+            ):
+                self._engine_cleanup_failed = True
+            return response.to_wire()
+        if action == "cleanup" and set(message) == {
+            "version",
+            "action",
+            "runId",
+            "timeout",
+        }:
+            if message["runId"] != self.run.run_id:
+                raise ReviewAuthorityUnavailable(
+                    "cleanup run does not match the registered run"
+                )
+            timeout = message["timeout"]
+            request = EngineRequest(
+                request_id=f"cleanup-{secrets.token_hex(12)}",
+                command="cleanup",
+                workspace=self.run.workspace,
+                artifact_root=self.run.root,
+                input={"runId": self.run.run_id},
+            )
+            response = self._bridge.invoke(
                 request, timeout=timeout, cancel_event=self._stop
-            ).to_wire()
+            )
+            self._engine_cleanup_failed = (
+                self._engine_cleanup_failed or response.status != "passed"
+            )
+            self._cleanup_completed = response.status == "passed"
+            return response.to_wire()
         raise ReviewAuthorityUnavailable("authority action or fields are invalid")
 
     def close(self) -> None:
@@ -299,10 +419,24 @@ class ReviewAuthority:
             self.run.revoke_authority_capability()
             return
         cleanup_failures: list[str] = []
+        sandbox_cleanup_pending = False
         try:
             self._closed = True
             listener = self._listener
             self._stop.set()
+            sandbox_executor = self._sandbox_executor
+            if sandbox_executor is not None:
+                sandbox_cleanup_failure = sandbox_executor.shutdown()
+                sandbox_cleanup_pending = sandbox_executor.cleanup_pending
+                self._sandbox_executor = None
+                if sandbox_cleanup_failure is not None:
+                    self._engine_cleanup_failed = True
+                    cleanup_failures.append(sandbox_cleanup_failure)
+                    _LOGGER.warning(
+                        "engineering review sandbox cleanup failed; recovery: "
+                        "hermes review cleanup --run %s",
+                        self.run.run_id,
+                    )
             if listener is not None:
                 try:
                     listener.close()
@@ -317,6 +451,43 @@ class ReviewAuthority:
                 except RuntimeError as exc:
                     cleanup_failures.append(f"authority thread cleanup failed: {exc}")
                 self._thread = None
+            if (
+                self._capture_completed
+                and not self._cleanup_completed
+                and not sandbox_cleanup_pending
+            ):
+                request = EngineRequest(
+                    request_id=f"cleanup-{secrets.token_hex(12)}",
+                    command="cleanup",
+                    workspace=self.run.workspace,
+                    artifact_root=self.run.root,
+                    input={"runId": self.run.run_id},
+                )
+                try:
+                    response = self._bridge.invoke(request, timeout=60)
+                    self._cleanup_completed = response.status == "passed"
+                    self._engine_cleanup_failed = (
+                        self._engine_cleanup_failed or not self._cleanup_completed
+                    )
+                    if not self._cleanup_completed:
+                        _LOGGER.warning(
+                            "engineering review cleanup failed; recovery: "
+                            "hermes review cleanup --run %s",
+                            self.run.run_id,
+                        )
+                except BaseException as exc:
+                    self._engine_cleanup_failed = True
+                    cleanup_failures.append(
+                        f"registered worktree cleanup failed: {exc}"
+                    )
+                    _LOGGER.warning(
+                        "engineering review cleanup failed; recovery: "
+                        "hermes review cleanup --run %s",
+                        self.run.run_id,
+                    )
+            elif sandbox_cleanup_pending:
+                self._engine_cleanup_failed = True
+                cleanup_failures.append("sandbox creation is still in flight")
             if not self._remove_owned_socket():
                 cleanup_failures.append("authority socket cleanup failed")
         except BaseException as exc:
@@ -324,7 +495,7 @@ class ReviewAuthority:
             raise
         finally:
             self._record_terminal_state(
-                cleanup_failed=bool(cleanup_failures),
+                cleanup_failed=bool(cleanup_failures) or self._engine_cleanup_failed,
                 cause="; ".join(cleanup_failures) or "normal close",
             )
 
@@ -379,3 +550,15 @@ class ReviewAuthorityClient:
             "timeout": timeout,
         })
         return EngineResponse.from_wire(value, expected_request_id=request.request_id)
+
+    def cleanup(self, run_id: str, *, timeout: float) -> EngineResponse:
+        value = self._request({
+            "version": _AUTHORITY_VERSION,
+            "action": "cleanup",
+            "runId": run_id,
+            "timeout": timeout,
+        })
+        request_id = value.get("requestId")
+        if not isinstance(request_id, str):
+            raise ReviewAuthorityUnavailable("cleanup response has no request identity")
+        return EngineResponse.from_wire(value, expected_request_id=request_id)

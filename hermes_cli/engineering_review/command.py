@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Literal, cast
 
 from .authority import ReviewAuthority
+from .execution_policy import decide_execution, target_kind_for
 from .runs import Effort
 
 
@@ -54,11 +55,38 @@ def launch_review_chat(
         nonlocal authority
         if authority is not None:
             raise RuntimeError("review authority was already created")
+        target_kind = target_kind_for(target)
+        backend = os.environ.get("TERMINAL_ENV", "local")
+        allow_local = False
+        if target_kind == "pr" and backend.strip().lower() == "local":
+            # Reuse the live Hermes approval surface.  Absence, timeout, and
+            # every unrecognized result fail closed while static review remains
+            # available.
+            from tools.terminal_tool import _get_approval_callback
+
+            approval = _get_approval_callback()
+            if approval is not None:
+                verdict = approval(
+                    "hermes review: execute untrusted pull-request build/tests locally",
+                    (
+                        "The pull request can execute repository-controlled code. "
+                        "Allow this review to run its recorded build and test commands "
+                        "outside a sandbox?"
+                    ),
+                    allow_permanent=False,
+                )
+                allow_local = verdict in {"once", "session"}
+        execution = decide_execution(
+            target_kind=target_kind,
+            sandbox=backend,
+            allow_local=allow_local,
+        )
         candidate = ReviewAuthority(
             workspace=workspace.resolve(),
             target=target,
             effort=cast(Effort, effort),
             session_id=session_id,
+            execution_decision=execution,
         )
         try:
             candidate.start_serving()
@@ -94,6 +122,23 @@ def launch_review_chat(
 def review_command(args: Namespace) -> int:
     """Entry point for ``hermes review``."""
     target = str(getattr(args, "target", "local") or "local")
+    recovery_run = getattr(args, "run", None)
+    if target == "cleanup":
+        if not isinstance(recovery_run, str) or not recovery_run:
+            raise ValueError("review cleanup requires --run RUN_ID")
+        from .recovery import recover_review_run
+
+        print(
+            json.dumps(
+                recover_review_run(recovery_run),
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 0
+    if recovery_run is not None:
+        raise ValueError("--run is accepted only by `hermes review cleanup`")
     effort_value = str(getattr(args, "effort", "medium"))
     if effort_value not in {"low", "medium", "high"}:
         raise ValueError("effort must be low, medium, or high")

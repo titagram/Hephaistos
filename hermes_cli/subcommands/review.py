@@ -29,6 +29,15 @@ def build_review_parser(subparsers, *, cmd_review: Callable) -> None:
         default="medium",
         help="Review depth and reviewer roster (default: medium)",
     )
+    parser.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "recover a registered cleanup_failed run; use as "
+            "`hermes review cleanup --run RUN_ID`"
+        ),
+    )
     # Hidden chat defaults. The public command deliberately exposes no model,
     # provider, runner, sandbox, publication, or mutation knobs.
     parser.set_defaults(

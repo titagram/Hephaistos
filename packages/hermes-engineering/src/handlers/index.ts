@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import type { EngineRequest, EngineResponse } from "../protocol.js";
 import { buildPrompts } from "./build-prompts.js";
 import { runBuildTest } from "./build-test.js";
@@ -9,10 +11,47 @@ import {
   resolveFindingAnchors,
 } from "./resolve-anchors.js";
 import { runTestEfficacy } from "./test-efficacy.js";
+import { cleanupRun } from "./cleanup.js";
 
 export async function dispatch(
   request: EngineRequest,
 ): Promise<EngineResponse> {
+  if (request.command === "cleanup") {
+    try {
+      const output = await cleanupRun(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: "passed",
+        output: { ...output },
+        diagnostics: [],
+      };
+    } catch (cause) {
+      const runId = request.input.runId;
+      const recoveryCommand =
+        typeof runId === "string" &&
+        /^[A-Za-z0-9_-]{16,128}$/.test(runId) &&
+        basename(request.artifactRoot) === runId
+          ? `hermes review cleanup --run ${runId}`
+          : null;
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: "inconclusive",
+        output: {
+          runId: typeof runId === "string" ? runId : null,
+          removedWorktrees: [],
+          recoveryCommand,
+        },
+        diagnostics: [
+          {
+            code: "cleanup_failed",
+            message: cause instanceof Error ? cause.message : String(cause),
+          },
+        ],
+      };
+    }
+  }
   if (request.command === "resolve-anchors") {
     try {
       const output = await resolveFindingAnchors(request);
