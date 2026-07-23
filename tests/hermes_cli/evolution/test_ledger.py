@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import replace
 
 import pytest
 
-from hermes_cli.evolution.ledger import EvolutionLedger, LifecycleEvent
+from hermes_cli.evolution.ledger import (
+    EvolutionLedger,
+    EvolutionLedgerError,
+    LifecycleEvent,
+)
+from hermes_cli.evolution.state_machine import TransitionRequest
 
 
 DIGEST = "0123456789abcdef" * 4
@@ -55,3 +61,302 @@ def test_verify_chain_identifies_the_changed_sequence(tmp_path) -> None:
 
     copied = replace(first, reason_summary="changed")
     assert ledger.verify_chain([copied]) == ["1"]
+
+
+def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    ledger.connection.execute(
+        """
+        INSERT INTO authorization_grants(
+            authorization_id, attempt_id, grant_kind, scope_digest, created_at
+        ) VALUES (?, ?, 'research', ?, '2026-07-23T00:00:00Z')
+        """,
+        ("grant-1", attempt_id, DIGEST),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="immutable_authorization_grant"):
+        ledger.connection.execute(
+            "UPDATE authorization_grants SET consumed_at = ? WHERE authorization_id = ?",
+            ("2026-07-23T00:01:00Z", "grant-1"),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable_authorization_grant"):
+        ledger.connection.execute(
+            "DELETE FROM authorization_grants WHERE authorization_id = ?",
+            ("grant-1",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("event_id", " " ),
+        ("attempt_id", "x" * 257),
+        ("generation_id", "not-a-digest"),
+        ("event_type", "x" * 129),
+        ("actor", "operator\nsecret"),
+        ("authorization_id", "x" * 257),
+        ("reason_code", "x" * 129),
+        ("created_at", "x" * 65),
+    ],
+)
+def test_append_rejects_unbounded_or_noncanonical_identity_fields(
+    tmp_path, field: str, value: str
+) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    malformed = replace(
+        event(event_id="event-1", attempt_id=attempt_id),
+        **{field: value},
+    )
+
+    with pytest.raises(EvolutionLedgerError, match="invalid_event"):
+        ledger.append_event(malformed)
+    assert ledger.history() == []
+
+
+def test_append_bounds_digest_count(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    malformed = replace(
+        event(event_id="event-1", attempt_id=attempt_id),
+        input_digests=(DIGEST,) * 65,
+    )
+
+    with pytest.raises(EvolutionLedgerError, match="invalid_event_digests"):
+        ledger.append_event(malformed)
+    assert ledger.history() == []
+
+
+def test_append_accepts_the_bounded_digest_count_limit(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    bounded = replace(
+        event(event_id="event-1", attempt_id=attempt_id),
+        input_digests=(DIGEST,) * 64,
+    )
+
+    stored = ledger.append_event(bounded)
+
+    assert len(stored.input_digests) == 64
+    assert ledger.verify_chain() == []
+
+
+def test_append_hashes_the_same_normalized_values_it_persists(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt(" manual ", " ticket-1 ")
+
+    stored = ledger.append_event(
+        replace(
+            event(event_id=" event-1 ", attempt_id=attempt_id),
+            event_type=" attempt_recorded ",
+            actor=" operator ",
+            reason_code=" created ",
+            reason_summary="  started   safely  ",
+        )
+    )
+
+    assert stored.event_id == "event-1"
+    assert stored.event_type == "attempt_recorded"
+    assert stored.actor == "operator"
+    assert stored.reason_code == "created"
+    assert stored.reason_summary == "started safely"
+    assert ledger.verify_chain() == []
+    row = ledger.connection.execute(
+        "SELECT source_kind, source_ref FROM attempts WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    assert tuple(row) == ("manual", "ticket-1")
+
+
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "/Users/alice/private/ticket",
+        "file:///tmp/ticket",
+        "https://example.invalid/ticket",
+        "../ticket",
+        "tickets/one",
+        r"tickets\one",
+        "C:\\ticket",
+    ],
+)
+def test_create_attempt_rejects_path_like_source_refs_without_storing_them(
+    tmp_path, source_ref: str
+) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+
+    with pytest.raises(EvolutionLedgerError, match="invalid_attempt_source") as error:
+        ledger.create_attempt("manual", source_ref)
+
+    assert source_ref not in str(error.value)
+    assert ledger.connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+
+
+def test_transition_rolls_back_state_when_event_append_fails(
+    tmp_path, monkeypatch
+) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+
+    def fail_append(*_args, **_kwargs):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(ledger, "_append", fail_append)
+    request = TransitionRequest(
+        attempt_id=attempt_id,
+        prior_state="draft",
+        next_state="rejected",
+        actor="operator",
+        input_digests=(DIGEST,),
+        authorization_id=None,
+        reason="not suitable",
+    )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        ledger.transition(request)
+    assert ledger.connection.execute(
+        "SELECT state FROM attempts WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()[0] == "draft"
+
+
+def test_transaction_rolls_back_base_exception_and_remains_usable(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+
+    class StopNow(BaseException):
+        pass
+
+    with pytest.raises(StopNow):
+        with ledger.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO attempts(
+                    attempt_id, source_kind, source_ref, state, created_at
+                ) VALUES ('doomed', 'manual', 'ticket-1', 'draft', 'now')
+                """
+            )
+            raise StopNow
+
+    assert ledger.create_attempt("manual", "ticket-2")
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM attempts WHERE attempt_id = 'doomed'"
+    ).fetchone()[0] == 0
+
+
+def test_transaction_recovers_from_real_deferred_constraint_commit_failure(
+    tmp_path,
+) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        with ledger.transaction() as connection:
+            connection.execute("PRAGMA defer_foreign_keys=ON")
+            connection.execute(
+                """
+                INSERT INTO candidates(
+                    candidate_id, attempt_id, state, created_at
+                ) VALUES ('candidate-1', 'missing', 'draft', 'now')
+                """
+            )
+
+    assert not ledger.connection.in_transaction
+    assert ledger.create_attempt("manual", "ticket-2")
+
+
+def test_separate_ledgers_append_concurrently_without_breaking_chain(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    first = EvolutionLedger(path)
+    attempt_id = first.create_attempt("manual", "ticket-1")
+    second = EvolutionLedger(path)
+    barrier = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def append_many(ledger: EvolutionLedger, prefix: str) -> None:
+        try:
+            barrier.wait()
+            for index in range(25):
+                ledger.append_event(
+                    event(event_id=f"{prefix}-{index}", attempt_id=attempt_id)
+                )
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=append_many, args=(first, "first")),
+        threading.Thread(target=append_many, args=(second, "second")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert len(first.history(limit=1000)) == 50
+    assert first.verify_chain() == []
+
+
+def test_same_instance_serializes_transactions(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    barrier = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def append_one(identifier: str) -> None:
+        try:
+            barrier.wait()
+            ledger.append_event(event(event_id=identifier, attempt_id=attempt_id))
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=append_one, args=("event-1",)),
+        threading.Thread(target=append_one, args=("event-2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert len(ledger.history()) == 2
+    assert ledger.verify_chain() == []
+
+
+def test_verify_chain_streams_past_one_thousand_events(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    with ledger.transaction() as connection:
+        for index in range(1005):
+            ledger._append(
+                connection,
+                event(event_id=f"event-{index}", attempt_id=attempt_id),
+            )
+    ledger.connection.execute("DROP TRIGGER lifecycle_events_no_update")
+    ledger.connection.execute(
+        """
+        UPDATE lifecycle_events
+        SET reason_summary = 'corrupted'
+        WHERE event_sequence = 1001
+        """
+    )
+
+    assert ledger.verify_chain() == ["1001"]
+
+
+def test_verify_chain_preserves_order_around_malformed_payloads(tmp_path) -> None:
+    ledger = EvolutionLedger(tmp_path / "evolution.db")
+    attempt_id = ledger.create_attempt("manual", "ticket-1")
+    for index in range(3):
+        ledger.append_event(
+            event(event_id=f"event-{index}", attempt_id=attempt_id)
+        )
+    ledger.connection.execute("DROP TRIGGER lifecycle_events_no_update")
+    ledger.connection.execute(
+        """
+        UPDATE lifecycle_events
+        SET input_digests_json = 'not-json'
+        WHERE event_sequence = 2
+        """
+    )
+
+    assert ledger.verify_chain() == ["2"]
