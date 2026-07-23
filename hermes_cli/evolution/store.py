@@ -14,10 +14,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 from hermes_constants import get_hermes_home
 
-from .contract import canonical_json_bytes, require_digest
+from .contract import canonical_json_bytes, content_digest, require_digest
 from .manifest import (
     _validate_manifest_at_fd,
     generation_id_for,
@@ -47,6 +48,38 @@ class VerifiedManifestDescriptor:
     generation: PublishedGeneration
     manifest_bytes: bytes
     manifest_digest: str
+
+
+GenerationProofFailureCode = Literal[
+    "store_unavailable",
+    "generation_missing",
+    "generation_unsafe",
+    "manifest_missing",
+    "manifest_unsafe",
+    "manifest_malformed",
+    "manifest_noncanonical",
+    "manifest_invalid",
+    "manifest_identity_mismatch",
+    "published_tree_unsafe",
+    "published_content_mismatch",
+    "proof_limit_exceeded",
+    "proof_changed",
+]
+
+
+@dataclass(frozen=True)
+class ExistingGenerationProof:
+    """Bounded typed evidence from one existing-generation proof attempt."""
+
+    descriptor: VerifiedManifestDescriptor | None
+    failure_code: GenerationProofFailureCode | None
+    evidence_digest: str
+
+
+_MAX_PROOF_MANIFEST_BYTES = 256 * 1024
+_MAX_PROOF_ENTRIES = 4_096
+_MAX_PROOF_FILE_BYTES = 64 * 1024 * 1024
+_MAX_PROOF_TOTAL_BYTES = 256 * 1024 * 1024
 
 
 def _error(message: str) -> ValueError:
@@ -149,6 +182,262 @@ def _read_file_at(root_descriptor: int, relative_path: str) -> bytes:
             os.close(descriptor)
     finally:
         os.close(directory)
+
+
+def _proof_evidence_digest(
+    code: str,
+    material: Mapping[str, object],
+) -> str:
+    return content_digest(
+        {"code": code, "material": material},
+        domain="hades-evolution-generation-proof-v1",
+    )
+
+
+def _failed_proof(
+    code: GenerationProofFailureCode,
+    material: Mapping[str, object],
+) -> ExistingGenerationProof:
+    return ExistingGenerationProof(
+        descriptor=None,
+        failure_code=code,
+        evidence_digest=_proof_evidence_digest(code, material),
+    )
+
+
+def _read_bounded_manifest(
+    generation_descriptor: int,
+) -> tuple[bytes, os.stat_result] | ExistingGenerationProof:
+    try:
+        linked = os.stat(
+            "manifest.json",
+            dir_fd=generation_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return _failed_proof("manifest_missing", {"manifest": "missing"})
+    except OSError:
+        return _failed_proof("manifest_unsafe", {"manifest": "unreadable"})
+    if (
+        not stat.S_ISREG(linked.st_mode)
+        or linked.st_nlink != 1
+        or linked.st_size > _MAX_PROOF_MANIFEST_BYTES
+    ):
+        code: GenerationProofFailureCode = (
+            "proof_limit_exceeded"
+            if linked.st_size > _MAX_PROOF_MANIFEST_BYTES
+            else "manifest_unsafe"
+        )
+        return _failed_proof(
+            code,
+            {
+                "kind": stat.S_IFMT(linked.st_mode),
+                "links": linked.st_nlink,
+                "size": min(linked.st_size, _MAX_PROOF_MANIFEST_BYTES + 1),
+            },
+        )
+    try:
+        descriptor = os.open(
+            "manifest.json",
+            _leaf_flags(),
+            dir_fd=generation_descriptor,
+        )
+    except OSError:
+        return _failed_proof("manifest_unsafe", {"manifest": "unreadable"})
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not _same_inode(linked, opened)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            return _failed_proof(
+                "manifest_unsafe",
+                {"manifest": "changed_or_unsafe"},
+            )
+        data = bytearray()
+        while chunk := os.read(descriptor, 16 * 1024):
+            data.extend(chunk)
+            if len(data) > _MAX_PROOF_MANIFEST_BYTES:
+                return _failed_proof(
+                    "proof_limit_exceeded",
+                    {
+                        "bounded_prefix_digest": hashlib.sha256(
+                            data[:_MAX_PROOF_MANIFEST_BYTES]
+                        ).hexdigest(),
+                        "size_at_least": len(data),
+                    },
+                )
+        if not _same_inode(
+            opened,
+            os.stat(
+                "manifest.json",
+                dir_fd=generation_descriptor,
+                follow_symlinks=False,
+            ),
+        ):
+            return _failed_proof(
+                "proof_changed",
+                {"manifest": "changed"},
+            )
+        return bytes(data), opened
+    except OSError:
+        return _failed_proof("manifest_unsafe", {"manifest": "unreadable"})
+    finally:
+        os.close(descriptor)
+
+
+def _bounded_tree_evidence(
+    root_descriptor: int,
+    *,
+    initial_bytes: int,
+) -> tuple[str, int] | ExistingGenerationProof:
+    entries: list[dict[str, object]] = []
+    total_bytes = initial_bytes
+
+    def visit(directory: int, prefix: str = "") -> ExistingGenerationProof | None:
+        nonlocal total_bytes
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            return _failed_proof(
+                "published_tree_unsafe",
+                {"tree": "unreadable"},
+            )
+        for name in names:
+            relative = f"{prefix}/{name}" if prefix else name
+            try:
+                info = os.stat(
+                    name,
+                    dir_fd=directory,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                return _failed_proof(
+                    "published_tree_unsafe",
+                    {"tree": "entry_unreadable"},
+                )
+            entries.append(
+                {
+                    "relative_digest": hashlib.sha256(
+                        relative.encode("utf-8", "surrogateescape")
+                    ).hexdigest(),
+                    "kind": stat.S_IFMT(info.st_mode),
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "size": info.st_size,
+                    "links": info.st_nlink,
+                }
+            )
+            if len(entries) > _MAX_PROOF_ENTRIES:
+                return _failed_proof(
+                    "proof_limit_exceeded",
+                    {
+                        "limit": "entries",
+                        "observed_at_least": len(entries),
+                    },
+                )
+            if stat.S_ISDIR(info.st_mode):
+                try:
+                    child = os.open(
+                        name,
+                        _directory_flags(),
+                        dir_fd=directory,
+                    )
+                except OSError:
+                    return _failed_proof(
+                        "published_tree_unsafe",
+                        {"tree": "directory_unsafe"},
+                    )
+                try:
+                    failure = visit(child, relative)
+                    if failure is not None:
+                        return failure
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                return _failed_proof(
+                    "published_tree_unsafe",
+                    {"tree": "entry_unsafe"},
+                )
+            if relative == "manifest.json":
+                continue
+            if (
+                info.st_size > _MAX_PROOF_FILE_BYTES
+                or total_bytes + info.st_size > _MAX_PROOF_TOTAL_BYTES
+            ):
+                return _failed_proof(
+                    "proof_limit_exceeded",
+                    {
+                        "limit": (
+                            "file"
+                            if info.st_size > _MAX_PROOF_FILE_BYTES
+                            else "total"
+                        ),
+                        "size": min(
+                            info.st_size,
+                            _MAX_PROOF_FILE_BYTES + 1,
+                        ),
+                    },
+                )
+            try:
+                child = os.open(
+                    name,
+                    _leaf_flags(),
+                    dir_fd=directory,
+                )
+            except OSError:
+                return _failed_proof(
+                    "published_tree_unsafe",
+                    {"tree": "file_unsafe"},
+                )
+            digest = hashlib.sha256()
+            read_size = 0
+            try:
+                while chunk := os.read(child, 1024 * 1024):
+                    read_size += len(chunk)
+                    total_bytes += len(chunk)
+                    if (
+                        read_size > _MAX_PROOF_FILE_BYTES
+                        or total_bytes > _MAX_PROOF_TOTAL_BYTES
+                    ):
+                        return _failed_proof(
+                            "proof_limit_exceeded",
+                            {
+                                "limit": (
+                                    "file"
+                                    if read_size > _MAX_PROOF_FILE_BYTES
+                                    else "total"
+                                ),
+                                "size_at_least": read_size,
+                            },
+                        )
+                    digest.update(chunk)
+                if read_size != info.st_size:
+                    return _failed_proof(
+                        "proof_changed",
+                        {"tree": "file_size_changed"},
+                    )
+                entries[-1]["content_digest"] = digest.hexdigest()
+            except OSError:
+                return _failed_proof(
+                    "published_tree_unsafe",
+                    {"tree": "file_unreadable"},
+                )
+            finally:
+                os.close(child)
+        return None
+
+    failure = visit(root_descriptor)
+    if failure is not None:
+        return failure
+    return (
+        content_digest(
+            {"entries": entries, "total_bytes": total_bytes},
+            domain="hades-evolution-generation-tree-proof-v1",
+        ),
+        total_bytes,
+    )
 
 
 def _validate_readonly_tree_at(root_descriptor: int) -> None:
@@ -595,6 +884,199 @@ class GenerationStore:
             finally:
                 if temporary.exists():
                     _remove_owned_tree(temporary)
+
+    def observe_existing_generation(
+        self,
+        generation_id: str,
+    ) -> ExistingGenerationProof:
+        """Return bounded typed proof evidence without creating store state."""
+
+        try:
+            require_digest(generation_id)
+        except ValueError:
+            return _failed_proof(
+                "generation_unsafe",
+                {"generation_id": "invalid"},
+            )
+        identity_material = {"generation_id": generation_id}
+        try:
+            self._secure_existing_root()
+            store_descriptor = os.open(self.root, _directory_flags())
+        except (OSError, ValueError, TypeError, NotImplementedError):
+            return _failed_proof("store_unavailable", identity_material)
+
+        generation_descriptor: int | None = None
+        try:
+            try:
+                linked = os.stat(
+                    generation_id,
+                    dir_fd=store_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return _failed_proof(
+                    "generation_missing",
+                    identity_material,
+                )
+            except OSError:
+                return _failed_proof(
+                    "generation_unsafe",
+                    identity_material,
+                )
+            if not stat.S_ISDIR(linked.st_mode):
+                return _failed_proof(
+                    "generation_unsafe",
+                    {
+                        **identity_material,
+                        "kind": stat.S_IFMT(linked.st_mode),
+                    },
+                )
+            try:
+                generation_descriptor = os.open(
+                    generation_id,
+                    _directory_flags(),
+                    dir_fd=store_descriptor,
+                )
+            except OSError:
+                return _failed_proof(
+                    "generation_unsafe",
+                    identity_material,
+                )
+            opened = os.fstat(generation_descriptor)
+            if not _same_inode(linked, opened):
+                return _failed_proof(
+                    "proof_changed",
+                    identity_material,
+                )
+
+            manifest_result = _read_bounded_manifest(
+                generation_descriptor
+            )
+            if isinstance(manifest_result, ExistingGenerationProof):
+                return manifest_result
+            manifest_bytes, _ = manifest_result
+            manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+            try:
+                manifest = json.loads(manifest_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return _failed_proof(
+                    "manifest_malformed",
+                    {"manifest_digest": manifest_digest},
+                )
+            if not isinstance(manifest, dict):
+                return _failed_proof(
+                    "manifest_invalid",
+                    {"manifest_digest": manifest_digest},
+                )
+            try:
+                canonical = canonical_json_bytes(manifest)
+            except (TypeError, ValueError):
+                return _failed_proof(
+                    "manifest_invalid",
+                    {"manifest_digest": manifest_digest},
+                )
+            if canonical != manifest_bytes:
+                return _failed_proof(
+                    "manifest_noncanonical",
+                    {"manifest_digest": manifest_digest},
+                )
+
+            structural = dict(manifest)
+            structural.pop("generation_id", None)
+            try:
+                validate_manifest(structural)
+            except ValueError:
+                return _failed_proof(
+                    "manifest_invalid",
+                    {"manifest_digest": manifest_digest},
+                )
+            if (
+                manifest.get("generation_id") != generation_id
+                or generation_id_for(manifest) != generation_id
+            ):
+                return _failed_proof(
+                    "manifest_identity_mismatch",
+                    {"manifest_digest": manifest_digest},
+                )
+
+            tree_result = _bounded_tree_evidence(
+                generation_descriptor,
+                initial_bytes=len(manifest_bytes),
+            )
+            if isinstance(tree_result, ExistingGenerationProof):
+                return tree_result
+            tree_digest, total_bytes = tree_result
+            combined_material = {
+                "manifest_digest": manifest_digest,
+                "tree_digest": tree_digest,
+                "total_bytes": total_bytes,
+            }
+            try:
+                _validate_readonly_tree_at(generation_descriptor)
+            except ValueError:
+                return _failed_proof(
+                    "published_tree_unsafe",
+                    combined_material,
+                )
+            try:
+                _validate_manifest_at_fd(
+                    manifest,
+                    generation_descriptor,
+                    published=True,
+                )
+            except ValueError:
+                return _failed_proof(
+                    "published_content_mismatch",
+                    combined_material,
+                )
+
+            current_generation = os.stat(
+                generation_id,
+                dir_fd=store_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not _same_inode(opened, current_generation)
+                or not _same_inode(
+                    opened,
+                    (self.root / generation_id).lstat(),
+                )
+                or not _same_inode(
+                    os.fstat(store_descriptor),
+                    self.root.lstat(),
+                )
+            ):
+                return _failed_proof(
+                    "proof_changed",
+                    combined_material,
+                )
+            generation = PublishedGeneration(
+                generation_id=generation_id,
+                root=self.root / generation_id,
+                manifest=MappingProxyType(manifest),
+            )
+            descriptor = VerifiedManifestDescriptor(
+                generation=generation,
+                manifest_bytes=manifest_bytes,
+                manifest_digest=manifest_digest,
+            )
+            return ExistingGenerationProof(
+                descriptor=descriptor,
+                failure_code=None,
+                evidence_digest=_proof_evidence_digest(
+                    "proven",
+                    combined_material,
+                ),
+            )
+        except (OSError, TypeError, NotImplementedError):
+            return _failed_proof(
+                "proof_changed",
+                identity_material,
+            )
+        finally:
+            if generation_descriptor is not None:
+                os.close(generation_descriptor)
+            os.close(store_descriptor)
 
     def verify(self, generation_id: str) -> PublishedGeneration:
         self._secure_root()

@@ -10,6 +10,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,7 +44,11 @@ from .pointers import (
     _write_all,
     validate_pointer,
 )
-from .store import GenerationStore
+from .store import (
+    ExistingGenerationProof,
+    GenerationStore,
+    VerifiedManifestDescriptor,
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,11 @@ _MISSING_POINTER_DIGEST = content_digest(
     {"observation": "missing"},
     domain="hades-evolution-pointer-observation-v1",
 )
+
+_MAX_SNAPSHOT_ATTEMPTS = 3
+_MAX_SNAPSHOT_FILE_BYTES = 512 * 1024 * 1024
+_MAX_SNAPSHOT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_SNAPSHOT_SECONDS = 10.0
 
 
 def _all_events(ledger: EvolutionLedger) -> list[StoredEvent]:
@@ -204,6 +214,8 @@ def _observe_pointer(
             evidence_digest=evidence_digest,
         )
     try:
+        if isinstance(store, _ExistingGenerationStore):
+            store.reset_proof_observation()
         document = validate_pointer(value, ledger, store)
     except (
         PointerError,
@@ -212,11 +224,37 @@ def _observe_pointer(
         OSError,
         ValueError,
     ):
+        if isinstance(store, _ExistingGenerationStore):
+            proof = store.proof_observation
+            if proof is not None and proof.failure_code is not None:
+                return _PointerObservation(
+                    document=None,
+                    reason=f"store_{proof.failure_code}",
+                    evidence_digest=content_digest(
+                        {
+                            "pointer_digest": evidence_digest,
+                            "store_proof_digest": proof.evidence_digest,
+                        },
+                        domain=(
+                            "hades-evolution-pointer-store-proof-v1"
+                        ),
+                    ),
+                )
         return _PointerObservation(
             document=None,
             reason="unproven_evidence",
             evidence_digest=evidence_digest,
         )
+    if isinstance(store, _ExistingGenerationStore):
+        proof = store.proof_observation
+        if proof is not None:
+            evidence_digest = content_digest(
+                {
+                    "pointer_digest": evidence_digest,
+                    "store_proof_digest": proof.evidence_digest,
+                },
+                domain="hades-evolution-pointer-store-proof-v1",
+            )
     return _PointerObservation(
         document=document,
         reason="proven",
@@ -254,11 +292,10 @@ def _open_existing_ledger(
                 _same_snapshot_file(descriptor, retained)
                 for descriptor in connection_fds
             ):
-                # SQLite can reuse a process-global main-database descriptor
-                # while opening only WAL/SHM descriptors for this connection.
-                # Keep the observed delta while retaining the independently
-                # verified main descriptor as the correlation fallback.
-                identity_fds = {*connection_fds, guard.file_fd}
+                # A process-global SQLite main descriptor may predate this
+                # connection. Its newly discovered WAL/SHM descriptors cannot
+                # prove main-file ownership, so retain no FD claim here.
+                identity_fds = None
         _verify_retained_identity(
             path,
             guard,
@@ -435,7 +472,47 @@ def _open_snapshot_file(
         raise
 
 
-def _copy_descriptor(descriptor: int, destination: Path) -> None:
+@dataclass
+class _SnapshotBudget:
+    started_at: float
+    copied_bytes: int = 0
+
+    @classmethod
+    def start(cls) -> _SnapshotBudget:
+        return cls(started_at=time.monotonic())
+
+    def check_time(self) -> None:
+        if time.monotonic() - self.started_at > _MAX_SNAPSHOT_SECONDS:
+            raise EvolutionLedgerError("ledger_snapshot_time_limit")
+
+    def check_pre_copy(self, sizes: list[int]) -> None:
+        self.check_time()
+        if any(size > _MAX_SNAPSHOT_FILE_BYTES for size in sizes):
+            raise EvolutionLedgerError("ledger_snapshot_file_limit")
+        if (
+            sum(sizes) > _MAX_SNAPSHOT_TOTAL_BYTES
+            or self.copied_bytes + sum(sizes)
+            > _MAX_SNAPSHOT_TOTAL_BYTES
+        ):
+            raise EvolutionLedgerError("ledger_snapshot_total_limit")
+
+    def consume(self, size: int) -> None:
+        self.check_time()
+        self.copied_bytes += size
+        if self.copied_bytes > _MAX_SNAPSHOT_TOTAL_BYTES:
+            raise EvolutionLedgerError("ledger_snapshot_total_limit")
+
+
+class _RetryableSnapshotError(RuntimeError):
+    """One transient capture attempt failed without unsafe source metadata."""
+
+
+def _copy_descriptor(
+    descriptor: int,
+    destination: Path,
+    budget: _SnapshotBudget,
+) -> None:
+    budget.check_time()
     target = os.open(
         destination,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -445,125 +522,206 @@ def _copy_descriptor(descriptor: int, destination: Path) -> None:
         if hasattr(os, "fchmod"):
             os.fchmod(target, 0o600)
         os.lseek(descriptor, 0, os.SEEK_SET)
+        file_bytes = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            file_bytes += len(chunk)
+            if file_bytes > _MAX_SNAPSHOT_FILE_BYTES:
+                raise EvolutionLedgerError(
+                    "ledger_snapshot_file_limit"
+                )
+            budget.consume(len(chunk))
             _write_all(target, chunk)
         os.fsync(target)
+        budget.check_time()
     finally:
         os.close(target)
 
 
-@contextmanager
-def _stable_wal_snapshot(path: Path) -> Iterator[Path]:
-    """Copy one descriptor-correlated committed WAL set outside evolution."""
+def _clean_snapshot_root(snapshot_root: Path) -> None:
+    for candidate in snapshot_root.iterdir():
+        candidate.unlink()
 
-    with tempfile.TemporaryDirectory(
-        prefix="hermes-evolution-reconcile-",
-    ) as temporary:
-        snapshot_root = Path(temporary)
-        snapshot_root.chmod(0o700)
-        snapshot_path = snapshot_root / path.name
-        for _ in range(3):
-            for candidate in snapshot_root.iterdir():
-                candidate.unlink()
-            guard = _open_readonly_protected_path(path)
-            descriptors: dict[str, tuple[int, os.stat_result]] = {
-                path.name: (
-                    os.dup(guard.file_fd),
-                    os.fstat(guard.file_fd),
-                )
-            }
+
+def _capture_wal_snapshot(
+    path: Path,
+    snapshot_root: Path,
+    budget: _SnapshotBudget,
+) -> Path:
+    """Capture one stable descriptor-correlated main/WAL/SHM attempt."""
+
+    budget.check_time()
+    guard = _open_readonly_protected_path(path)
+    descriptors: dict[str, tuple[int, os.stat_result]] = {
+        path.name: (
+            os.dup(guard.file_fd),
+            os.fstat(guard.file_fd),
+        )
+    }
+    try:
+        for suffix in ("-wal", "-shm"):
+            source = Path(f"{path}{suffix}")
             try:
-                for suffix in ("-wal", "-shm"):
-                    source = Path(f"{path}{suffix}")
-                    try:
-                        descriptors[source.name] = _open_snapshot_file(
-                            source,
-                            guard.directory_fd,
-                        )
-                    except FileNotFoundError:
-                        if suffix == "-wal":
-                            raise EvolutionLedgerError(
-                                "unstable_ledger_snapshot"
-                            ) from None
-                before = {
-                    name: _file_signature(info)
-                    for name, (_, info) in descriptors.items()
-                }
-                for name, (descriptor, _) in descriptors.items():
-                    _copy_descriptor(
-                        descriptor,
-                        snapshot_root / name,
-                    )
-                stable = True
-                for name, (descriptor, _) in descriptors.items():
-                    source = path.parent / name
-                    try:
-                        linked = source.lstat()
-                        opened = os.fstat(descriptor)
-                    except OSError:
-                        stable = False
-                        break
-                    if (
-                        _file_signature(opened) != before[name]
-                        or _file_signature(linked) != before[name]
-                    ):
-                        stable = False
-                        break
-                live_names = {
-                    candidate.name
-                    for candidate in path.parent.iterdir()
-                    if candidate.name in {
-                        path.name,
-                        f"{path.name}-wal",
-                        f"{path.name}-shm",
-                    }
-                }
-                if live_names != set(descriptors):
-                    stable = False
-                if stable:
-                    yield snapshot_path
-                    return
-            finally:
-                for descriptor, _ in descriptors.values():
-                    os.close(descriptor)
-                guard.close()
-        raise EvolutionLedgerError("unstable_ledger_snapshot")
+                descriptors[source.name] = _open_snapshot_file(
+                    source,
+                    guard.directory_fd,
+                )
+            except FileNotFoundError as error:
+                raise _RetryableSnapshotError(
+                    "snapshot_member_disappeared"
+                ) from error
+        before = {
+            name: _file_signature(info)
+            for name, (_, info) in descriptors.items()
+        }
+        budget.check_pre_copy(
+            [info.st_size for _, info in descriptors.values()]
+        )
+        for name, (descriptor, _) in descriptors.items():
+            _copy_descriptor(
+                descriptor,
+                snapshot_root / name,
+                budget,
+            )
+        for name, (descriptor, _) in descriptors.items():
+            source = path.parent / name
+            try:
+                linked = source.lstat()
+                opened = os.fstat(descriptor)
+            except OSError as error:
+                raise _RetryableSnapshotError(
+                    "snapshot_member_changed"
+                ) from error
+            if (
+                _file_signature(opened) != before[name]
+                or _file_signature(linked) != before[name]
+            ):
+                raise _RetryableSnapshotError(
+                    "snapshot_member_changed"
+                )
+        live_names = {
+            candidate.name
+            for candidate in path.parent.iterdir()
+            if candidate.name in {
+                path.name,
+                f"{path.name}-wal",
+                f"{path.name}-shm",
+            }
+        }
+        if live_names != set(descriptors):
+            raise _RetryableSnapshotError("snapshot_member_set_changed")
+        budget.check_time()
+        return snapshot_root / path.name
+    finally:
+        for descriptor, _ in descriptors.values():
+            os.close(descriptor)
+        guard.close()
 
 
 @contextmanager
 def _read_only_ledger(path: Path) -> Iterator[EvolutionLedger]:
     wal_path = Path(f"{path}-wal")
-    if wal_path.exists() or wal_path.is_symlink():
-        with _stable_wal_snapshot(path) as snapshot_path:
-            ledger = _open_existing_ledger(
-                snapshot_path,
-                repair=False,
-            )
+    if not wal_path.exists() and not wal_path.is_symlink():
+        before = _file_signature(path.lstat())
+        ledger = _open_immutable_ledger(path)
+        try:
+            if wal_path.exists() or wal_path.is_symlink():
+                raise EvolutionLedgerError("unstable_ledger_snapshot")
+            yield ledger
+            if (
+                wal_path.exists()
+                or wal_path.is_symlink()
+                or _file_signature(path.lstat()) != before
+            ):
+                raise EvolutionLedgerError("unstable_ledger_snapshot")
+        finally:
+            ledger.connection.close()
+        return
+
+    budget = _SnapshotBudget.start()
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-evolution-reconcile-",
+    ) as temporary:
+        snapshot_root = Path(temporary)
+        snapshot_root.chmod(0o700)
+        for _ in range(_MAX_SNAPSHOT_ATTEMPTS):
+            budget.check_time()
+            _clean_snapshot_root(snapshot_root)
+            if not wal_path.exists() and not wal_path.is_symlink():
+                try:
+                    before = _file_signature(path.lstat())
+                    ledger = _open_immutable_ledger(path)
+                    if wal_path.exists() or wal_path.is_symlink():
+                        ledger.connection.close()
+                        raise _RetryableSnapshotError(
+                            "wal_appeared_during_immutable_open"
+                        )
+                except _RetryableSnapshotError:
+                    continue
+                try:
+                    yield ledger
+                    if (
+                        wal_path.exists()
+                        or wal_path.is_symlink()
+                        or _file_signature(path.lstat()) != before
+                    ):
+                        raise EvolutionLedgerError(
+                            "unstable_ledger_snapshot"
+                        )
+                finally:
+                    ledger.connection.close()
+                return
+            try:
+                snapshot_path = _capture_wal_snapshot(
+                    path,
+                    snapshot_root,
+                    budget,
+                )
+            except EvolutionLedgerError:
+                raise
+            except (
+                _RetryableSnapshotError,
+                FileNotFoundError,
+                OSError,
+                PointerError,
+            ):
+                continue
+            try:
+                ledger = _open_existing_ledger(
+                    snapshot_path,
+                    repair=False,
+                )
+            except EvolutionLedgerError as error:
+                if error.args == ("invalid_ledger_database",):
+                    continue
+                raise
+            except (
+                sqlite3.DatabaseError,
+                OSError,
+            ):
+                continue
             try:
                 yield ledger
             finally:
                 ledger.connection.close()
-        return
-
-    before = _file_signature(path.lstat())
-    ledger = _open_immutable_ledger(path)
-    try:
-        if wal_path.exists() or wal_path.is_symlink():
-            raise EvolutionLedgerError("unstable_ledger_snapshot")
-        yield ledger
-        if (
-            wal_path.exists()
-            or wal_path.is_symlink()
-            or _file_signature(path.lstat()) != before
-        ):
-            raise EvolutionLedgerError("unstable_ledger_snapshot")
-    finally:
-        ledger.connection.close()
+            return
+        raise EvolutionLedgerError("unstable_ledger_snapshot")
 
 
 class _ExistingGenerationStore(GenerationStore):
-    def verified_manifest_descriptor(self, generation_id: str):
-        return self.verified_manifest_descriptor_existing(generation_id)
+    proof_observation: ExistingGenerationProof | None = None
+
+    def reset_proof_observation(self) -> None:
+        self.proof_observation = None
+
+    def verified_manifest_descriptor(
+        self,
+        generation_id: str,
+    ) -> VerifiedManifestDescriptor:
+        proof = self.observe_existing_generation(generation_id)
+        self.proof_observation = proof
+        if proof.descriptor is None:
+            raise ValueError("generation integrity failure")
+        return proof.descriptor
 
 
 def _condition_digest(

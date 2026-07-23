@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import multiprocessing
 import os
 import stat
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_cli.evolution import store as store_module
 from hermes_cli.evolution.manifest import generation_id_for
 from hermes_cli.evolution.store import GenerationStore, StableBaseIdentity
 
@@ -467,3 +469,90 @@ def test_verify_existing_never_creates_a_missing_store_root(
         GenerationStore(root).verified_manifest_descriptor_existing("a" * 64)
 
     assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_code"),
+    [
+        ("generation_missing", "generation_missing"),
+        ("manifest_missing", "manifest_missing"),
+        ("manifest_noncanonical", "manifest_noncanonical"),
+        ("manifest_wrong", "manifest_identity_mismatch"),
+        ("content_wrong", "published_content_mismatch"),
+    ],
+)
+def test_existing_generation_proof_returns_typed_bounded_evidence(
+    tmp_path: Path,
+    corruption: str,
+    expected_code: str,
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+    root = published.root
+    manifest_path = root / "manifest.json"
+    if corruption == "generation_missing":
+        root.rename(root.with_name(f".missing-{root.name}"))
+    else:
+        root.chmod(0o755)
+        manifest_path.chmod(0o600)
+        if corruption == "manifest_missing":
+            manifest_path.unlink()
+        elif corruption == "manifest_noncanonical":
+            manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
+        elif corruption == "manifest_wrong":
+            value = json.loads(manifest_path.read_bytes())
+            value["builder_version"] = "wrong"
+            manifest_path.write_bytes(
+                store_module.canonical_json_bytes(value)
+            )
+        else:
+            artifact = root / "bin" / "hello.sh"
+            artifact.chmod(0o600)
+            artifact.write_bytes(b"wrong content\n")
+            artifact.chmod(0o444)
+        if manifest_path.exists():
+            manifest_path.chmod(0o444)
+        root.chmod(0o555)
+
+    observation = store.observe_existing_generation(
+        published.generation_id
+    )
+
+    assert observation.descriptor is None
+    assert observation.failure_code == expected_code
+    assert len(observation.evidence_digest) == 64
+    assert all(
+        character in "0123456789abcdef"
+        for character in observation.evidence_digest
+    )
+    assert not hasattr(observation, "raw")
+    assert not hasattr(observation, "path")
+
+
+def test_existing_generation_proof_enforces_manifest_and_entry_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+
+    monkeypatch.setattr(store_module, "_MAX_PROOF_MANIFEST_BYTES", 8)
+    manifest_limited = store.observe_existing_generation(
+        published.generation_id
+    )
+    monkeypatch.setattr(store_module, "_MAX_PROOF_MANIFEST_BYTES", 256 * 1024)
+    monkeypatch.setattr(store_module, "_MAX_PROOF_ENTRIES", 1)
+    entry_limited = store.observe_existing_generation(
+        published.generation_id
+    )
+
+    assert manifest_limited.failure_code == "proof_limit_exceeded"
+    assert entry_limited.failure_code == "proof_limit_exceeded"
+    assert (
+        manifest_limited.evidence_digest
+        != entry_limited.evidence_digest
+    )

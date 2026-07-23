@@ -8,6 +8,8 @@ import os
 import shutil
 import sqlite3
 import stat
+import threading
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -282,6 +284,302 @@ def test_read_only_reconciliation_copies_committed_live_wal_without_mutation(
 
     assert result.status == "coherent"
     assert _tree_inventory(root) == before
+
+
+def _redirect_snapshot_temp(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> None:
+    real_temporary_directory = reconcile_module.tempfile.TemporaryDirectory
+
+    def located_temporary_directory(*args, **kwargs):
+        kwargs["dir"] = root
+        return real_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconcile_module.tempfile,
+        "TemporaryDirectory",
+        located_temporary_directory,
+    )
+
+
+def test_wal_snapshot_retries_whole_attempt_after_transient_missing_file(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    original = reconcile_module._open_snapshot_file
+    calls = 0
+
+    def missing_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise FileNotFoundError("transient WAL replacement")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_open_snapshot_file",
+        missing_once,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result.status == "coherent"
+    assert calls >= 2
+
+
+def test_wal_snapshot_retries_sqlite_validation_from_a_fresh_copy(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    original = reconcile_module._open_existing_ledger
+    attempts = 0
+
+    def inconsistent_once(path: Path, *, repair: bool):
+        nonlocal attempts
+        if "hermes-evolution-reconcile-" in str(path.parent):
+            attempts += 1
+            if attempts == 1:
+                raise EvolutionLedgerError("invalid_ledger_database")
+        return original(path, repair=repair)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_open_existing_ledger",
+        inconsistent_once,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result.status == "coherent"
+    assert attempts == 2
+
+
+def test_real_concurrent_checkpoint_restarts_snapshot_from_main(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    ledger.append_event(
+        LifecycleEvent(
+            event_id="checkpoint-race",
+            attempt_id=None,
+            generation_id=None,
+            event_type="observation",
+            prior_state=None,
+            next_state=None,
+            actor="system",
+            input_digests=("d" * 64,),
+            authorization_id=None,
+            reason_code="checkpoint",
+            reason_summary="real checkpoint race evidence",
+            created_at="2026-07-24T00:00:00.000000Z",
+        )
+    )
+    start_checkpoint = threading.Event()
+    checkpoint_done = threading.Event()
+    checkpoint_errors: list[BaseException] = []
+
+    def checkpoint() -> None:
+        try:
+            assert start_checkpoint.wait(timeout=5)
+            ledger.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except BaseException as error:
+            checkpoint_errors.append(error)
+        finally:
+            checkpoint_done.set()
+
+    worker = threading.Thread(target=checkpoint)
+    worker.start()
+    original = reconcile_module._copy_descriptor
+    triggered = False
+
+    def checkpoint_during_copy(descriptor, destination, *args, **kwargs):
+        nonlocal triggered
+        original(descriptor, destination, *args, **kwargs)
+        if not triggered and str(destination).endswith("-wal"):
+            triggered = True
+            start_checkpoint.set()
+            assert checkpoint_done.wait(timeout=5)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_copy_descriptor",
+        checkpoint_during_copy,
+    )
+    try:
+        result = reconcile_evolution_state(repair=False)
+    finally:
+        start_checkpoint.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert checkpoint_errors == []
+    assert triggered
+    assert result.status == "coherent"
+
+
+@pytest.mark.parametrize("limit_kind", ["file", "aggregate"])
+def test_snapshot_byte_limits_fail_closed_before_copy(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    limit_kind: str,
+) -> None:
+    home, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    database = home / "evolution" / "evolution.db"
+    members = [
+        database,
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+    ]
+    snapshot_root = tmp_path / f"snapshots-{limit_kind}"
+    snapshot_root.mkdir(mode=0o700)
+    _redirect_snapshot_temp(monkeypatch, snapshot_root)
+    copies = 0
+    original = reconcile_module._copy_descriptor
+
+    def counted_copy(*args, **kwargs):
+        nonlocal copies
+        copies += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_copy_descriptor",
+        counted_copy,
+    )
+    if limit_kind == "file":
+        monkeypatch.setattr(
+            reconcile_module,
+            "_MAX_SNAPSHOT_FILE_BYTES",
+            max(path.stat().st_size for path in members) - 1,
+            raising=False,
+        )
+    else:
+        monkeypatch.setattr(
+            reconcile_module,
+            "_MAX_SNAPSHOT_FILE_BYTES",
+            max(path.stat().st_size for path in members) + 1,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            reconcile_module,
+            "_MAX_SNAPSHOT_TOTAL_BYTES",
+            sum(path.stat().st_size for path in members) - 1,
+            raising=False,
+        )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result == reconcile_module._base_only("ledger_unavailable")
+    assert copies == 0
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_snapshot_elapsed_budget_stops_slow_copy_and_cleans_temp(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    snapshot_root = tmp_path / "slow-snapshots"
+    snapshot_root.mkdir(mode=0o700)
+    _redirect_snapshot_temp(monkeypatch, snapshot_root)
+    monkeypatch.setattr(
+        reconcile_module,
+        "_MAX_SNAPSHOT_SECONDS",
+        0.001,
+        raising=False,
+    )
+    original = reconcile_module._copy_descriptor
+
+    def slow_copy(*args, **kwargs):
+        time.sleep(0.01)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_copy_descriptor",
+        slow_copy,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result == reconcile_module._base_only("ledger_unavailable")
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_partial_snapshot_copy_retries_boundedly_and_cleans_every_attempt(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    snapshot_root = tmp_path / "partial-snapshots"
+    snapshot_root.mkdir(mode=0o700)
+    _redirect_snapshot_temp(monkeypatch, snapshot_root)
+    attempts = 0
+
+    def partial_copy(_descriptor, destination, *_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        Path(destination).write_bytes(b"partial")
+        raise OSError("transient partial copy")
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_copy_descriptor",
+        partial_copy,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result == reconcile_module._base_only("ledger_unavailable")
+    assert attempts == 3
+    assert list(snapshot_root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink semantics")
+def test_unsafe_wal_metadata_is_terminal_not_retryable(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home, ledger, _, _, _ = state
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    wal = home / "evolution" / "evolution.db-wal"
+    wal.unlink()
+    target = tmp_path / "foreign-wal"
+    target.write_bytes(b"foreign")
+    wal.symlink_to(target)
+    original = reconcile_module._open_snapshot_file
+    calls = 0
+
+    def counted_open(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_open_snapshot_file",
+        counted_open,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result == reconcile_module._base_only("ledger_unavailable")
+    assert calls == 1
 
 
 def test_read_only_snapshot_excludes_real_outer_uncommitted_sqlite_event(
@@ -596,6 +894,50 @@ def test_missing_and_corrupt_pointer_evidence_do_not_deduplicate(state) -> None:
     assert recovery[0].input_digests != recovery[1].input_digests
 
 
+def test_missing_generation_then_corrupt_manifest_appends_distinct_event(
+    state,
+) -> None:
+    _, ledger, store, active, _ = state
+    generation = store.root / active.generation_id
+    retained = store.root / f".retained-{active.generation_id}"
+    generation.rename(retained)
+
+    first = reconcile_evolution_state(repair=True)
+    first_events = [
+        event
+        for event in _events(ledger)
+        if event.event_type == "supervisor_recovery"
+    ]
+
+    retained.rename(generation)
+    manifest = generation / "manifest.json"
+    generation.chmod(0o755)
+    manifest.chmod(0o600)
+    manifest.write_bytes(manifest.read_bytes() + b"\n")
+    manifest.chmod(0o444)
+    generation.chmod(0o555)
+    second = reconcile_evolution_state(repair=True)
+    second_events = [
+        event
+        for event in _events(ledger)
+        if event.event_type == "supervisor_recovery"
+    ]
+    repeated = reconcile_evolution_state(repair=True)
+    repeated_events = [
+        event
+        for event in _events(ledger)
+        if event.event_type == "supervisor_recovery"
+    ]
+
+    assert first == second == repeated
+    assert len(first_events) == 1
+    assert len(second_events) == len(repeated_events) == 2
+    assert first_events[0].input_digests != second_events[1].input_digests
+    serialized = repr(second_events)
+    assert str(generation) not in serialized
+    assert "manifest.json" not in serialized
+
+
 def test_restore_fault_before_rename_is_idempotently_retried(
     state,
     monkeypatch: pytest.MonkeyPatch,
@@ -742,12 +1084,22 @@ def test_repair_event_lock_and_pointer_write_counts_are_exact(
     assert counts == {"lock": 2, "event": 1, "write": 1}
 
 
-def test_repair_passes_connection_fds_to_both_identity_checks(
+def test_repair_identity_checks_use_only_sqlite_discovered_fds(
     state,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[set[int] | None] = []
+    home, _, _, _, _ = state
+    discovered: set[int] | None = None
+    observed: list[tuple[set[int] | None, int]] = []
+    real_connect = reconcile_module._connect
     real_verify = reconcile_module._verify_retained_identity
+    unrelated_fd = os.open(home, os.O_RDONLY)
+
+    def observed_connect(*args, **kwargs):
+        nonlocal discovered
+        connection, _ = real_connect(*args, **kwargs)
+        discovered = {unrelated_fd}
+        return connection, set(discovered)
 
     def observed_verify(
         path,
@@ -756,17 +1108,36 @@ def test_repair_passes_connection_fds_to_both_identity_checks(
         connection_fds=None,
     ):
         if connection is not None:
-            observed.append(connection_fds)
+            observed.append(
+                (
+                    None
+                    if connection_fds is None
+                    else set(connection_fds),
+                    guard.file_fd,
+                )
+            )
         return real_verify(path, guard, connection, connection_fds)
 
+    monkeypatch.setattr(reconcile_module, "_connect", observed_connect)
     monkeypatch.setattr(
         reconcile_module,
         "_verify_retained_identity",
         observed_verify,
     )
 
-    result = reconcile_evolution_state(repair=True)
+    try:
+        result = reconcile_evolution_state(repair=True)
+    finally:
+        os.close(unrelated_fd)
 
     assert result.status == "coherent"
     assert len(observed) == 2
-    assert all(descriptors for descriptors in observed)
+    assert all(
+        passed is None
+        or (
+            discovered is not None
+            and passed <= discovered
+            and guard_fd not in passed
+        )
+        for passed, guard_fd in observed
+    )
