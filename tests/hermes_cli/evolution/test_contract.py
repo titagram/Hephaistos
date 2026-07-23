@@ -45,6 +45,41 @@ def test_canonical_json_bytes_rejects_non_string_mapping_keys() -> None:
 @pytest.mark.parametrize(
     "value",
     [
+        {"nested": {"value": "\ud800"}},
+        {"nested": {"\udfff": "value"}},
+    ],
+)
+def test_canonical_json_bytes_rejects_unpaired_surrogates(value: object) -> None:
+    with pytest.raises(EvolutionContractError) as error:
+        canonical_json_bytes(value)
+
+    assert error.value.code == "invalid_canonical_value"
+    assert str(error.value) == "invalid_canonical_value"
+
+
+def test_canonical_json_bytes_rejects_self_referential_list() -> None:
+    value: list[object] = []
+    value.append(value)
+
+    with pytest.raises(EvolutionContractError) as error:
+        canonical_json_bytes(value)
+
+    assert error.value.code == "invalid_canonical_value"
+
+
+def test_canonical_json_bytes_rejects_self_referential_mapping() -> None:
+    value: dict[str, object] = {}
+    value["self"] = value
+
+    with pytest.raises(EvolutionContractError) as error:
+        canonical_json_bytes(value)
+
+    assert error.value.code == "invalid_canonical_value"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
         b"secret",
         bytearray(b"secret"),
         {"unexpected"},

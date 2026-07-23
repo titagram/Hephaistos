@@ -57,13 +57,16 @@ def canonical_json_bytes(value: object) -> bytes:
     """Encode a JSON-compatible value into deterministic UTF-8 bytes."""
 
     _validate_canonical_value(value, set())
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except UnicodeEncodeError:
+        raise EvolutionContractError("invalid_canonical_value") from None
 
 
 def sha256_digest(data: bytes) -> str:

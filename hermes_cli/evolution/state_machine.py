@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, TypeAlias
 
-from .contract import EvolutionContractError, require_digest
+from .contract import EvolutionContractError, bounded_reason, require_digest
 
 AttemptState: TypeAlias = Literal[
     "draft",
@@ -27,6 +27,8 @@ AttemptState: TypeAlias = Literal[
     "retired",
 ]
 GrantKind: TypeAlias = Literal["research", "build", "promotion"]
+
+_AUTHORIZATION_ID_LIMIT = 256
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,17 @@ _TRANSITION_POLICY = MappingProxyType(
 )
 
 
+def _validate_authorization_id(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _AUTHORIZATION_ID_LIMIT
+        or value != value.strip()
+        or not value.isprintable()
+    ):
+        raise EvolutionContractError("invalid_authorization_id")
+
+
 def validate_transition(request: TransitionRequest) -> None:
     """Reject any lifecycle transition outside the closed v1 policy."""
 
@@ -96,6 +109,14 @@ def validate_transition(request: TransitionRequest) -> None:
         raise EvolutionContractError("transition_actor_mismatch")
     if policy.authorization_kind is not None and request.authorization_id is None:
         raise EvolutionContractError("transition_authorization_required")
+    if request.authorization_id is not None:
+        _validate_authorization_id(request.authorization_id)
+    if (
+        not isinstance(request.reason, str)
+        or bounded_reason(request.reason) != request.reason
+        or any(not character.isprintable() for character in request.reason)
+    ):
+        raise EvolutionContractError("invalid_transition_reason")
     if not isinstance(request.input_digests, tuple):
         raise EvolutionContractError("invalid_input_digests")
     for digest in request.input_digests:
