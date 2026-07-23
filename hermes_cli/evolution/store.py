@@ -57,7 +57,7 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+    descriptor = os.open(path, _directory_flags())
     try:
         os.fsync(descriptor)
     finally:
@@ -215,6 +215,7 @@ class GenerationStore:
             raise _error("store root ownership")
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise _error("store root is not private")
+        _fsync_directory(self.root.parent)
 
     @staticmethod
     def _require_posix() -> None:

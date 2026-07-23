@@ -38,10 +38,21 @@ _LOCKFILE_FIELDS = frozenset({"path", "digest"})
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._+-]+)?\Z", re.ASCII)
 _SENSITIVE = re.compile(
-    r"(?:^|[_-])(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|raw[_-]?output)(?:$|[_-])",
+    r"(?:^|[_-])(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|stdout|stderr|output|rawoutput)(?:$|[_-])",
     re.I,
 )
 _SECRET = re.compile(r"(?:sk|pk)[_-](?:live|test|proj)[_-]|ghp[_-]|github[_-]pat[_-]|glpat[_-]|xox[bp][_-]|akia", re.I)
+_HTTPS_URL = re.compile(r"https://[^\s\"'`]+", re.I)
+_WINDOWS_PATH = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])\\\\[^\s\"'`]+"
+)
+_POSIX_PATH = re.compile(r"(?<![:/])/(?:[^/\s\"'`]+/)*[^/\s\"'`]+")
+_EXPLICIT_RELATIVE_PATH = re.compile(
+    r"(?:^|[\s\"'`])(?:~|\.{1,2})[/\\][^\s\"'`]+"
+)
+_BARE_RELATIVE_PATH = re.compile(
+    r"[^\s/\\\"'`]+(?:[/\\][^\s/\\\"'`]+)+\Z"
+)
 _MAX_ITEMS = 64
 _MAX_TEXT = 512
 _MAX_KEY = 64
@@ -49,16 +60,33 @@ _MAX_DEPTH = 8
 _MAX_NODES = 512
 _MAX_TOTAL_TEXT = 16 * 1024
 _MAX_INTEGER = (1 << 63) - 1
-_OPAQUE_IDENTITY_KEYS = frozenset(
-    {
-        "blueprint_digest",
-        "configuration_fingerprint",
-        "digest",
-        "generation_id",
-        "parent_generation_id",
-        "repository_commit",
-    }
-)
+_SLOT_CHILDREN = {
+    "manifest": {
+        "generation_id": "digest",
+        "parent_generation_id": "digest",
+        "blueprint_digest": "digest",
+        "stable_base": "stable_base",
+        "components": "components",
+    },
+    "stable_base": {
+        "repository_commit": "repository_commit",
+        "configuration_fingerprint": "digest",
+    },
+    "component": {
+        "path": "declared_path",
+        "digest": "digest",
+        "source": "component_source",
+        "lockfiles": "lockfiles",
+    },
+    "lockfile": {
+        "path": "declared_path",
+        "digest": "digest",
+    },
+}
+_SLOT_ITEMS = {
+    "components": "component",
+    "lockfiles": "lockfile",
+}
 
 
 def _fail(code: str = "invalid_manifest") -> None:
@@ -86,14 +114,19 @@ def _strings(value: object, *, symbolic: bool = False) -> list[str]:
     return values
 
 
-def _looks_like_local_path(value: str, *, allowed: bool) -> bool:
-    if allowed:
+def _looks_like_local_path(value: str, *, slot: str) -> bool:
+    if slot in {"declared_path", "component_source"}:
         return False
-    if value.startswith(("/", "~", "./", "../", "\\", ".\\", "..\\")):
-        return True
-    if re.match(r"^[A-Za-z]:[\\/]", value):
-        return True
-    return re.fullmatch(r"[^\s/\\]+(?:[/\\][^\s/\\]+)+", value) is not None
+    without_urls = _HTTPS_URL.sub("", value)
+    return any(
+        pattern.search(without_urls) is not None
+        for pattern in (
+            _WINDOWS_PATH,
+            _POSIX_PATH,
+            _EXPLICIT_RELATIVE_PATH,
+            _BARE_RELATIVE_PATH,
+        )
+    )
 
 
 def _privacy(
@@ -102,8 +135,7 @@ def _privacy(
     key: str | None = None,
     depth: int = 0,
     budget: list[int] | None = None,
-    local_path_allowed: bool = False,
-    source_allowed: bool = False,
+    slot: str = "generic",
 ) -> None:
     if budget is None:
         budget = [0, 0]
@@ -115,20 +147,21 @@ def _privacy(
     if isinstance(value, str):
         _text(value)
         budget[1] += len(value)
-        opaque = (
-            not local_path_allowed
-            and not source_allowed
-            and key not in _OPAQUE_IDENTITY_KEYS
-            and not (key and key.endswith("_digest"))
-        )
+        if slot == "digest":
+            require_digest(value)
+        elif slot == "repository_commit" and re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            _fail()
+        opaque = slot not in {
+            "component_source",
+            "declared_path",
+            "digest",
+            "repository_commit",
+        }
         if (
             budget[1] > _MAX_TOTAL_TEXT
             or "file://" in value.lower()
             or _SECRET.search(value)
-            or _looks_like_local_path(
-                value,
-                allowed=local_path_allowed or source_allowed,
-            )
+            or _looks_like_local_path(value, slot=slot)
             or (
                 opaque
                 and not any(character.isspace() for character in value)
@@ -138,9 +171,6 @@ def _privacy(
             _fail()
     elif isinstance(value, Mapping):
         record = _mapping(value)
-        record_fields = frozenset(record)
-        component_record = record_fields == _COMPONENT_FIELDS
-        lockfile_record = record_fields == _LOCKFILE_FIELDS
         for child_key, child in record.items():
             if not child_key or len(child_key) > _MAX_KEY or "\0" in child_key:
                 _fail()
@@ -152,15 +182,19 @@ def _privacy(
                 key=child_key,
                 depth=depth + 1,
                 budget=budget,
-                local_path_allowed=child_key == "path"
-                and (component_record or lockfile_record),
-                source_allowed=child_key == "source" and component_record,
+                slot=_SLOT_CHILDREN.get(slot, {}).get(child_key, "generic"),
             )
     elif isinstance(value, list):
         if len(value) > _MAX_ITEMS:
             _fail()
         for child in value:
-            _privacy(child, key=key, depth=depth + 1, budget=budget)
+            _privacy(
+                child,
+                key=key,
+                depth=depth + 1,
+                budget=budget,
+                slot=_SLOT_ITEMS.get(slot, "generic"),
+            )
     elif isinstance(value, float):
         if not math.isfinite(value):
             _fail()
@@ -345,7 +379,7 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
     record = _mapping(manifest)
     if set(record) - _TOP or not _REQUIRED <= set(record) or record["schema_version"] != 1:
         _fail()
-    _privacy(record)
+    _privacy(record, slot="manifest")
     for key in ("parent_generation_id", "blueprint_digest"):
         require_digest(record[key])
     _text(record["source_suggestion_id"])
@@ -385,7 +419,7 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
                     _fail()
             finally:
                 os.close(root_descriptor)
-        except OSError:
+        except (OSError, NotImplementedError):
             _fail()
 
 
@@ -400,5 +434,5 @@ def _validate_manifest_at_fd(
     validate_manifest(manifest)
     try:
         _validate_files_at(manifest, root_descriptor, published=published)
-    except OSError:
+    except (OSError, NotImplementedError):
         _fail()

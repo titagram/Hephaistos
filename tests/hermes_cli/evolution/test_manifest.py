@@ -217,6 +217,91 @@ def test_manifest_rejects_opaque_credential_material_as_a_reference() -> None:
         validate_manifest(manifest)
 
 
+@pytest.mark.parametrize("field", ["digest", "artifact_digest"])
+def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
+    field: str,
+) -> None:
+    manifest = _manifest()
+    manifest["build_environment"][field] = "aB3dE5gH7jK9mN2pQ4rS6tV8"  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python /Users/alice/private/check.py --verify",
+        r"python C:\Users\alice\private\check.py --verify",
+    ],
+)
+def test_verification_commands_reject_embedded_local_paths(
+    command: str,
+) -> None:
+    manifest = _manifest()
+    manifest["verification_commands"] = [command]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "evidence_key",
+    [
+        "stdout",
+        "stderr",
+        "output",
+        "raw_output",
+        "raw-output",
+        "command_stdout",
+        "tool_stderr",
+        "captured_output",
+        "rawoutput",
+    ],
+)
+def test_manifest_rejects_evidence_bearing_keys_anywhere(
+    evidence_key: str,
+) -> None:
+    manifest = _manifest()
+    manifest["build_environment"]["nested"] = {  # type: ignore[index]
+        evidence_key: "captured evidence"
+    }
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+def test_manifest_accepts_normal_commands_and_nonopaque_digest_labels() -> None:
+    manifest = _manifest()
+    manifest["verification_commands"] = [
+        "python -m package.check --verify",
+        "hello --profile safe",
+        "probe --endpoint https://example.test/health",
+    ]
+    manifest["build_environment"]["digest"] = "sha256"  # type: ignore[index]
+    manifest["build_environment"]["artifact_digest"] = "sha256"  # type: ignore[index]
+
+    validate_manifest(manifest)
+
+
+def test_root_validation_normalizes_unsupported_dir_fd_operations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _manifest()
+    _stage(tmp_path, manifest)
+    original_open = __import__("os").open
+
+    def unsupported_dir_fd_open(*args, **kwargs):
+        if kwargs.get("dir_fd") is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr("hermes_cli.evolution.manifest.os.open", unsupported_dir_fd_open)
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest, tmp_path)
+
+
 @pytest.mark.parametrize("kind", ["extra-dir", "fifo", "manifest"])
 def test_staging_inventory_is_exact_and_has_no_manifest(tmp_path: Path, kind: str) -> None:
     manifest = _manifest()

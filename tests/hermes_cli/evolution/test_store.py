@@ -176,6 +176,53 @@ def test_empty_overlay_baseline_uses_normal_publication(tmp_path: Path) -> None:
     assert store.verify(baseline.generation_id) == baseline
 
 
+def test_new_store_root_fsyncs_its_inode_then_parent_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    parent = tmp_path / "evolution"
+    parent.mkdir()
+    root = parent / "generations"
+    parent_inode = parent.stat().st_ino
+    directory_fsyncs: list[int] = []
+    original_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode):
+            directory_fsyncs.append(info.st_ino)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    GenerationStore(root)._secure_root()
+
+    root_inode = root.stat().st_ino
+    assert root_inode in directory_fsyncs
+    assert parent_inode in directory_fsyncs
+    assert directory_fsyncs.index(root_inode) < directory_fsyncs.index(parent_inode)
+
+
+def test_existing_hostile_store_root_is_not_chmod_repaired(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "generations"
+    root.mkdir()
+    root.chmod(0o755)
+    root_inode = root.stat().st_ino
+    fchmod_inodes: list[int] = []
+    original_fchmod = os.fchmod
+
+    def recording_fchmod(descriptor: int, mode: int) -> None:
+        fchmod_inodes.append(os.fstat(descriptor).st_ino)
+        original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", recording_fchmod)
+
+    with pytest.raises(ValueError, match="private"):
+        GenerationStore(root).verify("a" * 64)
+    assert root_inode not in fchmod_inodes
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+
 def test_concurrent_first_publishers_converge_when_store_root_is_absent(
     tmp_path: Path,
 ) -> None:
@@ -279,18 +326,35 @@ def test_publication_fsyncs_regular_files_after_they_become_read_only(
     store = GenerationStore(tmp_path / "generations")
     stage = tmp_path / "stage"
     _stage(stage)
-    seen: list[int] = []
-    original = os.fsync
+    events: list[tuple[str, int, int]] = []
+    expected_inodes: set[int] = set()
+    original_fsync = os.fsync
+    original_rename = os.rename
 
     def recording_fsync(fd: int) -> None:
-        mode = stat.S_IMODE(os.fstat(fd).st_mode)
-        if stat.S_ISREG(os.fstat(fd).st_mode):
-            seen.append(mode)
-        original(fd)
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            events.append(("fsync", info.st_ino, stat.S_IMODE(info.st_mode)))
+        original_fsync(fd)
+
+    def recording_rename(source: Path, destination: Path) -> None:
+        expected_inodes.update(
+            path.stat().st_ino for path in Path(source).rglob("*") if path.is_file()
+        )
+        events.append(("rename", 0, 0))
+        original_rename(source, destination)
 
     monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "rename", recording_rename)
     store.publish_staged(stage, _manifest())
-    assert 0o444 in seen
+
+    rename_index = events.index(("rename", 0, 0))
+    assert len(expected_inodes) == 3
+    for inode in expected_inodes:
+        assert any(
+            event == ("fsync", inode, 0o444)
+            for event in events[:rename_index]
+        )
 
 
 def test_posix_capability_gate_is_bounded(monkeypatch, tmp_path: Path) -> None:
