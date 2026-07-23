@@ -41,7 +41,8 @@ def _parser() -> argparse.ArgumentParser:
         nargs="?",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument("--session-id", required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--session-id", help=argparse.SUPPRESS)
+    parser.add_argument("--run", help=argparse.SUPPRESS)
     return parser
 
 
@@ -84,14 +85,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        session_id = _current_session(args.session_id)
+        session_id = _current_session(
+            args.session_id or os.environ.get("HERMES_SESSION_ID", "")
+        )
         client = ReviewAuthorityClient(session_id)
         if args.operation == "start":
-            if args.request_json is not None:
-                raise ValueError("start does not accept a request JSON path")
+            if args.request_json is not None or args.run is not None:
+                raise ValueError("start does not accept request or run arguments")
             _emit(client.start())
             return 0
 
+        if args.operation == "cleanup" and args.run is not None:
+            if args.request_json is not None:
+                raise ValueError("cleanup --run does not accept a request JSON path")
+            _emit(
+                client.cleanup(
+                    args.run,
+                    timeout=_DEFAULT_TIMEOUT_SECONDS,
+                ).to_wire()
+            )
+            return 0
+        if args.run is not None:
+            raise ValueError("--run is accepted only by cleanup")
         if args.request_json is None:
             raise ValueError(f"{args.operation} requires a request JSON path")
         request = _read_request(args.request_json)

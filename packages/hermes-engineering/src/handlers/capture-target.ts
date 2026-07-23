@@ -745,6 +745,7 @@ export async function captureTarget(
           : {}),
         diffSha256: createHash("sha256").update(captured.diff).digest("hex"),
         skippedFiles,
+        worktreePath: captured.worktreePath,
         buildTest: discoverBuildTestPlan(
           captured.postImageRoot,
           reportBase.files,
@@ -788,15 +789,27 @@ export async function captureTarget(
   }
 }
 
-const removeWorktree = (worktreePath: string): void => {
+export const removeWorktree = (worktreePath: string): void => {
   if (!basename(worktreePath).startsWith(WORKTREE_PREFIX)) {
     throw new CaptureTargetError(
       "unsafe_cleanup",
       "refusing to remove an unknown worktree",
     );
   }
-  if (!existsSync(worktreePath)) return;
-  const stat = lstatSync(worktreePath);
+  let stat;
+  try {
+    stat = lstatSync(worktreePath);
+  } catch (cause) {
+    if (
+      typeof cause === "object" &&
+      cause !== null &&
+      "code" in cause &&
+      cause.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw cause;
+  }
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new CaptureTargetError(
       "unsafe_cleanup",

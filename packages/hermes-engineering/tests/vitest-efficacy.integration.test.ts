@@ -30,6 +30,14 @@ const ROOT_FIXTURE = resolve(
   "fixtures/vitest-root-efficacy",
 );
 const temporaryRoots: string[] = [];
+const LOCAL_EXECUTION = {
+  mode: "local",
+  allowed: true,
+  sanitizedEnv: { PATH: process.env.PATH ?? "" },
+  network: true,
+  reason: "test fixture",
+  backend: null,
+};
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -153,6 +161,7 @@ const requestFor = (
       baseRef: fixture.baseRef,
       runner: "vitest",
       timeoutMs,
+      execution: LOCAL_EXECUTION,
     },
   };
 };
@@ -215,6 +224,7 @@ describe("Vitest efficacy", () => {
         baseRef: fixture.baseRef,
         runner: "vitest",
         timeoutMs: 20_000,
+        execution: LOCAL_EXECUTION,
       },
     });
 

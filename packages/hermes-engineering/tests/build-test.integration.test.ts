@@ -26,6 +26,14 @@ const BUNDLE = resolve(
 const temporaryRoots: string[] = [];
 
 type Phase = "build" | "test";
+const LOCAL_EXECUTION = {
+  mode: "local",
+  allowed: true,
+  sanitizedEnv: { PATH: process.env.PATH ?? "" },
+  network: true,
+  reason: "test fixture",
+  backend: null,
+};
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -90,7 +98,7 @@ const requestFor = (
     command: "build-test",
     workspace: root,
     artifactRoot,
-    input: { planPath, timeoutMs },
+    input: { planPath, timeoutMs, execution: LOCAL_EXECUTION },
   };
 };
 
@@ -168,7 +176,11 @@ describe("build-test", () => {
       command: "build-test",
       workspace: root,
       artifactRoot,
-      input: { planPath, timeoutMs: 20_000 },
+      input: {
+        planPath,
+        timeoutMs: 20_000,
+        execution: LOCAL_EXECUTION,
+      },
     });
 
     expect(built.status).toBe("failed");
@@ -257,5 +269,46 @@ describe("build-test", () => {
     expect(result.status).toBe("inconclusive");
     expect(result.diagnostics[0]?.code).toBe("invalid_build_plan");
     expect(existsSync(join(request.workspace, "escaped"))).toBe(false);
+  });
+
+  it("does not spawn remote code when authority denies execution", async () => {
+    const request = requestFor("build:pass", "build");
+    request.input.execution = {
+      mode: "denied",
+      allowed: false,
+      sanitizedEnv: {},
+      network: false,
+      reason: "untrusted_remote_code_requires_sandbox_or_consent",
+      backend: null,
+    };
+
+    const result = await runBuildTest(request);
+
+    expect(result.status).toBe("inconclusive");
+    expect(result.diagnostics[0]?.code).toBe(
+      "untrusted_execution_not_authorized",
+    );
+    expect(result.output.commands).toEqual([]);
+    expect(existsSync(join(request.workspace, "dist/value.js"))).toBe(false);
+  });
+
+  it("never falls back to host execution for a configured sandbox", async () => {
+    const request = requestFor("build:pass", "build");
+    request.input.execution = {
+      mode: "sandbox",
+      allowed: true,
+      sanitizedEnv: { PATH: process.env.PATH ?? "" },
+      network: false,
+      reason: "untrusted_remote_code_sandboxed",
+      backend: "docker",
+    };
+
+    const result = await runBuildTest(request);
+
+    expect(result.status).toBe("inconclusive");
+    expect(result.diagnostics[0]?.code).toBe(
+      "sandbox_execution_requires_terminal_environment",
+    );
+    expect(existsSync(join(request.workspace, "dist/value.js"))).toBe(false);
   });
 });

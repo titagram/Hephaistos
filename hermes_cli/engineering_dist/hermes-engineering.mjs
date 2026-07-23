@@ -1,6 +1,9 @@
 // packages/hermes-engineering/src/main.ts
-import { realpathSync as realpathSync10 } from "node:fs";
+import { realpathSync as realpathSync11 } from "node:fs";
 import { fileURLToPath } from "node:url";
+
+// packages/hermes-engineering/src/handlers/index.ts
+import { basename as basename6 } from "node:path";
 
 // packages/hermes-engineering/src/handlers/build-prompts.ts
 import {
@@ -3472,7 +3475,7 @@ var appendBounded = (chunks, chunk, captured) => {
 var NodeProcessRunner = class {
   async run(invocation, timeoutMs) {
     const started = Date.now();
-    return await new Promise((resolve14) => {
+    return await new Promise((resolve15) => {
       const stdout = [];
       const stderr = [];
       const stdoutSize = { bytes: 0 };
@@ -3516,12 +3519,105 @@ var NodeProcessRunner = class {
           durationMs: Date.now() - started
         };
         if (spawnError !== void 0) result.error = spawnError.message;
-        resolve14(result);
+        resolve15(result);
       };
       child.on("close", finish);
     });
   }
 };
+
+// packages/hermes-engineering/src/handlers/execution.ts
+var SAFE_ENV = /* @__PURE__ */ new Set([
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "LANG",
+  "LANGUAGE"
+]);
+var record = (value, label2) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label2} must be an object`);
+  }
+  return value;
+};
+var parseExecutionPolicy = (value) => {
+  const policy = record(value, "execution");
+  const allowedKeys = /* @__PURE__ */ new Set([
+    "mode",
+    "allowed",
+    "sanitizedEnv",
+    "network",
+    "reason",
+    "backend"
+  ]);
+  const unknown = Object.keys(policy).find((key) => !allowedKeys.has(key));
+  if (unknown !== void 0)
+    throw new TypeError(`unknown execution field: ${unknown}`);
+  if (!["local", "sandbox", "denied"].includes(String(policy.mode))) {
+    throw new TypeError("execution.mode is invalid");
+  }
+  if (typeof policy.allowed !== "boolean")
+    throw new TypeError("execution.allowed must be a boolean");
+  if (typeof policy.network !== "boolean")
+    throw new TypeError("execution.network must be a boolean");
+  if (typeof policy.reason !== "string" || policy.reason.length === 0) {
+    throw new TypeError("execution.reason must be a non-empty string");
+  }
+  if (policy.backend !== null && typeof policy.backend !== "string") {
+    throw new TypeError("execution.backend must be a string or null");
+  }
+  const rawEnv = record(policy.sanitizedEnv, "execution.sanitizedEnv");
+  if (Object.keys(rawEnv).length > 64)
+    throw new TypeError("execution.sanitizedEnv has too many entries");
+  const sanitizedEnv = {};
+  for (const [name, raw] of Object.entries(rawEnv)) {
+    if (!SAFE_ENV.has(name) && !name.startsWith("LC_") || typeof raw !== "string" || raw.length > 32768 || raw.includes("\0")) {
+      throw new TypeError(
+        `execution.sanitizedEnv contains unsafe entry: ${name}`
+      );
+    }
+    sanitizedEnv[name] = raw;
+  }
+  const mode = policy.mode;
+  if (policy.allowed !== (mode !== "denied")) {
+    throw new TypeError("execution.allowed contradicts execution.mode");
+  }
+  if (mode === "sandbox" && policy.network) {
+    throw new TypeError("sandbox execution must disable network");
+  }
+  if (mode !== "sandbox" && policy.backend !== null) {
+    throw new TypeError("only sandbox execution may name a backend");
+  }
+  return {
+    mode,
+    allowed: policy.allowed,
+    sanitizedEnv,
+    network: policy.network,
+    reason: policy.reason,
+    backend: policy.backend
+  };
+};
+var deniedExecutionResult = (policy) => ({
+  status: "inconclusive",
+  diagnostics: [
+    {
+      code: "untrusted_execution_not_authorized",
+      message: `repository code was not executed: ${policy.reason}`
+    }
+  ]
+});
 
 // packages/hermes-engineering/src/handlers/build-test.ts
 var PACKAGE_MANAGERS = /* @__PURE__ */ new Set([
@@ -3622,7 +3718,7 @@ var validatePlanPath2 = (request, value) => {
 var parseInput2 = (request) => {
   const input = asRecord2(request.input, "input");
   const unknown = Object.keys(input).find(
-    (key) => !["planPath", "timeoutMs"].includes(key)
+    (key) => !["planPath", "timeoutMs", "execution"].includes(key)
   );
   if (unknown !== void 0)
     throw new TypeError(`unknown build-test input field: ${unknown}`);
@@ -3632,7 +3728,8 @@ var parseInput2 = (request) => {
   }
   return {
     planPath: validatePlanPath2(request, input.planPath),
-    timeoutMs
+    timeoutMs,
+    execution: parseExecutionPolicy(input.execution)
   };
 };
 var strings = (value, label2) => {
@@ -3788,6 +3885,24 @@ ${run.stderr}`;
 };
 async function runBuildTest(request, processes = new NodeProcessRunner()) {
   const input = parseInput2(request);
+  if (!input.execution.allowed) {
+    return {
+      ...deniedExecutionResult(input.execution),
+      output: { packageManager: null, commands: [] }
+    };
+  }
+  if (input.execution.mode === "sandbox") {
+    return {
+      status: "inconclusive",
+      output: { packageManager: null, commands: [] },
+      diagnostics: [
+        {
+          code: "sandbox_execution_requires_terminal_environment",
+          message: "sandbox execution must be routed through the configured Hermes terminal environment"
+        }
+      ]
+    };
+  }
   const workspace = realpathSync3(request.workspace);
   let recorded;
   try {
@@ -3812,7 +3927,7 @@ async function runBuildTest(request, processes = new NodeProcessRunner()) {
         args: command.args,
         cwd: resolve6(workspace, command.cwd),
         env: {
-          ...process.env,
+          ...input.execution.sanitizedEnv,
           CI: "1",
           NO_COLOR: "1",
           npm_config_yes: "true",
@@ -4587,6 +4702,7 @@ async function captureTarget(request) {
         } : {},
         diffSha256: createHash("sha256").update(captured.diff).digest("hex"),
         skippedFiles,
+        worktreePath: captured.worktreePath,
         buildTest: discoverBuildTestPlan(
           captured.postImageRoot,
           reportBase.files
@@ -4635,8 +4751,15 @@ var removeWorktree = (worktreePath) => {
       "refusing to remove an unknown worktree"
     );
   }
-  if (!existsSync5(worktreePath)) return;
-  const stat = lstatSync5(worktreePath);
+  let stat;
+  try {
+    stat = lstatSync5(worktreePath);
+  } catch (cause) {
+    if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT") {
+      return;
+    }
+    throw cause;
+  }
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new CaptureTargetError(
       "unsafe_cleanup",
@@ -4812,35 +4935,35 @@ var exactPromptMismatches = (promptPlan, planPath, env) => {
         `recorded prompt ${prompt.key} does not match immutable prompts.json`
       );
     }
-    if (!transcripts.some((record) => record.launchPrompt === built)) {
+    if (!transcripts.some((record3) => record3.launchPrompt === built)) {
       mismatches.push(prompt.key);
     }
   }
   return mismatches;
 };
-var authenticatedTranscript = (record) => {
+var authenticatedTranscript = (record3) => {
   const records = [
     {
-      agentId: record.agentId,
-      agentName: record.agentName,
+      agentId: record3.agentId,
+      agentName: record3.agentName,
       type: "user",
-      message: { role: "user", parts: [{ text: record.launchPrompt }] }
+      message: { role: "user", parts: [{ text: record3.launchPrompt }] }
     }
   ];
-  record.successfulCallArgs.forEach((serialized, index) => {
+  record3.successfulCallArgs.forEach((serialized, index) => {
     let args;
     try {
       args = JSON.parse(serialized);
     } catch (cause) {
       throw new TypeError(
-        `authenticated reviewer ${record.agentId} has invalid call arguments: ${cause.message}`
+        `authenticated reviewer ${record3.agentId} has invalid call arguments: ${cause.message}`
       );
     }
     const id = `authenticated-${index}`;
     records.push(
       {
-        agentId: record.agentId,
-        agentName: record.agentName,
+        agentId: record3.agentId,
+        agentName: record3.agentName,
         type: "assistant",
         message: {
           role: "model",
@@ -4848,8 +4971,8 @@ var authenticatedTranscript = (record) => {
         }
       },
       {
-        agentId: record.agentId,
-        agentName: record.agentName,
+        agentId: record3.agentId,
+        agentName: record3.agentName,
         type: "tool_result",
         message: {
           role: "user",
@@ -4866,12 +4989,12 @@ var authenticatedTranscript = (record) => {
       }
     );
   });
-  if (record.finalText.length > 0) {
+  if (record3.finalText.length > 0) {
     records.push({
-      agentId: record.agentId,
-      agentName: record.agentName,
+      agentId: record3.agentId,
+      agentName: record3.agentName,
       type: "assistant",
-      message: { role: "model", parts: [{ text: record.finalText }] }
+      message: { role: "model", parts: [{ text: record3.finalText }] }
     });
   }
   return `${records.map((entry) => JSON.stringify(entry)).join("\n")}
@@ -4892,10 +5015,10 @@ var withReviewerEnvironment = (request, artifactRoot, callback) => {
   chmodSync3(join10(root, "subagents"), 448);
   chmodSync3(reviewers, 448);
   try {
-    for (const record of request.authenticatedReviewerRecords) {
+    for (const record3 of request.authenticatedReviewerRecords) {
       writeFileSync5(
-        join10(reviewers, `agent-${record.agentId}.jsonl`),
-        authenticatedTranscript(record),
+        join10(reviewers, `agent-${record3.agentId}.jsonl`),
+        authenticatedTranscript(record3),
         { mode: 384 }
       );
     }
@@ -5308,22 +5431,22 @@ var parseVerifiedFindings = (value, knownReviewers) => {
 };
 var validateVerifiedFindings = (value, artifacts, authenticated) => {
   const knownReviewers = new Set(
-    reviewerRecords(artifacts, authenticated).map((record) => record.agentId)
+    reviewerRecords(artifacts, authenticated).map((record3) => record3.agentId)
   );
   return parseVerifiedFindings(value, knownReviewers);
 };
 var verifiedFindingsFromEvidence = (artifacts, authenticated) => {
   const records = reviewerRecords(artifacts, authenticated);
   const evidence = records.filter(
-    (record2) => record2.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER)
+    (record4) => record4.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER)
   );
   if (evidence.length !== 1) {
     throw new ReviewerEvidenceUnavailableError(
       `expected exactly one current-run verifier transcript evidence record, found ${evidence.length}`
     );
   }
-  const record = evidence[0];
-  if (record.successfulToolCalls === 0) {
+  const record3 = evidence[0];
+  if (record3.successfulToolCalls === 0) {
     throw new ReviewerEvidenceUnavailableError(
       "verifier transcript evidence has no successful tool calls"
     );
@@ -5331,7 +5454,7 @@ var verifiedFindingsFromEvidence = (artifacts, authenticated) => {
   let parsed;
   try {
     parsed = JSON.parse(
-      record.finalText.slice(VERIFIED_FINDINGS_EVIDENCE_MARKER.length)
+      record3.finalText.slice(VERIFIED_FINDINGS_EVIDENCE_MARKER.length)
     );
   } catch (cause) {
     throw new TypeError(
@@ -5848,7 +5971,7 @@ import {
   realpathSync as realpathSync9,
   rmSync as rmSync3
 } from "node:fs";
-import { isAbsolute as isAbsolute9, join as join13, relative as relative7, resolve as resolve13, sep as sep8 } from "node:path";
+import { basename as basename4, isAbsolute as isAbsolute9, join as join13, relative as relative7, resolve as resolve13, sep as sep8 } from "node:path";
 
 // packages/hermes-engineering/src/runners/pytest.ts
 import { existsSync as existsSync6, readFileSync as readFileSync12, realpathSync as realpathSync7 } from "node:fs";
@@ -5918,9 +6041,9 @@ var workspacePython = (workspace) => {
   }
   return null;
 };
-var probeEnvironment = () => {
+var probeEnvironment = (source) => {
   const env = {};
-  for (const [name, value] of Object.entries(process.env)) {
+  for (const [name, value] of Object.entries(source)) {
     if (value !== void 0 && (ENV_NAMES.has(name) || name.startsWith("LC_"))) {
       env[name] = value;
     }
@@ -5986,11 +6109,11 @@ var parseProbeResult = (stdout) => {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("pytest probe result is not an object");
   }
-  const record = parsed;
-  if (record.command !== "collect" && record.command !== "run") {
+  const record3 = parsed;
+  if (record3.command !== "collect" && record3.command !== "run") {
     throw new Error("pytest probe returned an invalid command");
   }
-  if (typeof record.outcome !== "string") {
+  if (typeof record3.outcome !== "string") {
     throw new Error("pytest probe returned no outcome");
   }
   const outcomes = /* @__PURE__ */ new Set([
@@ -6004,25 +6127,25 @@ var parseProbeResult = (stdout) => {
     "no_tests_executed",
     "probe_error"
   ]);
-  if (!outcomes.has(record.outcome)) {
+  if (!outcomes.has(record3.outcome)) {
     throw new Error("pytest probe returned an invalid outcome");
   }
-  if (!Number.isSafeInteger(record.pytestExitCode)) {
+  if (!Number.isSafeInteger(record3.pytestExitCode)) {
     throw new Error("pytest probe returned no valid exit code");
   }
   return {
-    command: record.command,
-    outcome: record.outcome,
-    pytestExitCode: record.pytestExitCode,
-    files: asStringArray(record.files, "files"),
+    command: record3.command,
+    outcome: record3.outcome,
+    pytestExitCode: record3.pytestExitCode,
+    files: asStringArray(record3.files, "files"),
     collectionErrors: asStringArray(
-      record.collectionErrors ?? [],
+      record3.collectionErrors ?? [],
       "collectionErrors"
     ),
-    ...typeof record.passed === "number" ? { passed: record.passed } : {},
-    ...typeof record.failedAssertions === "number" ? { failedAssertions: record.failedAssertions } : {},
-    ...typeof record.skipped === "number" ? { skipped: record.skipped } : {},
-    ...typeof record.error === "string" ? { error: record.error } : {}
+    ...typeof record3.passed === "number" ? { passed: record3.passed } : {},
+    ...typeof record3.failedAssertions === "number" ? { failedAssertions: record3.failedAssertions } : {},
+    ...typeof record3.skipped === "number" ? { skipped: record3.skipped } : {},
+    ...typeof record3.error === "string" ? { error: record3.error } : {}
   };
 };
 var failedRun = (run, message) => ({
@@ -6031,12 +6154,14 @@ var failedRun = (run, message) => ({
   error: message
 });
 var PytestRunner = class {
-  constructor(processes = new NodeProcessRunner(), python) {
+  constructor(processes = new NodeProcessRunner(), python, environment = process.env) {
     this.processes = processes;
     this.python = python;
+    this.environment = environment;
   }
   processes;
   python;
+  environment;
   id = "pytest";
   pythonFor(workspace) {
     return this.python ?? workspacePython(workspace) ?? defaultPython();
@@ -6060,7 +6185,7 @@ var PytestRunner = class {
           root
         ],
         cwd: root,
-        env: probeEnvironment()
+        env: probeEnvironment(this.environment)
       },
       6e4
     );
@@ -6107,7 +6232,7 @@ var PytestRunner = class {
           file
         ],
         cwd: root,
-        env: probeEnvironment()
+        env: probeEnvironment(this.environment)
       },
       timeoutMs
     );
@@ -6214,10 +6339,12 @@ var parseCollectedFiles = (workspace, stdout) => {
   return files;
 };
 var VitestRunner = class {
-  constructor(processes = new NodeProcessRunner()) {
+  constructor(processes = new NodeProcessRunner(), environment = process.env) {
     this.processes = processes;
+    this.environment = environment;
   }
   processes;
+  environment;
   id = "vitest";
   async detect(workspace, plan) {
     const configured = CONFIG_NAMES2.some(
@@ -6241,7 +6368,7 @@ var VitestRunner = class {
           "--json"
         ],
         cwd: workspace,
-        env: { ...process.env, CI: "1", NO_COLOR: "1" }
+        env: { ...this.environment, CI: "1", NO_COLOR: "1" }
       },
       6e4
     );
@@ -6286,7 +6413,7 @@ var VitestRunner = class {
           relativePath
         ],
         cwd: workspace,
-        env: { ...process.env, CI: "1", NO_COLOR: "1" }
+        env: { ...this.environment, CI: "1", NO_COLOR: "1" }
       },
       timeoutMs
     );
@@ -6319,7 +6446,9 @@ var validatedPlanPath2 = (request, raw) => {
 var parseInput4 = (request) => {
   const input = asRecord6(request.input);
   const unknown = Object.keys(input).find(
-    (key) => !["planPath", "baseRef", "runner", "timeoutMs"].includes(key)
+    (key) => !["planPath", "baseRef", "runner", "timeoutMs", "execution"].includes(
+      key
+    )
   );
   if (unknown !== void 0)
     throw new TypeError(`unknown test-efficacy input field: ${unknown}`);
@@ -6338,15 +6467,16 @@ var parseInput4 = (request) => {
     planPath,
     baseRef: input.baseRef,
     runner: input.runner,
-    timeoutMs
+    timeoutMs,
+    execution: parseExecutionPolicy(input.execution)
   };
 };
 var parsePlan = (path) => {
   const parsed = JSON.parse(readFileSync14(path, "utf8"));
-  const record = asRecord6(parsed);
-  if (!Array.isArray(record.files))
+  const record3 = asRecord6(parsed);
+  if (!Array.isArray(record3.files))
     throw new TypeError("plan.files must be an array");
-  const files = record.files.map((entry) => {
+  const files = record3.files.map((entry) => {
     const file = asRecord6(entry);
     if (typeof file.path !== "string" || typeof file.kind !== "string") {
       throw new TypeError(
@@ -6355,7 +6485,7 @@ var parsePlan = (path) => {
     }
     return { path: file.path, kind: file.kind };
   });
-  return { ...record, files };
+  return { ...record3, files };
 };
 var emptyOutput = (availableRunners) => ({
   runner: null,
@@ -6425,8 +6555,8 @@ var safeRelativePath = (workspace, path) => {
   }
   return normalized;
 };
-var probeTreePath = (workspace, requestId) => {
-  const suffix = createHash3("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
+var probeTreePath = (workspace, runId) => {
+  const suffix = createHash3("sha256").update(`${resolve13(workspace)}\0${runId}`).digest("hex").slice(0, 16);
   return join13(workspace, `.hermes-efficacy-${suffix}`);
 };
 var createProbeTree = (workspace, probeTree) => {
@@ -6473,11 +6603,38 @@ var inconclusiveForRun = (file, run, phase) => ({
   detail: run.timedOut ? `${phase} timed out after ${run.durationMs}ms` : `${phase} could not run${run.error ? `: ${run.error}` : ""}`
 });
 var group = (tests, verdict) => tests.filter((test) => test.verdict === verdict).map((test) => test.path);
-async function runTestEfficacy(request, runners = [new VitestRunner(), new PytestRunner()]) {
+async function runTestEfficacy(request, runners) {
   const input = parseInput4(request);
+  if (!input.execution.allowed) {
+    return {
+      ...deniedExecutionResult(input.execution),
+      output: emptyOutput([])
+    };
+  }
+  if (input.execution.mode === "sandbox") {
+    return {
+      status: "inconclusive",
+      output: emptyOutput([]),
+      diagnostics: [
+        {
+          code: "sandbox_execution_requires_terminal_environment",
+          message: "sandbox execution must be routed through the configured Hermes terminal environment"
+        }
+      ]
+    };
+  }
+  const availableRunners = runners ?? [
+    new VitestRunner(void 0, input.execution.sanitizedEnv),
+    new PytestRunner(void 0, void 0, input.execution.sanitizedEnv)
+  ];
   const workspace = realpathSync9(request.workspace);
   const plan = parsePlan(input.planPath);
-  const choice = await selectRunner(input.runner, workspace, plan, runners);
+  const choice = await selectRunner(
+    input.runner,
+    workspace,
+    plan,
+    availableRunners
+  );
   if ("code" in choice) {
     const output2 = emptyOutput(choice.available);
     const choices = choice.available.length > 0 ? choice.available.map((id) => `runner=${id}`).join(", ") : "vitest or pytest";
@@ -6520,9 +6677,17 @@ async function runTestEfficacy(request, runners = [new VitestRunner(), new Pytes
   let actualProbeTree = null;
   let cleanupFailure = null;
   let probes = [];
+  const runId = basename4(request.artifactRoot);
+  if (!runId) throw new TypeError("artifactRoot has no run identity");
   try {
     if (planned.probes.length > 0) {
-      actualProbeTree = probeTreePath(workspace, request.requestId);
+      actualProbeTree = probeTreePath(workspace, runId);
+      if (existsSync8(actualProbeTree)) {
+        const retainedCleanup = cleanupProbeTree(workspace, actualProbeTree);
+        if (retainedCleanup !== null) {
+          throw new Error(`retained probe cleanup failed: ${retainedCleanup}`);
+        }
+      }
       createProbeTree(workspace, actualProbeTree);
     }
     if (planned.probes.length > 0) {
@@ -6658,8 +6823,149 @@ async function runTestEfficacy(request, runners = [new VitestRunner(), new Pytes
   };
 }
 
+// packages/hermes-engineering/src/handlers/cleanup.ts
+import { createHash as createHash4 } from "node:crypto";
+import { existsSync as existsSync9, lstatSync as lstatSync9, readFileSync as readFileSync15, realpathSync as realpathSync10 } from "node:fs";
+import { basename as basename5, dirname as dirname8, join as join14 } from "node:path";
+import { execFileSync as execFileSync4 } from "node:child_process";
+var RUN_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
+var gitEnvironment = {
+  PATH: process.env.PATH,
+  GIT_TERMINAL_PROMPT: "0"
+};
+var record2 = (value, label2) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${label2} must be an object`);
+  }
+  return value;
+};
+var repositoryRoot = (workspace) => realpathSync10(
+  execFileSync4("git", ["rev-parse", "--show-toplevel"], {
+    cwd: workspace,
+    encoding: "utf8",
+    env: gitEnvironment,
+    shell: false
+  }).trim()
+);
+var expectedCaptureWorktree = (repoRoot, runId) => {
+  const suffix = createHash4("sha256").update(`${repoRoot}\0${runId}`).digest("hex").slice(0, 16);
+  return join14(dirname8(repoRoot), `.hermes-review-${suffix}`);
+};
+async function cleanupRun(request) {
+  const input = record2(request.input, "cleanup input");
+  if (Object.keys(input).some((key) => key !== "runId")) {
+    throw new TypeError("cleanup accepts only runId");
+  }
+  if (typeof input.runId !== "string" || !RUN_ID_RE.test(input.runId)) {
+    throw new TypeError("cleanup runId is invalid");
+  }
+  const runId = input.runId;
+  const artifactRoot = realpathSync10(request.artifactRoot);
+  if (basename5(artifactRoot) !== runId) {
+    throw new TypeError("cleanup runId does not match artifactRoot");
+  }
+  const planPath = join14(artifactRoot, "plan.json");
+  const planStat = lstatSync9(planPath);
+  if (!planStat.isFile() || planStat.isSymbolicLink()) {
+    throw new TypeError("registered plan is not a regular file");
+  }
+  const plan = record2(
+    JSON.parse(readFileSync15(planPath, "utf8")),
+    "plan"
+  );
+  const hermes = record2(plan.hermes, "plan.hermes");
+  if (hermes.runId !== runId) {
+    throw new TypeError("registered plan run identity does not match");
+  }
+  const workspace = realpathSync10(request.workspace);
+  const removedWorktrees = [];
+  const failures = [];
+  const targetKind = hermes.targetKind;
+  const registered = hermes.worktreePath;
+  if (targetKind === "range" || targetKind === "pr") {
+    const repoRoot = repositoryRoot(workspace);
+    const expected = expectedCaptureWorktree(repoRoot, runId);
+    if (registered !== expected) {
+      throw new TypeError(
+        "registered capture worktree identity does not match"
+      );
+    }
+    try {
+      const existed = existsSync9(expected);
+      removeWorktree(expected);
+      execFileSync4("git", ["worktree", "prune"], {
+        cwd: repoRoot,
+        env: gitEnvironment,
+        shell: false
+      });
+      const registered2 = execFileSync4(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: gitEnvironment,
+          shell: false
+        }
+      );
+      if (registered2.includes(`worktree ${expected}
+`)) {
+        throw new Error("capture worktree lease remains registered");
+      }
+      if (existed && !existsSync9(expected)) removedWorktrees.push(expected);
+    } catch (cause) {
+      failures.push(cause instanceof Error ? cause.message : String(cause));
+    }
+  } else if (registered !== null) {
+    throw new TypeError(
+      "non-isolated target registered an unexpected worktree"
+    );
+  }
+  const probe = probeTreePath(workspace, runId);
+  if (existsSync9(probe)) {
+    const failure = cleanupProbeTree(workspace, probe);
+    if (failure === null) removedWorktrees.push(probe);
+    else failures.push(failure);
+  }
+  if (failures.length > 0) {
+    throw new Error(failures.join("; "));
+  }
+  return { runId, removedWorktrees, recoveryCommand: null };
+}
+
 // packages/hermes-engineering/src/handlers/index.ts
 async function dispatch(request) {
+  if (request.command === "cleanup") {
+    try {
+      const output = await cleanupRun(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: "passed",
+        output: { ...output },
+        diagnostics: []
+      };
+    } catch (cause) {
+      const runId = request.input.runId;
+      const recoveryCommand = typeof runId === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(runId) && basename6(request.artifactRoot) === runId ? `hermes-review-engine cleanup --run ${runId}` : null;
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: "inconclusive",
+        output: {
+          runId: typeof runId === "string" ? runId : null,
+          removedWorktrees: [],
+          recoveryCommand
+        },
+        diagnostics: [
+          {
+            code: "cleanup_failed",
+            message: cause instanceof Error ? cause.message : String(cause)
+          }
+        ]
+      };
+    }
+  }
   if (request.command === "resolve-anchors") {
     try {
       const output = await resolveFindingAnchors(request);
@@ -7003,7 +7309,7 @@ async function main(options = {}) {
   process.exitCode = result.exitCode;
 }
 var entrypoint = process.argv[1];
-if (entrypoint && realpathSync10(fileURLToPath(import.meta.url)) === realpathSync10(entrypoint)) {
+if (entrypoint && realpathSync11(fileURLToPath(import.meta.url)) === realpathSync11(entrypoint)) {
   await main();
 }
 export {

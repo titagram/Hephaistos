@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Literal, cast
 
 from .authority import ReviewAuthority
+from .execution_policy import decide_execution, target_kind_for
 from .runs import Effort
 
 
@@ -54,11 +55,38 @@ def launch_review_chat(
         nonlocal authority
         if authority is not None:
             raise RuntimeError("review authority was already created")
+        target_kind = target_kind_for(target)
+        backend = os.environ.get("TERMINAL_ENV", "local")
+        allow_local = False
+        if target_kind == "pr" and backend.strip().lower() == "local":
+            # Reuse the live Hermes approval surface.  Absence, timeout, and
+            # every unrecognized result fail closed while static review remains
+            # available.
+            from tools.terminal_tool import _get_approval_callback
+
+            approval = _get_approval_callback()
+            if approval is not None:
+                verdict = approval(
+                    "hermes review: execute untrusted pull-request build/tests locally",
+                    (
+                        "The pull request can execute repository-controlled code. "
+                        "Allow this review to run its recorded build and test commands "
+                        "outside a sandbox?"
+                    ),
+                    allow_permanent=False,
+                )
+                allow_local = verdict in {"once", "session"}
+        execution = decide_execution(
+            target_kind=target_kind,
+            sandbox=backend,
+            allow_local=allow_local,
+        )
         candidate = ReviewAuthority(
             workspace=workspace.resolve(),
             target=target,
             effort=cast(Effort, effort),
             session_id=session_id,
+            execution_decision=execution,
         )
         try:
             candidate.start_serving()

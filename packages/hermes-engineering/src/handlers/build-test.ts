@@ -16,6 +16,7 @@ import {
   type ProcessRunner,
   type TestRun,
 } from "../runners/types.js";
+import { deniedExecutionResult, parseExecutionPolicy } from "./execution.js";
 
 type BuildTestStatus = "passed" | "failed" | "inconclusive";
 type BuildTestPhase = "build" | "test";
@@ -67,6 +68,7 @@ export interface BuildTestResult {
 interface BuildTestInput {
   planPath: string;
   timeoutMs: number;
+  execution: ReturnType<typeof parseExecutionPolicy>;
 }
 
 const PACKAGE_MANAGERS = new Set<PackageManager>([
@@ -190,7 +192,7 @@ const validatePlanPath = (request: EngineRequest, value: unknown): string => {
 const parseInput = (request: EngineRequest): BuildTestInput => {
   const input = asRecord(request.input, "input");
   const unknown = Object.keys(input).find(
-    (key) => !["planPath", "timeoutMs"].includes(key),
+    (key) => !["planPath", "timeoutMs", "execution"].includes(key),
   );
   if (unknown !== undefined)
     throw new TypeError(`unknown build-test input field: ${unknown}`);
@@ -205,6 +207,7 @@ const parseInput = (request: EngineRequest): BuildTestInput => {
   return {
     planPath: validatePlanPath(request, input.planPath),
     timeoutMs: timeoutMs as number,
+    execution: parseExecutionPolicy(input.execution),
   };
 };
 
@@ -399,6 +402,25 @@ export async function runBuildTest(
   processes: ProcessRunner = new NodeProcessRunner(),
 ): Promise<BuildTestResult> {
   const input = parseInput(request);
+  if (!input.execution.allowed) {
+    return {
+      ...deniedExecutionResult(input.execution),
+      output: { packageManager: null, commands: [] },
+    };
+  }
+  if (input.execution.mode === "sandbox") {
+    return {
+      status: "inconclusive",
+      output: { packageManager: null, commands: [] },
+      diagnostics: [
+        {
+          code: "sandbox_execution_requires_terminal_environment",
+          message:
+            "sandbox execution must be routed through the configured Hermes terminal environment",
+        },
+      ],
+    };
+  }
   const workspace = realpathSync(request.workspace);
   let recorded: ReturnType<typeof parseRecordedPlan>;
   try {
@@ -424,7 +446,7 @@ export async function runBuildTest(
         args: command.args,
         cwd: resolve(workspace, command.cwd),
         env: {
-          ...process.env,
+          ...input.execution.sanitizedEnv,
           CI: "1",
           NO_COLOR: "1",
           npm_config_yes: "true",

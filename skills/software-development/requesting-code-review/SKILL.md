@@ -154,6 +154,10 @@ then retry once with `vitest` or `pytest`. Never infer a runner from prose and
 never install a runner.
 
 Record each returned `passed`, `failed`, or `inconclusive` status exactly.
+When either operation returns
+`inconclusive/untrusted_execution_not_authorized`, do not retry it through the
+terminal tool or another runner. Continue the static review, preserve that
+exact check status, and do not claim that tests passed or were effective.
 
 ### 5. Prove reviewer coverage
 
@@ -256,6 +260,26 @@ boolean, event, coverage claim, verdict, or caller-written report.
 Read the returned report and verdict paths. Present the report, deterministic
 verdict, inconclusive checks, skipped content, unresolved findings, and
 artifact paths to the user.
+
+### 9. Clean up isolated worktrees
+
+Before returning the final review, call `cleanup` with only the accepted run
+ID:
+
+```bash
+hermes-review-engine cleanup --run <runId>
+```
+
+The live authority resolves the registered run and recorded worktrees; never
+pass or delete a path yourself. On `passed`, include cleanup success in the
+review facts. On `inconclusive/cleanup_failed`, preserve all artifacts and
+print the response's exact recovery command once:
+
+```text
+hermes-review-engine cleanup --run <runId>
+```
+
+Never replace it with `rm`, `git worktree remove`, or a caller-supplied path.
 
 ## Publication and follow-up
 

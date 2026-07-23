@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli.engineering_review import command, internal_cli
+from hermes_cli.engineering_review.execution_policy import ExecutionDecision
 from hermes_cli import main as main_module
 from hermes_cli.subcommands.review import build_review_parser
 
@@ -124,9 +125,88 @@ def test_launch_review_chat_owns_authority_for_chat_lifecycle(
         "target": "HEAD~1..HEAD",
         "effort": "high",
         "session_id": "session-1",
+        "execution_decision": ExecutionDecision(
+            mode="local",
+            allowed=True,
+            sanitized_env=command.decide_execution(
+                target_kind="range",
+                sandbox=os.environ.get("TERMINAL_ENV", "local"),
+                allow_local=False,
+            ).sanitized_env,
+            network=True,
+            reason="local_review_uses_existing_terminal_policy",
+            backend=None,
+        ),
     }
     assert events[2:] == ["start", "running", "close"]
     assert os.environ["HERMES_YOLO_MODE"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("backend", "approval_result", "expected_mode", "expected_allowed"),
+    [
+        ("local", "once", "local", True),
+        ("local", "deny", "denied", False),
+        ("docker", None, "sandbox", True),
+    ],
+)
+def test_pr_execution_uses_existing_backend_or_explicit_consent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+    approval_result: str | None,
+    expected_mode: str,
+    expected_allowed: bool,
+) -> None:
+    import tools.terminal_tool as terminal_tool
+
+    decisions: list[object] = []
+
+    class FakeAuthority:
+        def __init__(self, **kwargs: object) -> None:
+            decisions.append(kwargs["execution_decision"])
+
+        def start_serving(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    approvals: list[str] = []
+
+    def approval(command_text: str, _description: str, **_kwargs: object) -> str:
+        approvals.append(command_text)
+        assert approval_result is not None
+        return approval_result
+
+    monkeypatch.setenv("TERMINAL_ENV", backend)
+    monkeypatch.setattr(command, "ReviewAuthority", FakeAuthority)
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_approval_callback",
+        lambda: approval if approval_result is not None else None,
+    )
+    monkeypatch.setattr(
+        command,
+        "_load_chat_command",
+        lambda: lambda args: args.session_ready_callback("session-1"),
+    )
+
+    command.launch_review_chat(
+        args=argparse.Namespace(),
+        workspace=tmp_path,
+        target="https://github.com/o/r/pull/42",
+        effort="medium",
+        skills=["requesting-code-review"],
+        auto_approve=False,
+        pass_session_id=True,
+        query="review",
+    )
+
+    decision = decisions[0]
+    assert decision.mode == expected_mode
+    assert decision.allowed is expected_allowed
+    assert len(approvals) == (1 if backend == "local" else 0)
 
 
 def test_cmd_chat_forwards_private_session_ready_callback(
@@ -367,3 +447,45 @@ def test_internal_operation_rejects_mismatched_command(
             "--session-id",
             "session-1",
         ])
+
+
+def test_internal_cleanup_run_uses_current_live_authority(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, object] = {}
+    response = SimpleNamespace(
+        to_wire=lambda: {
+            "protocolVersion": 1,
+            "requestId": "cleanup-1",
+            "status": "passed",
+            "output": {"runId": "registered-run-1234"},
+            "diagnostics": [],
+        }
+    )
+
+    class FakeClient:
+        def __init__(self, session_id: str) -> None:
+            seen["session_id"] = session_id
+
+        def cleanup(self, run_id: str, *, timeout: float) -> object:
+            seen["run_id"] = run_id
+            seen["timeout"] = timeout
+            return response
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "session-1")
+    monkeypatch.setattr(internal_cli, "ReviewAuthorityClient", FakeClient)
+
+    assert (
+        internal_cli.main([
+            "cleanup",
+            "--run",
+            "registered-run-1234",
+        ])
+        == 0
+    )
+    assert seen == {
+        "session_id": "session-1",
+        "run_id": "registered-run-1234",
+        "timeout": 600.0,
+    }
+    assert json.loads(capsys.readouterr().out)["status"] == "passed"

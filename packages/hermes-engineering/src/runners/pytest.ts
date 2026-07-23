@@ -103,9 +103,9 @@ const workspacePython = (workspace: string): string | null => {
   return null;
 };
 
-const probeEnvironment = (): NodeJS.ProcessEnv => {
+const probeEnvironment = (source: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
+  for (const [name, value] of Object.entries(source)) {
     if (
       value !== undefined &&
       (ENV_NAMES.has(name) || name.startsWith("LC_"))
@@ -243,6 +243,7 @@ export class PytestRunner implements TestRunner {
   constructor(
     private readonly processes: ProcessRunner = new NodeProcessRunner(),
     private readonly python?: string,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
 
   private pythonFor(workspace: string): string {
@@ -276,7 +277,7 @@ export class PytestRunner implements TestRunner {
           root,
         ],
         cwd: root,
-        env: probeEnvironment(),
+        env: probeEnvironment(this.environment),
       },
       60_000,
     );
@@ -335,7 +336,7 @@ export class PytestRunner implements TestRunner {
           file,
         ],
         cwd: root,
-        env: probeEnvironment(),
+        env: probeEnvironment(this.environment),
       },
       timeoutMs,
     );
