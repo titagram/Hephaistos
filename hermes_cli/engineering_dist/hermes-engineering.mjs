@@ -4793,8 +4793,7 @@ async function checkCoverage(request) {
 }
 
 // packages/hermes-engineering/src/handlers/compose-review.ts
-import { createHash as createHash3 } from "node:crypto";
-import { lstatSync as lstatSync8, readFileSync as readFileSync11 } from "node:fs";
+import { readFileSync as readFileSync11 } from "node:fs";
 import { join as join11 } from "node:path";
 
 // packages/hermes-engineering/src/reverse-audit.ts
@@ -4840,6 +4839,8 @@ import { createHash as createHash2, randomBytes as randomBytes3 } from "node:cry
 import {
   chmodSync as chmodSync3,
   closeSync as closeSync3,
+  constants,
+  fstatSync,
   fsyncSync as fsyncSync3,
   lstatSync as lstatSync7,
   openSync as openSync3,
@@ -4874,7 +4875,8 @@ var MAX_TITLE_BYTES = 4096;
 var MAX_BODY_BYTES = 65536;
 var MAX_QUOTE_BYTES = 262144;
 var MAX_PATH_BYTES = 4096;
-var MAX_REVIEWERS_PER_FINDING = 32;
+var MAX_REVIEWER_RECORDS = 1024;
+var VERIFIED_FINDINGS_EVIDENCE_MARKER = "Hermes-Verified-Findings-v1\n";
 var asRecord4 = (value, label2) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${label2} must be an object`);
@@ -4978,7 +4980,6 @@ var atomicWrite2 = (artifactRoot, name, content) => {
   try {
     chmodSync3(temporary, 384);
     renameSync3(temporary, destination);
-    chmodSync3(destination, 384);
     if (process.platform !== "win32") {
       const directory = openSync3(artifactRoot, "r");
       try {
@@ -4994,6 +4995,30 @@ var atomicWrite2 = (artifactRoot, name, content) => {
     }
   }
   return destination;
+};
+var readPrivateFileNoFollow = (path, label2) => {
+  const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW);
+  let descriptor;
+  try {
+    descriptor = openSync3(path, flags);
+  } catch (cause) {
+    throw new TypeError(
+      `${label2} could not be opened safely: ${cause.message}`
+    );
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) throw new TypeError(`${label2} must be a regular file`);
+    if (process.platform !== "win32" && (stat.mode & 511) !== 384) {
+      throw new TypeError(`${label2} must be private to the current user`);
+    }
+    if (process.platform !== "win32" && typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new TypeError(`${label2} must be owned by the current user`);
+    }
+    return readFileSync10(descriptor, "utf8");
+  } finally {
+    closeSync3(descriptor);
+  }
 };
 var atomicJson = (artifactRoot, name, value) => atomicWrite2(artifactRoot, name, `${JSON.stringify(value, null, 2)}
 `);
@@ -5018,7 +5043,7 @@ var validatePrivateDestination = (artifactRoot, name) => {
   }
   return destination;
 };
-var knownReviewerIds = (artifacts) => {
+var reviewerRecords = (artifacts) => {
   const since = lstatSync7(artifacts.planPath).mtimeMs;
   try {
     const records = readTranscripts(
@@ -5030,7 +5055,12 @@ var knownReviewerIds = (artifacts) => {
       },
       artifacts.diffPath
     );
-    return new Set(records.map((record) => record.agentId));
+    if (records.length > MAX_REVIEWER_RECORDS) {
+      throw new ReviewerEvidenceUnavailableError(
+        `reviewer evidence exceeds ${MAX_REVIEWER_RECORDS} current-run records`
+      );
+    }
+    return records;
   } catch (cause) {
     if (cause instanceof TranscriptsUnavailableError) {
       throw new ReviewerEvidenceUnavailableError(cause.message);
@@ -5038,8 +5068,7 @@ var knownReviewerIds = (artifacts) => {
     throw cause;
   }
 };
-var validateVerifiedFindings = (value, artifacts) => {
-  const knownReviewers = knownReviewerIds(artifacts);
+var parseVerifiedFindings = (value, knownReviewers) => {
   if (!Array.isArray(value) || value.length > MAX_FINDINGS) {
     throw new TypeError(
       `findings must be an array of at most ${MAX_FINDINGS} entries`
@@ -5067,9 +5096,9 @@ var validateVerifiedFindings = (value, artifacts) => {
     if (!(finding.verification === "confirmed" || finding.verification === "rejected" || finding.verification === "uncertain")) {
       throw new TypeError(`findings[${index}].verification is invalid`);
     }
-    if (!Array.isArray(finding.sourceReviewerIds) || finding.sourceReviewerIds.length === 0 || finding.sourceReviewerIds.length > MAX_REVIEWERS_PER_FINDING) {
+    if (!Array.isArray(finding.sourceReviewerIds) || finding.sourceReviewerIds.length === 0 || finding.sourceReviewerIds.length > knownReviewers.size) {
       throw new TypeError(
-        `findings[${index}].sourceReviewerIds must contain 1-${MAX_REVIEWERS_PER_FINDING} ids`
+        `findings[${index}].sourceReviewerIds must contain 1-${knownReviewers.size} current-run ids`
       );
     }
     const sourceReviewerIds = finding.sourceReviewerIds.map(
@@ -5116,16 +5145,41 @@ var validateVerifiedFindings = (value, artifacts) => {
     };
   });
 };
-var findingArtifactIntegrity = (value) => createHash2("sha256").update(
-  JSON.stringify({
-    schemaVersion: value.schemaVersion,
-    findingsPath: value.findingsPath,
-    diffSha256: value.diffSha256,
-    findings: value.findings,
-    unresolvedFindings: value.unresolvedFindings,
-    stats: value.stats
-  })
-).digest("hex");
+var validateVerifiedFindings = (value, artifacts) => {
+  const knownReviewers = new Set(
+    reviewerRecords(artifacts).map((record) => record.agentId)
+  );
+  return parseVerifiedFindings(value, knownReviewers);
+};
+var verifiedFindingsFromEvidence = (artifacts) => {
+  const records = reviewerRecords(artifacts);
+  const evidence = records.filter(
+    (record2) => record2.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER)
+  );
+  if (evidence.length !== 1) {
+    throw new ReviewerEvidenceUnavailableError(
+      `expected exactly one current-run verifier transcript evidence record, found ${evidence.length}`
+    );
+  }
+  const record = evidence[0];
+  if (record.successfulToolCalls === 0) {
+    throw new ReviewerEvidenceUnavailableError(
+      "verifier transcript evidence has no successful tool calls"
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(
+      record.finalText.slice(VERIFIED_FINDINGS_EVIDENCE_MARKER.length)
+    );
+  } catch (cause) {
+    throw new TypeError(
+      `verifier transcript evidence is not valid JSON: ${cause.message}`
+    );
+  }
+  const knownReviewers = new Set(records.map((entry) => entry.agentId));
+  return parseVerifiedFindings(parsed, knownReviewers);
+};
 var severityRank = {
   blocker: 4,
   high: 3,
@@ -5166,13 +5220,7 @@ var deduplicate = (findings) => {
     };
   });
 };
-async function resolveFindingAnchors(request) {
-  const input = asRecord4(request.input, "input");
-  const unknown = Object.keys(input).find((key) => key !== "findings");
-  if (unknown !== void 0)
-    throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
-  const artifacts = validatedReviewArtifacts(request);
-  const findings = validateVerifiedFindings(input.findings, artifacts);
+var deriveResolvedFindings = (artifacts, findings) => {
   const resolutions = resolveAnchors(
     artifacts.diff,
     findings.map((entry) => ({
@@ -5204,7 +5252,7 @@ async function resolveFindingAnchors(request) {
   }
   const deduplicated = deduplicate(resolved);
   const findingsPath = join10(artifacts.artifactRoot, FINDINGS_NAME);
-  const payload = {
+  return {
     schemaVersion: 1,
     findingsPath,
     diffSha256: artifacts.diffSha256,
@@ -5219,12 +5267,22 @@ async function resolveFindingAnchors(request) {
       deduplicated: resolved.length - deduplicated.length
     }
   };
-  const output = {
-    ...payload,
-    integritySha256: findingArtifactIntegrity(payload)
-  };
+};
+async function resolveFindingAnchors(request) {
+  const input = asRecord4(request.input, "input");
+  const unknown = Object.keys(input).find((key) => key !== "findings");
+  if (unknown !== void 0)
+    throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
+  const artifacts = validatedReviewArtifacts(request);
+  const findings = validateVerifiedFindings(input.findings, artifacts);
+  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  if (JSON.stringify(findings) !== JSON.stringify(evidenced)) {
+    throw new TypeError(
+      "findings do not match the current-run verifier transcript evidence"
+    );
+  }
+  const output = deriveResolvedFindings(artifacts, evidenced);
   atomicJson(artifacts.artifactRoot, FINDINGS_NAME, output);
-  if (process.platform !== "win32") chmodSync3(findingsPath, 256);
   return output;
 }
 var writePrivateJson = atomicJson;
@@ -5279,7 +5337,6 @@ var FINDINGS_ARTIFACT_KEYS = /* @__PURE__ */ new Set([
   "schemaVersion",
   "findingsPath",
   "diffSha256",
-  "integritySha256",
   "findings",
   "unresolvedFindings",
   "stats"
@@ -5377,18 +5434,12 @@ var parseStats = (value, resolved, unresolved) => {
   }
   return stats;
 };
-var readFindings = (artifacts) => {
+var readFindings = (artifacts, expected) => {
   const findingsPath = join11(artifacts.artifactRoot, "findings.json");
-  const stat = lstatSync8(findingsPath);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new TypeError("findings.json must be a real file");
-  }
-  if (process.platform !== "win32" && (stat.mode & 511) !== 256) {
-    throw new TypeError("findings.json must remain read-only and private");
-  }
+  const serialized = readPrivateFileNoFollow(findingsPath, "findings.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync11(findingsPath, "utf8"));
+    parsed = JSON.parse(serialized);
   } catch (cause) {
     throw new TypeError(
       `findings.json is not valid JSON: ${cause.message}`
@@ -5401,7 +5452,7 @@ var readFindings = (artifacts) => {
   if (unknown !== void 0) {
     throw new TypeError(`unknown findings.json field: ${unknown}`);
   }
-  if (value.schemaVersion !== 1 || value.findingsPath !== findingsPath || value.diffSha256 !== artifacts.diffSha256 || typeof value.integritySha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.integritySha256) || !Array.isArray(value.findings) || !Array.isArray(value.unresolvedFindings)) {
+  if (value.schemaVersion !== 1 || value.findingsPath !== findingsPath || value.diffSha256 !== artifacts.diffSha256 || !Array.isArray(value.findings) || !Array.isArray(value.unresolvedFindings)) {
     throw new TypeError("findings.json does not belong to the captured diff");
   }
   const resolved = value.findings.map(
@@ -5424,39 +5475,14 @@ var readFindings = (artifacts) => {
     schemaVersion: 1,
     findingsPath,
     diffSha256: artifacts.diffSha256,
-    integritySha256: value.integritySha256,
     findings: resolved,
     unresolvedFindings: unresolved,
     stats: parseStats(value.stats, resolved.length, unresolved.length)
   };
-  if (findingArtifactIntegrity(output) !== output.integritySha256) {
-    throw new TypeError("findings.json integrity check failed");
-  }
-  const all = [...output.findings, ...output.unresolvedFindings];
-  const resolvedCount = output.findings.length;
-  const anchors = resolveAnchors(
-    artifacts.diff,
-    all.map((entry) => ({
-      id: entry.id,
-      path: entry.path,
-      anchor: entry.quotedCode
-    }))
-  );
-  for (const [index, anchor] of anchors.entries()) {
-    const stored = all[index];
-    if (index < resolvedCount) {
-      const resolved2 = stored;
-      const quoteSha256 = createHash3("sha256").update(resolved2.quotedCode).digest("hex");
-      if (anchor.status !== "resolved" || anchor.startLine !== resolved2.startLine || anchor.line !== resolved2.line || quoteSha256 !== resolved2.quotedCodeSha256) {
-        throw new TypeError(
-          "findings.json contains an anchor not derived from target.diff"
-        );
-      }
-    } else if (anchor.status !== "unmatched") {
-      throw new TypeError(
-        "findings.json marks a captured-diff anchor as unresolved"
-      );
-    }
+  if (JSON.stringify(output) !== JSON.stringify(expected)) {
+    throw new TypeError(
+      "findings.json does not match current-run verifier transcript evidence"
+    );
   }
   return output;
 };
@@ -5534,7 +5560,11 @@ async function composeReview2(request) {
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const findings = readFindings(artifacts);
+  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const findings = readFindings(
+    artifacts,
+    deriveResolvedFindings(artifacts, evidenced)
+  );
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(
     (entry) => entry.verification !== "rejected"
@@ -5637,10 +5667,10 @@ async function composeReview2(request) {
 
 // packages/hermes-engineering/src/handlers/test-efficacy.ts
 import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import {
   existsSync as existsSync8,
-  lstatSync as lstatSync9,
+  lstatSync as lstatSync8,
   readFileSync as readFileSync14,
   realpathSync as realpathSync9,
   rmSync as rmSync2
@@ -6110,7 +6140,7 @@ var validatedPlanPath2 = (request, raw) => {
   if (!within5(artifactRoot, path)) {
     throw new TypeError("planPath must be inside artifactRoot");
   }
-  if (!lstatSync9(path).isFile()) throw new TypeError("planPath must be a file");
+  if (!lstatSync8(path).isFile()) throw new TypeError("planPath must be a file");
   return path;
 };
 var parseInput4 = (request) => {
@@ -6223,7 +6253,7 @@ var safeRelativePath = (workspace, path) => {
   return normalized;
 };
 var probeTreePath = (workspace, requestId) => {
-  const suffix = createHash4("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
+  const suffix = createHash3("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
   return join12(workspace, `.hermes-efficacy-${suffix}`);
 };
 var createProbeTree = (workspace, probeTree) => {

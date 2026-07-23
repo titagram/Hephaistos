@@ -1,11 +1,14 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -20,7 +23,10 @@ import {
   type BuildPromptsOutput,
 } from "../src/handlers/build-prompts.js";
 import { dispatch } from "../src/handlers/index.js";
-import { resolveFindingAnchors } from "../src/handlers/resolve-anchors.js";
+import {
+  resolveFindingAnchors,
+  VERIFIED_FINDINGS_EVIDENCE_MARKER,
+} from "../src/handlers/resolve-anchors.js";
 import {
   initialReverseAuditState,
   nextReverseAudit,
@@ -63,6 +69,70 @@ const transcript = (agentId: string): string =>
     type: "user",
     message: { role: "user", parts: [{ text: "review fixture" }] },
   })}\n`;
+
+const verifierTranscript = (
+  findings: Array<Record<string, unknown>>,
+): string => {
+  const agentId = "verifier-evidence";
+  const records = [
+    {
+      agentId,
+      agentName: "finding-verifier",
+      type: "user",
+      message: {
+        role: "user",
+        parts: [{ text: "Consolidate the verified findings as JSON." }],
+      },
+    },
+    {
+      agentId,
+      agentName: "finding-verifier",
+      type: "assistant",
+      message: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              id: "verify",
+              name: "read_file",
+              args: { file_path: "verification-input.json" },
+            },
+          },
+        ],
+      },
+    },
+    {
+      agentId,
+      agentName: "finding-verifier",
+      type: "tool_result",
+      message: {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: "verify",
+              response: { output: "verified" },
+            },
+          },
+        ],
+      },
+    },
+    {
+      agentId,
+      agentName: "finding-verifier",
+      type: "assistant",
+      message: {
+        role: "model",
+        parts: [
+          {
+            text: `${VERIFIED_FINDINGS_EVIDENCE_MARKER}${JSON.stringify(findings)}`,
+          },
+        ],
+      },
+    },
+  ];
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+};
 
 interface Fixture {
   root: string;
@@ -220,6 +290,11 @@ const prepareCoverage = async (
   run: Fixture,
   effort: "low" | "medium" | "high" = "medium",
 ): Promise<void> => {
+  const transcriptRoot = join(run.artifactRoot, "subagents", "reviewers");
+  const verifierPath = join(transcriptRoot, "agent-verifier-evidence.jsonl");
+  const verifierEvidence = existsSync(verifierPath)
+    ? readFileSync(verifierPath, "utf8")
+    : null;
   const prompts = await buildPrompts(
     run.request("build-prompts", {
       planPath: run.planPath,
@@ -233,24 +308,39 @@ const prepareCoverage = async (
         ? "reviewer-b"
         : `reviewer-${index}`,
   );
-  const transcriptRoot = join(run.artifactRoot, "subagents", "reviewers");
   prompts.prompts.forEach((prompt, index) => {
     writeFileSync(
       join(transcriptRoot, `agent-${reviewerIds[index]}.jsonl`),
       completeTranscript(reviewerIds[index]!, prompt, prompts),
     );
   });
+  if (verifierEvidence !== null) {
+    writeFileSync(verifierPath, verifierEvidence);
+  }
+};
+
+const recordVerifierEvidence = (
+  run: Fixture,
+  findings: Array<Record<string, unknown>>,
+): void => {
+  const transcriptRoot = join(run.artifactRoot, "subagents", "reviewers");
+  writeFileSync(
+    join(transcriptRoot, "agent-verifier-evidence.jsonl"),
+    verifierTranscript(findings),
+  );
 };
 
 const resolveOne = async (
   run: Fixture,
   findings: Array<Record<string, unknown>> = [finding()],
-) => resolveFindingAnchors(run.request("resolve-anchors", { findings }));
+) => {
+  recordVerifierEvidence(run, findings);
+  return resolveFindingAnchors(run.request("resolve-anchors", { findings }));
+};
 
 const replaceFindingsArtifact = (path: string, value: unknown): void => {
   chmodSync(path, 0o600);
   writeFileSync(path, JSON.stringify(value));
-  if (process.platform !== "win32") chmodSync(path, 0o400);
 };
 
 afterEach(() => {
@@ -282,9 +372,63 @@ describe("verified findings and anchors", () => {
     expect(JSON.parse(readFileSync(result.findingsPath, "utf8"))).toEqual(
       result,
     );
-    expect(statSync(result.findingsPath).mode & 0o777).toBe(
-      process.platform === "win32" ? 0o600 : 0o400,
+    expect(statSync(result.findingsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("accepts the union of all current-run source reviewer ids when deduplicating", async () => {
+    const run = fixture();
+    const transcriptRoot = join(run.artifactRoot, "subagents", "reviewers");
+    const reviewerIds = Array.from(
+      { length: 40 },
+      (_, index) => `source-${index}`,
     );
+    for (const reviewerId of reviewerIds) {
+      writeFileSync(
+        join(transcriptRoot, `agent-${reviewerId}.jsonl`),
+        transcript(reviewerId),
+      );
+    }
+
+    const candidates = [
+      finding({ id: "union-a", sourceReviewerIds: reviewerIds.slice(0, 20) }),
+      finding({ id: "union-b", sourceReviewerIds: reviewerIds.slice(20) }),
+    ];
+    const result = await resolveOne(run, candidates);
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]!.sourceReviewerIds).toHaveLength(40);
+    expect(result.findings[0]!.sourceReviewerIds).toEqual(
+      [...reviewerIds].sort(),
+    );
+    await prepareCoverage(run);
+    for (const reviewerId of reviewerIds) {
+      writeFileSync(
+        join(transcriptRoot, `agent-${reviewerId}.jsonl`),
+        transcript(reviewerId),
+      );
+    }
+    recordVerifierEvidence(run, candidates);
+    const composed = await composeReview(
+      run.request("compose-review", cleanFacts),
+    );
+    expect(composed.event).toBe("REQUEST_CHANGES");
+  });
+
+  it("rejects caller findings that differ from verifier transcript evidence", async () => {
+    const run = fixture();
+    const transcriptRoot = join(run.artifactRoot, "subagents", "reviewers");
+    writeFileSync(
+      join(transcriptRoot, "agent-verifier-evidence.jsonl"),
+      verifierTranscript([finding()]),
+    );
+
+    await expect(
+      resolveFindingAnchors(
+        run.request("resolve-anchors", {
+          findings: [finding({ severity: "low" })],
+        }),
+      ),
+    ).rejects.toThrow(/verifier transcript evidence/);
   });
 
   it.each([
@@ -374,7 +518,45 @@ describe("computed verdict", () => {
 
     await expect(
       composeReview(run.request("compose-review", cleanFacts)),
-    ).rejects.toThrow(/integrity|not derived from target\.diff/);
+    ).rejects.toThrow();
+  });
+
+  it("rejects a semantic rewrite even when the old plain hash is recomputed", async () => {
+    const run = fixture();
+    const resolved = await resolveOne(run);
+    await prepareCoverage(run);
+    const stored = JSON.parse(readFileSync(resolved.findingsPath, "utf8")) as {
+      integritySha256: string;
+      findings: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    stored.findings[0]!.severity = "low";
+    const { integritySha256: _oldHash, ...hashable } = stored;
+    stored.integritySha256 = createHash("sha256")
+      .update(JSON.stringify(hashable))
+      .digest("hex");
+    replaceFindingsArtifact(resolved.findingsPath, stored);
+
+    await expect(
+      composeReview(run.request("compose-review", cleanFacts)),
+    ).rejects.toThrow(
+      /verifier transcript evidence|unknown findings\.json field/,
+    );
+  });
+
+  it("rejects a symlink substituted for findings.json", async () => {
+    if (process.platform === "win32") return;
+    const run = fixture();
+    const resolved = await resolveOne(run);
+    await prepareCoverage(run);
+    const outside = join(run.root, "forged-findings.json");
+    writeFileSync(outside, readFileSync(resolved.findingsPath));
+    unlinkSync(resolved.findingsPath);
+    symlinkSync(outside, resolved.findingsPath);
+
+    await expect(
+      composeReview(run.request("compose-review", cleanFacts)),
+    ).rejects.toThrow(/findings\.json/);
   });
 
   it.each([
@@ -454,6 +636,7 @@ describe("computed verdict", () => {
 describe("engine dispatch", () => {
   it("returns typed statuses for anchor and verdict operations", async () => {
     const run = fixture();
+    recordVerifierEvidence(run, [finding()]);
     const anchors = await dispatch(
       run.request("resolve-anchors", { findings: [finding()] }),
     );

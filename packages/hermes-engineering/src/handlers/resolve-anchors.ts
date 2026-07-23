@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -18,6 +20,7 @@ import {
   readTranscripts,
   resolveAnchors as resolveQwenAnchors,
   TranscriptsUnavailableError,
+  type AgentRecord,
 } from "../shims/qwenReviewRuntime.js";
 
 export type FindingSeverity = "blocker" | "high" | "medium" | "low";
@@ -50,7 +53,6 @@ export interface ResolveFindingAnchorsOutput {
   schemaVersion: 1;
   findingsPath: string;
   diffSha256: string;
-  integritySha256: string;
   findings: ResolvedFinding[];
   unresolvedFindings: UnresolvedFinding[];
   stats: {
@@ -95,7 +97,9 @@ const MAX_TITLE_BYTES = 4_096;
 const MAX_BODY_BYTES = 65_536;
 const MAX_QUOTE_BYTES = 262_144;
 const MAX_PATH_BYTES = 4_096;
-const MAX_REVIEWERS_PER_FINDING = 32;
+const MAX_REVIEWER_RECORDS = 1_024;
+export const VERIFIED_FINDINGS_EVIDENCE_MARKER =
+  "Hermes-Verified-Findings-v1\n";
 
 const asRecord = (value: unknown, label: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -226,7 +230,6 @@ const atomicWrite = (
   try {
     chmodSync(temporary, 0o600);
     renameSync(temporary, destination);
-    chmodSync(destination, 0o600);
     if (process.platform !== "win32") {
       const directory = openSync(artifactRoot, "r");
       try {
@@ -243,6 +246,40 @@ const atomicWrite = (
     }
   }
   return destination;
+};
+
+export const readPrivateFileNoFollow = (
+  path: string,
+  label: string,
+): string => {
+  const flags =
+    constants.O_RDONLY |
+    (process.platform === "win32" ? 0 : constants.O_NOFOLLOW);
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, flags);
+  } catch (cause) {
+    throw new TypeError(
+      `${label} could not be opened safely: ${(cause as Error).message}`,
+    );
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) throw new TypeError(`${label} must be a regular file`);
+    if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) {
+      throw new TypeError(`${label} must be private to the current user`);
+    }
+    if (
+      process.platform !== "win32" &&
+      typeof process.getuid === "function" &&
+      stat.uid !== process.getuid()
+    ) {
+      throw new TypeError(`${label} must be owned by the current user`);
+    }
+    return readFileSync(descriptor, "utf8");
+  } finally {
+    closeSync(descriptor);
+  }
 };
 
 const atomicJson = (
@@ -278,7 +315,7 @@ export const validatePrivateDestination = (
   return destination;
 };
 
-const knownReviewerIds = (artifacts: ReviewArtifacts): Set<string> => {
+const reviewerRecords = (artifacts: ReviewArtifacts): AgentRecord[] => {
   const since = lstatSync(artifacts.planPath).mtimeMs;
   try {
     const records = readTranscripts(
@@ -290,7 +327,12 @@ const knownReviewerIds = (artifacts: ReviewArtifacts): Set<string> => {
       },
       artifacts.diffPath,
     );
-    return new Set(records.map((record) => record.agentId));
+    if (records.length > MAX_REVIEWER_RECORDS) {
+      throw new ReviewerEvidenceUnavailableError(
+        `reviewer evidence exceeds ${MAX_REVIEWER_RECORDS} current-run records`,
+      );
+    }
+    return records;
   } catch (cause) {
     if (cause instanceof TranscriptsUnavailableError) {
       throw new ReviewerEvidenceUnavailableError(cause.message);
@@ -299,11 +341,10 @@ const knownReviewerIds = (artifacts: ReviewArtifacts): Set<string> => {
   }
 };
 
-export const validateVerifiedFindings = (
+const parseVerifiedFindings = (
   value: unknown,
-  artifacts: ReviewArtifacts,
+  knownReviewers: ReadonlySet<string>,
 ): VerifiedFinding[] => {
-  const knownReviewers = knownReviewerIds(artifacts);
   if (!Array.isArray(value) || value.length > MAX_FINDINGS) {
     throw new TypeError(
       `findings must be an array of at most ${MAX_FINDINGS} entries`,
@@ -347,10 +388,10 @@ export const validateVerifiedFindings = (
     if (
       !Array.isArray(finding.sourceReviewerIds) ||
       finding.sourceReviewerIds.length === 0 ||
-      finding.sourceReviewerIds.length > MAX_REVIEWERS_PER_FINDING
+      finding.sourceReviewerIds.length > knownReviewers.size
     ) {
       throw new TypeError(
-        `findings[${index}].sourceReviewerIds must contain 1-${MAX_REVIEWERS_PER_FINDING} ids`,
+        `findings[${index}].sourceReviewerIds must contain 1-${knownReviewers.size} current-run ids`,
       );
     }
     const sourceReviewerIds = finding.sourceReviewerIds.map(
@@ -400,26 +441,47 @@ export const validateVerifiedFindings = (
   });
 };
 
-export const findingArtifactIntegrity = (value: {
-  schemaVersion: 1;
-  findingsPath: string;
-  diffSha256: string;
-  findings: ResolvedFinding[];
-  unresolvedFindings: UnresolvedFinding[];
-  stats: ResolveFindingAnchorsOutput["stats"];
-}): string =>
-  createHash("sha256")
-    .update(
-      JSON.stringify({
-        schemaVersion: value.schemaVersion,
-        findingsPath: value.findingsPath,
-        diffSha256: value.diffSha256,
-        findings: value.findings,
-        unresolvedFindings: value.unresolvedFindings,
-        stats: value.stats,
-      }),
-    )
-    .digest("hex");
+export const validateVerifiedFindings = (
+  value: unknown,
+  artifacts: ReviewArtifacts,
+): VerifiedFinding[] => {
+  const knownReviewers = new Set(
+    reviewerRecords(artifacts).map((record) => record.agentId),
+  );
+  return parseVerifiedFindings(value, knownReviewers);
+};
+
+export const verifiedFindingsFromEvidence = (
+  artifacts: ReviewArtifacts,
+): VerifiedFinding[] => {
+  const records = reviewerRecords(artifacts);
+  const evidence = records.filter((record) =>
+    record.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER),
+  );
+  if (evidence.length !== 1) {
+    throw new ReviewerEvidenceUnavailableError(
+      `expected exactly one current-run verifier transcript evidence record, found ${evidence.length}`,
+    );
+  }
+  const record = evidence[0]!;
+  if (record.successfulToolCalls === 0) {
+    throw new ReviewerEvidenceUnavailableError(
+      "verifier transcript evidence has no successful tool calls",
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      record.finalText.slice(VERIFIED_FINDINGS_EVIDENCE_MARKER.length),
+    ) as unknown;
+  } catch (cause) {
+    throw new TypeError(
+      `verifier transcript evidence is not valid JSON: ${(cause as Error).message}`,
+    );
+  }
+  const knownReviewers = new Set(records.map((entry) => entry.agentId));
+  return parseVerifiedFindings(parsed, knownReviewers);
+};
 
 const severityRank: Record<FindingSeverity, number> = {
   blocker: 4,
@@ -472,15 +534,10 @@ const deduplicate = (findings: ResolvedFinding[]): ResolvedFinding[] => {
     });
 };
 
-export async function resolveFindingAnchors(
-  request: EngineRequest,
-): Promise<ResolveFindingAnchorsOutput> {
-  const input = asRecord(request.input, "input");
-  const unknown = Object.keys(input).find((key) => key !== "findings");
-  if (unknown !== undefined)
-    throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
-  const artifacts = validatedReviewArtifacts(request);
-  const findings = validateVerifiedFindings(input.findings, artifacts);
+export const deriveResolvedFindings = (
+  artifacts: ReviewArtifacts,
+  findings: VerifiedFinding[],
+): ResolveFindingAnchorsOutput => {
   const resolutions = resolveQwenAnchors(
     artifacts.diff,
     findings.map((entry) => ({
@@ -516,7 +573,7 @@ export async function resolveFindingAnchors(
   }
   const deduplicated = deduplicate(resolved);
   const findingsPath = join(artifacts.artifactRoot, FINDINGS_NAME);
-  const payload = {
+  return {
     schemaVersion: 1 as const,
     findingsPath,
     diffSha256: artifacts.diffSha256,
@@ -531,12 +588,25 @@ export async function resolveFindingAnchors(
       deduplicated: resolved.length - deduplicated.length,
     },
   };
-  const output: ResolveFindingAnchorsOutput = {
-    ...payload,
-    integritySha256: findingArtifactIntegrity(payload),
-  };
+};
+
+export async function resolveFindingAnchors(
+  request: EngineRequest,
+): Promise<ResolveFindingAnchorsOutput> {
+  const input = asRecord(request.input, "input");
+  const unknown = Object.keys(input).find((key) => key !== "findings");
+  if (unknown !== undefined)
+    throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
+  const artifacts = validatedReviewArtifacts(request);
+  const findings = validateVerifiedFindings(input.findings, artifacts);
+  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  if (JSON.stringify(findings) !== JSON.stringify(evidenced)) {
+    throw new TypeError(
+      "findings do not match the current-run verifier transcript evidence",
+    );
+  }
+  const output = deriveResolvedFindings(artifacts, evidenced);
   atomicJson(artifacts.artifactRoot, FINDINGS_NAME, output);
-  if (process.platform !== "win32") chmodSync(findingsPath, 0o400);
   return output;
 }
 

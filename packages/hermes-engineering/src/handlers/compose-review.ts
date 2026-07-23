@@ -1,11 +1,9 @@
-import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { CheckStatus, EngineRequest } from "../protocol.js";
 import {
   composeReview as composeQwenReview,
-  resolveAnchors as resolveQwenAnchors,
   type ReviewEvent,
 } from "../shims/qwenReviewRuntime.js";
 import {
@@ -16,7 +14,9 @@ import {
   validatedReviewArtifacts,
   validatePrivateDestination,
   validateVerifiedFindings,
-  findingArtifactIntegrity,
+  deriveResolvedFindings,
+  readPrivateFileNoFollow,
+  verifiedFindingsFromEvidence,
   writePrivateJson,
   writePrivateText,
   type FindingSeverity,
@@ -117,7 +117,6 @@ const FINDINGS_ARTIFACT_KEYS = new Set([
   "schemaVersion",
   "findingsPath",
   "diffSha256",
-  "integritySha256",
   "findings",
   "unresolvedFindings",
   "stats",
@@ -277,18 +276,13 @@ const parseStats = (
 
 const readFindings = (
   artifacts: ReviewArtifacts,
+  expected: ResolveFindingAnchorsOutput,
 ): ResolveFindingAnchorsOutput => {
   const findingsPath = join(artifacts.artifactRoot, "findings.json");
-  const stat = lstatSync(findingsPath);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new TypeError("findings.json must be a real file");
-  }
-  if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o400) {
-    throw new TypeError("findings.json must remain read-only and private");
-  }
+  const serialized = readPrivateFileNoFollow(findingsPath, "findings.json");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(findingsPath, "utf8")) as unknown;
+    parsed = JSON.parse(serialized) as unknown;
   } catch (cause) {
     throw new TypeError(
       `findings.json is not valid JSON: ${(cause as Error).message}`,
@@ -305,8 +299,6 @@ const readFindings = (
     value.schemaVersion !== 1 ||
     value.findingsPath !== findingsPath ||
     value.diffSha256 !== artifacts.diffSha256 ||
-    typeof value.integritySha256 !== "string" ||
-    !/^[0-9a-f]{64}$/u.test(value.integritySha256) ||
     !Array.isArray(value.findings) ||
     !Array.isArray(value.unresolvedFindings)
   ) {
@@ -332,46 +324,14 @@ const readFindings = (
     schemaVersion: 1,
     findingsPath,
     diffSha256: artifacts.diffSha256,
-    integritySha256: value.integritySha256,
     findings: resolved,
     unresolvedFindings: unresolved,
     stats: parseStats(value.stats, resolved.length, unresolved.length),
   };
-  if (findingArtifactIntegrity(output) !== output.integritySha256) {
-    throw new TypeError("findings.json integrity check failed");
-  }
-  const all = [...output.findings, ...output.unresolvedFindings];
-  const resolvedCount = output.findings.length;
-  const anchors = resolveQwenAnchors(
-    artifacts.diff,
-    all.map((entry) => ({
-      id: entry.id,
-      path: entry.path,
-      anchor: entry.quotedCode,
-    })),
-  );
-  for (const [index, anchor] of anchors.entries()) {
-    const stored = all[index]!;
-    if (index < resolvedCount) {
-      const resolved = stored as ResolvedFinding;
-      const quoteSha256 = createHash("sha256")
-        .update(resolved.quotedCode)
-        .digest("hex");
-      if (
-        anchor.status !== "resolved" ||
-        anchor.startLine !== resolved.startLine ||
-        anchor.line !== resolved.line ||
-        quoteSha256 !== resolved.quotedCodeSha256
-      ) {
-        throw new TypeError(
-          "findings.json contains an anchor not derived from target.diff",
-        );
-      }
-    } else if (anchor.status !== "unmatched") {
-      throw new TypeError(
-        "findings.json marks a captured-diff anchor as unresolved",
-      );
-    }
+  if (JSON.stringify(output) !== JSON.stringify(expected)) {
+    throw new TypeError(
+      "findings.json does not match current-run verifier transcript evidence",
+    );
   }
   return output;
 };
@@ -467,7 +427,11 @@ export async function composeReview(
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const findings = readFindings(artifacts);
+  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const findings = readFindings(
+    artifacts,
+    deriveResolvedFindings(artifacts, evidenced),
+  );
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(
     (entry) => entry.verification !== "rejected",
