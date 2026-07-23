@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import stat
 from pathlib import Path
@@ -37,6 +38,37 @@ def _stage(root: Path, *, artifact: bytes = b"echo safe\n") -> None:
     (root / "bin/hello.sh").write_bytes(artifact)
     (root / "locks").mkdir()
     (root / "locks/hello.lock").write_bytes(b"hello==1\n")
+
+
+def _publish_after_barrier(
+    root: Path,
+    stage: Path,
+    manifest: dict[str, object],
+    barrier,
+    results,
+) -> None:
+    try:
+        barrier.wait(timeout=10)
+        published = GenerationStore(root).publish_staged(stage, manifest)
+        results.put(("ok", published.generation_id))
+    except BaseException as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+
+
+def _lock_then_crash(root: Path, ready) -> None:
+    store = GenerationStore(root)
+    store._secure_root()
+    with store._publication_lock():
+        ready.set()
+        os._exit(23)
+
+
+def _join_process(process: multiprocessing.Process) -> None:
+    process.join(timeout=15)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        pytest.fail("child process did not finish")
 
 
 def test_equivalent_staged_bytes_converge_and_final_tree_is_read_only(tmp_path: Path) -> None:
@@ -142,3 +174,138 @@ def test_empty_overlay_baseline_uses_normal_publication(tmp_path: Path) -> None:
 
     assert baseline.manifest["components"] == []
     assert store.verify(baseline.generation_id) == baseline
+
+
+def test_concurrent_first_publishers_converge_when_store_root_is_absent(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    root = tmp_path / "generations"
+    stages = [tmp_path / "stage-one", tmp_path / "stage-two"]
+    for stage in stages:
+        _stage(stage)
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_publish_after_barrier,
+            args=(root, stage, _manifest(), barrier, results),
+        )
+        for stage in stages
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        _join_process(process)
+
+    outcomes = [results.get(timeout=5) for _ in processes]
+    assert outcomes == [
+        ("ok", generation_id_for(_manifest())),
+        ("ok", generation_id_for(_manifest())),
+    ]
+    assert all(process.exitcode == 0 for process in processes)
+    assert GenerationStore(root).verify(generation_id_for(_manifest())).generation_id == generation_id_for(_manifest())
+
+
+def test_publication_lock_is_reacquired_after_process_crash(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    root = tmp_path / "generations"
+    ready = context.Event()
+    process = context.Process(target=_lock_then_crash, args=(root, ready))
+    process.start()
+    assert ready.wait(timeout=10)
+    _join_process(process)
+    assert process.exitcode == 23
+
+    stage = tmp_path / "stage"
+    _stage(stage)
+    assert (
+        GenerationStore(root).publish_staged(stage, _manifest()).generation_id
+        == generation_id_for(_manifest())
+    )
+
+
+def test_verify_rejects_generation_path_swapped_between_digest_phases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+    manifest_bytes = (published.root / "manifest.json").read_bytes()
+    artifact_inode = (published.root / "bin/hello.sh").stat().st_ino
+    original_read = os.read
+    swapped = False
+
+    def swap_generation() -> None:
+        nonlocal swapped
+        original = published.root.with_name(f".original-{published.generation_id}")
+        published.root.rename(original)
+        _stage(published.root, artifact=b"tampered\n")
+        (published.root / "manifest.json").write_bytes(manifest_bytes)
+        for path in (
+            published.root / "bin/hello.sh",
+            published.root / "locks/hello.lock",
+            published.root / "manifest.json",
+        ):
+            path.chmod(0o444)
+        (published.root / "bin").chmod(0o555)
+        (published.root / "locks").chmod(0o555)
+        published.root.chmod(0o555)
+        swapped = True
+
+    def racing_read(descriptor: int, count: int) -> bytes:
+        data = original_read(descriptor, count)
+        if (
+            not swapped
+            and not data
+            and stat.S_ISREG(os.fstat(descriptor).st_mode)
+            and os.fstat(descriptor).st_ino == artifact_inode
+        ):
+            swap_generation()
+        return data
+
+    monkeypatch.setattr(os, "read", racing_read)
+
+    with pytest.raises(ValueError, match="integrity"):
+        store.verify(published.generation_id)
+    assert swapped
+
+
+def test_publication_fsyncs_regular_files_after_they_become_read_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    seen: list[int] = []
+    original = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            seen.append(mode)
+        original(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    store.publish_staged(stage, _manifest())
+    assert 0o444 in seen
+
+
+def test_posix_capability_gate_is_bounded(monkeypatch, tmp_path: Path) -> None:
+    import hermes_cli.evolution.store as module
+
+    monkeypatch.delattr(module.os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(ValueError, match="POSIX"):
+        GenerationStore(tmp_path / "generations").verify("a" * 64)
+
+
+def test_posix_capability_gate_checks_descriptor_relative_primitives(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import hermes_cli.evolution.store as module
+
+    monkeypatch.setattr(module.os, "supports_dir_fd", frozenset())
+    with pytest.raises(ValueError, match="POSIX"):
+        GenerationStore(tmp_path / "generations").verify("a" * 64)

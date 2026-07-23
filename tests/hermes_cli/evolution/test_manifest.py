@@ -167,6 +167,56 @@ def test_manifest_rejects_noncanonical_privacy_sensitive_nested_fields(mutate) -
         validate_manifest(manifest)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "/private/tmp/private.txt",
+        r"C:\Users\alice\private.txt",
+        "relative/private.txt",
+        {"nested": {"path": "/private/tmp/private.txt"}},
+        {"nested": {"text": "x" * (1024 * 1024)}},
+        {"nested": {"material": "aB3dE5gH7jK9mN2pQ4rS6tV8"}},
+    ],
+)
+def test_manifest_rejects_local_paths_and_unbounded_text_in_nested_payloads(
+    payload: object,
+) -> None:
+    manifest = _manifest()
+    manifest["build_environment"]["payload"] = payload  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "sensitive_key",
+    ["prompt", "system_prompt_body", "transcript", "raw-output", "raw_output"],
+)
+def test_manifest_rejects_sensitive_evidence_keys_at_any_depth(
+    sensitive_key: str,
+) -> None:
+    manifest = _manifest()
+    manifest["build_environment"]["nested"] = {sensitive_key: "not identity"}  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+def test_manifest_accepts_uppercase_symbolic_credential_reference() -> None:
+    manifest = _manifest()
+    manifest["credential_references"] = ["OPENAI_API_KEY"]
+
+    validate_manifest(manifest)
+
+
+def test_manifest_rejects_opaque_credential_material_as_a_reference() -> None:
+    manifest = _manifest()
+    manifest["credential_references"] = ["aB3dE5gH7jK9mN2pQ4rS6tV8"]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
 @pytest.mark.parametrize("kind", ["extra-dir", "fifo", "manifest"])
 def test_staging_inventory_is_exact_and_has_no_manifest(tmp_path: Path, kind: str) -> None:
     manifest = _manifest()

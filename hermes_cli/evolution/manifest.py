@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import stat
@@ -19,13 +20,45 @@ _EXCLUDED = frozenset({"generation_id", "created_at", "attestations"})
 _TOP = frozenset({"schema_version", "generation_id", "parent_generation_id", "source_suggestion_id", "blueprint_digest", "stable_base", "compatibility_range", "components", "dependency_constraints", "resolved_versions", "credential_references", "service_prerequisites", "capabilities", "invariants", "verification_commands", "canary_policy", "resource_ceilings", "expected_organism_diff", "build_environment", "builder_version", "rollback_plan", "incompatibility_reasons", "created_at", "attestations"})
 _REQUIRED = _TOP - {"generation_id", "attestations"}
 _CLASSES = frozenset({"skill", "script", "plugin", "mcp"})
+_COMPONENT_FIELDS = frozenset(
+    {
+        "class",
+        "logical_id",
+        "path",
+        "digest",
+        "source",
+        "author",
+        "license",
+        "provenance",
+        "capabilities",
+        "lockfiles",
+    }
+)
+_LOCKFILE_FIELDS = frozenset({"path", "digest"})
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._+-]+)?\Z", re.ASCII)
-_SENSITIVE = re.compile(r"(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|raw[_-]?output)\Z", re.I)
-_PATH_KEY = re.compile(r"(?:path|root|workspace|cwd|directory)\Z", re.I)
+_SENSITIVE = re.compile(
+    r"(?:^|[_-])(?:secret|password|api[_-]?key|access[_-]?token|prompt|transcript|raw[_-]?output)(?:$|[_-])",
+    re.I,
+)
 _SECRET = re.compile(r"(?:sk|pk)[_-](?:live|test|proj)[_-]|ghp[_-]|github[_-]pat[_-]|glpat[_-]|xox[bp][_-]|akia", re.I)
 _MAX_ITEMS = 64
 _MAX_TEXT = 512
+_MAX_KEY = 64
+_MAX_DEPTH = 8
+_MAX_NODES = 512
+_MAX_TOTAL_TEXT = 16 * 1024
+_MAX_INTEGER = (1 << 63) - 1
+_OPAQUE_IDENTITY_KEYS = frozenset(
+    {
+        "blueprint_digest",
+        "configuration_fingerprint",
+        "digest",
+        "generation_id",
+        "parent_generation_id",
+        "repository_commit",
+    }
+)
 
 
 def _fail(code: str = "invalid_manifest") -> None:
@@ -53,24 +86,88 @@ def _strings(value: object, *, symbolic: bool = False) -> list[str]:
     return values
 
 
-def _privacy(value: object, *, key: str | None = None, depth: int = 0) -> None:
-    if depth > 8:
+def _looks_like_local_path(value: str, *, allowed: bool) -> bool:
+    if allowed:
+        return False
+    if value.startswith(("/", "~", "./", "../", "\\", ".\\", "..\\")):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return True
+    return re.fullmatch(r"[^\s/\\]+(?:[/\\][^\s/\\]+)+", value) is not None
+
+
+def _privacy(
+    value: object,
+    *,
+    key: str | None = None,
+    depth: int = 0,
+    budget: list[int] | None = None,
+    local_path_allowed: bool = False,
+    source_allowed: bool = False,
+) -> None:
+    if budget is None:
+        budget = [0, 0]
+    budget[0] += 1
+    if depth > _MAX_DEPTH or budget[0] > _MAX_NODES:
         _fail()
     if key and _SENSITIVE.search(key) and key != "credential_references":
         _fail()
     if isinstance(value, str):
-        local = value.startswith(("/", "~", "./", "../", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value)
-        if "file://" in value.lower() or _SECRET.search(value) or (key and key != "path" and _PATH_KEY.search(key) and local):
+        _text(value)
+        budget[1] += len(value)
+        opaque = (
+            not local_path_allowed
+            and not source_allowed
+            and key not in _OPAQUE_IDENTITY_KEYS
+            and not (key and key.endswith("_digest"))
+        )
+        if (
+            budget[1] > _MAX_TOTAL_TEXT
+            or "file://" in value.lower()
+            or _SECRET.search(value)
+            or _looks_like_local_path(
+                value,
+                allowed=local_path_allowed or source_allowed,
+            )
+            or (
+                opaque
+                and not any(character.isspace() for character in value)
+                and _looks_like_credential_material(value)
+            )
+        ):
             _fail()
     elif isinstance(value, Mapping):
-        for child_key, child in _mapping(value).items():
-            _privacy(child, key=child_key, depth=depth + 1)
+        record = _mapping(value)
+        record_fields = frozenset(record)
+        component_record = record_fields == _COMPONENT_FIELDS
+        lockfile_record = record_fields == _LOCKFILE_FIELDS
+        for child_key, child in record.items():
+            if not child_key or len(child_key) > _MAX_KEY or "\0" in child_key:
+                _fail()
+            budget[1] += len(child_key)
+            if budget[1] > _MAX_TOTAL_TEXT:
+                _fail()
+            _privacy(
+                child,
+                key=child_key,
+                depth=depth + 1,
+                budget=budget,
+                local_path_allowed=child_key == "path"
+                and (component_record or lockfile_record),
+                source_allowed=child_key == "source" and component_record,
+            )
     elif isinstance(value, list):
         if len(value) > _MAX_ITEMS:
             _fail()
         for child in value:
-            _privacy(child, key=key, depth=depth + 1)
-    elif value is not None and not isinstance(value, (bool, int, float)):
+            _privacy(child, key=key, depth=depth + 1, budget=budget)
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            _fail()
+    elif isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) > _MAX_INTEGER:
+            _fail()
+    elif value is not None and not isinstance(value, bool):
         _fail()
 
 
@@ -91,10 +188,9 @@ def _files(manifest: Mapping[str, object]) -> list[tuple[str, str]]:
     result: list[tuple[str, str]] = []
     logical_ids: set[str] = set()
     paths: set[str] = set()
-    expected = {"class", "logical_id", "path", "digest", "source", "author", "license", "provenance", "capabilities", "lockfiles"}
     for component in components:
         record = _mapping(component)
-        if set(record) != expected or record["class"] not in _CLASSES:
+        if set(record) != _COMPONENT_FIELDS or record["class"] not in _CLASSES:
             _fail()
         logical_id = _text(record["logical_id"])
         if logical_id in logical_ids:
@@ -114,7 +210,7 @@ def _files(manifest: Mapping[str, object]) -> list[tuple[str, str]]:
             _fail()
         for lock in locks:
             item = _mapping(lock)
-            if set(item) != {"path", "digest"}:
+            if set(item) != _LOCKFILE_FIELDS:
                 _fail()
             lock_path = require_relative_posix_path(item["path"])
             if lock_path in paths:
@@ -124,9 +220,25 @@ def _files(manifest: Mapping[str, object]) -> list[tuple[str, str]]:
     return result
 
 
-def _open_parent(root: Path, relative: str) -> tuple[int, str]:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(root, flags)
+def _directory_flags() -> int:
+    try:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    except AttributeError:
+        _fail()
+    raise AssertionError("unreachable")
+
+
+def _leaf_flags() -> int:
+    try:
+        return os.O_RDONLY | os.O_NOFOLLOW
+    except AttributeError:
+        _fail()
+    raise AssertionError("unreachable")
+
+
+def _open_parent_at(root_descriptor: int, relative: str) -> tuple[int, str]:
+    flags = _directory_flags()
+    descriptor = os.dup(root_descriptor)
     try:
         for segment in relative.split("/")[:-1]:
             child = os.open(segment, flags, dir_fd=descriptor)
@@ -138,10 +250,10 @@ def _open_parent(root: Path, relative: str) -> tuple[int, str]:
         raise
 
 
-def _digest_file(root: Path, relative: str) -> str:
-    parent, leaf = _open_parent(root, relative)
+def _digest_file_at(root_descriptor: int, relative: str) -> str:
+    parent, leaf = _open_parent_at(root_descriptor, relative)
     try:
-        descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        descriptor = os.open(leaf, _leaf_flags(), dir_fd=parent)
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -159,7 +271,9 @@ def _digest_file(root: Path, relative: str) -> str:
     raise AssertionError("unreachable")
 
 
-def _inventory(root: Path, declared: set[str], *, published: bool) -> None:
+def _inventory_at(
+    root_descriptor: int, declared: set[str], *, published: bool
+) -> None:
     expected_dirs = {"/".join(path.split("/")[:index]) for path in declared for index in range(1, len(path.split("/")))}
     files = set(declared)
     if published:
@@ -171,7 +285,9 @@ def _inventory(root: Path, declared: set[str], *, published: bool) -> None:
             info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
                 found_dirs.add(relative)
-                child = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=descriptor)
+                child = os.open(
+                    name, _directory_flags(), dir_fd=descriptor
+                )
                 try:
                     visit(child, relative)
                 finally:
@@ -179,15 +295,42 @@ def _inventory(root: Path, declared: set[str], *, published: bool) -> None:
             elif not stat.S_ISREG(info.st_mode) or relative not in files or info.st_nlink != 1:
                 _fail()
     try:
-        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            visit(root_fd)
-        finally:
-            os.close(root_fd)
+        visit(root_descriptor)
     except OSError:
         _fail()
     if found_dirs != expected_dirs:
         _fail()
+
+
+def _validate_files_at(
+    manifest: Mapping[str, object],
+    root_descriptor: int,
+    *,
+    published: bool,
+) -> None:
+    info = os.fstat(root_descriptor)
+    if not stat.S_ISDIR(info.st_mode):
+        _fail()
+    files = _files(manifest)
+    _inventory_at(
+        root_descriptor,
+        {path for path, _ in files},
+        published=published,
+    )
+    for path, digest in files:
+        if _digest_file_at(root_descriptor, path) != digest:
+            _fail()
+
+
+def _same_inode(path: Path, descriptor: int) -> bool:
+    path_info = path.lstat()
+    descriptor_info = os.fstat(descriptor)
+    return (
+        not stat.S_ISLNK(path_info.st_mode)
+        and stat.S_ISDIR(path_info.st_mode)
+        and (path_info.st_dev, path_info.st_ino)
+        == (descriptor_info.st_dev, descriptor_info.st_ino)
+    )
 
 
 def identity_payload(manifest: Mapping[str, object]) -> dict[str, object]:
@@ -213,7 +356,7 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
     if stable["repository_commit"] is not None and re.fullmatch(r"[0-9a-f]{40}", _text(stable["repository_commit"])) is None:
         _fail()
     _text(record["compatibility_range"])
-    files = _files(record)
+    _files(record)
     for key in ("dependency_constraints", "service_prerequisites", "capabilities", "invariants", "verification_commands", "incompatibility_reasons"):
         _strings(record[key])
     _strings(record["credential_references"], symbolic=True)
@@ -231,13 +374,31 @@ def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) 
         _fail()
     if root is not None:
         try:
-            info = root.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                _fail()
-            declared = {path for path, _ in files}
-            _inventory(root, declared, published="generation_id" in record)
-            for path, digest in files:
-                if _digest_file(root, path) != digest:
+            root_descriptor = os.open(root, _directory_flags())
+            try:
+                _validate_files_at(
+                    record,
+                    root_descriptor,
+                    published="generation_id" in record,
+                )
+                if not _same_inode(root, root_descriptor):
                     _fail()
+            finally:
+                os.close(root_descriptor)
         except OSError:
             _fail()
+
+
+def _validate_manifest_at_fd(
+    manifest: Mapping[str, object],
+    root_descriptor: int,
+    *,
+    published: bool,
+) -> None:
+    """Validate one manifest and all declared bytes from an anchored root FD."""
+
+    validate_manifest(manifest)
+    try:
+        _validate_files_at(manifest, root_descriptor, published=published)
+    except OSError:
+        _fail()
