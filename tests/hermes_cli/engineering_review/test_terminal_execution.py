@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import hermes_cli.engineering_review.terminal_execution as terminal_execution
 from hermes_cli.engineering_review.execution_policy import decide_execution
 from hermes_cli.engineering_review.protocol import EngineRequest
 from hermes_cli.engineering_review.runs import ReviewRun
@@ -490,6 +491,103 @@ def test_cleanup_failure_is_observed_and_records_public_recovery(
     recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
     assert recovery["containerId"] == "b" * 64
     assert recovery["taskId"] == f"review-{run.run_id}"
+
+
+def test_distinct_environments_cannot_share_teardown_result_when_ids_are_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = _run(tmp_path, monkeypatch)
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    calls: list[tuple[str, str]] = []
+
+    class Environment:
+        def __init__(self, name: str, cleanup_error: str | None) -> None:
+            self.name = name
+            self._cleanup_error = cleanup_error
+
+        def execute(self, command: str, **kwargs: object) -> dict[str, object]:
+            if command == "node --version":
+                return {"returncode": 0, "output": "v22.23.1\n"}
+            if command.startswith("git clone "):
+                return {"returncode": 0, "output": ""}
+            request = json.loads(str(kwargs["stdin_data"]))
+            return {
+                "returncode": 0,
+                "output": json.dumps({
+                    "protocolVersion": 1,
+                    "requestId": request["requestId"],
+                    "status": "passed",
+                    "output": {"packageManager": None, "commands": []},
+                    "diagnostics": [],
+                }),
+            }
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+            calls.append((self.name, "cleanup"))
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            assert timeout == 60
+            calls.append((self.name, "wait"))
+            return True
+
+        @property
+        def cleanup_error(self) -> str | None:
+            return self._cleanup_error
+
+        def recovery_identity(self) -> dict[str, str]:
+            container_id = "a" * 64 if self.name == "first" else "b" * 64
+            return {
+                "containerId": container_id,
+                "containerName": f"hermes-review-{self.name}",
+                "taskId": f"review-{run.run_id}",
+            }
+
+    first_environment = Environment("first", None)
+    second_environment = Environment("second", "docker rm -f exited 1")
+    environments = [first_environment, second_environment]
+    # Deterministically reproduce the old cache collision. Before the fix,
+    # terminal_execution.id shadowed builtins.id and both environments shared
+    # one teardown result. The implementation must not depend on integer IDs.
+    monkeypatch.setattr(terminal_execution, "id", lambda _value: 1, raising=False)
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=lambda **_kwargs: environments.pop(0),
+        snapshot_builder=_write_fake_bundle,
+    )
+
+    first = executor.invoke(_request(run), timeout=30, source=_source(run))
+    second = executor.invoke(_request(run), timeout=30, source=_source(run))
+
+    assert first.status == "passed"
+    assert second.status == "inconclusive"
+    assert second.diagnostics[0].code == "cleanup_failed"
+    assert calls == [
+        ("first", "cleanup"),
+        ("first", "wait"),
+        ("second", "cleanup"),
+        ("second", "wait"),
+    ]
+    assert executor._teardown_environment(first_environment, {}) is None
+    assert calls == [
+        ("first", "cleanup"),
+        ("first", "wait"),
+        ("second", "cleanup"),
+        ("second", "wait"),
+    ]
+    recovery = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert recovery["containerId"] == "b" * 64
+    assert recovery["containerName"] == "hermes-review-second"
 
 
 def test_snapshot_failure_is_inconclusive_and_removes_runtime_staging(

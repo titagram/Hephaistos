@@ -329,7 +329,11 @@ class SandboxTerminalExecutor:
         self._idle.set()
         self._active_environment: _TerminalEnvironment | None = None
         self._active_identity: dict[str, str] | None = None
-        self._teardown_results: dict[int, str | None] = {}
+        # Keep the environment objects themselves alive for the executor's
+        # authority-scoped lifetime. Caching by id(environment) is unsafe:
+        # CPython may reuse that integer after an environment is collected,
+        # causing a later container to skip cleanup entirely.
+        self._teardown_results: list[tuple[_TerminalEnvironment, str | None]] = []
         self._cleanup_failure: str | None = None
 
     def cancel(self) -> str | None:
@@ -400,10 +404,10 @@ class SandboxTerminalExecutor:
         environment: _TerminalEnvironment,
         identity: Mapping[str, str] | None,
     ) -> str | None:
-        key = id(environment)
         with self._teardown_lock:
-            if key in self._teardown_results:
-                return self._teardown_results[key]
+            for torn_down, result in self._teardown_results:
+                if torn_down is environment:
+                    return result
             failure: str | None = None
             try:
                 environment.cleanup(force_remove=True)
@@ -413,7 +417,7 @@ class SandboxTerminalExecutor:
                     failure = f"sandbox cleanup failed: {environment.cleanup_error}"
             except Exception as exc:
                 failure = f"sandbox cleanup failed: {exc}"
-            self._teardown_results[key] = failure
+            self._teardown_results.append((environment, failure))
             if failure is not None:
                 self._record_cleanup_failure(failure, identity)
             return failure
