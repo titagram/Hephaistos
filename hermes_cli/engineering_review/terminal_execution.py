@@ -337,6 +337,7 @@ class SandboxTerminalExecutor:
         # causing a later container to skip cleanup entirely.
         self._teardown_results: list[tuple[_TerminalEnvironment, str | None]] = []
         self._cleanup_failure: str | None = None
+        self._sandbox_recovery_required = False
 
     def cancel(self) -> str | None:
         """Terminate and observe the active sandbox before authority exit."""
@@ -397,6 +398,7 @@ class SandboxTerminalExecutor:
         self, failure: str, identity: Mapping[str, str] | None
     ) -> None:
         self._cleanup_failure = failure
+        self._sandbox_recovery_required = True
         payload: dict[str, object] = {
             "schemaVersion": 1,
             "runId": self._run.run_id,
@@ -572,11 +574,49 @@ class SandboxTerminalExecutor:
                             f"{self._run.run_id}"
                         ),
                     )
+                try:
+                    # Publish the recovery lease while holding the same lock
+                    # that cancel() uses to observe active work.  Therefore an
+                    # authority close cannot make this run recoverable between
+                    # marking the invocation active and persisting its lease.
+                    self._record_factory_pending()
+                except (OSError, ReviewRunError):
+                    self._cleanup_failure = (
+                        "sandbox creation lease could not be recorded"
+                    )
+                    return _inconclusive(
+                        request,
+                        "cleanup_failed",
+                        (
+                            "sandbox creation lease could not be recorded; "
+                            f"recovery: hermes review cleanup --run "
+                            f"{self._run.run_id}"
+                        ),
+                    )
                 self._idle.clear()
+            response: EngineResponse | None = None
+            lease_failure: str | None = None
             try:
-                return self._invoke_once(request, timeout=timeout, source=source)
+                response = self._invoke_once(request, timeout=timeout, source=source)
             finally:
+                # A teardown failure replaces the creating lease with a
+                # validated container identity.  Every other exit, including
+                # validation/config/snapshot failures, finalizes it as clean
+                # before shutdown may observe the invocation as idle.
+                if not self._sandbox_recovery_required:
+                    lease_failure = self._record_factory_clean()
                 self._idle.set()
+            if lease_failure is not None:
+                return _inconclusive(
+                    request,
+                    "cleanup_failed",
+                    (
+                        f"{lease_failure}; recovery: "
+                        f"hermes review cleanup --run {self._run.run_id}"
+                    ),
+                )
+            assert response is not None
+            return response
 
     def _invoke_once(
         self,
@@ -692,7 +732,6 @@ class SandboxTerminalExecutor:
         environment: _TerminalEnvironment | None = None
         environment_identity: dict[str, str] | None = None
         response: EngineResponse | None = None
-        factory_pending = False
         try:
             container_config = dict(config)
             container_config.update({
@@ -707,8 +746,6 @@ class SandboxTerminalExecutor:
                 # User extra args can override network/mount/security flags.
                 "docker_extra_args": [],
             })
-            self._record_factory_pending()
-            factory_pending = True
             environment = self._environment_factory(
                 env_type="docker",
                 image=str(config.get("docker_image", "")),
@@ -840,8 +877,6 @@ class SandboxTerminalExecutor:
                 cleanup_failure = self._teardown_environment(
                     environment, environment_identity
                 )
-            if factory_pending and cleanup_failure is None:
-                cleanup_failure = self._record_factory_clean()
             with self._environment_lock:
                 if self._active_environment is environment:
                     self._active_environment = None

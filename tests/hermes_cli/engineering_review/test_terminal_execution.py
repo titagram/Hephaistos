@@ -13,6 +13,7 @@ import pytest
 
 import hermes_cli.engineering_review.terminal_execution as terminal_execution
 from hermes_cli.engineering_review import recovery
+from hermes_cli.engineering_review.authority import ReviewAuthority
 from hermes_cli.engineering_review.execution_policy import decide_execution
 from hermes_cli.engineering_review.protocol import EngineRequest
 from hermes_cli.engineering_review.runs import ReviewRun, ReviewRunError
@@ -959,6 +960,123 @@ def test_shutdown_timeout_blocks_recovery_until_factory_finalizes_identity(
     }]
     assert result["removed"] == [f"docker:{container_id}"]
     assert result["status"] == "complete"
+
+
+def test_authority_close_during_snapshot_blocks_recovery_until_lease_finalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(terminal_execution, "_SHUTDOWN_WAIT_SECONDS", 0.05)
+
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="https://github.com/o/r/pull/1",
+        effort="low",
+        session_id="session-1",
+    )
+    run = authority.run
+    (run.root / "plan.json").write_text(
+        '{"files":[],"buildTest":{"commands":[]}}',
+        encoding="utf-8",
+    )
+    snapshot_entered = threading.Event()
+    release_snapshot = threading.Event()
+    factory_calls: list[str] = []
+
+    def blocked_snapshot(
+        _source: SandboxSource, destination: Path, _environment: object
+    ) -> None:
+        snapshot_entered.set()
+        assert release_snapshot.wait(timeout=5)
+        destination.write_bytes(b"fake git bundle")
+
+    class Environment:
+        cleanup_error = None
+
+        def execute(self, _command: str, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("cancelled sandbox must not execute commands")
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            assert force_remove is True
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            assert timeout == 60
+            return True
+
+        def recovery_identity(self) -> dict[str, str]:
+            return {}
+
+    def factory(**_kwargs: object) -> Environment:
+        factory_calls.append("factory")
+        return Environment()
+
+    decision = decide_execution(
+        target_kind="pr",
+        sandbox="docker",
+        allow_local=False,
+        environ={"PATH": "/usr/bin"},
+    )
+    executor = SandboxTerminalExecutor(
+        run=run,
+        decision=decision,
+        config_loader=lambda: {
+            "env_type": "docker",
+            "docker_image": "trusted-image",
+        },
+        environment_factory=factory,
+        snapshot_builder=blocked_snapshot,
+    )
+    authority._capture_completed = True  # noqa: SLF001 - lifecycle regression
+    authority._sandbox_executor = executor  # noqa: SLF001 - lifecycle regression
+    responses: list[object] = []
+    invoke_thread = threading.Thread(
+        target=lambda: responses.append(
+            executor.invoke(_request(run), timeout=30, source=_source(run))
+        )
+    )
+    invoke_thread.start()
+    assert snapshot_entered.wait(timeout=5)
+
+    authority.close()
+
+    assert authority.run.status == "cleanup_failed"
+    assert executor.cleanup_pending is True
+    pending = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert pending["state"] == "creating"
+
+    removed_worktrees: list[Path] = []
+    monkeypatch.setattr(recovery, "_repository_root", lambda _workspace: workspace)
+
+    def remove_worktree(_repo: Path, tree: Path) -> bool:
+        removed_worktrees.append(tree)
+        return False
+
+    monkeypatch.setattr(recovery, "_remove_registered_worktree", remove_worktree)
+
+    with pytest.raises(ReviewRunError, match="still in flight"):
+        recovery.recover_review_run(run.run_id)
+
+    assert removed_worktrees == []
+    assert ReviewRun.load(run.run_id, run.session_id).status == "cleanup_failed"
+
+    release_snapshot.set()
+    invoke_thread.join(timeout=5)
+
+    assert not invoke_thread.is_alive()
+    assert executor.cleanup_pending is False
+    assert factory_calls == ["factory"]
+    assert getattr(responses[0], "diagnostics")[0].code == "sandbox_execution_failed"
+    finalized = json.loads((run.root / "sandbox-recovery.json").read_text("utf-8"))
+    assert finalized["state"] == "clean"
+
+    result = recovery.recover_review_run(run.run_id)
+
+    assert result["status"] == "complete"
+    assert len(removed_worktrees) == 2
 
 
 def test_snapshot_failure_is_inconclusive_and_removes_runtime_staging(
