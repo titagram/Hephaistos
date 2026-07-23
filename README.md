@@ -179,7 +179,16 @@ when applicable, records its evidence under `~/.hermes/reviews/`, and leaves
 the verdict local: it never pushes, merges, comments on, approves, or requests
 changes on a remote PR. Reviewing untrusted PR code requires a configured
 sandbox or explicit approval before build/tests run; static review remains
-available when execution is denied. Node.js 22 or newer is required.
+available when execution is denied.
+
+Automated sandbox execution for reviews currently supports **Docker only**.
+The image must contain Node.js 22 or newer and pre-provision project test
+dependencies at `/opt/hermes-review-dependencies`; review containers run with
+Docker networking disabled and receive no provider credentials. Modal,
+Daytona, SSH, and Singularity terminal backends currently return an
+`inconclusive` executable check rather than falling back to the host. The
+authority requires Unix peer credentials: Windows users must run Hades under
+WSL; native Windows review sessions are not currently supported.
 
 The deterministic review engine incorporates a provenance-pinned source slice
 from [Qwen Code](https://github.com/QwenLM/qwen-code), licensed under

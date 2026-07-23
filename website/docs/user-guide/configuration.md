@@ -135,6 +135,19 @@ review remains available but executable evidence stays inconclusive. Remote
 access is read-only and the final verdict remains a local artifact until a
 separate user-authorized workflow publishes it.
 
+Review sandboxing currently supports `terminal.env_type: docker` only. The
+Docker image must have Node.js 22 or newer and must pre-provision offline test
+dependencies at `/opt/hermes-review-dependencies` (including a `node_modules`
+tree for Vitest or the `python-ready` marker plus pytest for Python). Hades
+forces `network: none`, strips provider credentials, and does not honor user
+Docker flags that could weaken those constraints.
+
+Modal, Daytona, SSH, and Singularity currently lack the authority's provable
+workspace-and-network confinement contract. Their executable review checks
+return `inconclusive`; Hades does not silently run them on the host. Native
+Windows also lacks the kernel-authenticated Unix authority channel, so use
+Hades inside WSL for engineering reviews.
+
 The packaged deterministic engine incorporates a pinned source slice from
 [Qwen Code](https://github.com/QwenLM/qwen-code/tree/d064bd7dcf98e0255283068a775f6e49d70db8aa)
 under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0); its wheel

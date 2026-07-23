@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.parse import quote
 
 import pytest
@@ -23,7 +25,6 @@ from hermes_cli.engineering_review.execution_policy import decide_execution
 from hermes_cli.engineering_review.protocol import EngineRequest
 from hermes_cli.engineering_review.runs import ReviewRun
 from hermes_cli.engineering_review.terminal_execution import (
-    SandboxSource,
     SandboxTerminalExecutor,
 )
 from toolsets import _HERMES_CORE_TOOLS
@@ -226,6 +227,167 @@ def _write_reviewer(
     )
     assert transcript is not None
     return transcript
+
+
+def _stub_completion(content: str) -> SimpleNamespace:
+    message = SimpleNamespace(
+        content=content,
+        tool_calls=None,
+        reasoning=None,
+        reasoning_content=None,
+        reasoning_details=None,
+        refusal=None,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="stop")],
+        model="stub/review-model",
+        usage=None,
+    )
+
+
+@pytest.mark.integration
+def test_public_hades_review_runs_real_agent_with_stable_prompt_and_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise review_command -> launch_review_chat -> AIAgent without a model API."""
+    import run_agent
+    import tools.skills_tool as skills_tool
+    from agent.skill_commands import build_preloaded_skills_prompt
+    from hermes_cli.engineering_review import command
+    from hermes_cli.subcommands.review import build_review_parser
+    from run_agent import AIAgent
+
+    home = tmp_path / "hermes-home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(
+        skills_tool,
+        "SKILLS_DIR",
+        REPOSITORY_ROOT / "skills" / "software-development",
+    )
+    workspace, _base_ref = _fixture_workspace("pytest", tmp_path)
+    before = _git(workspace, "status", "--porcelain=v1", "-z", text=False)
+    before_remote_refs = _git(
+        workspace, "for-each-ref", "--format=%(refname):%(objectname)", "refs/remotes"
+    )
+    requests: list[dict[str, object]] = []
+    client = MagicMock()
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        requests.append(kwargs)
+        return _stub_completion(f"local review turn {len(requests)}")
+
+    client.chat.completions.create.side_effect = create
+    tool_definitions = [
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "stub terminal schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    monkeypatch.setattr(
+        run_agent,
+        "get_tool_definitions",
+        lambda *_a, **_k: tool_definitions,
+    )
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda *_a, **_k: {})
+    monkeypatch.setattr(run_agent, "OpenAI", lambda *_a, **_k: client)
+
+    observed: dict[str, object] = {}
+    lifecycle: list[str] = []
+
+    class StubAuthority:
+        def __init__(self, **_kwargs: object) -> None:
+            lifecycle.append("created")
+
+        def start_serving(self) -> None:
+            lifecycle.append("serving")
+
+        def close(self) -> None:
+            lifecycle.append("closed")
+
+    def stub_chat(args: object) -> None:
+        session_id = "public-review-e2e"
+        skill_prompt, loaded, missing = build_preloaded_skills_prompt(
+            list(args.skills),
+            task_id=session_id,
+        )
+        assert loaded == ["requesting-code-review"]
+        assert missing == []
+        assert "hermes-review-engine capture-target" in skill_prompt
+
+        agent = AIAgent(
+            api_key="stub-key",
+            base_url="https://model.invalid/v1",
+            model="stub/review-model",
+            session_id=session_id,
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = client
+        args.session_ready_callback(session_id)
+        first = agent.run_conversation(
+            args.query,
+            system_message=skill_prompt,
+            task_id=session_id,
+        )
+        second = agent.run_conversation(
+            "Return the local verdict without publishing it.",
+            conversation_history=first["messages"],
+            task_id=session_id,
+        )
+        observed["messages"] = second["messages"]
+
+    monkeypatch.setattr(command, "_load_chat_command", lambda: stub_chat)
+    monkeypatch.setattr(command, "ReviewAuthority", StubAuthority)
+    monkeypatch.setattr(command, "_prune_completed_review_runs", lambda: None)
+    monkeypatch.chdir(workspace)
+    parser = argparse.ArgumentParser(prog="hades")
+    build_review_parser(
+        parser.add_subparsers(dest="command"),
+        cmd_review=command.review_command,
+    )
+    args = parser.parse_args(["review", "local", "--effort", "medium"])
+
+    assert args.func(args) == 0
+    assert lifecycle == ["created", "serving", "closed"]
+    assert len(requests) == 2
+    system_prompts = [
+        next(
+            message["content"]
+            for message in request["messages"]
+            if message["role"] == "system"
+        )
+        for request in requests
+    ]
+    assert system_prompts[0] == system_prompts[1]
+    assert [
+        json.dumps(request["tools"], sort_keys=True, separators=(",", ":"))
+        for request in requests
+    ] == [json.dumps(requests[0]["tools"], sort_keys=True, separators=(",", ":"))] * 2
+    roles = [
+        message["role"]
+        for message in observed["messages"]
+        if message["role"] != "system"
+    ]
+    assert all(left != right for left, right in zip(roles, roles[1:]))
+    assert _git(workspace, "status", "--porcelain=v1", "-z", text=False) == before
+    assert (
+        _git(
+            workspace,
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/remotes",
+        )
+        == before_remote_refs
+    )
+    assert str(_git(workspace, "remote")).strip() == ""
+    assert all("review" not in name for name in _HERMES_CORE_TOOLS)
 
 
 @pytest.mark.integration
@@ -490,99 +652,187 @@ def test_review_artifacts_fail_unread_coverage_and_deduplicate_findings(
 
 
 @pytest.mark.integration
-def test_real_docker_sandbox_acceptance_requires_reachable_preprovisioned_image(
+@pytest.mark.parametrize(
+    ("kind", "runner", "effective", "inert", "untracked"),
+    [
+        (
+            "pytest",
+            "pytest",
+            "tests/test_effective.py",
+            "tests/test_inert.py",
+            "untracked.py",
+        ),
+        (
+            "vitest",
+            "vitest",
+            "tests/effective.test.ts",
+            "tests/inert.test.ts",
+            "untracked.ts",
+        ),
+    ],
+)
+def test_real_docker_sandbox_runs_captured_fixture_through_authority_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    runner: str,
+    effective: str,
+    inert: str,
+    untracked: str,
 ) -> None:
-    """Declare the real sandbox gate without replacing it with a fake backend.
+    """Run real fixture code in the network-disabled Hermes Docker backend.
 
     Operators opt in with an image containing Node >=22 and the fixed
-    ``/opt/hermes-review-dependencies`` layer. A missing daemon socket or image
-    is an environment limitation and never counts as passing sandbox execution.
+    ``/opt/hermes-review-dependencies`` layer. Once opted in, an unavailable
+    daemon or image is a failing release gate, never a skip.
     """
+    from hermes_cli.engineering_review import authority as authority_module
+    from tools.terminal_tool import _create_environment
+
     image = os.environ.get("HERMES_REVIEW_SANDBOX_E2E_IMAGE")
     if not image:
         pytest.skip(
             "real sandbox E2E requires HERMES_REVIEW_SANDBOX_E2E_IMAGE; "
             "the image must pre-provision offline review dependencies"
         )
-    probe = subprocess.run(
-        ["docker", "info", "--format", "{{.ServerVersion}}"],
-        capture_output=True,
-        text=True,
-        timeout=20,
+    try:
+        probe = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        image_probe = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.fail(f"Docker sandbox acceptance was requested but unavailable: {exc}")
+    assert probe.returncode == 0, (
+        "Docker sandbox acceptance was requested but the daemon is unreachable: "
+        f"{probe.stderr.strip()}"
     )
-    if probe.returncode != 0:
-        pytest.skip(f"Docker daemon is not reachable: {probe.stderr.strip()}")
+    assert image_probe.returncode == 0, (
+        "Docker sandbox acceptance was requested but its preprovisioned image "
+        f"is unavailable: {image_probe.stderr.strip()}"
+    )
 
     home = tmp_path / "hermes-home"
     home.mkdir(mode=0o700)
     monkeypatch.setenv("HERMES_HOME", str(home))
-    workspace = tmp_path / "sandbox-source"
-    workspace.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=workspace, check=True)
-    (workspace / "README.md").write_text("sandbox acceptance\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "sandbox fixture"],
-        cwd=workspace,
-        env=GIT_ENV,
-        check=True,
-    )
-    head = str(_git(workspace, "rev-parse", "HEAD")).strip()
-    run = ReviewRun.create(
-        workspace,
-        target="https://github.com/example/repository/pull/1",
-        effort="low",
-        session_id="sandbox-e2e",
-    )
-    plan_path = run.atomic_artifact(
-        "plan.json",
-        json.dumps(
-            {
-                "files": [],
-                "hermes": {
-                    "buildTest": {
-                        "packageManager": "npm",
-                        "commands": [],
-                    }
-                },
-            },
-            separators=(",", ":"),
-        ).encode(),
-    )
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-enter-container")
+    monkeypatch.setenv("REVIEW_E2E_SENTINEL", "must-not-enter-container")
+    workspace, base_ref = _fixture_workspace(kind, tmp_path)
+    head_ref = _commit_fixture_head(workspace, untracked)
+    before = _git(workspace, "status", "--porcelain=v1", "-z", text=False)
     decision = decide_execution(
         target_kind="pr",
         sandbox="docker",
         allow_local=False,
-        environ={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"},
     )
-    executor = SandboxTerminalExecutor(
-        run=run,
-        decision=decision,
-        config_loader=lambda: {
-            "env_type": "docker",
-            "docker_image": image,
-        },
+    factory_calls: list[dict[str, object]] = []
+    container_identities: list[dict[str, str]] = []
+
+    class RecordingEnvironment:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+
+        def execute(self, command: str, **kwargs: object):
+            result = self.inner.execute(command, **kwargs)
+            identity = dict(self.inner.recovery_identity())
+            if identity and identity not in container_identities:
+                container_identities.append(identity)
+            return result
+
+        def cleanup(self, *, force_remove: bool = False) -> None:
+            self.inner.cleanup(force_remove=force_remove)
+
+        def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+            return self.inner.wait_for_cleanup(timeout=timeout)
+
+        @property
+        def cleanup_error(self) -> str | None:
+            return self.inner.cleanup_error
+
+        def recovery_identity(self):
+            return self.inner.recovery_identity()
+
+    def environment_factory(**kwargs: object) -> RecordingEnvironment:
+        factory_calls.append(dict(kwargs))
+        return RecordingEnvironment(_create_environment(**kwargs))
+
+    class ConfiguredExecutor(SandboxTerminalExecutor):
+        def __init__(self, *, run: ReviewRun, decision: object) -> None:
+            super().__init__(
+                run=run,
+                decision=decision,
+                config_loader=lambda: {
+                    "env_type": "docker",
+                    "docker_image": image,
+                },
+                environment_factory=environment_factory,
+            )
+
+    monkeypatch.setattr(
+        authority_module,
+        "SandboxTerminalExecutor",
+        ConfiguredExecutor,
     )
-    response = executor.invoke(
-        EngineRequest(
-            request_id="real-sandbox-build-test",
-            command="build-test",
-            workspace=workspace.resolve(),
-            artifact_root=run.root,
-            input={
-                "planPath": str(plan_path),
+    worktree_path: Path | None = None
+    with ReviewAuthority(
+        workspace=workspace,
+        target=f"{base_ref}..{head_ref}",
+        effort="medium",
+        session_id=f"sandbox-e2e-{kind}",
+        execution_decision=decision,
+    ) as authority:
+        capture = _invoke(authority, "capture-target", {"kind": "local"})
+        assert capture.status == "passed", capture.to_wire()
+        worktree_path = Path(str(capture.output["worktreePath"]))
+        assert worktree_path.is_dir()
+        efficacy = _invoke(
+            authority,
+            "test-efficacy",
+            {
+                "planPath": capture.output["planPath"],
+                "baseRef": base_ref,
+                "runner": runner,
                 "timeoutMs": 60_000,
-                "execution": decision.to_wire(),
             },
-        ),
-        timeout=90,
-        source=SandboxSource(worktree=workspace, base_ref=head, head_ref=head),
-    )
-    cleanup_failure = executor.shutdown()
-    assert response.status == "passed", [
-        (item.code, item.message) for item in response.diagnostics
-    ]
-    assert response.output["commands"] == []
-    assert cleanup_failure is None
+        )
+        assert efficacy.status == "failed", json.dumps(efficacy.to_wire(), indent=2)
+        assert efficacy.output["gated"] == [effective]
+        assert efficacy.output["inert"] == [inert]
+        assert efficacy.output["inconclusive"] == []
+        assert efficacy.output["cleanupFailure"] is None
+        cleanup = ReviewAuthorityClient(authority.run.session_id).cleanup(
+            authority.run.run_id,
+            timeout=60,
+        )
+        assert cleanup.status == "passed"
+
+    assert factory_calls
+    for call in factory_calls:
+        assert call["network"] is False
+        assert call["mount_hermes_resources"] is False
+        assert call["allow_implicit_env_passthrough"] is False
+        container_config = call["container_config"]
+        assert container_config["docker_forward_env"] == []
+        assert container_config["docker_extra_args"] == []
+        assert "OPENAI_API_KEY" not in container_config["docker_env"]
+        assert "REVIEW_E2E_SENTINEL" not in container_config["docker_env"]
+    assert container_identities
+    for identity in container_identities:
+        inspect = subprocess.run(
+            ["docker", "inspect", identity["containerId"]],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert inspect.returncode != 0, (
+            f"sandbox container survived cleanup: {identity}"
+        )
+    assert worktree_path is not None and not worktree_path.exists()
+    assert _git(workspace, "status", "--porcelain=v1", "-z", text=False) == before

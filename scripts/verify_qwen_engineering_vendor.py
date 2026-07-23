@@ -3,34 +3,37 @@
 
 from __future__ import annotations
 
+import argparse
+import ast
 import hashlib
 import json
-import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VENDOR_ROOT = ROOT / "third_party" / "qwen-code"
-MANIFEST_PATH = VENDOR_ROOT / "UPSTREAM.json"
-BUNDLE_PATH = ROOT / "hermes_cli" / "engineering_dist" / "hermes-engineering.mjs"
-BUNDLE_NOTICE_PATH = ROOT / "hermes_cli" / "engineering_dist" / "NOTICE.qwen-code"
-PACKAGED_PROVENANCE_PATH = (
-    ROOT / "hermes_cli" / "engineering_dist" / "UPSTREAM.qwen-code.json"
+TYPESCRIPT_ROOTS = (
+    Path("packages/hermes-engineering/src"),
+    Path("third_party/qwen-code/packages/cli/src/commands/review"),
+    Path("third_party/qwen-code/packages/cli/src/services"),
 )
-PRODUCTION_ROOTS = (
-    ROOT / "packages" / "hermes-engineering" / "src",
-    VENDOR_ROOT / "packages" / "cli" / "src" / "commands" / "review",
-    VENDOR_ROOT / "packages" / "cli" / "src" / "services",
-)
-IMPORT_RE = re.compile(
-    r"""(?:from\s*|import\s*\()\s*['"](?P<specifier>[^'"]+)['"]""",
-    re.MULTILINE,
+PYTHON_REVIEW_SURFACE = (
+    Path("hermes_cli/engineering_review"),
+    Path("hermes_cli/subcommands/review.py"),
+    Path("agent/review_evidence.py"),
 )
 
 
-def _manifest() -> dict[str, object]:
-    value = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+def _vendor_root(root: Path) -> Path:
+    return root / "third_party" / "qwen-code"
+
+
+def _manifest(root: Path = ROOT) -> dict[str, object]:
+    value = json.loads(
+        (_vendor_root(root) / "UPSTREAM.json").read_text(encoding="utf-8")
+    )
     if not isinstance(value, dict) or value.get("schemaVersion") != 1:
         raise ValueError("UPSTREAM.json is not a supported provenance manifest")
     return value
@@ -56,9 +59,10 @@ def _manifest_files(manifest: dict[str, object]) -> list[dict[str, str]]:
     return result
 
 
-def verify_manifest_hashes() -> None:
-    for record in _manifest_files(_manifest()):
-        path = VENDOR_ROOT / record["path"]
+def verify_manifest_hashes(root: Path = ROOT) -> None:
+    vendor_root = _vendor_root(root)
+    for record in _manifest_files(_manifest(root)):
+        path = vendor_root / record["path"]
         if not path.is_file():
             raise ValueError(f"manifested vendor file is missing: {record['path']}")
         actual = _sha256(path)
@@ -69,11 +73,12 @@ def verify_manifest_hashes() -> None:
             )
 
 
-def verify_apache_headers() -> None:
-    for record in _manifest_files(_manifest()):
+def verify_apache_headers(root: Path = ROOT) -> None:
+    vendor_root = _vendor_root(root)
+    for record in _manifest_files(_manifest(root)):
         if not record["path"].endswith((".ts", ".js")):
             continue
-        prefix = (VENDOR_ROOT / record["path"]).read_text(encoding="utf-8")[:512]
+        prefix = (vendor_root / record["path"]).read_text(encoding="utf-8")[:512]
         if (
             "Copyright 2026 Qwen Team" not in prefix
             or "SPDX-License-Identifier: Apache-2.0" not in prefix
@@ -83,13 +88,14 @@ def verify_apache_headers() -> None:
             )
 
 
-def verify_no_unmanifested_vendor_files() -> None:
-    manifest = _manifest()
+def verify_no_unmanifested_vendor_files(root: Path = ROOT) -> None:
+    vendor_root = _vendor_root(root)
+    manifest = _manifest(root)
     expected = {record["path"] for record in _manifest_files(manifest)}
     expected.update({"NOTICE", "UPSTREAM.json"})
     actual = {
-        path.relative_to(VENDOR_ROOT).as_posix()
-        for path in VENDOR_ROOT.rglob("*")
+        path.relative_to(vendor_root).as_posix()
+        for path in vendor_root.rglob("*")
         if path.is_file()
     }
     extra = sorted(actual - expected)
@@ -100,8 +106,11 @@ def verify_no_unmanifested_vendor_files() -> None:
         )
 
 
-def verify_bundle_notice_and_hash() -> None:
-    manifest = _manifest()
+def verify_bundle_notice_and_hash(root: Path = ROOT) -> None:
+    manifest = _manifest(root)
+    bundle_path = root / "hermes_cli/engineering_dist/hermes-engineering.mjs"
+    notice_path = root / "hermes_cli/engineering_dist/NOTICE.qwen-code"
+    provenance_path = root / "hermes_cli/engineering_dist/UPSTREAM.qwen-code.json"
     bundle = manifest.get("hermesBundle")
     if (
         not isinstance(bundle, dict)
@@ -109,9 +118,9 @@ def verify_bundle_notice_and_hash() -> None:
         or not isinstance(bundle.get("sha256"), str)
     ):
         raise ValueError("UPSTREAM.json has no valid hermesBundle record")
-    if not BUNDLE_PATH.is_file() or _sha256(BUNDLE_PATH) != bundle["sha256"]:
+    if not bundle_path.is_file() or _sha256(bundle_path) != bundle["sha256"]:
         raise ValueError("packaged engineering-review bundle hash mismatch")
-    notice = BUNDLE_NOTICE_PATH.read_text(encoding="utf-8")
+    notice = notice_path.read_text(encoding="utf-8")
     commit = manifest.get("upstreamCommit")
     repository = manifest.get("repository")
     if (
@@ -122,62 +131,159 @@ def verify_bundle_notice_and_hash() -> None:
         or "Apache-2.0" not in notice
     ):
         raise ValueError("packaged bundle notice does not match Qwen provenance")
-    if PACKAGED_PROVENANCE_PATH.read_bytes() != MANIFEST_PATH.read_bytes():
+    if (
+        provenance_path.read_bytes()
+        != (_vendor_root(root) / "UPSTREAM.json").read_bytes()
+    ):
         raise ValueError("packaged Qwen provenance differs from UPSTREAM.json")
 
 
-def _production_files() -> Iterable[Path]:
-    for root in PRODUCTION_ROOTS:
-        for path in root.rglob("*"):
+def _typescript_files(root: Path) -> Iterable[Path]:
+    for relative_root in TYPESCRIPT_ROOTS:
+        source_root = root / relative_root
+        for path in source_root.rglob("*"):
             if (
                 path.is_file()
-                and path.suffix in {".ts", ".js", ".mjs"}
-                and not path.name.endswith((".test.ts", ".spec.ts"))
+                and path.suffix
+                in {".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"}
+                and ".test." not in path.name
+                and ".spec." not in path.name
             ):
                 yield path
 
 
+def _python_review_files(root: Path) -> Iterable[Path]:
+    for relative in PYTHON_REVIEW_SURFACE:
+        path = root / relative
+        if path.is_file():
+            yield path
+        elif path.is_dir():
+            yield from (
+                candidate for candidate in path.rglob("*.py") if candidate.is_file()
+            )
+
+
+def _typescript_specifiers(root: Path, path: Path) -> tuple[str, ...]:
+    node = shutil.which("node")
+    if node is None:
+        raise ValueError("Node.js is required for TypeScript AST verification")
+    # The parser is part of this verifier, not part of the repository copy
+    # being inspected.  Keeping it anchored beside this script also lets the
+    # negative-copy tests use the already installed TypeScript compiler.
+    helper = Path(__file__).with_name("qwen_engineering_imports.mjs")
+    completed = subprocess.run(
+        [node, str(helper), path.relative_to(root).as_posix()],
+        input=path.read_text(encoding="utf-8"),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            f"TypeScript AST verification failed for {path.relative_to(root)}: "
+            f"{completed.stderr.strip()}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("TypeScript AST helper returned invalid JSON") from exc
+    specifiers = payload.get("specifiers") if isinstance(payload, dict) else None
+    if not isinstance(specifiers, list) or not all(
+        isinstance(item, str) for item in specifiers
+    ):
+        raise ValueError("TypeScript AST helper returned invalid specifiers")
+    return tuple(specifiers)
+
+
 def verify_no_forbidden_imports(
     forbidden: tuple[str, ...] = ("provider", "telemetry", "submit"),
+    root: Path = ROOT,
 ) -> None:
     needles = tuple(item.casefold() for item in forbidden)
-    for path in _production_files():
-        source = path.read_text(encoding="utf-8")
-        for match in IMPORT_RE.finditer(source):
-            specifier = match.group("specifier").casefold()
-            segments = re.split(r"[/_.-]+", specifier)
+    separators = "/_.-"
+    for path in _typescript_files(root):
+        for raw_specifier in _typescript_specifiers(root, path):
+            specifier = raw_specifier.casefold()
+            segments = [specifier]
+            for separator in separators:
+                segments = [
+                    part for segment in segments for part in segment.split(separator)
+                ]
             if any(needle in segments for needle in needles):
                 raise ValueError(
-                    f"forbidden import {match.group('specifier')!r} in "
-                    f"{path.relative_to(ROOT)}"
+                    f"forbidden import {raw_specifier!r} in {path.relative_to(root)}"
                 )
+
+
+def _python_string_literals(path: Path) -> Iterable[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        raise ValueError(f"could not parse Python review surface: {path}") from exc
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, (ast.List, ast.Tuple)) and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            for item in node.elts
+        ):
+            yield " ".join(str(item.value) for item in node.elts)
 
 
 def verify_no_remote_mutation_strings(
-    forbidden: tuple[str, ...] = ("gh pr review", "git push", "git merge"),
+    forbidden: tuple[str, ...] = (
+        "gh pr review",
+        "gh pr comment",
+        "git push",
+        "git merge",
+    ),
+    root: Path = ROOT,
 ) -> None:
-    paths = [BUNDLE_PATH, *_production_files()]
-    for path in paths:
-        folded = path.read_text(encoding="utf-8").casefold()
-        for command in forbidden:
-            if command.casefold() in folded:
-                raise ValueError(
-                    f"remote mutation command {command!r} found in "
-                    f"{path.relative_to(ROOT)}"
-                )
+    text_paths = [
+        root / "hermes_cli/engineering_dist/hermes-engineering.mjs",
+        *_typescript_files(root),
+    ]
+    for path in text_paths:
+        values = (path.read_text(encoding="utf-8"),)
+        for value in values:
+            folded = value.casefold()
+            for command in forbidden:
+                if command.casefold() in folded:
+                    raise ValueError(
+                        f"remote mutation command {command!r} found in "
+                        f"{path.relative_to(root)}"
+                    )
+    for path in _python_review_files(root):
+        for value in _python_string_literals(path):
+            folded = value.casefold()
+            for command in forbidden:
+                if command.casefold() in folded:
+                    raise ValueError(
+                        f"remote mutation command {command!r} found in "
+                        f"{path.relative_to(root)}"
+                    )
 
 
-def verify() -> None:
-    verify_manifest_hashes()
-    verify_apache_headers()
-    verify_no_unmanifested_vendor_files()
-    verify_bundle_notice_and_hash()
-    verify_no_forbidden_imports()
-    verify_no_remote_mutation_strings()
+def verify(root: Path = ROOT) -> None:
+    root = root.resolve()
+    verify_manifest_hashes(root)
+    verify_apache_headers(root)
+    verify_no_unmanifested_vendor_files(root)
+    verify_bundle_notice_and_hash(root)
+    verify_no_forbidden_imports(root=root)
+    verify_no_remote_mutation_strings(root=root)
 
 
-def main() -> int:
-    verify()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT,
+        help="repository copy to verify (used by negative acceptance tests)",
+    )
+    args = parser.parse_args(argv)
+    verify(args.root)
     print("Qwen engineering vendor verification passed")
     return 0
 

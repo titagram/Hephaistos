@@ -49,6 +49,13 @@ const visit = node => {
     node.arguments.length >= 1
   ) {
     add(node.arguments[0]);
+  } else if (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'require' &&
+    node.arguments.length >= 1
+  ) {
+    add(node.arguments[0]);
   } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
     add(node.argument.literal);
   }

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -50,7 +51,7 @@ PACKAGE_MODULES = (
 )
 
 
-def _build_wheel(output: Path) -> Path:
+def _build_distributions(output: Path) -> tuple[Path, Path]:
     source = output.parent / "source"
     source.mkdir()
     for name in ("LICENSE", "MANIFEST.in", "README.md", "pyproject.toml"):
@@ -68,6 +69,7 @@ def _build_wheel(output: Path) -> Path:
             sys.executable,
             "-m",
             "build",
+            "--sdist",
             "--wheel",
             "--no-isolation",
             "--outdir",
@@ -79,8 +81,10 @@ def _build_wheel(output: Path) -> Path:
         check=True,
     )
     wheels = list(output.glob("*.whl"))
+    sdists = list(output.glob("*.tar.gz"))
     assert len(wheels) == 1
-    return wheels[0]
+    assert len(sdists) == 1
+    return wheels[0], sdists[0]
 
 
 def _venv_executable(root: Path, name: str) -> Path:
@@ -110,7 +114,7 @@ def _git(workspace: Path, *args: str) -> None:
 def test_wheel_review_engine_runs_without_source_tree_or_node_modules(
     tmp_path: Path,
 ) -> None:
-    wheel = _build_wheel(tmp_path / "dist")
+    wheel, sdist = _build_distributions(tmp_path / "dist")
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         assert ENGINE_BUNDLE in names
@@ -123,6 +127,15 @@ def test_wheel_review_engine_runs_without_source_tree_or_node_modules(
         provenance = json.loads(archive.read(ENGINE_PROVENANCE))
         assert provenance["schemaVersion"] == 1
         assert provenance["repository"] == ("https://github.com/QwenLM/qwen-code.git")
+    with tarfile.open(sdist, mode="r:gz") as archive:
+        names = set(archive.getnames())
+        for required in (
+            ENGINE_BUNDLE,
+            ENGINE_NOTICE,
+            ENGINE_PROVENANCE,
+            "third_party/qwen-code/LICENSE",
+        ):
+            assert any(name.endswith(f"/{required}") for name in names), required
 
     venv = tmp_path / "installed"
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
@@ -223,6 +236,15 @@ with ReviewAuthority(
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir(mode=0o700)
     env["HERMES_HOME"] = str(hermes_home)
+    node = subprocess.run(
+        ["node", "-p", "process.versions.node"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert node.returncode == 0, node.stderr
+    assert int(node.stdout.strip().split(".", maxsplit=1)[0]) >= 22
     result = subprocess.run(
         [str(python), str(probe), str(workspace), str(proxy)],
         cwd=tmp_path,

@@ -126,9 +126,18 @@ code from a pull request runs only in a configured Hermes sandbox or after an
 explicit local-execution approval. If neither is available, executable checks
 are denied while static review continues.
 
-The packaged engine requires Node.js 22 or newer. Completed artifacts are
-bounded by `review.retention_runs` (default `30`); active and cleanup-failed
-runs are preserved. If cleanup fails, use the printed recovery command:
+The review sandbox currently supports Docker only. The selected image must
+pre-provision Node.js 22 or newer and offline test dependencies at
+`/opt/hermes-review-dependencies`. Docker networking is disabled and host
+credentials are not forwarded. Modal, Daytona, SSH, and Singularity return
+`inconclusive` for executable review checks; they never fall back to the host.
+The authority is unavailable on native Windows because it requires
+kernel-authenticated Unix peers; use Hades under WSL.
+
+The packaged engine also requires Node.js 22 or newer on the Hades host.
+Completed artifacts are bounded by `review.retention_runs` (default `30`);
+active and cleanup-failed runs are preserved. If cleanup fails, use the
+printed recovery command:
 
 ```bash
 hermes review cleanup --run RUN_ID
