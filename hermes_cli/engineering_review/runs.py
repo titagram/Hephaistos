@@ -616,6 +616,32 @@ class ReviewRun:
         _drop_capability(loaded.root)
         return replace(loaded, status="complete")
 
+    def mark_cleanup_failed(self) -> ReviewRun:
+        """Record terminal cleanup failure when metadata remains trustworthy."""
+        loaded = self._validated_loaded()
+        if loaded.status == "cleanup_failed":
+            _drop_capability(loaded.root)
+            return loaded
+        if loaded.status != "active":
+            raise ReviewRunError("only active review runs can fail cleanup")
+        metadata = loaded._metadata()
+        now = _now()
+        metadata["status"] = "cleanup_failed"
+        metadata["updated_at"] = now
+        metadata["completed_at"] = now
+        loaded._write_metadata(metadata)
+        _drop_capability(loaded.root)
+        return replace(loaded, status="cleanup_failed")
+
+    def revoke_authority_capability(self) -> None:
+        """Unconditionally destroy process-local authority without reading disk.
+
+        Only the lifecycle owner calls this escape hatch. It intentionally does
+        not trust mutable metadata: terminal-state persistence is a separate,
+        best-effort operation and can never gate cryptographic revocation.
+        """
+        _drop_capability(self.root)
+
     def _metadata(self) -> dict[str, Any]:
         try:
             value = json.loads(_read_private_file(self.root / _METADATA_NAME))

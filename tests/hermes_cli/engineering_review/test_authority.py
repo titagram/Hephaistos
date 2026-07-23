@@ -25,6 +25,7 @@ from hermes_cli.engineering_review.bridge import (
 )
 from hermes_cli.engineering_review.protocol import EngineRequest
 from hermes_cli.engineering_review.runs import ReviewRunError
+from hermes_cli.engineering_review import runs as runs_module
 
 
 @pytest.fixture
@@ -272,3 +273,100 @@ def test_authority_rejects_unverified_peer_and_bundle_selection_fields(
         )
         with pytest.raises(ReviewAuthorityUnavailable, match="ownership"):
             ReviewAuthorityClient("parent").start()
+
+
+def test_unsafe_socket_directory_rolls_back_capability(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="parent",
+    )
+    unsafe = tmp_path / "unsafe-sockets"
+    unsafe.mkdir(mode=0o755)
+    authority.socket_path = unsafe / "authority.sock"
+
+    with pytest.raises(ReviewAuthorityUnavailable, match="not private"):
+        authority.start_serving()
+
+    assert authority.run.root not in runs_module._CAPABILITIES
+    assert authority.run.status == "cleanup_failed"
+    with pytest.raises(ReviewRunError, match="active run"):
+        authority.run.commit_reviewer_evidence("late", b"{}")
+
+
+def test_constructor_preflight_failure_cannot_create_capability(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    before = set(runs_module._CAPABILITIES)
+    monkeypatch.setattr(
+        authority_module,
+        "_authority_socket_path",
+        lambda _session_id: (_ for _ in ()).throw(RuntimeError("preflight failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        ReviewAuthority(
+            workspace=workspace,
+            target="local",
+            effort="low",
+            session_id="parent",
+        )
+
+    assert set(runs_module._CAPABILITIES) == before
+
+
+def test_thread_publication_failure_removes_socket_and_capability(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="parent",
+    )
+    monkeypatch.setattr(
+        authority_module.threading.Thread,
+        "start",
+        lambda _thread: (_ for _ in ()).throw(RuntimeError("thread failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread failed"):
+        authority.start_serving()
+
+    assert not authority.socket_path.exists()
+    assert authority.run.root not in runs_module._CAPABILITIES
+    assert authority.run.status == "cleanup_failed"
+
+
+def test_unsafe_metadata_cannot_prevent_close_from_revoking_capability(
+    fake_home: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    del fake_home
+    workspace = _git_workspace(tmp_path)
+    authority = ReviewAuthority(
+        workspace=workspace,
+        target="local",
+        effort="low",
+        session_id="parent",
+    )
+    authority.start_serving()
+    metadata = authority.run.root / "run.json"
+    metadata.chmod(0o644)
+
+    authority.close()
+
+    assert not authority.socket_path.exists()
+    assert authority.run.root not in runs_module._CAPABILITIES
+    assert "could not persist review authority terminal state" in caplog.text
+    metadata.chmod(0o600)
+    with pytest.raises(ReviewRunError, match="capability is unavailable"):
+        authority.run.commit_reviewer_evidence("late", b"{}")

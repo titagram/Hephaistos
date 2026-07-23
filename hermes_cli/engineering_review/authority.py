@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 import stat
@@ -35,6 +36,7 @@ from .runs import Effort, ReviewRun, ReviewRunError
 
 _AUTHORITY_VERSION = 1
 _SOCKET_DIRECTORY = f"hermes-review-authority-{getattr(os, 'geteuid', lambda: 0)()}"
+_LOGGER = logging.getLogger(__name__)
 
 
 class ReviewAuthorityUnavailable(RuntimeError):
@@ -121,6 +123,16 @@ class ReviewAuthority:
         session_id: str,
         bundle: Path | None = None,
     ) -> None:
+        self.socket_path = _authority_socket_path(session_id)
+        self._listener: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._socket_identity: tuple[int, int] | None = None
+        self._bridge = EngineeringReviewBridge(require_authority=True)
+        self._closed = False
+        # Run creation is deliberately last: once its capability exists there
+        # are no remaining constructor steps that can fail before ownership is
+        # fully established and ``start_serving`` can roll back transactionally.
         self.run = ReviewRun.create(
             workspace,
             target=target,
@@ -128,12 +140,6 @@ class ReviewAuthority:
             session_id=session_id,
             bundle=bundle,
         )
-        self.socket_path = _authority_socket_path(session_id)
-        self._listener: socket.socket | None = None
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-        self._socket_identity: tuple[int, int] | None = None
-        self._bridge = EngineeringReviewBridge(require_authority=True)
 
     def __enter__(self) -> ReviewAuthority:
         self.start_serving()
@@ -146,34 +152,90 @@ class ReviewAuthority:
         """Publish the private proxy socket after the session-bound run exists."""
         if self._listener is not None:
             return
-        if os.name == "nt" or not hasattr(socket, "AF_UNIX"):
-            self.run.mark_complete()
-            raise ReviewAuthorityUnavailable(
-                "review authority peer authentication is unavailable on this platform"
-            )
-        _private_socket_directory(self.socket_path.parent)
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            self.run.mark_complete()
-            raise ReviewAuthorityUnavailable("a review authority is already registered")
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if self._closed:
+            raise ReviewAuthorityUnavailable("review authority is already closed")
+        listener: socket.socket | None = None
         try:
+            if os.name == "nt" or not hasattr(socket, "AF_UNIX"):
+                raise ReviewAuthorityUnavailable(
+                    "review authority peer authentication is unavailable on this platform"
+                )
+            _private_socket_directory(self.socket_path.parent)
+            if self.socket_path.exists() or self.socket_path.is_symlink():
+                raise ReviewAuthorityUnavailable(
+                    "a review authority is already registered"
+                )
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(self.socket_path))
             os.chmod(self.socket_path, 0o600)
             info = self.socket_path.lstat()
             self._socket_identity = (info.st_dev, info.st_ino)
             listener.listen(8)
             listener.settimeout(0.1)
-        except BaseException:
-            listener.close()
-            self.run.mark_complete()
+            self._listener = listener
+            self._thread = threading.Thread(
+                target=self._serve,
+                name=f"review-authority-{self.run.run_id}",
+                daemon=True,
+            )
+            self._thread.start()
+        except BaseException as exc:
+            self._rollback_start(listener, exc)
             raise
-        self._listener = listener
-        self._thread = threading.Thread(
-            target=self._serve,
-            name=f"review-authority-{self.run.run_id}",
-            daemon=True,
-        )
-        self._thread.start()
+
+    def _remove_owned_socket(self) -> bool:
+        """Remove only the endpoint inode this owner published."""
+        try:
+            info = self.socket_path.lstat()
+            if self._socket_identity != (info.st_dev, info.st_ino):
+                return False
+            self.socket_path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        finally:
+            self._socket_identity = None
+
+    def _record_terminal_state(self, *, cleanup_failed: bool, cause: object) -> None:
+        """Persist status best-effort, but always revoke in-memory authority."""
+        try:
+            if cleanup_failed:
+                self.run = self.run.mark_cleanup_failed()
+            else:
+                self.run = self.run.mark_complete()
+        except BaseException:
+            _LOGGER.warning(
+                "could not persist review authority terminal state (%s)",
+                cause,
+                exc_info=True,
+            )
+        finally:
+            self.run.revoke_authority_capability()
+
+    def _rollback_start(
+        self, listener: socket.socket | None, cause: BaseException
+    ) -> None:
+        """Undo every partially published resource after startup failure."""
+        self._closed = True
+        self._stop.set()
+        rollback_cause: object = cause
+        try:
+            if listener is not None:
+                try:
+                    listener.close()
+                except OSError as exc:
+                    rollback_cause = f"{cause}; listener close failed: {exc}"
+            self._listener = None
+            self._thread = None
+            if not self._remove_owned_socket():
+                rollback_cause = f"{rollback_cause}; socket cleanup failed"
+        finally:
+            self._record_terminal_state(
+                cleanup_failed=True,
+                cause=rollback_cause,
+            )
 
     def _serve(self) -> None:
         listener = self._listener
@@ -233,33 +295,38 @@ class ReviewAuthority:
 
     def close(self) -> None:
         """Stop proxy access, remove the socket, and destroy run capabilities."""
-        listener = self._listener
-        if listener is None:
-            if self.run.status == "active":
-                try:
-                    self.run.mark_complete()
-                except ReviewRunError:
-                    pass
+        if self._closed:
+            self.run.revoke_authority_capability()
             return
-        self._stop.set()
-        listener.close()
-        self._listener = None
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
-                raise ReviewAuthorityUnavailable(
-                    "review authority could not stop active work safely"
-                )
-            self._thread = None
+        cleanup_failures: list[str] = []
         try:
-            info = self.socket_path.lstat()
-            if self._socket_identity == (info.st_dev, info.st_ino):
-                self.socket_path.unlink()
-        except FileNotFoundError:
-            pass
+            self._closed = True
+            listener = self._listener
+            self._stop.set()
+            if listener is not None:
+                try:
+                    listener.close()
+                except OSError as exc:
+                    cleanup_failures.append(f"listener close failed: {exc}")
+            self._listener = None
+            if self._thread is not None:
+                try:
+                    self._thread.join(timeout=5)
+                    if self._thread.is_alive():
+                        cleanup_failures.append("active work did not stop")
+                except RuntimeError as exc:
+                    cleanup_failures.append(f"authority thread cleanup failed: {exc}")
+                self._thread = None
+            if not self._remove_owned_socket():
+                cleanup_failures.append("authority socket cleanup failed")
+        except BaseException as exc:
+            cleanup_failures.append(f"unexpected authority cleanup failure: {exc}")
+            raise
         finally:
-            self._socket_identity = None
-            self.run = self.run.mark_complete()
+            self._record_terminal_state(
+                cleanup_failed=bool(cleanup_failures),
+                cause="; ".join(cleanup_failures) or "normal close",
+            )
 
 
 class ReviewAuthorityClient:
