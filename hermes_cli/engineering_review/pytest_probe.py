@@ -137,7 +137,7 @@ def probe(command: str, root: Path, raw_file: str | None = None) -> dict[str, ob
         "no:cacheprovider",
     ]
     if command == "collect":
-        args.extend(["--collect-only", str(canonical_root)])
+        args.append("--collect-only")
     else:
         if raw_file is None:
             raise ValueError("run requires --file")

@@ -77,7 +77,7 @@ const fixtureRepo = (): {
   );
   write(
     root,
-    "checks/not_collected.py",
+    "checks/test_not_collected.py",
     "def test_outside_discovery():\n    assert True\n",
   );
   git(root, "init", "-q");
@@ -98,7 +98,7 @@ const fixtureRepo = (): {
     { path: "tests/test_import_error.py", kind: "test" },
     { path: "tests/test_setup_error.py", kind: "test" },
     { path: "tests/test_timeout.py", kind: "test" },
-    { path: "checks/not_collected.py", kind: "test" },
+    { path: "checks/test_not_collected.py", kind: "test" },
   ]);
   return { root, artifactRoot: dirname(planPath), planPath, baseRef };
 };
@@ -158,7 +158,7 @@ describe("Pytest efficacy", () => {
   it.each([
     ["test_effective.py", "gated", 10_000],
     ["test_inert.py", "inert", 10_000],
-    ["not_collected.py", "unreachable", 10_000],
+    ["test_not_collected.py", "unreachable", 10_000],
     ["test_import_error.py", "inconclusive", 10_000],
     ["test_setup_error.py", "inconclusive", 10_000],
     ["test_timeout.py", "inconclusive", 100],
