@@ -49,8 +49,10 @@ _EXPLICIT_RELATIVE_PATH = re.compile(
 _BARE_RELATIVE_PATH = re.compile(
     r"[^\s/\\\"'`]+(?:[/\\][^\s/\\\"'`]+)+\Z"
 )
-_SINGLETON_LOCAL_PATH = re.compile(
-    r"(?<![A-Za-z0-9_:/])(?:/|~)(?![A-Za-z0-9_/:])"
+_LOCAL_ROOT_PATH = re.compile(
+    r"(?<![A-Za-z0-9_./\\:])"
+    r"(?:\.{1,2}|~|/{1,2}|[A-Za-z]:[\\/])"
+    r"(?=$|[\s\"'`,;)\]])"
 )
 _PACKAGE_COORDINATE = re.compile(
     r"(?<![A-Za-z0-9._-])[a-z0-9][a-z0-9._-]*/"
@@ -107,6 +109,7 @@ _SLOT_CHILDREN = {
         "blueprint_digest": "digest",
         "stable_base": "stable_base",
         "components": "components",
+        "resolved_versions": "resolved_versions",
         "verification_commands": "verification_commands",
         "build_environment": "build_environment",
     },
@@ -133,6 +136,9 @@ _SLOT_ITEMS = {
     "components": "component",
     "lockfiles": "lockfile",
     "verification_commands": "command",
+}
+_DYNAMIC_MAPPING_VALUES = {
+    "resolved_versions": "resolved_version",
 }
 
 
@@ -173,7 +179,7 @@ def _looks_like_local_path(value: str, *, slot: str) -> bool:
             _POSIX_PATH,
             _EXPLICIT_RELATIVE_PATH,
             _BARE_RELATIVE_PATH,
-            _SINGLETON_LOCAL_PATH,
+            _LOCAL_ROOT_PATH,
         )
     )
 
@@ -259,12 +265,16 @@ def _privacy(
             budget[1] += len(child_key)
             if budget[1] > _MAX_TOTAL_TEXT:
                 _fail()
+            dynamic_value_slot = _DYNAMIC_MAPPING_VALUES.get(slot)
             _privacy(
                 child,
-                key=child_key,
+                key=None if dynamic_value_slot is not None else child_key,
                 depth=depth + 1,
                 budget=budget,
-                slot=_SLOT_CHILDREN.get(slot, {}).get(child_key, "generic"),
+                slot=(
+                    dynamic_value_slot
+                    or _SLOT_CHILDREN.get(slot, {}).get(child_key, "generic")
+                ),
             )
     elif isinstance(value, list):
         if len(value) > _MAX_ITEMS:
@@ -531,7 +541,12 @@ def generation_id_for(manifest: Mapping[str, object]) -> str:
 
 def validate_manifest(manifest: Mapping[str, object], root: Path | None = None) -> None:
     record = _mapping(manifest)
-    if set(record) - _TOP or not _REQUIRED <= set(record) or record["schema_version"] != 1:
+    if (
+        set(record) - _TOP
+        or not _REQUIRED <= set(record)
+        or type(record["schema_version"]) is not int
+        or record["schema_version"] != 1
+    ):
         _fail()
     _privacy(record, slot="manifest")
     for key in ("parent_generation_id", "blueprint_digest"):

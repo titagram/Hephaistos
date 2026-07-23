@@ -238,6 +238,16 @@ def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
         "~",
         "check --path=/",
         "check --home=~",
+        ".",
+        "..",
+        "//",
+        "C:\\",
+        "C:/",
+        "check --path=.",
+        "check --path=..",
+        "check --path=//",
+        "check --path=C:\\",
+        "check --path=C:/",
     ],
 )
 def test_verification_commands_reject_embedded_local_paths(
@@ -291,6 +301,7 @@ def test_manifest_accepts_normal_commands() -> None:
         "install --package owner/package@1.2.3",
         "check --path-mode safe --output=json",
         "verify --timeout 30 --memory 512 --retries 3 --jobs 4 --limit 10",
+        "check --range=1.0..2.0 --version=3.12.1",
     ]
 
     validate_manifest(manifest)
@@ -313,6 +324,9 @@ def test_verification_command_rejects_opaque_credential_token() -> None:
         ("x" * 64, "1.2.3"),
         ("logical-id_2", "2.4.0"),
         ("owner/package", "3.1.4-rc.1+build.7"),
+        ("prompt-toolkit", "3.0.51"),
+        ("output-parser", "1.4.2"),
+        ("transcript-tools", "2.0.0"),
     ],
 )
 def test_resolved_versions_accept_bounded_coordinates_and_semantic_versions(
@@ -486,6 +500,17 @@ def test_closed_nested_mappings_reject_every_unknown_key_variant(
 ) -> None:
     manifest = _manifest()
     manifest[mapping_name][unknown_key] = value  # type: ignore[index]
+
+    with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_schema_version_requires_the_exact_non_boolean_integer_one(
+    schema_version: object,
+) -> None:
+    manifest = _manifest()
+    manifest["schema_version"] = schema_version
 
     with pytest.raises(EvolutionContractError, match="invalid_manifest"):
         validate_manifest(manifest)
