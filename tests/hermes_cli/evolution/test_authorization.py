@@ -30,6 +30,8 @@ DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 SEPARATED_OPAQUE = "a1b2c3d4-e5f6g7h8-i9j0k1l2-m3n4o5p6"
+TWO_CHUNK_OPAQUE = "a1b2c3d4e5f6g7h8-i9j0k1l2m3n4o5p6"
+BASE32_OPAQUE = "mfrggzdfmztwq2lkorsxg5banvuw63tp"
 
 
 def research_scope(**changes: object) -> dict[str, object]:
@@ -933,6 +935,7 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
                 "sk_live",
                 "authorization-protocol-version-2026",
                 "python-3.13",
+                "sha256-rsa2048-pkcs1-v1",
             ],
             dependency_families=[
                 "python3",
@@ -971,9 +974,14 @@ def test_ordinary_symbolic_families_policies_and_actor_remain_valid(
     "surface",
     ["scope-value", "scope-key", "actor", "domain-label"],
 )
+@pytest.mark.parametrize(
+    "material",
+    [SEPARATED_OPAQUE, TWO_CHUNK_OPAQUE, BASE32_OPAQUE],
+)
 def test_separated_opaque_material_is_rejected_without_echo(
     ledger: EvolutionLedger,
     surface: str,
+    material: str,
 ) -> None:
     if surface == "actor":
         request = create_authorization_request(
@@ -991,7 +999,7 @@ def test_separated_opaque_material_is_rejected_without_echo(
         operation = lambda: issue_grant(
             ledger,
             request_id=request.request_id,
-            approved_by=SEPARATED_OPAQUE,
+            approved_by=material,
             confirmation_digest=confirmation,
         )
         expected_code = "invalid_approver"
@@ -1002,17 +1010,17 @@ def test_separated_opaque_material_is_rejected_without_echo(
             kind="research",
             subject_digest=DIGEST_A,
             scope=research_scope(
-                domains=[f"{SEPARATED_OPAQUE}.example.com"]
+                domains=[f"{material}.example.com"]
             ),
             ttl_seconds=120,
         )
         expected_code = "invalid_scope"
     else:
         scope = (
-            build_scope(source_families=[SEPARATED_OPAQUE])
+            build_scope(source_families=[material])
             if surface == "scope-value"
             else build_scope(
-                isolation_policy={SEPARATED_OPAQUE: "deny"}
+                isolation_policy={material: "deny"}
             )
         )
         operation = lambda: create_authorization_request(
@@ -1029,7 +1037,43 @@ def test_separated_opaque_material_is_rejected_without_echo(
         operation()
 
     assert captured.value.code == expected_code
-    assert SEPARATED_OPAQUE not in str(captured.value)
+    assert material not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("segment", "expected"),
+    [
+        ("a1b2c3d4e5f6g7h", False),
+        ("a1b2c3d4e5f6g7h8", True),
+        ("abcdefghi1j2k3l4", False),
+        ("abcdefg1h2i3j4kl", True),
+        ("abcdefghijklmnopqrabcdefghijklm", False),
+        ("abcdefghijklmnopqabcdefghijklmno", False),
+        ("abcdefghijklmnopqrabcdefghijklmn", True),
+    ],
+)
+def test_opaque_segment_threshold_boundaries(
+    segment: str,
+    expected: bool,
+) -> None:
+    assert authorization._looks_like_opaque_segment(segment) is expected
+
+
+@pytest.mark.parametrize(
+    ("material", "expected"),
+    [
+        ("abcdefabcdefabcdefabcde", False),
+        ("abcdefabcdefabcdefabcdef", True),
+    ],
+)
+def test_hex_material_length_boundary(
+    material: str,
+    expected: bool,
+) -> None:
+    assert (
+        authorization._looks_like_credential_material(material)
+        is expected
+    )
 
 
 @pytest.mark.parametrize(

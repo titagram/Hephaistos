@@ -332,9 +332,11 @@ transaction.
 Read the issue/deny/consume clock only after `BEGIN IMMEDIATE` acquires the
 write lock. Validate all nested scope symbols and actor identifiers
 syntactically, then apply a separate bounded credential-material detector;
-analyze compacted and segmented mixed-alphanumeric material independently of
-its separators, and apply the material detector to every hostname label
-without rejecting ordinary semantic vocabulary or bounded version suffixes.
+analyze each segment with bounded alpha/digit-transition and character-
+distribution thresholds, analyze compacted material for repeated alternation
+across separators, and apply the material detector to every hostname label
+without rejecting ordinary semantic vocabulary, algorithm names, or bounded
+version suffixes.
 Enforce exact request-to-decision-to-grant coherence,
 including decision/grant audit timestamps, in SQLite so direct SQL cannot
 invent or reshape authority, and validate canonical UUID lookup identifiers

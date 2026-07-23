@@ -29,6 +29,10 @@ _HOST_PATTERN = re.compile(
     re.ASCII,
 )
 _HEX_SECRET_PATTERN = re.compile(r"[0-9a-f]{24,}\Z", re.ASCII)
+_OPAQUE_ALTERNATING_MIN_LENGTH = 16
+_OPAQUE_ALTERNATING_MIN_TRANSITIONS = 8
+_OPAQUE_DIVERSE_MIN_LENGTH = 32
+_OPAQUE_DIVERSE_MIN_UNIQUE = 18
 _CREDENTIAL_PREFIXES = (
     "github_pat_",
     "github-pat-",
@@ -179,42 +183,37 @@ def _compact_material(value: str) -> str:
     return value.translate(str.maketrans("", "", "._-"))
 
 
+def _looks_like_alternating_material(segment: str) -> bool:
+    transitions = sum(
+        left.isdigit() != right.isdigit()
+        for left, right in zip(segment, segment[1:])
+    )
+    return (
+        len(segment) >= _OPAQUE_ALTERNATING_MIN_LENGTH
+        and transitions >= _OPAQUE_ALTERNATING_MIN_TRANSITIONS
+        and any(character.isalpha() for character in segment)
+        and any(character.isdigit() for character in segment)
+    )
+
+
+def _looks_like_opaque_segment(segment: str) -> bool:
+    alternating = _looks_like_alternating_material(segment)
+    diverse = (
+        len(segment) >= _OPAQUE_DIVERSE_MIN_LENGTH
+        and len(set(segment)) >= _OPAQUE_DIVERSE_MIN_UNIQUE
+    )
+    return alternating or diverse
+
+
 def _looks_like_credential_material(value: str) -> bool:
     compact = _compact_material(value)
     if _HEX_SECRET_PATTERN.fullmatch(compact) is not None:
         return True
 
-    unique = len(set(compact))
-    has_alpha = any(character.isalpha() for character in compact)
-    has_digit = any(character.isdigit() for character in compact)
-    has_separator = any(separator in value for separator in "._-")
-    if (
-        not has_separator
-        and len(compact) >= 32
-        and unique >= 10
-        and has_alpha
-        and has_digit
-    ):
-        return True
-    if not has_separator and len(compact) >= 40 and unique >= 14:
-        return True
-
-    mixed_segments = [
-        segment
+    if any(
+        _looks_like_opaque_segment(segment)
         for segment in re.split(r"[._-]", value)
-        if len(segment) >= 4
-        and any(character.isalpha() for character in segment)
-        and any(character.isdigit() for character in segment)
-    ]
-    mixed_length = sum(len(segment) for segment in mixed_segments)
-    if (
-        len(compact) >= 24
-        and len(mixed_segments) >= 3
-        and mixed_length * 4 >= len(compact) * 3
-        and unique >= 12
-        and sum(character.isalpha() for character in compact) >= 6
-        and sum(character.isdigit() for character in compact) >= 6
-    ):
+    ) or _looks_like_alternating_material(compact):
         return True
 
     for prefix in _CREDENTIAL_PREFIXES:
