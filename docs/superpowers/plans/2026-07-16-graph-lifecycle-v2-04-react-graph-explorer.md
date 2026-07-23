@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Inherit `2026-07-16-graph-lifecycle-v2-master.md`.
-- Work in Git repository `/home/ubuntu/dev-sandbox` on branch `codex/graph-lifecycle-v2-backend`; frontend files live under `frontend/`.
+- Work in Git repository `/home/ubuntu/dev-sandbox`; frontend files live under `frontend/`. Each task starts on a fresh checkpoint-recorded `codex/graph-v2-p4-frontend-task-N` branch from then-current clean, pulled `main`, after the accepted predecessor was reviewed, integrated, tested, and pushed. Do not revive the historical catch-all backend branch.
 - Run every npm command from the Git root as `npm --prefix frontend ...`; paths passed to Vitest are relative to the frontend package and therefore start with `src/`, not `frontend/src/`.
 - START GATE: Plan 2 dashboard golden responses are frozen and Plan 3 verification badges/status DTOs are available.
 - Before Task 1, use the available React/frontend best-practices skill and read it completely.
@@ -73,22 +73,47 @@ export interface GraphApiResponse<T> {
 
 export interface CountKnowledge {
   represented: number
-  exact_value: number | null
-  knowledge: 'absence_verified' | 'lower_bound' | 'unknown'
+  value: number | null
+  knowledge: 'exact' | 'absence_verified' | 'unknown'
+  reason: CompletenessReasonCode | null
 }
 
-export interface GraphApiError {
-  status: number
-  code: 'graph_context_stale' | 'graph_handle_invalid' | 'graph_cursor_invalid' | 'graph_projection_not_ready' | 'graph_request_invalid' | 'graph_forbidden' | 'graph_unavailable'
-  message: string
-  retryable: boolean
-  details: Record<string, never>
+export type GraphApiError =
+  | {
+    code: 'graph_not_ready' | 'graph_context_stale' | 'graph_projection_failed' | 'graph_search_snapshot_expired'
+    message: string
+    retryable: true
+    details: Record<string, never>
+  }
+  | {
+    code: 'graph_scope_mismatch' | 'graph_entrypoint_not_found' | 'graph_query_invalid' | 'graph_projection_partial' | 'graph_handle_invalid' | 'graph_cursor_invalid'
+    message: string
+    retryable: false
+    details: Record<string, never>
+  }
+  | {
+    code: 'graph_maintenance'
+    message: string
+    retryable: true
+    details: {
+      reason: 'backup' | 'cutover' | 'retirement' | 'operator'
+      retry_after_seconds: number
+    }
+  }
+
+export type GraphErrorCode = GraphApiError['code']
+
+export interface GraphApiErrorResponse {
+  protocol_version: 'hades.dashboard_graph.v2'
+  error: GraphApiError
 }
 ```
 
+HTTP status is transport metadata held by `apiClient`; it is never parsed as a property of `GraphApiErrorResponse`. Tests enforce the schema's exact code→HTTP→retryable→details mapping, including the closed maintenance details object, and reject an invented alias or property.
+
 - [ ] **Step 1: Add RED golden DTO tests**
 
-Parse every response in `contracts/hades/graph-v2/golden/dashboard-protocol.json`; reject v1 protocol, unknown properties, null projection outside scopes, false zero for unknown, and malformed handle/context. Import the canonicalization subset used by browser handles/cursors and assert TypeScript canonical bytes/digests equal the root vectors, completing the TypeScript side of G13.
+Parse every response in `contracts/hades/graph-v2/golden/dashboard-protocol.json`; reject v1 protocol, unknown properties, null projection outside scopes, false zero for unknown, `lower_bound`/`exact_value` aliases, and malformed handle/context. Parse every error vector against the exact closed error envelope and stable transport-status table from design section 10.6. Import the canonicalization subset used by browser handles/cursors and assert TypeScript canonical bytes/digests equal the root vectors, completing the TypeScript side of G13.
 
 - [ ] **Step 2: Run RED**
 
@@ -227,7 +252,7 @@ export const graphCopy = {
 
 ```bash
 npm --prefix frontend test -- --run src/components/devboard/graph/__tests__/useGraphBootstrap.test.tsx src/components/devboard/graph/__tests__/GraphScopePicker.test.tsx
-git add frontend/src/components/devboard/graph/useGraphBootstrap.ts frontend/src/components/devboard/graph/GraphScopePicker.tsx frontend/src/components/devboard/graph/GraphModeToggle.tsx frontend/src/components/devboard/graph/graphCopy.ts frontend/src/components/devboard/graph/__tests__
+git add -- frontend/src/components/devboard/graph/useGraphBootstrap.ts frontend/src/components/devboard/graph/GraphScopePicker.tsx frontend/src/components/devboard/graph/GraphModeToggle.tsx frontend/src/components/devboard/graph/graphCopy.ts frontend/src/components/devboard/graph/__tests__/useGraphBootstrap.test.tsx frontend/src/components/devboard/graph/__tests__/GraphScopePicker.test.tsx
 git commit -m "feat(frontend): bootstrap graph scope and exploration mode"
 ```
 
@@ -341,7 +366,7 @@ Import `@xyflow/react/dist/style.css` exactly once in `LifecycleCanvas.tsx`. Use
 
 ```bash
 npm --prefix frontend test -- --run src/components/devboard/graph/__tests__/LifecycleCanvas.test.tsx src/components/devboard/graph/__tests__/LifecycleAccessibleTree.test.tsx
-git add frontend/package.json frontend/package-lock.json frontend/src/components/devboard/graph/LifecycleStageRail.tsx frontend/src/components/devboard/graph/LifecycleCanvas.tsx frontend/src/components/devboard/graph/LifecycleAccessibleTree.tsx frontend/src/components/devboard/graph/__tests__
+git add -- frontend/package.json frontend/package-lock.json frontend/src/components/devboard/graph/LifecycleStageRail.tsx frontend/src/components/devboard/graph/LifecycleCanvas.tsx frontend/src/components/devboard/graph/LifecycleAccessibleTree.tsx frontend/src/components/devboard/graph/__tests__/LifecycleCanvas.test.tsx frontend/src/components/devboard/graph/__tests__/LifecycleAccessibleTree.test.tsx
 git commit -m "feat(frontend): render accessible lifecycle canvas"
 ```
 
@@ -370,7 +395,7 @@ Run: `npm --prefix frontend test -- --run src/components/devboard/graph/__tests_
 
 ```bash
 npm --prefix frontend test -- --run src/components/devboard/graph/__tests__/useLifecycle.test.tsx src/components/devboard/graph/__tests__/LifecycleNodeDrawer.test.tsx
-git add frontend/src/components/devboard/graph/useLifecycle.ts frontend/src/components/devboard/graph/AsyncFlowsPanel.tsx frontend/src/components/devboard/graph/LifecycleNodeDrawer.tsx frontend/src/components/devboard/graph/__tests__
+git add -- frontend/src/components/devboard/graph/useLifecycle.ts frontend/src/components/devboard/graph/AsyncFlowsPanel.tsx frontend/src/components/devboard/graph/LifecycleNodeDrawer.tsx frontend/src/components/devboard/graph/__tests__/useLifecycle.test.tsx frontend/src/components/devboard/graph/__tests__/LifecycleNodeDrawer.test.tsx
 git commit -m "feat(frontend): inspect lifecycle branches and node evidence"
 ```
 
@@ -449,14 +474,17 @@ Search all imports before deletion; no compatibility re-export.
 
 ```bash
 npm --prefix frontend test -- --run src/components/devboard/graph/__tests__/GraphExplorer.test.tsx src/pages/__tests__/GraphPage.test.tsx src/pages/__tests__/GraphPageProjectTransition.test.tsx
-git add -A frontend/src/components/devboard frontend/src/pages
+git add -- frontend/src/components/devboard/graph/GraphExplorer.tsx frontend/src/components/devboard/graph/GraphMaintenanceScreen.tsx frontend/src/pages/GraphPage.tsx frontend/src/components/devboard/graph/__tests__/GraphExplorer.test.tsx frontend/src/pages/__tests__/GraphPage.test.tsx frontend/src/pages/__tests__/GraphPageProjectTransition.test.tsx frontend/src/components/devboard/GraphExplorer.tsx frontend/src/pages/graphExplorerModel.ts
+git diff --cached --name-only
 git commit -m "feat(frontend): replace graph page with lifecycle explorer"
 ```
+
+The staged-name output must equal the eight Task 9 paths above (including deleted paths) and contain nothing else; otherwise unstage the unrelated path and stop before commit.
 
 ### Task 10: Close U01–U12, Build, and Responsive/Accessibility QA
 
 **Files:**
-- Modify: frontend tests/styles only for missing acceptance coverage
+- Modify only the nine exact mapped frontend test files below when acceptance coverage is missing; production code/styles return to their owning Task 3–9 branch and are never repaired under Task 10
 - Create: `.codex-artifacts/graph-v2/frontend-gates.json`
 
 - [ ] **Step 1: Map every frontend gate to an exact test node**
@@ -521,7 +549,8 @@ Each action must have at least one test that observes state, API call, focus, or
 
 ```bash
 git diff --check
-git add frontend .codex-artifacts/graph-v2/frontend-gates.json
+git add -- frontend/src/pages/__tests__/GraphPage.test.tsx frontend/src/pages/__tests__/GraphPageProjectTransition.test.tsx frontend/src/components/devboard/graph/__tests__/GraphExplorer.test.tsx frontend/src/components/devboard/graph/__tests__/useLifecycle.test.tsx frontend/src/components/devboard/graph/__tests__/ElementAnalysisPanel.test.tsx frontend/src/components/devboard/graph/__tests__/LifecycleCanvas.test.tsx frontend/src/components/devboard/graph/__tests__/LifecycleAccessibleTree.test.tsx frontend/src/components/devboard/graph/__tests__/graphExplorerReducer.test.ts frontend/src/components/devboard/graph/__tests__/lifecycleLayout.test.ts .codex-artifacts/graph-v2/frontend-gates.json
+git diff --cached --name-only
 git commit -m "test(frontend): close graph explorer UX gates"
 ```
 

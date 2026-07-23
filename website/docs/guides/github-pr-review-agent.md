@@ -94,6 +94,73 @@ Hermes will:
 
 If you're happy with the quality, time to automate it.
 
+### Use the evidence-backed local review command
+
+For a one-off review with deterministic artifacts, real test-efficacy probes,
+reviewer coverage checks, and deduplicated findings, run the dedicated command
+from a checkout of the repository:
+
+```bash
+hermes review https://github.com/OWNER/REPOSITORY/pull/42 --effort medium
+```
+
+The command supports `low`, `medium`, and `high` effort, requires Node.js 22 or
+newer, and detects pytest and Vitest projects. Its deterministic operations
+report `passed`, `failed`, or `inconclusive`; when both test runners apply and
+the choice is ambiguous, the review asks for clarification instead of guessing.
+Artifacts and the final report are stored under
+`~/.hermes/reviews/<session-id>/<run-id>/`.
+
+This workflow is deliberately read-only with respect to GitHub. It can fetch
+the requested PR into a disposable local worktree, but it does not push,
+merge, comment, approve, or request changes. The verdict remains local until
+you explicitly publish it through a separate workflow.
+
+:::caution Reviewing untrusted pull requests
+PR-controlled build and test code runs only through a configured Hermes
+sandbox. With the local terminal backend, Hermes asks for explicit one-session
+approval before executing it. Denying or not answering that prompt leaves
+static review available and marks executable evidence inconclusive; it does
+not silently run the PR code.
+
+The confined review runner currently supports Docker only. Its image must
+provide Node.js 22 or newer plus offline project dependencies under
+`/opt/hermes-review-dependencies`; the container starts with networking
+disabled and without host provider credentials. Modal, Daytona, SSH, and
+Singularity do not yet expose the confinement contract required by the review
+authority, so executable checks on those backends are `inconclusive`. On
+Windows, run Hades inside WSL: native Windows does not provide the
+kernel-authenticated Unix authority channel.
+:::
+
+The engine incorporates a provenance-pinned source slice from
+[Qwen Code](https://github.com/QwenLM/qwen-code/tree/d064bd7dcf98e0255283068a775f6e49d70db8aa),
+licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+### Manual release acceptance
+
+This check is intentionally gated on a configured real model provider and an
+interactive approval surface. If either is absent, record the check as
+**not run**; do not replace it with a fake success.
+
+From a disposable fixture repository containing staged, unstaged, and
+untracked changes:
+
+```bash
+git status --porcelain=v1 -z > /tmp/hades-review-status-before
+hades review --effort medium
+git status --porcelain=v1 -z > /tmp/hades-review-status-after
+cmp /tmp/hades-review-status-before /tmp/hades-review-status-after
+```
+
+Confirm that the displayed report names the untracked source, classifies the
+effective and inert tests, reports reviewer coverage and deduplicated
+findings, shows the computed local verdict and residual uncertainty, prints
+the artifact and cleanup paths, and leaves Git unchanged. For a PR target,
+also confirm in GitHub that no review, comment, approval, merge, or push was
+created. Record the provider/model, target commit, run ID, and UTC timestamp
+with the release evidence; never record credentials.
+
 ---
 
 ## Step 3: Create a Review Skill

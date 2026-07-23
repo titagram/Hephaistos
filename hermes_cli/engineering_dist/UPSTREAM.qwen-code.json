@@ -1,0 +1,289 @@
+{
+  "dependencies": [
+    {
+      "dependency": "yargs@17.7.2",
+      "specifier": "yargs"
+    },
+    {
+      "dependency": "Task 2 dev dependency",
+      "specifier": "vitest"
+    },
+    {
+      "dependency": "Node.js built-in",
+      "specifier": "node:child_process"
+    },
+    {
+      "dependency": "Node.js built-in",
+      "specifier": "node:crypto"
+    },
+    {
+      "dependency": "Node.js built-in",
+      "specifier": "node:fs"
+    },
+    {
+      "dependency": "Node.js built-in",
+      "specifier": "node:os"
+    },
+    {
+      "dependency": "Node.js built-in",
+      "specifier": "node:path"
+    }
+  ],
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "55367b61ccd2a016a0159ad886bd66a3ee6cb5e873d0c75c803c897dd245b075"
+    },
+    {
+      "path": "packages/cli/src/commands/review/agent-prompt.ts",
+      "sha256": "2d9c09b85cea5f60893f46dbbde1ddc3c464fafd4f175e7e33e34d97078be187"
+    },
+    {
+      "path": "packages/cli/src/commands/review/build-test.ts",
+      "sha256": "65006518f034511f8df6aadf15d98c3162b38e4de099f557b81d7726f590d510"
+    },
+    {
+      "path": "packages/cli/src/commands/review/capture-local.ts",
+      "sha256": "1d1481c00a7f24629e408d031a77fabfef70cc24856e567594607a523e5a4433"
+    },
+    {
+      "path": "packages/cli/src/commands/review/check-coverage.ts",
+      "sha256": "2eb61fbca4b29a835f315bea4786129dcfe5445e5c8984d35d7dc6086fcf9166"
+    },
+    {
+      "path": "packages/cli/src/commands/review/cleanup.ts",
+      "sha256": "d8078a1dc093ff4098df8705bcd42fc3fa5b9af2932b69fd77237aeb30938388"
+    },
+    {
+      "path": "packages/cli/src/commands/review/compose-review.ts",
+      "sha256": "b5cd2689adce20cccc90067664ba4ca182c0aa7ae7dc430879fee4deffadb285"
+    },
+    {
+      "path": "packages/cli/src/commands/review/fetch-pr.ts",
+      "sha256": "13ec41ff01dd45c2db71f1d834229741d16bd856ac8c140370be4a63a341a84d"
+    },
+    {
+      "path": "packages/cli/src/commands/review/plan-diff.ts",
+      "sha256": "8996f06915289978167d0acdaa095c01b1ab0e3289813000435631a6a364858a"
+    },
+    {
+      "path": "packages/cli/src/commands/review/resolve-anchors.ts",
+      "sha256": "c07a061cb44ed120c39dff16e1ec4ea670462d9c4b1cb826b4c0078ae25c35fa"
+    },
+    {
+      "path": "packages/cli/src/commands/review/test-efficacy.ts",
+      "sha256": "687ed9f0e364e8f093dc1f702f6c309d66c433e1fd5786cf7a73452c1c4a771a"
+    },
+    {
+      "path": "packages/cli/src/commands/review/agent-prompt.test.ts",
+      "sha256": "c82c4bc35d522c220067bd03084c424f6675b7249daa438271843d520b7dbbc1"
+    },
+    {
+      "path": "packages/cli/src/commands/review/build-test.test.ts",
+      "sha256": "69127ffec73684e9527ea57a5ec70b660b77b554044e7bce810d8eb3b018c27d"
+    },
+    {
+      "path": "packages/cli/src/commands/review/capture-local.test.ts",
+      "sha256": "60f41203f1b54d01bd5d36420ecdcd02d9ad144b084f0558fe5d910cb9d63434"
+    },
+    {
+      "path": "packages/cli/src/commands/review/check-coverage.test.ts",
+      "sha256": "1366fab0786882dfcb56d1b40ccf6ff6147ffea4b033c6a54b51948a3b694c5d"
+    },
+    {
+      "path": "packages/cli/src/commands/review/cleanup.test.ts",
+      "sha256": "06fd571174af9d3fc9248c7be365a79b741404156efa7b0e0a499434ab928a33"
+    },
+    {
+      "path": "packages/cli/src/commands/review/compose-review.test.ts",
+      "sha256": "50851c5f590e4aae25025d4d959492b93a310a909486e718b219508d8141b1d8"
+    },
+    {
+      "path": "packages/cli/src/commands/review/fetch-pr.test.ts",
+      "sha256": "09397997fb302281db39a92d25f2b253caeef3a61e427b3d6451f4cc4ee260dd"
+    },
+    {
+      "path": "packages/cli/src/commands/review/plan-diff.test.ts",
+      "sha256": "57bb59cf73208f18daa4909f7b504e6a4b2f078fec868322e97118a6584e4efa"
+    },
+    {
+      "path": "packages/cli/src/commands/review/resolve-anchors.test.ts",
+      "sha256": "b9c6234bd3a4b20122564b1c1ec41553b4b2125996143e3ed8bf84c129102fbd"
+    },
+    {
+      "path": "packages/cli/src/commands/review/test-efficacy.integration.test.ts",
+      "sha256": "76be3090b7463d7adc6efd9b196ece962c1200e33b311563fe90348e7dda4a18"
+    },
+    {
+      "path": "packages/cli/src/commands/review/test-efficacy.test.ts",
+      "sha256": "e355d7f88bbd1359f1797388714a63857c07f64dd427b67f0950ac76fc72df42"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/agent-briefs.ts",
+      "sha256": "94cbbc9857f0fbb9f11f5bfffb836810262e77b6eaa600d402ff6fa1a20c9b24"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/anchors.ts",
+      "sha256": "1c3b55cf240187d38234dc057ff9593ae15a95c815098f05a372e895f2e60944"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/coverage.ts",
+      "sha256": "20614f3b01ef54a3b85fe9c863ab2b2038447ac75c0041fd5a90606ea519ae82"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/diff-flags.ts",
+      "sha256": "4b0a7988490ff69dd2d44d73a655cb84ce632fab3cdb7a391ce187d8c92057bd"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/diff-plan.ts",
+      "sha256": "af91920164de2c0f3faa5de6e8b25cf0a094543e7aaf46b685c2107795c87282"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/gh.ts",
+      "sha256": "e073ec9ae3584099b8f0a3f5757ee591a735ce75c9f347913d4b4ed7a86533ac"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/git.ts",
+      "sha256": "1c1fb754b0de3222f52f4e8bca49820315d179f59e01f409a41ce8a674ebaac5"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/heavy.ts",
+      "sha256": "eb952adbdd33e7b888e6dba0dbe755466d919089f2e44de3916d22fc4997b851"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/inline-counts.ts",
+      "sha256": "44eca48b3e2b1d7349112ebcb636a5ada63b286c71d774816e51fdcc0e36e4e2"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/local-diff.ts",
+      "sha256": "9b38ea834921d0272ba5ac8dfef237c3c0f9e730b99f602f4cff133cd0f6a70d"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/merge-base.ts",
+      "sha256": "957193bfa8efaf8cacbaa7ff97a98cf40763a9eecf5be64b43c31847b62548f6"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/path-rules.ts",
+      "sha256": "f500f7b13a999a99e0c1e07850aab4e0e0d637f8d244d1cfc982d04fc9b249a4"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/paths.ts",
+      "sha256": "3a71f8f2f609b7acc6eabece02c6db4e73e8f8f0cf750347b3366959c6a6d35d"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/prompt-record.ts",
+      "sha256": "cc349acf305ac61849d1956f53cd3e1aaf16fde303b7b114716dc1908fe44f17"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/report.ts",
+      "sha256": "ae96d5c470d26054b4b8e4af02ec66007a89871b51ce17d906ca08c457a55486"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/roster.ts",
+      "sha256": "25a5585d0332c40476d8422ec0035631e2c4e403024385084ec4c16d0ae4c01c"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/shell-quote.ts",
+      "sha256": "0b008b5565255244d61741ab295f1eb44768bbd3802d1b86c02ba3c676f9e13c"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/transcripts.ts",
+      "sha256": "7c5a90b442624ae2902fc7e10a8a372dd09d4fdc3ccb167e56076b85ece9e3d5"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/workspaces.ts",
+      "sha256": "015c5c0ba34815b0ab0b6fa69c6698760baf320ab6985f2bb148518e7d5f3ec1"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/anchors.test.ts",
+      "sha256": "8b567736bd782f06fc022b5337d47834b58443249768220fc42d5487eb13c542"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/diff-plan.integration.test.ts",
+      "sha256": "2a3da584bce536b6afe56335259f44310ee4c5c8095d9e0c61ba67d524557f12"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/diff-plan.test.ts",
+      "sha256": "06758cf3d470f3c85a5853ee6a1dd339c6585285d280a022fe03e46f7d32cd31"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/gh.test.ts",
+      "sha256": "4f94bad8b3052be2d59af092c012da2e8003fea9097832770d7093cf52816c32"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/git.integration.test.ts",
+      "sha256": "2c5d201e47812d6352969ca4f7aa2dd544697b17b8e1587459ea117d1f644d2a"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/git.test.ts",
+      "sha256": "7fecdf727d9475e924ee6b08e22a05bf6207b08f08b3f8ab00325e632070b117"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/local-diff.integration.test.ts",
+      "sha256": "3fdfe8246dee5a0418fd7f0fc4c200bc0c84df67b8b821b39418ab7ac1c98482"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/merge-base.test.ts",
+      "sha256": "4dbb9bf696e89e5a8428a6191a8ec629cb973f41a94f55e68217bacc7001c13a"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/path-rules.test.ts",
+      "sha256": "c8c1f3859f41f5b589d32fb84116ba0cdb84ab66342672d000179956bfa344f6"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/paths.test.ts",
+      "sha256": "f6838014662bb776bde695699cf3f2e7cb46f8f16959d44a14f6759805b7d1a5"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/prompt-record.test.ts",
+      "sha256": "2274fce74f884c49b64ebeedbed66434b2bb71214db6eba4faf46311569e8846"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/report.test.ts",
+      "sha256": "4786130b51b229a4b0e88c11fb5e31d64e2a1249e24dfe7fea2cded25d342b9e"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/roster.test.ts",
+      "sha256": "f17b0752863a3bcea58730bc4ded99e16a0b8e6acc44974207c59d94c2715e26"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/transcripts.test.ts",
+      "sha256": "02b511d3fc2851a25d2648ee6809e6bd31203f046c1c13833f8691125e9da1e5"
+    },
+    {
+      "path": "packages/cli/src/commands/review/lib/workspaces.test.ts",
+      "sha256": "6fad71801ebd61dbeb0d1bc1bbcb1722e9473728fff55347322718cd7cf3c1fa"
+    },
+    {
+      "path": "packages/cli/src/services/review-worktree-lease.ts",
+      "sha256": "1fdb42d2362c556e8d095e1e9b32226c5b71bdf8073e8002d023875dc3fd4030"
+    },
+    {
+      "path": "packages/cli/src/services/review-worktree-lease.test.ts",
+      "sha256": "507839c48395767933ff4550f5c11e19c0380ded53fec7be31da3393348eee8a"
+    }
+  ],
+  "hermesBundle": {
+    "path": "hermes_cli/engineering_dist/hermes-engineering.mjs",
+    "sha256": "47fffde81bc6c3bb0311f7182aa32805e3987decc8128b3409f220ae165c4b27"
+  },
+  "hermesShims": [
+    {
+      "derivation": "narrow adapter retaining writeStdoutLine and writeStderrLine with unconditional newlines",
+      "destination": "packages/hermes-engineering/src/shims/stdioHelpers.ts",
+      "source": "packages/cli/src/utils/stdioHelpers.ts",
+      "sourceSha256": "c7fc344a4375bdcd9f94f4eeba4a9965120e76bc9158e75981c44b2c9e1efca0"
+    },
+    {
+      "derivation": "extract unquoteCStylePath and add a no-op createDebugLogger",
+      "destination": "packages/hermes-engineering/src/shims/qwenCore.ts",
+      "source": "packages/core/src/utils/gitDiff.ts",
+      "sourceSha256": "e6afa6050e60a61cd1d0b040157799cf8813b74b2ed8339b86dc7fb44a46d563",
+      "specifier": "@qwen-code/qwen-code-core"
+    }
+  ],
+  "patches": [],
+  "repository": "https://github.com/QwenLM/qwen-code.git",
+  "schemaVersion": 1,
+  "upstreamCommit": "d064bd7dcf98e0255283068a775f6e49d70db8aa"
+}

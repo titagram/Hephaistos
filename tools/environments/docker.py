@@ -593,6 +593,8 @@ class DockerEnvironment(BaseEnvironment):
         run_as_host_user: bool = False,
         extra_args: list = None,
         persist_across_processes: bool = True,
+        mount_hermes_resources: bool = True,
+        allow_implicit_env_passthrough: bool = True,
     ):
         if cwd == "~":
             cwd = "/root"
@@ -602,12 +604,14 @@ class DockerEnvironment(BaseEnvironment):
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
+        self._allow_implicit_env_passthrough = allow_implicit_env_passthrough
         self._container_id: Optional[str] = None
         self._labels: dict[str, str] = {}
         self._image: str = ""
         self._container_name: str = ""
         self._image_uses_s6_init: bool = False
         self._all_run_args: list[str] = []
+        self._cleanup_error: str | None = None
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
         if volumes is not None and not isinstance(volumes, list):
@@ -712,7 +716,9 @@ class DockerEnvironment(BaseEnvironment):
                 get_cache_directory_mounts,
             )
 
-            for mount_entry in get_credential_file_mounts():
+            for mount_entry in (
+                get_credential_file_mounts() if mount_hermes_resources else []
+            ):
                 src = Path(mount_entry["host_path"])
                 if src.is_dir():
                     # Docker-in-Docker: Docker auto-created the source path as
@@ -741,7 +747,9 @@ class DockerEnvironment(BaseEnvironment):
 
             # Mount skill directories (local + external) so skill
             # scripts/templates are available inside the container.
-            for skills_mount in get_skills_directory_mount():
+            for skills_mount in (
+                get_skills_directory_mount() if mount_hermes_resources else []
+            ):
                 src = Path(skills_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -763,7 +771,9 @@ class DockerEnvironment(BaseEnvironment):
             # screenshots) so the agent can access uploaded files and other
             # cached media from inside the container.  Read-only — the
             # container reads these but the host gateway manages writes.
-            for cache_mount in get_cache_directory_mounts():
+            for cache_mount in (
+                get_cache_directory_mounts() if mount_hermes_resources else []
+            ):
                 src = Path(cache_mount["host_path"])
                 if not src.is_dir():
                     logger.warning(
@@ -985,11 +995,12 @@ class DockerEnvironment(BaseEnvironment):
 
         explicit_forward_keys = set(self._forward_env)
         passthrough_keys: set[str] = set()
-        try:
-            from tools.env_passthrough import get_all_passthrough
-            passthrough_keys = set(get_all_passthrough())
-        except Exception:
-            pass
+        if getattr(self, "_allow_implicit_env_passthrough", True):
+            try:
+                from tools.env_passthrough import get_all_passthrough
+                passthrough_keys = set(get_all_passthrough())
+            except Exception:
+                pass
         # Explicit docker_forward_env entries are an intentional opt-in and must
         # win over the generic Hermes secret blocklist. Only implicit passthrough
         # keys are filtered.
@@ -1287,6 +1298,7 @@ class DockerEnvironment(BaseEnvironment):
         ``docker rm`` actually completes when we do trigger it.
         """
         container_id = self._container_id
+        self._cleanup_error = None
         if not container_id:
             # Still drop the bind-mount dirs if any were allocated and we're
             # NOT in persist mode (persist mode preserves them).
@@ -1324,24 +1336,46 @@ class DockerEnvironment(BaseEnvironment):
         log_id = container_id[:12]
 
         def _do_cleanup() -> None:
+            failures: list[str] = []
             if should_stop:
                 try:
-                    subprocess.run(
+                    stopped = subprocess.run(
                         [docker_exe, "stop", "-t", "10", container_id],
                         capture_output=True, timeout=30,
                         stdin=subprocess.DEVNULL,
                     )
+                    if stopped.returncode != 0:
+                        failures.append(
+                            f"docker stop exited {stopped.returncode}"
+                        )
                 except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"docker stop failed: {e}")
                     logger.warning("docker stop %s timed out / failed: %s", log_id, e)
             if should_remove:
                 try:
-                    subprocess.run(
+                    removed = subprocess.run(
                         [docker_exe, "rm", "-f", container_id],
                         capture_output=True, timeout=30,
                         stdin=subprocess.DEVNULL,
                     )
+                    if removed.returncode != 0:
+                        failures.append(
+                            f"docker rm -f exited {removed.returncode}"
+                        )
                 except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"docker rm -f failed: {e}")
                     logger.warning("docker rm -f %s failed: %s", log_id, e)
+                try:
+                    verified = subprocess.run(
+                        [docker_exe, "inspect", container_id],
+                        capture_output=True, timeout=30,
+                        stdin=subprocess.DEVNULL,
+                    )
+                    if verified.returncode == 0:
+                        failures.append("container remains after docker rm -f")
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    failures.append(f"container removal could not be verified: {e}")
+            self._cleanup_error = "; ".join(failures) or None
 
         # Daemon thread: doesn't block interpreter exit (atexit returns
         # promptly), but unlike the old ``Popen(... &)`` shell trick the
@@ -1377,3 +1411,16 @@ class DockerEnvironment(BaseEnvironment):
             return True
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    @property
+    def cleanup_error(self) -> str | None:
+        """Observed stop/remove failure from the most recent cleanup."""
+        return getattr(self, "_cleanup_error", None)
+
+    def recovery_identity(self) -> dict[str, str]:
+        """Return the bounded Docker identity before review teardown."""
+        return {
+            "containerId": self._container_id or "",
+            "containerName": self._container_name,
+            "taskId": self._task_id,
+        }

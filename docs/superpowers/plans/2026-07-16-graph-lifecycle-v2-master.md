@@ -12,7 +12,7 @@
 
 **Architecture:** The root JSON Schemas and golden vectors are the source of truth. Hades Agent produces immutable v2 artifacts and resumable chunks; the Laravel backend validates, projects, versions, queries, and overlays them; a verification queue reduces graph/Wiki uncertainty without mutating base artifacts; React consumes one closed v2 dashboard protocol; Restic plus scoped export/restore protect the cutover. There is no v1 adapter, fallback, mixed-version query, or dual-protocol graph route.
 
-**Tech Stack:** Python 3.11+, pytest, JSON Schema 2020-12, RFC 8785 JCS, tree-sitter 0.26.0, Laravel/PHP 8.3+, Pest/PHPUnit, PostgreSQL, Neo4j 5.26.27 Community, React/TypeScript/Vitest, `@xyflow/react` 12.11.2, Docker Compose, Restic, systemd.
+**Tech Stack:** Python 3.11+, pytest, JSON Schema 2020-12, RFC 8785 JCS, tree-sitter 0.26.0, filelock 3.24.3, Laravel/PHP 8.3+, Pest/PHPUnit, PostgreSQL, Neo4j 5.26.27 Community, React/TypeScript/Vitest, `@xyflow/react` 12.11.2, Docker Compose, Restic, systemd.
 
 ## Global Constraints
 
@@ -27,13 +27,16 @@
 - Producer flow membership and lifecycle stages are authoritative. The backend validates/maps them one-to-one and does not reconstruct them.
 - The browser keeps at most 200 canonical lifecycle nodes and receives at most 120 in the initial backbone.
 - `@xyflow/react` is pinned to exactly `12.11.2`; do not add ELK, D3, Cytoscape, or another graph renderer.
-- `jsonschema==4.26.0`, `tree-sitter==0.26.0`, and the exact official JavaScript, TypeScript/TSX, PHP, and Python grammar wheels are mandatory base dependencies, never extras or lazy installs. Grammar loading never downloads at runtime. A failed detected-language canary escapes the legacy graph builder and blocks publication; only a failure confined to one ordinary source file becomes partial coverage.
+- `jsonschema==4.26.0`, `tree-sitter==0.26.0`, the exact official JavaScript, TypeScript/TSX, PHP, and Python grammar wheels, and `filelock==3.24.3` are mandatory base dependencies, never extras or lazy installs. Grammar loading never downloads at runtime. A failed detected-language canary escapes the legacy graph builder and blocks publication; only a failure confined to one ordinary source file becomes partial coverage.
 - Ordinary `hades backend sync` reads and caches verification counts only; it never claims work, invokes a model, or injects conversation messages.
 - Verification work is processed one item at a time, with project, binding, capability, lease, target-version, and structured-result checks.
+- Plan 2 publishes the semantic `CanonicalGraphV2ProjectionActivated` event after a successful projection-head CAS and owns the fixed internal graph-artifact reachability aggregator. Plan 2 never imports verification/Wiki services; Plan 3 consumes the event and registers concrete verification/Wiki reachability providers.
+- `GraphArtifactReferenceLock` is the outer transaction for every import-reference writer and cleanup: sorted import advisory locks, sorted import rows, then scope/domain locks. Plan 3 domain services consume its guard; they never reacquire it. `WikiRevisionService` publishes `WikiCurrentRevisionActivated` after its current-pointer CAS through the real `AppServiceProvider` event registration.
+- Verification audit cleanup is whole-chain, fixed at 90 days, externally reachability-aware, and fail-closed; provider composition alone is not a substitute for deleting eligible audit chains.
 - No new core model tool is added. Agent capability is CLI + skills + the service-gated Hades backend plugin surface. The separately distributed Codex plugin delegates index, sync, lifecycle queries, and verification to the installed Hades CLI and never embeds a second parser or backend client.
 - Inertia must not be reintroduced. `frontend/src/pages/GraphPage.tsx` stays a thin composition root.
 - Traefik remains separate from the application Compose stack and is not reconfigured by these plans.
-- Never run `migrate:fresh`, drop PostgreSQL, clear Neo4j globally, or delete users/projects/memory/Wiki/Kanban data.
+- Never run `migrate:fresh`, drop PostgreSQL, clear Neo4j globally, or delete users/projects/memory/Wiki/Kanban data. The only automated schema-reset exception is the repository's guarded `composer test:postgres` runner after it proves the exact disposable database name is `devboard_acceptance`; it is never pointed at the application database.
 - Before any potentially destructive graph operation, create and verify the required DR backup and scoped v1 export.
 - If an unexpected restore occurs, rerun the user seeder and prove admin login before completion.
 - Do not write this platform work to `LOGBOOK_CARNOVALI`.
@@ -44,13 +47,15 @@
 
 ## Repository Map
 
-| Alias | Absolute path | Branch to create at execution time | Ownership |
+| Alias | Absolute path | Branch rule at execution time | Ownership |
 |---|---|---|---|
-| `AGENT_REPO` | `/Users/gabriele/Dev/Hephaistos` | `codex/graph-lifecycle-v2-agent` | contracts, producer, uploader, CLI, skills, agent docs |
-| `BACKEND_REPO` | `/home/ubuntu/dev-sandbox` | `codex/graph-lifecycle-v2-backend` | Laravel backend, React frontend, PostgreSQL/Neo4j projection, operations |
-| `CARNOVALI_WORKSPACE` | `/Users/gabriele/Dev/sinervis/carnovali` | read-only during import | live v2 extraction fixture |
+| `AGENT_REPO` | `/Users/gabriele/Dev/Hephaistos` | checkpoint-authoritative existing branch for an open repair; otherwise fresh `codex/graph-v2-<plan>-<slice>` from then-current clean, pulled `main` after the accepted predecessor was integrated | contracts, producer, uploader, CLI, skills, agent docs |
+| `BACKEND_REPO` | `/home/ubuntu/dev-sandbox` | checkpoint-authoritative existing branch for an open repair; otherwise fresh `codex/graph-v2-<plan>-<slice>` from then-current clean, pulled `main` after the accepted predecessor was integrated | Laravel backend, React frontend, PostgreSQL/Neo4j projection, operations |
+| `CODEX_PLUGIN_REPO` | `/Users/gabriele/plugins/hades-backend` | standalone `codex/graph-v2-verification`; never Agent core or installed cache | five delegating Codex skills and plugin contract tests |
+| `SYMFONY_DEMO_FIXTURE` | isolated pinned Symfony Demo checkout chosen by Plan 6 | read-only during import | small representative live acceptance fixture |
+| `CARNOVALI_WORKSPACE` | `/Users/gabriele/Dev/sinervis/carnovali` | read-only; optional post-acceptance scale gate | large real-world extraction/performance fixture |
 
-Backend-relative paths beginning with `backend/`, `frontend/`, `ops/`, or backend `docs/` are resolved from `BACKEND_REPO`. Agent-relative paths are resolved from `AGENT_REPO`.
+Backend-relative paths beginning with `backend/`, `frontend/`, `ops/`, or backend `docs/` are resolved from `BACKEND_REPO`. Agent-relative paths are resolved from `AGENT_REPO`. Never revive the old catch-all branch names merely because they appear in historical prose: the checkpoint records the exact accepted SHA and branch for every current slice.
 
 ## Plan Set and Hard Dependencies
 
@@ -60,10 +65,12 @@ Execute these files in the listed order. A later plan may start only when its `S
 |---:|---|---|---|---|
 | 1 | `2026-07-16-graph-lifecycle-v2-01-contract-indexer-agent.md` | Root schemas, golden vectors, typed v2 artifact package, polyglot lifecycle producer, bundle/chunk spool | Clean agent feature branch | G01–G12/G14 plus Python side of G13 green |
 | 2 | `2026-07-16-graph-lifecycle-v2-02-backend-import-projection-api.md` | Backend vendored contracts, resumable validation, atomic projection, closed dashboard API | Plan 1 contract commit pinned by SHA | L01–L15 green in backend |
-| 3 | `2026-07-16-graph-lifecycle-v2-03-verification-wiki.md` | Graph/Wiki verification queue, overlays, CLI/worker/skills, empty-project Wiki bootstrap | Plans 1–2 DTOs and storage migrations green | V01–V18 green end-to-end |
+| 3 | `2026-07-16-graph-lifecycle-v2-03-verification-wiki.md` | Graph/Wiki verification queue, overlays, CLI/worker/skills, empty-project Wiki bootstrap, standalone Codex plugin | Global Checkpoint C / execution checkpoint C2 and L01–L15 green, including activation event, reference lock, and base reachability seam | V01–V19 plus verification-retention gate green end-to-end |
 | 4 | `2026-07-16-graph-lifecycle-v2-04-react-graph-explorer.md` | Explainable lifecycle-first Graph Explorer and element analysis | Plan 2 dashboard response golden fixture frozen and Plan 3 verification badge/status DTOs available | U01–U12 green; production frontend build green |
-| 5 | `2026-07-16-graph-lifecycle-v2-05-backup-cutover.md` | DR scripts/timers, maintenance, scoped v1 export/retire/restore, maintenance deployment | Backend/agent feature branches pass their suites | Restore rehearsal green; cutover prerequisites recorded |
-| 6 | `2026-07-16-graph-lifecycle-v2-06-live-acceptance.md` | Carnovali import, deployed browser/API/queue acceptance, review, merge/push | Plans 1–5 completed without unresolved Critical/Important findings | All G/L/V/U and 12 live gates green; user acceptance before v1 retirement |
+| 5 | `2026-07-16-graph-lifecycle-v2-05-backup-cutover.md` | DR scripts/timers, bound maintenance authority, central storage guard/inventory, scoped v1 export/retire/restore, resumable cutover driver | C1/C2/C3 and Checkpoint E green; Plans 1–4 exact accepted slices integrated, tested, reviewed with zero Critical/Important, and pushed; maintenance service/copy exists | Checkpoint F tooling: central storage boundary, bound-authority crash/resume, disposable backup/restore/export/retirement/restore, and release-driver gates green with production untouched |
+| 6 | `2026-07-16-graph-lifecycle-v2-06-live-acceptance.md` | isolated Symfony Demo import, browser/API/queue/plugin acceptance, production-promotion/deployed-SHA verification | C1/C2/C3 plus Checkpoints E/F green; Plans 1–5 completed on exact pushed SHAs without unresolved Critical/Important | All G/L/V/U and isolated live gates green; digest-bound approval before production promotion and separate digest-bound approval before v1 retirement; Carnovali scale run is optional follow-up |
+
+Naming is fixed: execution checkpoint **C1** is the Agent producer gate, execution checkpoint **C2** is global **Checkpoint C** / Plan 2 backend gate, and execution checkpoint **C3** is global **Checkpoint D** / Plan 3 verification gate. C2 closes only the Plan 2 side of the cross-plan seam: post-CAS event emission, outer reference lock/guard, fixed provider aggregator, and projection/head/attempt/context roots. C3 closes the listeners, normalized verification/Wiki providers, whole-chain audit retention, and cleanup races. C2 must not invent Plan 3 tables; C3 must not modify the projection core to call verification directly.
 
 ## Cross-Repository Contract Lock
 
@@ -100,9 +107,10 @@ Use this protocol for every task in every component plan:
 5. Implement only the interfaces and invariants listed in that task.
 6. Run the targeted GREEN command, then the task regression command.
 7. Run `git diff --check` and inspect `git diff --stat` plus `git diff -- <task files>`.
-8. Commit only task files with the prescribed message.
+8. Stage only explicit file paths with `git add -- PATH...`, inspect `git diff --cached --name-only` against the task allowlist, and run `git diff --cached --check` before committing with the prescribed message. `git add .`, `git add -A`, wildcard/directory-root staging, and unrelated paths are forbidden. Tasks explicitly split into mandatory slices are separate sessions, reviews, and commits; never aggregate them back into a mega-task.
 9. Have a fresh reviewer check spec compliance first and code quality second. Fix findings before the next task.
-10. Update the execution ledger below with commit, tests, and residual risk.
+10. After zero Critical/Important, seal a SHA-256 handoff containing repository, parent/base SHA, candidate SHA, exact allowlist, diff/check results, test commands/results, review verdicts, and residual risk. A genuinely fresh coordinator Codex task—never the implementation worker—verifies that `BASE_SHA` is an ancestor of both current pulled `main` and `CANDIDATE_SHA`, and that every path in `BASE_SHA..CANDIDATE_SHA` is allowlisted. Integration is only `git merge --no-ff --no-edit CANDIDATE_SHA` from clean current `main`; cherry-pick, squash, rebase, conflict resolution, and hand reimplementation are forbidden. A merge conflict stops and returns to the implementation owner. The coordinator verifies `CANDIDATE_SHA` is an ancestor of the merge commit, reruns affected smoke on that integration commit, and pushes. Record coordinator task ID/model/handoff digest/integration SHA, then create the next branch from pulled `main`.
+11. Update the execution ledger below with task commit, main integration SHA, tests, elapsed time, and residual risk. Respect the checkpoint's time-box; on expiry stop with evidence and a resumable checkpoint instead of broadening scope or silently continuing.
 
 Never combine tasks across repositories in one Git commit. Backend and agent histories remain independently bisectable.
 
@@ -114,11 +122,13 @@ Copy this row once per completed task into the implementation task report:
 Plan/Task:
 Repository:
 Commit:
+Integrated main commit / push:
 RED command and observed failure:
 GREEN command and result:
 Regression command and result:
 Spec gates covered:
 Reviewer verdict:
+Elapsed time / guardrail:
 Residual risk:
 ```
 
@@ -134,7 +144,7 @@ Stop the current task and report evidence when any of these occurs:
 - a frontend action would require an API not present in the frozen protocol;
 - a verification operation cannot be committed atomically with work completion;
 - a backup or restore rehearsal fails, Neo4j cannot be restarted healthy, or graph maintenance cannot be safely released;
-- the live project/binding differs from `01KXJD0SV73EBGWKNE2EK3M4KD` / `01KXJD1BDMQ2TFABMVJV6EFE8Q`.
+- a live acceptance command is about to use a production project/binding, the Carnovali project IDs, a user's normal Hades profile, or any non-disposable database/volume instead of the Plan 6 isolated identifiers.
 
 Do not treat a test failure as permission to weaken the assertion, use a v1 fallback, return a false zero, disable authorization, or skip the backup gate.
 
@@ -142,34 +152,34 @@ Do not treat a test failure as permission to weaken the assertion, use a v1 fall
 
 - [ ] **Checkpoint A — Contract freeze:** After Plan 1 Tasks 1–3, compare root schemas, Python types, golden bytes, and contract-lock digests.
 - [ ] **Checkpoint B — Producer gate:** After Plan 1, run G01–G12/G14, Python G13 vectors, plus the >5,000-node/>10,000-edge/>500-entrypoint benchmark; PHP/TypeScript G13 closes in Plans 2/4.
-- [ ] **Checkpoint C — Backend gate:** After Plan 2, run L01–L15 with failure injection, concurrency, and tenant-isolation suites.
-- [ ] **Checkpoint D — Verification gate:** After Plan 3, run V01–V18 including out-of-order cache, stale CAS, graph overlays, Wiki fingerprint recompute, and one-item worker behavior.
+- [ ] **Checkpoint C — Backend gate:** After Plan 2, run L01–L15 with failure injection, concurrency, tenant isolation, one post-CAS projection-activated event, and the composed Plan 2 reachability roots.
+- [ ] **Checkpoint D — Verification gate:** After Plan 3, run V01–V19 including out-of-order cache, stale CAS, graph overlays, Wiki fingerprint recompute, one-item worker behavior, hard/progress deadlines, mandatory OS containment plus backend specialist-fence teardown/quarantine across hosts, delayed graph/Wiki event-order handling, human-retry total lock order, verification/Wiki retention races, and the standalone Codex plugin contract/fresh-task smoke.
 - [ ] **Checkpoint E — UX gate:** After Plan 4, run U01–U12, typecheck, build, accessibility checks, and deterministic layout fixtures.
-- [ ] **Checkpoint F — DR gate:** After Plan 5, retain the successful Restic snapshot ID and restore-rehearsal report before cutover.
-- [ ] **Checkpoint G — Live gate:** After Plan 6, obtain explicit user acceptance before executing the v1 retirement `--confirm` command.
+- [ ] **Checkpoint F — DR tooling gate:** After Plan 5, prove the central artifact mutation guard/inventory, bound maintenance authority crash/resume/stale-owner fencing, scoped export/retirement/forward restore, resumable release driver, and complete disposable Restic backup/restore rehearsal with `production_touched=false`. Live DR readiness occurs only in Plan 6 Task 10B after digest-bound P1 and before deployment.
+- [ ] **Checkpoint G — Acceptance/promotion gate:** After Plan 6 isolated acceptance, obtain the exact run/prepared-release-digest P1 approval before production mutation and a separate run/receipt/selection/export-digest P2 approval before v1 retirement. Whole-system restore requires its own consistency-set-digest approval.
 
 ## Specification Traceability
 
 | Design section | Implemented by |
 |---|---|
 | 6.1–6.4 schemas, scalars, source/identity/digests | Plan 1 Tasks 1–4; Plan 2 Task 1 |
-| 6.5–6.11 nodes, entrypoints, structures, edges, evidence, completeness, uncertainty | Plan 1 Tasks 2–3, 5–8; Plan 3 Task 5 |
-| 7 lifecycle model, stages, traversal, framework matrix, Graphify role | Plan 1 Tasks 5–8 |
-| 8 bundle/chunk transport and resumable API | Plan 1 Tasks 9–11; Plan 2 Tasks 3–4 |
-| 9.1 storage migrations/retention | Plan 2 Tasks 2, 11; Plan 3 Task 1; Plan 5 Tasks 5–6 |
-| 9.2–9.5 projection versions, context, Neo4j, services | Plan 2 Tasks 4–9 |
+| 6.5–6.11 nodes, entrypoints, structures, edges, evidence, completeness, uncertainty | Plan 1 Tasks 2–3 and 5–15; Plan 3 Task 4 |
+| 7 lifecycle model, stages, traversal, framework matrix, Graphify role | Plan 1 Tasks 5–14 |
+| 8 bundle/chunk transport and resumable API | Plan 1 Tasks 15 and 17; Plan 2 Tasks 3–4 |
+| 9.1 storage migrations/retention | Plan 2 Tasks 2, 6, 11; Plan 3 Tasks 1–8; Plan 5 Tasks 1 and 4–6 |
+| 9.2–9.5 projection versions, context, Neo4j, services/maintenance/retention | Plan 2 Tasks 4–11; Plan 3 Tasks 2–8 |
 | 10 dashboard graph API, handles, cursors, DTOs/errors | Plan 2 Tasks 7–9; Plan 4 Task 1 |
-| 11.1–11.6 queue, results, leases, verdicts, CLI | Plan 3 Tasks 1–10 |
-| 11.7–11.8 skills and empty-project Wiki bootstrap | Plan 3 Task 11 |
-| 12 Hades Agent file map/dependencies/docs | Plan 1 Tasks 1–18; Plan 3 Tasks 8–13; Plan 6 Task 9 |
+| 11.1–11.6 queue, results, leases, verdicts, CLI | Plan 3 Tasks 1–11 |
+| 11.7–11.8 skills and empty-project Wiki bootstrap | Plan 3 Tasks 12–13 |
+| 12 Hades Agent file map/dependencies/docs/plugin | Plan 1 Tasks 1–18; Plan 3 Tasks 9–15; Plan 6 Tasks 4–6 |
 | 13 React Graph Explorer UX | Plan 4 Tasks 1–10 |
-| 14.1 deployment order | Plan 6 Tasks 1–9 |
+| 14.1 deployment order | Plan 6 Tasks 0–10 |
 | 14.2 DR/hourly differential backup | Plan 5 Tasks 1–4, 7–8 |
-| 14.3–14.4 scoped retirement/restore/rollback | Plan 5 Tasks 4–6; Plan 6 Tasks 7–8 |
-| 15 G/L/V/U/live acceptance | Plans 1–4 final tasks; Plan 6 Tasks 3–6 |
-| 16 documentation/operator handoff | Plan 3 Tasks 11–13; Plan 5 Task 7; Plan 6 Task 9 |
+| 14.3–14.4 scoped retirement/restore/rollback | Plan 5 Tasks 4–6; Plan 6 Task 10 |
+| 15 G/L/V/U/live acceptance | Plans 1–4 final tasks; Plan 6 Tasks 2–8 |
+| 16 documentation/operator handoff | Plan 3 Tasks 12–14; Plan 5 Task 7; Plan 6 Tasks 8–10 |
 | 17 definition of done | Plan 6 Exit Gate |
 
 ## Completion Rule
 
-The program is complete only when every component plan is committed on its feature branch, all automated gates are green, the live Carnovali gate passes on desktop and mobile, backups and scoped rollback are verified, unrelated data counts are unchanged, final reviews contain no unresolved Critical/Important finding, and the user explicitly accepts the deployment. Only then merge backend and agent branches to `main` and push.
+The program is complete only when every accepted component slice is integrated into and pushed from the appropriate `main`, all automated gates are green, the isolated Symfony Demo acceptance passes on desktop and mobile (with Carnovali retained as an optional later scale gate), backups and scoped rollback are verified, unrelated data counts are unchanged, final reviews contain no unresolved Critical/Important finding, and the user explicitly accepts production promotion/retirement decisions. Plan 6 verifies that deployed SHAs match those incrementally integrated histories; it does not accumulate one late mega-merge.

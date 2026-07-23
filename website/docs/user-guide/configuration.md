@@ -106,6 +106,61 @@ For git installs, Hermes auto-stashes dirty tracked files and untracked files be
 
 Before that stash step, Hermes also restores tracked `package-lock.json` diffs left by npm install/build churn. Commit or manually stash intentional lockfile edits before updating.
 
+## Engineering Review Configuration
+
+Autonomous engineering reviews keep their private evidence and reports under
+`~/.hermes/reviews/<session-id>/<run-id>/`. Completed runs are pruned after a
+review closes according to this non-secret `config.yaml` setting:
+
+```yaml
+review:
+  retention_runs: 30
+```
+
+The default retains the 30 newest completed runs across the active profile.
+Set `retention_runs: 0` to remove completed runs at the next pruning pass.
+Negative, boolean, and non-integer values fall back to `30`. Active runs are
+never pruned, and a `cleanup_failed` run is preserved so you can recover it
+with `hermes review cleanup --run RUN_ID`.
+
+`hermes review` requires Node.js 22 or newer. It accepts local changes, Git
+ranges, diff files, and GitHub pull-request URLs; supports
+`--effort low|medium|high`; and can collect real pytest or Vitest evidence.
+Review operations use the explicit statuses `passed`, `failed`, and
+`inconclusive`.
+
+For an untrusted PR, build/tests require either a configured sandbox backend or
+explicit approval before local execution. Without that authority, static
+review remains available but executable evidence stays inconclusive. Remote
+access is read-only and the final verdict remains a local artifact until a
+separate user-authorized workflow publishes it.
+
+Review sandboxing currently supports the Docker terminal backend only:
+
+```yaml
+terminal:
+  backend: docker
+```
+
+You can set the same value with
+`hades config set terminal.backend docker`. The Docker image must have Node.js
+22 or newer and must pre-provision offline test dependencies at
+`/opt/hermes-review-dependencies` (including a `node_modules` tree for Vitest
+or the `python-ready` marker plus pytest for Python). Hades forces
+`network: none`, strips provider credentials, and does not honor user Docker
+flags that could weaken those constraints.
+
+Modal, Daytona, SSH, and Singularity currently lack the authority's provable
+workspace-and-network confinement contract. Their executable review checks
+return `inconclusive`; Hades does not silently run them on the host. Native
+Windows also lacks the kernel-authenticated Unix authority channel, so use
+Hades inside WSL for engineering reviews.
+
+The packaged deterministic engine incorporates a pinned source slice from
+[Qwen Code](https://github.com/QwenLM/qwen-code/tree/d064bd7dcf98e0255283068a775f6e49d70db8aa)
+under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0); its wheel
+includes the upstream notice, license, and provenance hashes.
+
 ## Terminal Backend Configuration
 
 Hermes supports six terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, or a Singularity/Apptainer container.

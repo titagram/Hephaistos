@@ -1,0 +1,5 @@
+from feature import answer
+
+
+def test_effective() -> None:
+    assert answer() == 200

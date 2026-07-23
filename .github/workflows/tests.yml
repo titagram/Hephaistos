@@ -17,6 +17,65 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  engineering-review:
+    name: Engineering review engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci --ignore-scripts
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python acceptance environment
+        run: |
+          uv python install 3.11
+          uv sync --locked --python 3.11 --extra dev
+
+      - name: Verify vendored Qwen slice
+        run: python3 scripts/verify_qwen_engineering_vendor.py
+
+      - name: Test, typecheck, and build engine
+        run: |
+          npm test --workspace packages/hermes-engineering
+          npm run typecheck --workspace packages/hermes-engineering
+          npm run build --workspace packages/hermes-engineering
+          git diff --exit-code -- hermes_cli/engineering_dist
+
+      - name: Build network-isolated review image
+        run: |
+          docker build \
+            --tag hermes-review-e2e:node22 \
+            tests/fixtures/engineering_review/docker
+
+      - name: Run public, installed, and sandbox acceptance
+        env:
+          HERMES_REVIEW_SANDBOX_E2E_IMAGE: hermes-review-e2e:node22
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          NOUS_API_KEY: ""
+        run: |
+          .venv/bin/python -m pytest -o addopts='' -q \
+            tests/integration/test_engineering_review_e2e.py \
+            tests/integration/test_engineering_review_wheel.py \
+            tests/scripts/test_verify_qwen_engineering_vendor.py
+
   generate:
     name: "Generate slices"
     runs-on: ubuntu-latest

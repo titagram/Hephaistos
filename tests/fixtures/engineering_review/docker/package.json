@@ -1,0 +1,8 @@
+{
+  "name": "hermes-review-e2e-dependencies",
+  "private": true,
+  "version": "1.0.0",
+  "devDependencies": {
+    "vitest": "4.1.9"
+  }
+}

@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Inherit every global constraint from `2026-07-16-graph-lifecycle-v2-master.md`.
-- Work only in `/Users/gabriele/Dev/Hephaistos` on `codex/graph-lifecycle-v2-agent`.
+- Historical execution used `/Users/gabriele/Dev/Hephaistos`; current C1 status/SHA/branch are authoritative only in `2026-07-21-graph-lifecycle-v2-execution-checkpoint.md`. Do not resume the obsolete `codex/graph-lifecycle-v2-agent` branch. Any bounded repair starts from clean pulled `main` after the accepted predecessor integration, on a fresh checkpoint-recorded branch.
 - Read design sections 6–8 and 12 before Task 1; treat their scalar rules and closed unions as normative.
 - `hermes_cli/hades_graph_contract.py` remains an import facade but exports v2 only.
 - All public artifact objects include every declared property; nullable fields use explicit `null`/`None`.
@@ -184,7 +184,8 @@ Expected: PASS; manifest paths are sorted and every digest matches exact file by
 - [ ] **Step 6: Commit**
 
 ```bash
-git add contracts/hades/graph-v2 tests/hermes_cli/test_hades_graph_v2_golden.py
+git add -- contracts/hades/graph-v2/artifact.schema.json contracts/hades/graph-v2/bundle.schema.json contracts/hades/graph-v2/chunk.schema.json contracts/hades/graph-v2/dashboard-query.schema.json contracts/hades/graph-v2/dashboard-response.schema.json contracts/hades/graph-v2/verification-work.schema.json contracts/hades/graph-v2/verification-result.schema.json contracts/hades/graph-v2/graph-overlay.schema.json contracts/hades/graph-v2/golden/canonicalization.json contracts/hades/graph-v2/golden/dashboard-protocol.json contracts/hades/graph-v2/golden/verification-results.json contracts/hades/graph-v2/manifest.json tests/hermes_cli/test_hades_graph_v2_golden.py
+git diff --cached --name-only
 git commit -m "feat(hades): freeze graph lifecycle v2 contracts"
 ```
 
@@ -268,7 +269,8 @@ Expected: PASS including NFC, path-normalization, line-insertion, permutation, a
 Generate `contracts/hades/graph-v2/contract-lock.json` from the current manifest. Set `schema_source_commit` to the Task 1 commit, which is the already-existing commit that last changed schema/golden/manifest bytes. Do not amend this commit to insert its own SHA; that would create a self-reference with no stable value.
 
 ```bash
-git add hermes_cli/hades_graph_v2 hermes_cli/hades_graph_contract.py contracts/hades/graph-v2/contract-lock.json tests/hermes_cli/test_hades_graph_contract.py tests/hermes_cli/test_hades_graph_v2_golden.py
+git add -- hermes_cli/hades_graph_v2/__init__.py hermes_cli/hades_graph_v2/schema.py hermes_cli/hades_graph_v2/identity.py hermes_cli/hades_graph_v2/canonicalize.py hermes_cli/hades_graph_contract.py contracts/hades/graph-v2/contract-lock.json tests/hermes_cli/test_hades_graph_contract.py tests/hermes_cli/test_hades_graph_v2_golden.py
+git diff --cached --name-only
 git commit -m "feat(hades): implement graph v2 canonical identity"
 ```
 
@@ -284,15 +286,16 @@ git commit -m "feat(hades): implement graph v2 canonical identity"
 
 ```python
 class Knowledge(str, Enum):
+    EXACT = "exact"
     ABSENCE_VERIFIED = "absence_verified"
-    LOWER_BOUND = "lower_bound"
     UNKNOWN = "unknown"
 
 @dataclass(frozen=True, slots=True)
 class CountKnowledge:
     represented: int
-    exact_value: int | None
+    value: int | None
     knowledge: Knowledge
+    reason: ReasonCode | None
 
 @dataclass(frozen=True, slots=True)
 class GraphArtifactV2:
@@ -316,8 +319,25 @@ class GraphArtifactV2:
 
 ```python
 def test_partial_family_never_returns_verified_zero():
-    count = count_knowledge(represented=0, omitted=2, capability_status="partial")
-    assert count == CountKnowledge(represented=0, exact_value=None, knowledge=Knowledge.UNKNOWN)
+    count = count_knowledge(
+        represented=0,
+        omitted=2,
+        capability_status="partial",
+        reasons=[ReasonCode.DYNAMIC_DISPATCH],
+    )
+    assert count == CountKnowledge(
+        represented=0,
+        value=None,
+        knowledge=Knowledge.UNKNOWN,
+        reason=ReasonCode.DYNAMIC_DISPATCH,
+    )
+
+def test_count_knowledge_closes_all_three_schema_shapes():
+    assert exact_count(3) == CountKnowledge(3, 3, Knowledge.EXACT, None)
+    assert verified_absence() == CountKnowledge(0, 0, Knowledge.ABSENCE_VERIFIED, None)
+    assert unknown_count(2, [ReasonCode.RESOURCE_BUDGET_REACHED, ReasonCode.DYNAMIC_DISPATCH]) == CountKnowledge(
+        2, None, Knowledge.UNKNOWN, ReasonCode.DYNAMIC_DISPATCH
+    )
 
 def test_base_artifact_rejects_agent_verified_evidence(valid_artifact):
     payload = replace_first_evidence_origin(valid_artifact, "agent_verified")
@@ -462,7 +482,8 @@ Use the dataclass fields and enums verbatim from design section 12.2. `AdapterRe
 Run: `.venv/bin/python -m pytest tests/hermes_cli/test_hades_lifecycle_ir.py -q`
 
 ```bash
-git add hermes_cli/hades_index/lifecycle hermes_cli/hades_index/base.py tests/hermes_cli/test_hades_lifecycle_ir.py
+git add -- hermes_cli/hades_index/lifecycle/__init__.py hermes_cli/hades_index/lifecycle/model.py hermes_cli/hades_index/base.py tests/hermes_cli/test_hades_lifecycle_ir.py
+git diff --cached --name-only
 git commit -m "feat(hades): define lifecycle extraction IR"
 ```
 
@@ -991,7 +1012,8 @@ Expected: PASS. If unrelated pre-existing failures exist, record exact node IDs 
 
 ```bash
 git diff --check
-git add tests/fixtures/hades/graph_v2 tests/hermes_cli .codex-artifacts/graph-v2/agent-gates.json
+git add -- tests/hermes_cli/test_hades_graph_contract.py tests/hermes_cli/test_hades_graph_v2_golden.py tests/hermes_cli/test_hades_lifecycle_control_flow.py tests/hermes_cli/test_hades_lifecycle_framework_adapter.py tests/hermes_cli/test_hades_lifecycle_symfony.py tests/hermes_cli/test_hades_lifecycle_laravel.py tests/hermes_cli/test_hades_lifecycle_django.py tests/hermes_cli/test_hades_lifecycle_fastapi.py tests/hermes_cli/test_hades_lifecycle_express.py tests/hermes_cli/test_hades_lifecycle_nextjs.py tests/hermes_cli/test_hades_lifecycle_traversal.py tests/hermes_cli/test_hades_index_enrichment.py tests/hermes_cli/test_hades_graph_budget_pruner.py tests/hermes_cli/test_hades_graph_bundle.py tests/hermes_cli/test_hades_backend_indexer_golden.py tests/fixtures/hades/graph_v2/adapter_result_validation.json .codex-artifacts/graph-v2/agent-gates.json
+git diff --cached --name-only
 git commit -m "test(hades): close graph v2 producer gates"
 ```
 

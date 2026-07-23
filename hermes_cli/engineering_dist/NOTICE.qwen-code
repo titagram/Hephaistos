@@ -1,0 +1,9 @@
+Qwen Code review-engine source slice
+
+Source: https://github.com/QwenLM/qwen-code.git
+Commit: d064bd7dcf98e0255283068a775f6e49d70db8aa
+
+This bundle contains code derived from Qwen Code, including the
+unquoteCStylePath implementation from packages/core/src/utils/gitDiff.ts.
+The Qwen-derived material is Apache-2.0 licensed. The complete license and
+source provenance are recorded under third_party/qwen-code/.

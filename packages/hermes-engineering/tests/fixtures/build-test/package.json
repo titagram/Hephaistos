@@ -1,0 +1,11 @@
+{
+  "name": "build-test-fixture",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:pass",
+    "build:pass": "node scripts/build-pass.mjs",
+    "test:fail": "vitest run --reporter=json --configLoader=runner --no-cache failing.test.ts",
+    "test:compile": "vitest run --reporter=json --configLoader=runner --no-cache compile-error.test.ts",
+    "test:timeout": "node scripts/timeout.mjs"
+  }
+}
