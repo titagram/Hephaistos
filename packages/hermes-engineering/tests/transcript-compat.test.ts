@@ -63,11 +63,13 @@ result = {
             {"id": "brief", "function": {"name": "read_file", "arguments": json.dumps({"file_path": str(brief)})}},
             {"id": "denied", "function": {"name": "read_file", "arguments": json.dumps({"file_path": "/denied"})}},
             {"id": "cancelled", "function": {"name": "read_file", "arguments": json.dumps({"file_path": "/cancelled"})}},
+            {"id": "native-error", "function": {"name": "read_file", "arguments": json.dumps({"file_path": str(diff), "offset": 4, "limit": 1})}},
         ]},
         {"role": "tool", "tool_call_id": "diff", "content": "two\nthree\nfour"},
         {"role": "tool", "tool_call_id": "brief", "content": "Review the chunk."},
         {"role": "tool", "tool_call_id": "denied", "content": "Denied by the approval policy"},
         {"role": "tool", "tool_call_id": "cancelled", "content": "[Tool execution cancelled — read_file was skipped due to user interrupt]"},
+        {"role": "tool", "tool_call_id": "native-error", "content": "Error executing tool 'read_file': permission denied"},
     ],
 }
 path = write_reviewer_transcript("parent", child, result)

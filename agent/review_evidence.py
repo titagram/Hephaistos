@@ -29,6 +29,7 @@ _SENSITIVE_ASSIGNMENT = re.compile(
     r"(\s*[:=]\s*)(?:bearer\s+)?"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
 )
+_COOKIE_HEADER = re.compile(r"(?im)^([ \t]*cookie[ \t]*:[ \t]*)[^\r\n]*")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
 _CANCELLED_RESULT = re.compile(
     r"(?i)^\[?\s*(?:(?:tool\s+(?:execution|call)|execution|operation|task)\s+)?"
@@ -48,6 +49,7 @@ def _redact_text(value: str) -> str:
     redacted = _SENSITIVE_ASSIGNMENT.sub(
         lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value
     )
+    redacted = _COOKIE_HEADER.sub(lambda match: f"{match.group(1)}[REDACTED]", redacted)
     return _BEARER.sub("Bearer [REDACTED]", redacted)
 
 
@@ -122,6 +124,7 @@ def _is_error_result(content: Any) -> bool:
     return first.startswith((
         "denied",
         "error:",
+        "error executing tool ",
         "exception:",
         "failed:",
         "keyboardinterrupt",

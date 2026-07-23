@@ -86,6 +86,17 @@ def _child_result() -> dict[str, object]:
                             "arguments": json.dumps({"file_path": "/cancelled"}),
                         },
                     },
+                    {
+                        "id": "native-error-read",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({
+                                "file_path": "/tmp/review.diff",
+                                "offset": 20,
+                                "limit": 5,
+                            }),
+                        },
+                    },
                 ],
             },
             {
@@ -98,7 +109,14 @@ def _child_result() -> dict[str, object]:
                     "ANTHROPIC_API_KEY: sk-anthropic-result\n"
                     "HERMES_TOKEN=hermes-token-result\n"
                     "AWS_SECRET_ACCESS_KEY=aws-secret-result\n"
-                    "cookie: cookie-result"
+                    "Cookie: sid=first-cookie; csrf=second-cookie"
+                ),
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "native-error-read",
+                "content": (
+                    "Error executing tool 'read_file': native-tool-error-detail"
                 ),
             },
             {
@@ -161,8 +179,11 @@ def test_only_active_registered_review_markers_create_private_evidence(
     assert "sk-anthropic-result" not in raw
     assert "hermes-token-result" not in raw
     assert "aws-secret-result" not in raw
-    assert "cookie-result" not in raw
+    assert "first-cookie" not in raw
+    assert "csrf=second-cookie" not in raw
     assert "cancelled-read" not in raw
+    assert "native-error-read" not in raw
+    assert "native-tool-error-detail" not in raw
 
     records = [json.loads(line) for line in raw.splitlines()]
     assert records[0]["type"] == "user"
