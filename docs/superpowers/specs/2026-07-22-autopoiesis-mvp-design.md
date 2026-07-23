@@ -1,9 +1,10 @@
 # Autopoiesis MVP Design
 
 **Date:** 2026-07-22
-**Status:** Approved design, awaiting implementation plan
+**Status:** Approved design with implementation plans ready
 **Parent design:** `2026-07-11-gnothi-seauton-autopoiesis-design.md`
 **Prerequisite:** an operational `gnothi_seauton` organism model
+**Implementation plan:** `../plans/2026-07-23-autopoiesis-mvp-index.md`
 
 ## Summary
 
