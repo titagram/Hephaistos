@@ -332,7 +332,19 @@ export async function runTestEfficacy(
   }
 
   const runner = choice.runner;
-  const planned = planTestEfficacy(plan.files, readWorkspaceGlobs(workspace));
+  const workspaceGlobs = readWorkspaceGlobs(workspace);
+  const upstreamPlan = planTestEfficacy(plan.files, workspaceGlobs);
+  const rootVitest = runner.id === "vitest" && workspaceGlobs.length === 0;
+  const rootTests = plan.files
+    .filter((file) => file.kind === "test")
+    .map((file) => file.path);
+  const planned = rootVitest
+    ? {
+        unreachable: [],
+        probes: upstreamPlan.revert.length > 0 ? rootTests : [],
+        revert: upstreamPlan.revert,
+      }
+    : upstreamPlan;
   const tests: TestEfficacyTest[] = planned.unreachable.map((path) => ({
     path,
     verdict: "unreachable",

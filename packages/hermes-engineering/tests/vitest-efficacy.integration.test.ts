@@ -25,6 +25,10 @@ import type {
 } from "../src/runners/types.js";
 
 const FIXTURE = resolve(import.meta.dirname, "fixtures/vitest-efficacy");
+const ROOT_FIXTURE = resolve(
+  import.meta.dirname,
+  "fixtures/vitest-root-efficacy",
+);
 const temporaryRoots: string[] = [];
 
 const git = (cwd: string, ...args: string[]): string =>
@@ -95,6 +99,31 @@ const fixtureRepo = (): {
     { path: "outside-workspace.test.ts", kind: "test" as const },
   ];
   const planPath = writePlan(root, files);
+  return { root, artifactRoot: dirname(planPath), planPath, baseRef };
+};
+
+const rootFixtureRepo = (): ReturnType<typeof fixtureRepo> => {
+  const root = mkdtempSync(join(import.meta.dirname, ".tmp-root-efficacy-"));
+  temporaryRoots.push(root);
+  cpSync(ROOT_FIXTURE, root, { recursive: true });
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "Hermes Test");
+  git(root, "config", "user.email", "hermes@example.invalid");
+  writeFileSync(root + "/feature.ts", readFileSync(root + "/feature.base.ts"));
+  rmSync(root + "/feature.head.ts");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "base");
+  const baseRef = git(root, "rev-parse", "HEAD");
+  writeFileSync(
+    root + "/feature.ts",
+    readFileSync(join(ROOT_FIXTURE, "feature.head.ts")),
+  );
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "head");
+  const planPath = writePlan(root, [
+    { path: "feature.ts", kind: "source" },
+    { path: "effective.test.ts", kind: "test" },
+  ]);
   return { root, artifactRoot: dirname(planPath), planPath, baseRef };
 };
 
@@ -169,6 +198,32 @@ describe("Vitest efficacy", () => {
       detectedRunner("vitest", "no"),
     ]);
     expect(selection).toEqual({ code: "no_runner", available: [] });
+  });
+
+  it("collects and classifies a changed test in a root package without npm workspaces", async () => {
+    const fixture = rootFixtureRepo();
+    const before = git(fixture.root, "status", "--porcelain=v1", "-z");
+
+    const result = await runTestEfficacy({
+      protocolVersion: 1,
+      requestId: "efficacy:root-package",
+      command: "test-efficacy",
+      workspace: fixture.root,
+      artifactRoot: fixture.artifactRoot,
+      input: {
+        planPath: fixture.planPath,
+        baseRef: fixture.baseRef,
+        runner: "vitest",
+        timeoutMs: 20_000,
+      },
+    });
+
+    expect(result.output.tests).toEqual([
+      expect.objectContaining({ path: "effective.test.ts", verdict: "gated" }),
+    ]);
+    expect(result.output.unreachable).toEqual([]);
+    expect(git(fixture.root, "status", "--porcelain=v1", "-z")).toBe(before);
+    expect(existsSync(result.output.probeWorktreePath!)).toBe(false);
   });
 
   it.each([

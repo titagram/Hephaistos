@@ -311,6 +311,29 @@ const boundedOutput = (run: TestRun): string => {
   return `${value.slice(0, 2_000)}\n... [output truncated] ...\n${value.slice(-6_000)}`;
 };
 
+const structuredVitestFiles = (stdout: string): string[] => {
+  const start = stdout.indexOf("{");
+  if (start < 0) return [];
+  try {
+    const parsed = JSON.parse(stdout.slice(start)) as {
+      testResults?: Array<{ name?: unknown }>;
+    };
+    if (!Array.isArray(parsed.testResults)) return [];
+    return [
+      ...new Set(
+        parsed.testResults
+          .map((result) => result.name)
+          .filter(
+            (name): name is string =>
+              typeof name === "string" && name.length > 0,
+          ),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+};
+
 const classifyCommand = (
   command: RecordedCommand,
   run: TestRun,
@@ -337,11 +360,14 @@ const classifyCommand = (
         "the build failed; compilation and infrastructure failures are not a verified test finding",
     };
   }
-  if (command.testFiles.length > 0) {
+  const structuredFiles = structuredVitestFiles(run.stdout);
+  const evidenceFiles =
+    structuredFiles.length > 0 ? structuredFiles : command.testFiles;
+  if (evidenceFiles.length > 0) {
     const classified = classifyProbeRun(
       run.exitCode,
       run.stdout,
-      command.testFiles,
+      evidenceFiles,
       run.stderr,
     );
     if (classified.some((test) => test.verdict === "gated")) {

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -18,9 +19,35 @@ import {
 import type { EngineRequest } from "../src/protocol.js";
 
 const FIXTURE = resolve(import.meta.dirname, "fixtures/build-test");
+const BUNDLE = resolve(
+  import.meta.dirname,
+  "../../../hermes_cli/engineering_dist/hermes-engineering.mjs",
+);
 const temporaryRoots: string[] = [];
 
 type Phase = "build" | "test";
+
+const git = (cwd: string, ...args: string[]): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+const runBundle = (
+  request: EngineRequest,
+): {
+  status: string;
+  output: Record<string, unknown>;
+  diagnostics: Array<{ code: string; message: string }>;
+} =>
+  JSON.parse(
+    execFileSync(process.execPath, [BUNDLE], {
+      input: JSON.stringify(request),
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    }),
+  ) as {
+    status: string;
+    output: Record<string, unknown>;
+    diagnostics: Array<{ code: string; message: string }>;
+  };
 
 const requestFor = (
   script: string,
@@ -74,6 +101,83 @@ afterEach(() => {
 });
 
 describe("build-test", () => {
+  it("classifies an existing test assertion failure through capture and the built engine", () => {
+    const outer = mkdtempSync(join(import.meta.dirname, ".tmp-capture-build-"));
+    temporaryRoots.push(outer);
+    const root = join(outer, "repo");
+    const artifactRoot = join(outer, "artifacts");
+    mkdirSync(root);
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(artifactRoot, { mode: 0o700 });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({
+        name: "capture-build-fixture",
+        private: true,
+        scripts: {
+          test: "vitest run --reporter=json --configLoader=runner --no-cache",
+        },
+        devDependencies: { vitest: "^4.1.5" },
+      }),
+    );
+    writeFileSync(
+      join(root, "vitest.config.ts"),
+      'import { defineConfig } from "vitest/config";\n' +
+        'export default defineConfig({ test: { include: ["*.test.ts"] } });\n',
+    );
+    writeFileSync(join(root, "src/value.ts"), "export const value = 2;\n");
+    writeFileSync(
+      join(root, "value.test.ts"),
+      'import { expect, it } from "vitest";\n' +
+        'import { value } from "./src/value.js";\n' +
+        'it("keeps the behavior", () => expect(value).toBe(2));\n',
+    );
+    git(root, "init", "-q");
+    git(root, "config", "user.name", "Hermes Test");
+    git(root, "config", "user.email", "hermes@example.invalid");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "base");
+    writeFileSync(join(root, "src/value.ts"), "export const value = 1;\n");
+    const before = git(root, "status", "--porcelain=v1", "-z");
+
+    const capture = runBundle({
+      protocolVersion: 1,
+      requestId: "capture-build:capture",
+      command: "capture-target",
+      workspace: root,
+      artifactRoot,
+      input: { kind: "local" },
+    });
+    expect(capture.status).toBe("passed");
+    const planPath = capture.output.planPath as string;
+    const plan = JSON.parse(readFileSync(planPath, "utf8")) as {
+      hermes: {
+        buildTest: {
+          commands: Array<{ phase: string; testFiles?: string[] }>;
+        };
+      };
+    };
+    expect(
+      plan.hermes.buildTest.commands.find((command) => command.phase === "test")
+        ?.testFiles,
+    ).toBeUndefined();
+
+    const built = runBundle({
+      protocolVersion: 1,
+      requestId: "capture-build:build-test",
+      command: "build-test",
+      workspace: root,
+      artifactRoot,
+      input: { planPath, timeoutMs: 20_000 },
+    });
+
+    expect(built.status).toBe("failed");
+    expect(
+      (built.output.commands as Array<{ outcome: string }>)[0]?.outcome,
+    ).toBe("failed");
+    expect(git(root, "status", "--porcelain=v1", "-z")).toBe(before);
+  });
+
   it("executes the Qwen-scoped commands recorded during planning", async () => {
     const request = requestFor("build:pass", "build");
     const discovered = discoverBuildTestPlan(request.workspace, [

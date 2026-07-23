@@ -1330,6 +1330,23 @@ var boundedOutput = (run) => {
 ... [output truncated] ...
 ${value.slice(-6e3)}`;
 };
+var structuredVitestFiles = (stdout) => {
+  const start = stdout.indexOf("{");
+  if (start < 0) return [];
+  try {
+    const parsed = JSON.parse(stdout.slice(start));
+    if (!Array.isArray(parsed.testResults)) return [];
+    return [
+      ...new Set(
+        parsed.testResults.map((result) => result.name).filter(
+          (name) => typeof name === "string" && name.length > 0
+        )
+      )
+    ];
+  } catch {
+    return [];
+  }
+};
 var classifyCommand = (command, run) => {
   if (run.timedOut) {
     return {
@@ -1353,11 +1370,13 @@ ${run.stderr}`;
       detail: "the build failed; compilation and infrastructure failures are not a verified test finding"
     };
   }
-  if (command.testFiles.length > 0) {
+  const structuredFiles = structuredVitestFiles(run.stdout);
+  const evidenceFiles = structuredFiles.length > 0 ? structuredFiles : command.testFiles;
+  if (evidenceFiles.length > 0) {
     const classified = classifyProbeRun(
       run.exitCode,
       run.stdout,
-      command.testFiles,
+      evidenceFiles,
       run.stderr
     );
     if (classified.some((test) => test.verdict === "gated")) {
@@ -2583,7 +2602,15 @@ async function runTestEfficacy(request, runners = [new VitestRunner()]) {
     };
   }
   const runner = choice.runner;
-  const planned = planTestEfficacy(plan.files, readWorkspaceGlobs(workspace));
+  const workspaceGlobs = readWorkspaceGlobs(workspace);
+  const upstreamPlan = planTestEfficacy(plan.files, workspaceGlobs);
+  const rootVitest = runner.id === "vitest" && workspaceGlobs.length === 0;
+  const rootTests = plan.files.filter((file) => file.kind === "test").map((file) => file.path);
+  const planned = rootVitest ? {
+    unreachable: [],
+    probes: upstreamPlan.revert.length > 0 ? rootTests : [],
+    revert: upstreamPlan.revert
+  } : upstreamPlan;
   const tests = planned.unreachable.map((path) => ({
     path,
     verdict: "unreachable",
