@@ -23,6 +23,7 @@ import type {
   TestRunner,
   TestRun,
 } from "../runners/types.js";
+import { PytestRunner } from "../runners/pytest.js";
 import { VitestRunner } from "../runners/vitest.js";
 
 export type TestVerdict = ProbeVerdict | "unreachable";
@@ -304,7 +305,7 @@ const group = (tests: TestEfficacyTest[], verdict: TestVerdict): string[] =>
 
 export async function runTestEfficacy(
   request: EngineRequest,
-  runners: readonly TestRunner[] = [new VitestRunner()],
+  runners: readonly TestRunner[] = [new VitestRunner(), new PytestRunner()],
 ): Promise<TestEfficacyResult> {
   const input = parseInput(request);
   const workspace = realpathSync(request.workspace);
@@ -334,11 +335,12 @@ export async function runTestEfficacy(
   const runner = choice.runner;
   const workspaceGlobs = readWorkspaceGlobs(workspace);
   const upstreamPlan = planTestEfficacy(plan.files, workspaceGlobs);
-  const rootVitest = runner.id === "vitest" && workspaceGlobs.length === 0;
+  const collectionIsAuthoritative =
+    runner.id === "pytest" || workspaceGlobs.length === 0;
   const rootTests = plan.files
     .filter((file) => file.kind === "test")
     .map((file) => file.path);
-  const planned = rootVitest
+  const planned = collectionIsAuthoritative
     ? {
         unreachable: [],
         probes: upstreamPlan.revert.length > 0 ? rootTests : [],
@@ -392,7 +394,7 @@ export async function runTestEfficacy(
           tests.push({
             path,
             verdict: "unreachable",
-            detail: "Vitest did not collect the changed test file",
+            detail: `${runner.id} did not collect the changed test file`,
           });
           return false;
         });
@@ -433,9 +435,32 @@ export async function runTestEfficacy(
           tests.push(inconclusiveForRun(file, run, "revert probe"));
           continue;
         }
+        const classifierStdout = run.structured
+          ? JSON.stringify({
+              testResults:
+                run.structured.outcome === "passed" ||
+                run.structured.outcome === "assertion_failed"
+                  ? [
+                      {
+                        name: file,
+                        assertionResults: [
+                          ...Array.from(
+                            { length: run.structured.failedAssertions },
+                            () => ({ status: "failed" }),
+                          ),
+                          ...Array.from(
+                            { length: run.structured.passed },
+                            () => ({ status: "passed" }),
+                          ),
+                        ],
+                      },
+                    ]
+                  : [],
+            })
+          : run.stdout;
         const classified = classifyProbeRun(
           run.exitCode,
-          run.stdout,
+          classifierStdout,
           [file],
           run.stderr,
         )[0];

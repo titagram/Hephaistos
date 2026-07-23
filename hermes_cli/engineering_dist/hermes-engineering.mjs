@@ -1,5 +1,5 @@
 // packages/hermes-engineering/src/main.ts
-import { realpathSync as realpathSync6 } from "node:fs";
+import { realpathSync as realpathSync7 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // packages/hermes-engineering/src/handlers/build-test.ts
@@ -1087,7 +1087,7 @@ var appendBounded = (chunks, chunk, captured) => {
 var NodeProcessRunner = class {
   async run(invocation, timeoutMs) {
     const started = Date.now();
-    return await new Promise((resolve8) => {
+    return await new Promise((resolve9) => {
       const stdout = [];
       const stderr = [];
       const stdoutSize = { bytes: 0 };
@@ -1131,7 +1131,7 @@ var NodeProcessRunner = class {
           durationMs: Date.now() - started
         };
         if (spawnError !== void 0) result.error = spawnError.message;
-        resolve8(result);
+        resolve9(result);
       };
       child.on("close", finish);
     });
@@ -2242,31 +2242,322 @@ var removeWorktree = (worktreePath) => {
 import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
 import {
-  existsSync as existsSync6,
+  existsSync as existsSync7,
   lstatSync as lstatSync5,
-  readFileSync as readFileSync6,
-  realpathSync as realpathSync5,
+  readFileSync as readFileSync7,
+  realpathSync as realpathSync6,
   rmSync as rmSync2
 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join6, relative as relative5, resolve as resolve7, sep as sep6 } from "node:path";
+import { isAbsolute as isAbsolute7, join as join6, relative as relative6, resolve as resolve8, sep as sep7 } from "node:path";
 
-// packages/hermes-engineering/src/runners/vitest.ts
+// packages/hermes-engineering/src/runners/pytest.ts
 import { existsSync as existsSync5, readFileSync as readFileSync5, realpathSync as realpathSync4 } from "node:fs";
 import { dirname as dirname3, isAbsolute as isAbsolute5, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
-var CONFIG_NAMES = [
+var CONFIG_NAMES = ["pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"];
+var ENV_NAMES = /* @__PURE__ */ new Set([
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PROGRAMDATA",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "LANG",
+  "LANGUAGE"
+]);
+var within2 = (root, candidate) => {
+  const rel = relative4(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep5}`) && rel !== ".." && !isAbsolute5(rel);
+};
+var findModuleRoot = () => {
+  let cursor = resolve6(import.meta.dirname);
+  for (; ; ) {
+    if (existsSync5(
+      resolve6(cursor, "hermes_cli/engineering_review/pytest_probe.py")
+    )) {
+      return cursor;
+    }
+    const parent = dirname3(cursor);
+    if (parent === cursor) return resolve6(import.meta.dirname);
+    cursor = parent;
+  }
+};
+var defaultPython = () => {
+  const root = findModuleRoot();
+  const names = process.platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"];
+  for (const name of names) {
+    const candidate = resolve6(root, name);
+    if (existsSync5(candidate)) return candidate;
+  }
+  let cursor = root;
+  for (; ; ) {
+    const candidate = resolve6(
+      cursor,
+      process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
+    );
+    if (existsSync5(candidate)) return candidate;
+    const parent = dirname3(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return process.platform === "win32" ? "python" : "python3";
+};
+var workspacePython = (workspace) => {
+  const names = process.platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"];
+  for (const name of names) {
+    const candidate = resolve6(workspace, name);
+    if (existsSync5(candidate)) return candidate;
+  }
+  return null;
+};
+var probeEnvironment = () => {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== void 0 && (ENV_NAMES.has(name) || name.startsWith("LC_"))) {
+      env[name] = value;
+    }
+  }
+  env.CI = "1";
+  env.NO_COLOR = "1";
+  env.PYTHONDONTWRITEBYTECODE = "1";
+  env.PYTHONSAFEPATH = "1";
+  env.PYTHONPATH = findModuleRoot();
+  return env;
+};
+var manifestSignalsPytest = (workspace) => {
+  for (const name of CONFIG_NAMES) {
+    try {
+      const contents = readFileSync5(resolve6(workspace, name), "utf8");
+      if (name === "pytest.ini" || /\[tool\.pytest\.ini_options\]/.test(contents) || /(?:^|\n)\[pytest\](?:\n|$)/.test(contents)) {
+        return true;
+      }
+    } catch {
+    }
+  }
+  for (const name of ["requirements.txt", "requirements-dev.txt"]) {
+    try {
+      if (/^\s*pytest(?:\b|[<=>~!])/m.test(
+        readFileSync5(resolve6(workspace, name), "utf8")
+      )) {
+        return true;
+      }
+    } catch {
+    }
+  }
+  return false;
+};
+var safeRelativeFile = (workspace, raw) => {
+  if (raw.length === 0 || raw.includes("\0") || isAbsolute5(raw)) {
+    throw new Error("test path must be repository-relative");
+  }
+  const normalized = raw.split("\\").join("/");
+  if (normalized.split("/").some((part) => part === "." || part === "..")) {
+    throw new Error("test path contains an unsafe segment");
+  }
+  const root = resolve6(workspace);
+  const target = resolve6(root, normalized);
+  if (!within2(root, target)) throw new Error("test path escapes the workspace");
+  if (existsSync5(target) && !within2(root, realpathSync4(target))) {
+    throw new Error("test path resolves outside the workspace");
+  }
+  return normalized;
+};
+var asStringArray = (value, field) => {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`pytest probe ${field} is not a string array`);
+  }
+  return value;
+};
+var parseProbeResult = (stdout) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("pytest probe produced no parseable JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("pytest probe result is not an object");
+  }
+  const record = parsed;
+  if (record.command !== "collect" && record.command !== "run") {
+    throw new Error("pytest probe returned an invalid command");
+  }
+  if (typeof record.outcome !== "string") {
+    throw new Error("pytest probe returned no outcome");
+  }
+  const outcomes = /* @__PURE__ */ new Set([
+    "collected",
+    "passed",
+    "assertion_failed",
+    "collection_or_import_error",
+    "setup_or_teardown_error",
+    "internal_error",
+    "interrupted",
+    "no_tests_executed",
+    "probe_error"
+  ]);
+  if (!outcomes.has(record.outcome)) {
+    throw new Error("pytest probe returned an invalid outcome");
+  }
+  if (!Number.isSafeInteger(record.pytestExitCode)) {
+    throw new Error("pytest probe returned no valid exit code");
+  }
+  return {
+    command: record.command,
+    outcome: record.outcome,
+    pytestExitCode: record.pytestExitCode,
+    files: asStringArray(record.files, "files"),
+    collectionErrors: asStringArray(
+      record.collectionErrors ?? [],
+      "collectionErrors"
+    ),
+    ...typeof record.passed === "number" ? { passed: record.passed } : {},
+    ...typeof record.failedAssertions === "number" ? { failedAssertions: record.failedAssertions } : {},
+    ...typeof record.skipped === "number" ? { skipped: record.skipped } : {},
+    ...typeof record.error === "string" ? { error: record.error } : {}
+  };
+};
+var failedRun = (run, message) => ({
+  ...run,
+  exitCode: null,
+  error: message
+});
+var PytestRunner = class {
+  constructor(processes = new NodeProcessRunner(), python) {
+    this.processes = processes;
+    this.python = python;
+  }
+  processes;
+  python;
+  id = "pytest";
+  pythonFor(workspace) {
+    return this.python ?? workspacePython(workspace) ?? defaultPython();
+  }
+  async detect(workspace, plan) {
+    if (manifestSignalsPytest(workspace)) return "yes";
+    return plan.files.some(
+      (file) => file.kind === "test" && /(?:^|\/)(?:test_[^/]+|[^/]+_test)\.py$/.test(file.path)
+    ) ? "ambiguous" : "no";
+  }
+  async collectedFiles(workspace) {
+    const root = resolve6(workspace);
+    const run = await this.processes.run(
+      {
+        executable: this.pythonFor(root),
+        args: [
+          "-m",
+          "hermes_cli.engineering_review.pytest_probe",
+          "collect",
+          "--root",
+          root
+        ],
+        cwd: root,
+        env: probeEnvironment()
+      },
+      6e4
+    );
+    if (run.timedOut) throw new Error("pytest collection timed out");
+    if (run.error)
+      throw new Error(`pytest collection could not start: ${run.error}`);
+    if (run.exitCode !== 0) {
+      throw new Error(`pytest collection probe exited ${run.exitCode}`);
+    }
+    const result = parseProbeResult(run.stdout);
+    if (result.command !== "collect") {
+      throw new Error("pytest collection probe returned a run result");
+    }
+    if (result.outcome === "internal_error" || result.outcome === "interrupted" || result.outcome === "probe_error") {
+      throw new Error(`pytest collection was inconclusive: ${result.outcome}`);
+    }
+    if (result.outcome === "collection_or_import_error") {
+      const specificErrors = result.collectionErrors.filter(
+        (file) => /(?:^|\/)(?:test_[^/]+|[^/]+_test)\.py$/.test(file)
+      );
+      if (specificErrors.length === 0 || specificErrors.length !== result.collectionErrors.length) {
+        throw new Error("pytest collection failed outside a test module");
+      }
+    }
+    return new Set(
+      [...result.files, ...result.collectionErrors].map(
+        (file) => safeRelativeFile(root, file)
+      )
+    );
+  }
+  async runFile(workspace, relativePath, timeoutMs) {
+    const root = resolve6(workspace);
+    const file = safeRelativeFile(root, relativePath);
+    const run = await this.processes.run(
+      {
+        executable: this.pythonFor(root),
+        args: [
+          "-m",
+          "hermes_cli.engineering_review.pytest_probe",
+          "run",
+          "--root",
+          root,
+          "--file",
+          file
+        ],
+        cwd: root,
+        env: probeEnvironment()
+      },
+      timeoutMs
+    );
+    if (run.timedOut || run.error || run.exitCode !== 0) return run;
+    let result;
+    try {
+      result = parseProbeResult(run.stdout);
+    } catch (cause) {
+      return failedRun(
+        run,
+        cause instanceof Error ? cause.message : String(cause)
+      );
+    }
+    if (result.command !== "run" || result.outcome === "collected") {
+      return failedRun(run, "pytest run probe returned a collection result");
+    }
+    const structured = {
+      framework: "pytest",
+      outcome: result.outcome,
+      passed: result.passed ?? 0,
+      failedAssertions: result.failedAssertions ?? 0,
+      skipped: result.skipped ?? 0
+    };
+    const error = result.outcome === "probe_error" ? result.error : void 0;
+    return {
+      ...run,
+      exitCode: result.outcome === "passed" ? 0 : Math.max(result.pytestExitCode, 1),
+      structured,
+      ...error === void 0 ? {} : { error }
+    };
+  }
+};
+
+// packages/hermes-engineering/src/runners/vitest.ts
+import { existsSync as existsSync6, readFileSync as readFileSync6, realpathSync as realpathSync5 } from "node:fs";
+import { dirname as dirname4, isAbsolute as isAbsolute6, relative as relative5, resolve as resolve7, sep as sep6 } from "node:path";
+var CONFIG_NAMES2 = [
   "vitest.config.ts",
   "vitest.config.js",
   "vitest.config.mts",
   "vitest.config.mjs"
 ];
-var within2 = (root, candidate) => {
-  const rel = relative4(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep5}`) && rel !== ".." && !isAbsolute5(rel);
+var within3 = (root, candidate) => {
+  const rel = relative5(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute6(rel);
 };
 var manifestSignalsVitest = (workspace) => {
   try {
     const parsed = JSON.parse(
-      readFileSync5(resolve6(workspace, "package.json"), "utf8")
+      readFileSync6(resolve7(workspace, "package.json"), "utf8")
     );
     if ("vitest" in (parsed.dependencies ?? {})) return true;
     if ("vitest" in (parsed.devDependencies ?? {})) return true;
@@ -2278,30 +2569,30 @@ var manifestSignalsVitest = (workspace) => {
   }
 };
 var planSignalsVitest = (workspace, plan) => {
-  const root = resolve6(workspace);
+  const root = resolve7(workspace);
   for (const file of plan.files) {
-    if (file.kind !== "test" || isAbsolute5(file.path)) continue;
-    const absolute = resolve6(root, file.path);
-    if (!within2(root, absolute)) continue;
-    let cursor = dirname3(absolute);
+    if (file.kind !== "test" || isAbsolute6(file.path)) continue;
+    const absolute = resolve7(root, file.path);
+    if (!within3(root, absolute)) continue;
+    let cursor = dirname4(absolute);
     for (; ; ) {
-      if (CONFIG_NAMES.some((name) => existsSync5(resolve6(cursor, name))) || manifestSignalsVitest(cursor)) {
+      if (CONFIG_NAMES2.some((name) => existsSync6(resolve7(cursor, name))) || manifestSignalsVitest(cursor)) {
         return true;
       }
       if (cursor === root) break;
-      const parent = dirname3(cursor);
-      if (parent === cursor || !within2(root, parent)) break;
+      const parent = dirname4(cursor);
+      if (parent === cursor || !within3(root, parent)) break;
       cursor = parent;
     }
   }
   return false;
 };
 var resolveVitestModule = (workspace) => {
-  let cursor = resolve6(workspace);
+  let cursor = resolve7(workspace);
   for (; ; ) {
-    const candidate = resolve6(cursor, "node_modules/vitest/vitest.mjs");
-    if (existsSync5(candidate)) return candidate;
-    const parent = dirname3(cursor);
+    const candidate = resolve7(cursor, "node_modules/vitest/vitest.mjs");
+    if (existsSync6(candidate)) return candidate;
+    const parent = dirname4(cursor);
     if (parent === cursor) return null;
     cursor = parent;
   }
@@ -2316,9 +2607,9 @@ var parseCollectedFiles = (workspace, stdout) => {
       continue;
     const file = entry.file;
     if (typeof file !== "string") continue;
-    const absolute = resolve6(workspace, file);
-    if (!within2(resolve6(workspace), absolute)) continue;
-    files.add(relative4(resolve6(workspace), absolute).split(sep5).join("/"));
+    const absolute = resolve7(workspace, file);
+    if (!within3(resolve7(workspace), absolute)) continue;
+    files.add(relative5(resolve7(workspace), absolute).split(sep6).join("/"));
   }
   return files;
 };
@@ -2329,8 +2620,8 @@ var VitestRunner = class {
   processes;
   id = "vitest";
   async detect(workspace, plan) {
-    const configured = CONFIG_NAMES.some(
-      (name) => existsSync5(resolve6(workspace, name))
+    const configured = CONFIG_NAMES2.some(
+      (name) => existsSync6(resolve7(workspace, name))
     );
     return configured || manifestSignalsVitest(workspace) || planSignalsVitest(workspace, plan) ? "yes" : "no";
   }
@@ -2363,13 +2654,13 @@ var VitestRunner = class {
     return parseCollectedFiles(workspace, run.stdout);
   }
   async runFile(workspace, relativePath, timeoutMs) {
-    if (isAbsolute5(relativePath))
+    if (isAbsolute6(relativePath))
       throw new Error("test path must be repository-relative");
-    const target = resolve6(workspace, relativePath);
-    if (!within2(resolve6(workspace), target)) {
+    const target = resolve7(workspace, relativePath);
+    if (!within3(resolve7(workspace), target)) {
       throw new Error("test path escapes the workspace");
     }
-    if (existsSync5(target) && !within2(resolve6(workspace), realpathSync4(target))) {
+    if (existsSync6(target) && !within3(resolve7(workspace), realpathSync5(target))) {
       throw new Error("test path resolves outside the workspace");
     }
     const modulePath = resolveVitestModule(workspace);
@@ -2409,17 +2700,17 @@ var asRecord2 = (value) => {
   }
   return value;
 };
-var within3 = (root, candidate) => {
-  const rel = relative5(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep6}`) && rel !== ".." && !isAbsolute6(rel);
+var within4 = (root, candidate) => {
+  const rel = relative6(root, candidate);
+  return rel === "" || !rel.startsWith(`..${sep7}`) && rel !== ".." && !isAbsolute7(rel);
 };
 var validatedPlanPath = (request, raw) => {
   if (typeof raw !== "string" || raw.length === 0) {
     throw new TypeError("planPath must be a non-empty string");
   }
-  const artifactRoot = realpathSync5(request.artifactRoot);
-  const path = realpathSync5(resolve7(raw));
-  if (!within3(artifactRoot, path)) {
+  const artifactRoot = realpathSync6(request.artifactRoot);
+  const path = realpathSync6(resolve8(raw));
+  if (!within4(artifactRoot, path)) {
     throw new TypeError("planPath must be inside artifactRoot");
   }
   if (!lstatSync5(path).isFile()) throw new TypeError("planPath must be a file");
@@ -2451,7 +2742,7 @@ var parseInput2 = (request) => {
   };
 };
 var parsePlan = (path) => {
-  const parsed = JSON.parse(readFileSync6(path, "utf8"));
+  const parsed = JSON.parse(readFileSync7(path, "utf8"));
   const record = asRecord2(parsed);
   if (!Array.isArray(record.files))
     throw new TypeError("plan.files must be an array");
@@ -2519,15 +2810,15 @@ var existsAtBase = (cwd, baseRef, path) => {
   return result.status === 0;
 };
 var safeRelativePath = (workspace, path) => {
-  if (path.length === 0 || path.includes("\0") || isAbsolute6(path)) {
+  if (path.length === 0 || path.includes("\0") || isAbsolute7(path)) {
     throw new Error(`unsafe plan path: ${JSON.stringify(path)}`);
   }
   const normalized = path.split("\\").join("/");
   if (normalized.split("/").some((segment) => segment === ".." || segment === ".")) {
     throw new Error(`unsafe plan path segment: ${JSON.stringify(path)}`);
   }
-  const target = resolve7(workspace, normalized);
-  if (!within3(resolve7(workspace), target)) {
+  const target = resolve8(workspace, normalized);
+  if (!within4(resolve8(workspace), target)) {
     throw new Error(
       `plan path escapes the probe worktree: ${JSON.stringify(path)}`
     );
@@ -2558,7 +2849,7 @@ var revertProduction = (probeTree, baseRef, revert) => {
   for (const path of added) safeRmWithin(probeTree, path);
 };
 var cleanupProbeTree = (workspace, probeTree) => {
-  if (!within3(resolve7(workspace), resolve7(probeTree)) || !probeTree.includes(".hermes-efficacy-")) {
+  if (!within4(resolve8(workspace), resolve8(probeTree)) || !probeTree.includes(".hermes-efficacy-")) {
     return "refusing to clean an unrecognized probe worktree";
   }
   let failure = null;
@@ -2568,13 +2859,13 @@ var cleanupProbeTree = (workspace, probeTree) => {
     failure = cause instanceof Error ? cause.message : String(cause);
   }
   try {
-    if (existsSync6(probeTree))
+    if (existsSync7(probeTree))
       rmSync2(probeTree, { recursive: true, force: true });
     git2(workspace, ["worktree", "prune"]);
   } catch (cause) {
     failure ??= cause instanceof Error ? cause.message : String(cause);
   }
-  return existsSync6(probeTree) ? failure ?? `could not remove ${probeTree}` : null;
+  return existsSync7(probeTree) ? failure ?? `could not remove ${probeTree}` : null;
 };
 var inconclusiveForRun = (file, run, phase) => ({
   path: file,
@@ -2582,9 +2873,9 @@ var inconclusiveForRun = (file, run, phase) => ({
   detail: run.timedOut ? `${phase} timed out after ${run.durationMs}ms` : `${phase} could not run${run.error ? `: ${run.error}` : ""}`
 });
 var group = (tests, verdict) => tests.filter((test) => test.verdict === verdict).map((test) => test.path);
-async function runTestEfficacy(request, runners = [new VitestRunner()]) {
+async function runTestEfficacy(request, runners = [new VitestRunner(), new PytestRunner()]) {
   const input = parseInput2(request);
-  const workspace = realpathSync5(request.workspace);
+  const workspace = realpathSync6(request.workspace);
   const plan = parsePlan(input.planPath);
   const choice = await selectRunner(input.runner, workspace, plan, runners);
   if ("code" in choice) {
@@ -2604,9 +2895,9 @@ async function runTestEfficacy(request, runners = [new VitestRunner()]) {
   const runner = choice.runner;
   const workspaceGlobs = readWorkspaceGlobs(workspace);
   const upstreamPlan = planTestEfficacy(plan.files, workspaceGlobs);
-  const rootVitest = runner.id === "vitest" && workspaceGlobs.length === 0;
+  const collectionIsAuthoritative = runner.id === "pytest" || workspaceGlobs.length === 0;
   const rootTests = plan.files.filter((file) => file.kind === "test").map((file) => file.path);
-  const planned = rootVitest ? {
+  const planned = collectionIsAuthoritative ? {
     unreachable: [],
     probes: upstreamPlan.revert.length > 0 ? rootTests : [],
     revert: upstreamPlan.revert
@@ -2656,7 +2947,7 @@ async function runTestEfficacy(request, runners = [new VitestRunner()]) {
           tests.push({
             path,
             verdict: "unreachable",
-            detail: "Vitest did not collect the changed test file"
+            detail: `${runner.id} did not collect the changed test file`
           });
           return false;
         });
@@ -2695,9 +2986,26 @@ async function runTestEfficacy(request, runners = [new VitestRunner()]) {
           tests.push(inconclusiveForRun(file, run, "revert probe"));
           continue;
         }
+        const classifierStdout = run.structured ? JSON.stringify({
+          testResults: run.structured.outcome === "passed" || run.structured.outcome === "assertion_failed" ? [
+            {
+              name: file,
+              assertionResults: [
+                ...Array.from(
+                  { length: run.structured.failedAssertions },
+                  () => ({ status: "failed" })
+                ),
+                ...Array.from(
+                  { length: run.structured.passed },
+                  () => ({ status: "passed" })
+                )
+              ]
+            }
+          ] : []
+        }) : run.stdout;
         const classified = classifyProbeRun(
           run.exitCode,
-          run.stdout,
+          classifierStdout,
           [file],
           run.stderr
         )[0];
@@ -2969,7 +3277,7 @@ async function main(options = {}) {
   process.exitCode = result.exitCode;
 }
 var entrypoint = process.argv[1];
-if (entrypoint && realpathSync6(fileURLToPath(import.meta.url)) === realpathSync6(entrypoint)) {
+if (entrypoint && realpathSync7(fileURLToPath(import.meta.url)) === realpathSync7(entrypoint)) {
   await main();
 }
 export {

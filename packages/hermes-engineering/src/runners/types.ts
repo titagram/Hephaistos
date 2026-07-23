@@ -27,6 +27,23 @@ export interface TestRun {
   timedOut: boolean;
   durationMs: number;
   error?: string;
+  structured?: StructuredTestRun;
+}
+
+export interface StructuredTestRun {
+  framework: "pytest";
+  outcome:
+    | "passed"
+    | "assertion_failed"
+    | "collection_or_import_error"
+    | "setup_or_teardown_error"
+    | "internal_error"
+    | "interrupted"
+    | "no_tests_executed"
+    | "probe_error";
+  passed: number;
+  failedAssertions: number;
+  skipped: number;
 }
 
 export interface ProcessRunner {
