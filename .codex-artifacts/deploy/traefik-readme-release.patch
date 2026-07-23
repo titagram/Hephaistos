@@ -1,0 +1,44 @@
+--- /home/ubuntu/traefik-readme.md
++++ /home/ubuntu/traefik-readme.md
+@@ -157,15 +157,40 @@
+ ## Hades-specific pointer
+ 
+-Hades lives at `/home/ubuntu/dev-sandbox`. Its routers and middleware are defined in `docker-compose.devboard.traefik.yaml`; its agent-facing instructions are in `AGENTS.md`; its integration runbook is `docs/runbooks/traefik-integration.md`.
++The development repository lives at `/home/ubuntu/dev-sandbox`. Its routers and
++middleware are defined in `docker-compose.devboard.traefik.yaml`; its
++agent-facing instructions are in `AGENTS.md`; its integration runbook is
++`docs/runbooks/traefik-integration.md`.
+ 
+-The Hades deployment command is:
++The active production source checkout is intentionally separate:
+ 
+-```bash
+-cd /home/ubuntu/dev-sandbox
+-docker compose up -d --build --wait
++```text
++/home/ubuntu/devboard-logbook-release
+ ```
+ 
+-That command relies on `COMPOSE_FILE` and Traefik variables in the ignored project `.env`. It must not own the standalone Traefik container.
++It is a regular Git checkout of `main`, currently deployed at
++`a31473f8332a77006510e9981be65f3c83cfbaa3`. Do not deploy from
++`/home/ubuntu/dev-sandbox` while it is on a task branch or has local changes.
++The application containers need a real `.git` directory because their startup
++invokes Composer; do not substitute a Git worktree unless its Git metadata is
++also visible inside the container.
++
++Deploy Hades with both the base Compose file and the Traefik overlay, reusing
++the ignored environment file from the development repository:
++
++```bash
++RELEASE_DIR=/home/ubuntu/devboard-logbook-release
++ENV_FILE=/home/ubuntu/dev-sandbox/.env
++docker compose --env-file "$ENV_FILE" -p devboard \
++  -f "$RELEASE_DIR/docker-compose.devboard.yaml" \
++  -f "$RELEASE_DIR/docker-compose.devboard.traefik.yaml" \
++  up -d --build --wait
++```
++
++The overlay restores the `traefik_default` network and the Hades/API/frontend
++router labels. It must not own, recreate, or restart the standalone Traefik
++container.

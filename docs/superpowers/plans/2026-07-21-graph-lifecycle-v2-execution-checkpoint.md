@@ -38,10 +38,10 @@ checkpoint onward it has exactly this meaning:
 | Milestone | Component plans | Exit condition |
 |---|---|---|
 | **P0 — Graph foundation** | Plan 1 producer + Plan 2 backend | Producer checkpoint C1 and backend checkpoint C2 are verified on exact SHAs; no open Critical/Important review finding |
-| **P1 — Uncertainty reduction** | Plan 3 verification + Wiki | V01–V18 verified end-to-end |
+| **P1 — Uncertainty reduction** | Plan 3 verification + Wiki + standalone Codex plugin | V01–V19 plus 90-day whole-chain retention verified end-to-end |
 | **P2 — Human exploration** | Plan 4 React Graph Explorer | U01–U12, build, responsive and accessibility gates verified |
 | **P3 — Recoverability** | Plan 5 backup + cutover tooling | Restic snapshot, restore rehearsal, scoped export/restore and runbook verified |
-| **P4 — Live acceptance** | Plan 6 | deployed live gates, explicit user acceptance, scoped v1 retirement decision, final integration |
+| **P4 — Isolated acceptance and promotion** | Plan 6 | isolated Symfony Demo/plugin/browser gates, explicit production-promotion decision, separately authorized scoped-v1 retirement decision, deployed-SHA verification |
 
 `P0/P1 finding` in older review text means severity, not one of these
 milestones. New reports must use `Critical`, `Important`, or `Minor` for review
@@ -133,7 +133,7 @@ the separate backup/restore gate required by Plan 5.
 |---|---|---|
 | Plan 1 — producer | all 18 tasks implemented | **C1 verified** at `74c27506639195bb4ddff595821b312f4f1fdd6f`; current evidence pack persisted |
 | Plan 2 — backend | Tasks 1–4 implemented; Task 5 implemented but quality-blocked; Tasks 6–12 not started | C2/L01–L15 open; Task 5 has 1 Important and 1 Minor |
-| Plan 3 — verification/Wiki | v2 plan not started | C3/V01–V18 open |
+| Plan 3 — verification/Wiki/plugin | v2 plan not started | C3/V01–V19 open |
 | Plan 4 — React Explorer | v2 plan not started | C4/U01–U12 open |
 | Plan 5 — DR/cutover | v2 plan not started | C5 open |
 | Plan 6 — live acceptance | not started | C6 and user acceptance open |
@@ -222,8 +222,8 @@ This cleanup corrected three documentation-only contradictions:
 - Plan 6 now agrees with the master and Plan 1 Task 16: Tree-sitter and grammar
   wheels are base dependencies and sync performs no lazy/runtime install.
 
-Two forward dependencies still need a reviewed architectural amendment. They
-are plan defects, not permission for an implementation agent to improvise:
+The full plan review identified the following forward-contract defects; the
+2026-07-21 amendment resolves them without changing product code:
 
 1. Plan 2 Task 6 queues verification reconciliation although the concrete
    verification implementation is introduced only in Plan 3.
@@ -238,10 +238,9 @@ branches and record the deviation.
 The Agent C1 session is closed. The initial backend Task 5 session is also
 closed, but Task 5 itself remains quality-blocked by the Important recorded in
 Section 5.2. The only authorized implementation session is its bounded repair.
-**Do not start backend Task 6 until the Task 5 Important is closed and a
-reviewed plan amendment resolves both forward dependencies.**
+**Do not start backend Task 6 until the Task 5 Important is closed.**
 
-Recommended amendment, pending explicit design approval:
+Approved amendment — Alternative A:
 
 1. Plan 2 Task 6 emits one generic
    `CanonicalGraphV2ProjectionActivated` domain event after a successful CAS
@@ -250,13 +249,93 @@ Recommended amendment, pending explicit design approval:
    `GraphArtifactReachabilityProvider` seam plus an aggregator and the concrete
    Plan 2 provider for projection/head, attempts, and contexts.
 3. Plan 3 supplies the event listener and concrete reachability providers for
-   verification requests/results/overlays and Wiki ledgers. Every listener
-   rereads the current head; cleanup rechecks reachability under its locks.
+   verification requests/results/overlays and Wiki ledgers. The graph listener
+   rereads the current projection head, the Wiki listener rereads the current
+   revision, and cleanup rechecks reachability under its locks.
+
+4. `GraphArtifactReferenceLock` is the single outer transaction for every
+   reference writer and cleanup: sorted import advisory locks, sorted import
+   rows, the Plan 3 scope advisory lock, then domain rows. Domain services
+   consume the same per-invocation guard and never reacquire the lock.
+5. Wiki verification uses exact new normalized revision/claim/import-reference
+   storage and `WikiCurrentRevisionActivated`; Laravel listener registration is
+   in the real `AppServiceProvider`, not a nonexistent `EventServiceProvider`.
+6. Plan 3 Task 8 owns the missing 90-day whole-retry-chain cleanup and the
+   external-reachability/concurrent-reference tests. Agent-side implementation
+   is Tasks 9–14, standalone plugin is Task 15, and V01–V19 closure is Task 16.
+7. Global Checkpoint C is execution checkpoint C2 and proves event emission plus
+   only the Plan 2 reachability roots. Global Checkpoint D is execution
+   checkpoint C3 and proves the Plan 3 listeners/providers, audit retention,
+   and cleanup races.
+8. Already-applied backend migrations `000100`–`000350` remain immutable. New
+   coordination state, desired-import provenance, cleanup state, execution
+   fencing, durable uncertainty locators, and retry-incarnation indexing are a
+   forward-only `000375` upgrade tested from both the applied and fresh schema.
+9. Validation/projection jobs have one broker try on dedicated `graph-v2`
+   runtime (`1900 > 1800 > 1740`); four domain attempts are explicit rows with
+   renewable 120-second fencing. Every projection retry has a fresh physical
+   incarnation so late workers/cleaners cannot affect a same-version winner.
+10. Graph contexts/handles/cursors are bound to a server-derived dashboard or
+    Hades-device principal and physical projection ID. The Hades graph surface
+    is v2 `POST graph/query` under existing read capability; old `GET
+    graph/traverse` and local topology fallbacks are deleted.
+11. Graph/Wiki completion prepares immutable evidence drafts before locks and
+    performs only bounded DB work under reference→scope→head→domain locks.
+    Same-digest replay repeats authorization and locking. Wiki certification
+    freshness and identical-artifact overlay reuse retain explicit source/base
+    provenance.
+12. Verification has a ten-execution ceiling per generation, exact
+    critical↔urgent boundary mapping, local same-profile/scope `filelock`, and
+    a fresh bounded `AIAgent` specialist per work item. Direct Wiki verify is
+    removed; queue completion is the only verification mutation.
+13. The Codex integration is a separately versioned five-skill plugin that
+    delegates to the installed CLI. The recurring backup keeps global graph
+    maintenance active through PostgreSQL, Neo4j, artifact inventory, and
+    manifest sealing. Live acceptance uses an isolated Symfony Demo fixture;
+    Carnovali is a later optional scale gate.
+14. Every Neo4j projection incarnation owns a permanent
+    `CanonicalProjectionFence`. Projector batches lock it before bounded
+    writes; cleanup changes `building→deleting`, deletes/proves zero, and
+    leaves `retired` forever. A late owner cannot recreate an orphan even
+    after its PostgreSQL projection row is deleted.
+15. A verification specialist has a parent-monotonic 900-second hard deadline
+    and 300-second meaningful-progress deadline. Heartbeats/log noise do not
+    reset progress. Before child release it must enter a mandatory OS
+    containment domain (Linux cgroup v2, Windows Job Object, or Darwin
+    run-scoped Docker PID namespace) and acquire the backend specialist fence.
+    Every exit tears down and proves that whole domain empty. A failed proof
+    leaves the server fence `active|quarantined`, globally blocking claims and
+    reclaim across hosts; the mode-0600 local marker is diagnostic only. The
+    same invocation never reclaims expired work.
+16. Human retry and reconciliation use one total order: optional outer
+    reference lock, verification scope, exact projection head, ascending full
+    request/work chain, then domain rows. Any pre-read/current-source change
+    returns `verification_source_changed` and restarts only outside locks.
+    Wiki revision/projection events are wake-ups that reread both current
+    heads, so either delivery order converges and stale certification is not
+    suppressed.
+17. Plan 5 introduces a typed project/reason/owner/generation-bound
+    `MaintenanceAuthority`, central guarded artifact mutations/inventory, and
+    durable export, retirement, and restore state machines. Crash recovery
+    rotates authority and fences old owners; ordinary maintenance-off cannot
+    close a bound operation. Restore is forward-only and retains a v2 operator
+    artifact until verified completion. Its exit gate is hermetic tooling only;
+    production backup/rehearsal/export installation and execution move to Plan
+    6 Task 10B after digest-bound P1.
+18. Implementation workers never integrate/push. A genuinely fresh
+    coordinator verifies a SHA-256 handoff, base ancestry, exact path
+    allowlist, diff, tests, and reviews, then uses only
+    `git merge --no-ff --no-edit CANDIDATE_SHA`; cherry-pick/squash/rebase and
+    conflict resolution are forbidden. It proves the candidate is an ancestor
+    of the tested merge commit before pushing. Plan 6 uses a closed
+    argv-array release driver, H1 for disposable stack creation, digest-bound
+    P1 for production promotion, distinct receipt/selection/export-bound P2
+    for retirement, and a third consistency-set-bound approval for whole DR.
 
 This is deliberately not a generic hook or plugin surface: the event and
-provider have named consumers in Plans 2 and 3. The lower-surface alternative
-is to defer all integration to Plan 3 and modify projection/cleanup directly,
-but that couples the Graph core to verification and Wiki internals.
+provider have named consumers in Plans 2 and 3. Alternative B — modifying the
+projection core and cleanup directly from Plan 3 — was rejected because it
+would couple Graph publication to verification and Wiki internals.
 
 ## 7. Safe Parallel Session Layout
 
@@ -332,27 +411,50 @@ Additional stop rules:
   initializer, migration, projection, purge, restart, deploy, or restore.
 - Stop after focused/regression checks and fresh reviews. Do not continue into
   Task 6 even if Task 5 becomes verified.
+- The Task 5 worker does not merge/push. After its zero-Critical/Important
+  report, it seals the exact handoff. A genuinely fresh coordinator task
+  verifies the SHA/digest/ancestry/allowlist/tests, integrates it into current
+  backend `main`, reruns the affected smoke, pushes, updates this checkpoint,
+  and only then creates the Task 6A branch.
 
 A simultaneous session may be read-only reviewer only. It must not edit either
 repository, database, Neo4j, deployment, or this checkpoint.
 
-### Later waves — sequential after the amendment gate
+### Later waves — sequential after the Task 5 quality gate
 
-1. Backend Task 6.
+1. Backend Task 6A, then 6B, then 6C: three separate sessions/commits/reviews,
+   with coordinator merge-to-main/test/push after each accepted slice.
 2. Backend Tasks 7–8, task-by-task with a review boundary between them.
 3. Backend Tasks 9–11, still one commit and review per task.
 4. Backend Task 12, C2/L01–L15, fresh overall review, and checkpoint update.
-5. Start P1 only after P0 C1 and C2 are both verified.
+5. Start P1 only after P0 C1 and C2 are both verified and integrated. Plan 3
+   begins with 1A, 1B, and 1C as separate sessions/commits/reviews/main
+   integrations before Task 2. It closes with 16A-backend and 16B-Agent/plugin
+   implementation commits integrated first, then evidence-only report commits
+   bound to immutable `subject_main_sha` values; 16B evidence waits for the
+   exact 16A backend subject SHA. Read-only 16C unions per-node ownership and
+   closes C3. Implementation work may overlap only after Tasks 1–15 are
+   integrated; evidence sealing follows the stated dependency order.
 
-This is approximately five dependency waves. Opening more backend writer
-sessions does not shorten the chain; it creates branch, database, and Neo4j
-contention.
+This is a dependency chain, not permission to create simultaneous writers.
+Parallel sessions are useful only for read-only review, test observation, or
+work in a different repository after its start gate; they must not share a
+branch, database, Neo4j namespace, Compose project, or checkpoint writer.
 
 ## 8. Exact Prompt for the Next Session
 
 ### Prompt C — remote backend Task 5 bounded repair
 
 ```text
+Before reading any handoff document, verify the copy using the manifest digest
+supplied OUT OF BAND by the coordinator (never read the expected value from
+the remote directory):
+cd /home/ubuntu/graph-lifecycle-v2-handoff
+printf '%s  %s\n' 'EXPECTED_HANDOFF_MANIFEST_SHA256' SHA256SUMS | sha256sum -c -
+sha256sum -c SHA256SUMS
+If either command fails, stop without editing. The coordinator must replace
+EXPECTED_HANDOFF_MANIFEST_SHA256 with the exact 64-hex value in this prompt.
+
 Work only in /home/ubuntu/dev-sandbox on the existing branch
 codex/graph-lifecycle-v2-backend-task-5. Read these handoff files completely:
 1. /home/ubuntu/graph-lifecycle-v2-handoff/2026-07-21-graph-lifecycle-v2-execution-checkpoint.md
@@ -383,12 +485,38 @@ touch live data. A deterministic query-shape regression that proves public_id
 lookup and excludes ordinal range/order is required; EXPLAIN is optional only
 against an isolated representative PostgreSQL database.
 
-Run focused Task 5 tests, the prescribed regression, Pint, PHP lint, and
-PHPStan. Use one spec reviewer and one quality reviewer, with at most two repair
-cycles. Task 5 may be declared verified only with zero Critical/Important; the
-existing schema-definition verification Minor may remain explicitly recorded.
-Commit the scoped code/test repair, then update and commit the two evidence
-documents separately so their prior content is preserved.
+The implementation allowlist is exactly:
+- backend/app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php
+- backend/tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php
+
+Run these exact gates, respecting the checkpoint's 15/45-minute limits:
+1. RED then GREEN: `docker compose exec -T app php artisan test tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php`
+2. Graph regression: `docker compose exec -T app php artisan test tests/Integration/Graph`
+3. Pint: `docker compose exec -T app vendor/bin/pint --test app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php`
+4. PHP lint: `docker compose exec -T app php -l app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php` and the same command for `tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php`
+5. PHPStan: `docker compose exec -T app vendor/bin/phpstan analyse app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php --no-progress`
+
+Use one spec reviewer and one quality reviewer, with at most two repair cycles.
+Task 5 may be declared verified only with zero Critical/Important; the existing
+schema-definition verification Minor may remain explicitly recorded. Before
+the implementation commit require:
+`git diff --name-only 1735eacd01f03cbe559a7aee9631404e4b05643a --` equals exactly the two implementation paths **plus** the two known pre-dirty evidence paths. Separately require
+`git diff --name-only 1735eacd01f03cbe559a7aee9631404e4b05643a -- backend/app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php backend/tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php`
+equals exactly the implementation allowlist, then run:
+`git add -- backend/app/Services/Graph/V2/GraphV2LifecycleProjectionMapper.php backend/tests/Integration/Graph/CanonicalGraphV2ProjectionTest.php`
+and require `git diff --cached --name-only` equals those two paths. Commit with
+`fix(graph): index lifecycle records by public id` and record `REPAIR_SHA`.
+
+Only after that commit, update the two pre-existing evidence documents without
+discarding their old content. Stage exactly:
+`git add -- .superpowers/sdd/progress.md ai-sandbox/logbooks/LOGBOOK_PROJECT.md`
+and require the cached-name output equals those two paths. Commit with
+`docs(graph): record task 5 quality closure` and record `EVIDENCE_SHA`. Require
+`git rev-parse REPAIR_SHA^` equals the original Task 5 SHA above and
+`git rev-parse EVIDENCE_SHA^` equals `REPAIR_SHA`. Compute/report
+`TASK5_BASE_SHA=$(git rev-parse 1735eacd01f03cbe559a7aee9631404e4b05643a^)`;
+the coordinator candidate range is exactly `TASK5_BASE_SHA..EVIDENCE_SHA`, so
+it preserves the original Task 5 commit, repair commit, and evidence commit.
 
 Do not run live migrations, the live schema initializer, projection, purge,
 restart, deploy, restore, or destructive Docker commands. Do not push or merge.
@@ -433,6 +561,10 @@ same repository or checkpoint concurrently.
 - End of P3 + P4: disaster recovery, deployment, mobile/desktop live acceptance,
   and v1 retirement decision can be accepted.
 
-C1 is closed. The next safe implementation action is the bounded backend Task
-5 Important repair in Prompt C. Do not start backend Task 6 before both the
-Task 5 quality gate and the plan-amendment gate are closed.
+C1 is closed. The plan-amendment gate remains open until the normative design,
+Plans 2–3, Plan 5 backup sequencing, Plan 6 isolated acceptance, master, and
+this checkpoint pass fresh specification, executor, and concurrency reviews
+with zero Critical/Important findings. The next safe implementation
+action remains the bounded backend Task 5 Important repair in Prompt C. Do not
+start backend Task 6 before both the Task 5 quality gate and this amendment gate
+are closed.

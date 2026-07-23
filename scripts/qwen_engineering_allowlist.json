@@ -1,0 +1,110 @@
+{
+  "repository": "https://github.com/QwenLM/qwen-code.git",
+  "files": [
+    "LICENSE",
+    "packages/cli/src/commands/review/agent-prompt.ts",
+    "packages/cli/src/commands/review/build-test.ts",
+    "packages/cli/src/commands/review/capture-local.ts",
+    "packages/cli/src/commands/review/check-coverage.ts",
+    "packages/cli/src/commands/review/cleanup.ts",
+    "packages/cli/src/commands/review/compose-review.ts",
+    "packages/cli/src/commands/review/fetch-pr.ts",
+    "packages/cli/src/commands/review/plan-diff.ts",
+    "packages/cli/src/commands/review/resolve-anchors.ts",
+    "packages/cli/src/commands/review/test-efficacy.ts",
+    "packages/cli/src/commands/review/agent-prompt.test.ts",
+    "packages/cli/src/commands/review/build-test.test.ts",
+    "packages/cli/src/commands/review/capture-local.test.ts",
+    "packages/cli/src/commands/review/check-coverage.test.ts",
+    "packages/cli/src/commands/review/cleanup.test.ts",
+    "packages/cli/src/commands/review/compose-review.test.ts",
+    "packages/cli/src/commands/review/fetch-pr.test.ts",
+    "packages/cli/src/commands/review/plan-diff.test.ts",
+    "packages/cli/src/commands/review/resolve-anchors.test.ts",
+    "packages/cli/src/commands/review/test-efficacy.integration.test.ts",
+    "packages/cli/src/commands/review/test-efficacy.test.ts",
+    "packages/cli/src/commands/review/lib/agent-briefs.ts",
+    "packages/cli/src/commands/review/lib/anchors.ts",
+    "packages/cli/src/commands/review/lib/coverage.ts",
+    "packages/cli/src/commands/review/lib/diff-flags.ts",
+    "packages/cli/src/commands/review/lib/diff-plan.ts",
+    "packages/cli/src/commands/review/lib/gh.ts",
+    "packages/cli/src/commands/review/lib/git.ts",
+    "packages/cli/src/commands/review/lib/heavy.ts",
+    "packages/cli/src/commands/review/lib/inline-counts.ts",
+    "packages/cli/src/commands/review/lib/local-diff.ts",
+    "packages/cli/src/commands/review/lib/merge-base.ts",
+    "packages/cli/src/commands/review/lib/path-rules.ts",
+    "packages/cli/src/commands/review/lib/paths.ts",
+    "packages/cli/src/commands/review/lib/prompt-record.ts",
+    "packages/cli/src/commands/review/lib/report.ts",
+    "packages/cli/src/commands/review/lib/roster.ts",
+    "packages/cli/src/commands/review/lib/shell-quote.ts",
+    "packages/cli/src/commands/review/lib/transcripts.ts",
+    "packages/cli/src/commands/review/lib/workspaces.ts",
+    "packages/cli/src/commands/review/lib/anchors.test.ts",
+    "packages/cli/src/commands/review/lib/diff-plan.integration.test.ts",
+    "packages/cli/src/commands/review/lib/diff-plan.test.ts",
+    "packages/cli/src/commands/review/lib/gh.test.ts",
+    "packages/cli/src/commands/review/lib/git.integration.test.ts",
+    "packages/cli/src/commands/review/lib/git.test.ts",
+    "packages/cli/src/commands/review/lib/local-diff.integration.test.ts",
+    "packages/cli/src/commands/review/lib/merge-base.test.ts",
+    "packages/cli/src/commands/review/lib/path-rules.test.ts",
+    "packages/cli/src/commands/review/lib/paths.test.ts",
+    "packages/cli/src/commands/review/lib/prompt-record.test.ts",
+    "packages/cli/src/commands/review/lib/report.test.ts",
+    "packages/cli/src/commands/review/lib/roster.test.ts",
+    "packages/cli/src/commands/review/lib/transcripts.test.ts",
+    "packages/cli/src/commands/review/lib/workspaces.test.ts",
+    "packages/cli/src/services/review-worktree-lease.ts",
+    "packages/cli/src/services/review-worktree-lease.test.ts"
+  ],
+  "importExceptions": {
+    "relative": [
+      {
+        "derivation": "narrow adapter retaining writeStdoutLine and writeStderrLine with unconditional newlines",
+        "source": "packages/cli/src/utils/stdioHelpers.ts",
+        "sourceSha256": "c7fc344a4375bdcd9f94f4eeba4a9965120e76bc9158e75981c44b2c9e1efca0",
+        "destination": "packages/hermes-engineering/src/shims/stdioHelpers.ts"
+      }
+    ],
+    "packages": [
+      {
+        "specifier": "@qwen-code/qwen-code-core",
+        "source": "packages/core/src/utils/gitDiff.ts",
+        "sourceSha256": "e6afa6050e60a61cd1d0b040157799cf8813b74b2ed8339b86dc7fb44a46d563",
+        "derivation": "extract unquoteCStylePath and add a no-op createDebugLogger",
+        "destination": "packages/hermes-engineering/src/shims/qwenCore.ts"
+      },
+      {
+        "specifier": "yargs",
+        "dependency": "yargs@17.7.2"
+      },
+      {
+        "specifier": "vitest",
+        "dependency": "Task 2 dev dependency"
+      },
+      {
+        "specifier": "node:child_process",
+        "dependency": "Node.js built-in"
+      },
+      {
+        "specifier": "node:crypto",
+        "dependency": "Node.js built-in"
+      },
+      {
+        "specifier": "node:fs",
+        "dependency": "Node.js built-in"
+      },
+      {
+        "specifier": "node:os",
+        "dependency": "Node.js built-in"
+      },
+      {
+        "specifier": "node:path",
+        "dependency": "Node.js built-in"
+      }
+    ]
+  }
+}

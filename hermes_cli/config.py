@@ -906,6 +906,12 @@ DEFAULT_CONFIG = {
     # sessions (no live client) so accumulated agents don't pile up under memory
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
+    "review": {
+        "retention_runs": 30,
+        "default_effort": "medium",
+        "engine_timeout_seconds": 120,
+        "test_timeout_seconds": 900,
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).
@@ -6040,6 +6046,21 @@ def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _normalize_review_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep review retention non-negative without making bool a count."""
+    review = config.get("review")
+    if not isinstance(review, dict):
+        review = copy.deepcopy(DEFAULT_CONFIG["review"])
+    else:
+        review = dict(review)
+    retention = review.get("retention_runs")
+    if isinstance(retention, bool) or not isinstance(retention, int) or retention < 0:
+        review["retention_runs"] = DEFAULT_CONFIG["review"]["retention_runs"]
+    config = dict(config)
+    config["review"] = review
+    return config
+
+
 def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> Any:
     """Traverse nested dict keys safely, returning ``default`` on any miss.
 
@@ -6342,7 +6363,9 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             except Exception as e:
                 _warn_config_parse_failure(config_path, e)
 
-        normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        normalized = _normalize_review_config(
+            _normalize_root_model_keys(_normalize_max_turns_config(config))
+        )
         expanded = _expand_env_vars(normalized)
         # Managed scope wins at the leaf. Applied AFTER user expansion so a user
         # ${VAR} cannot shadow a managed literal: managed values are expanded only
@@ -6353,6 +6376,9 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         if managed_config:
             managed_expanded = _expand_env_vars(managed_config)
             expanded = _deep_merge(expanded, managed_expanded)
+        # Managed settings are part of the effective configuration too. Keep
+        # retention safe after their final leaf-level overlay, not only before.
+        expanded = _normalize_review_config(expanded)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
@@ -6500,9 +6526,13 @@ def save_config(
         )
         # ----------------------------------------------------------------
 
-        current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        current_normalized = _normalize_review_config(
+            _normalize_root_model_keys(_normalize_max_turns_config(config))
+        )
         normalized = current_normalized
-        raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        raw_existing = _normalize_review_config(
+            _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        )
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,

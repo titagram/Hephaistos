@@ -1976,6 +1976,33 @@ def _run_single_child(
                     if target is not None:
                         target.update(result_meta)
 
+        # Engineering-review evidence is authored by the harness from the
+        # verified in-memory trace. Recording is deliberately best-effort: a
+        # full disk or unavailable artifact directory must not change the
+        # delegated child's result.
+        try:
+            from agent.review_evidence import write_reviewer_transcript
+
+            evidence_path = write_reviewer_transcript(
+                getattr(parent_agent, "session_id", "") or "",
+                child,
+                result,
+            )
+        except Exception:
+            logger.warning("Reviewer evidence recording failed", exc_info=True)
+            evidence_path = None
+
+        review_evidence_ref = None
+        if evidence_path is not None:
+            evidence_parts = getattr(evidence_path, "parts", ())
+            if (
+                len(evidence_parts) >= 3
+                and evidence_parts[-3:-1] == ("subagents", "reviewers")
+                and evidence_parts[-1].startswith("agent-")
+                and evidence_parts[-1].endswith(".jsonl")
+            ):
+                review_evidence_ref = "/".join(evidence_parts[-3:])
+
         # Determine exit reason
         if interrupted:
             exit_reason = "interrupted"
@@ -2026,6 +2053,8 @@ def _run_single_child(
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
+        if review_evidence_ref is not None:
+            entry["review_evidence_ref"] = review_evidence_ref
 
         # Build compact evidence from runtime Git facts plus an optional,
         # structured child record. The conversation messages above are used
