@@ -93,3 +93,13 @@ def test_v1_database_missing_immutability_trigger_is_rejected(tmp_path) -> None:
 
     with pytest.raises(EvolutionLedgerError, match="invalid_ledger_database"):
         EvolutionLedger(path)
+
+
+def test_existing_schema_without_version_record_is_rejected(tmp_path) -> None:
+    path = tmp_path / "evolution.db"
+    ledger = EvolutionLedger(path)
+    ledger.connection.execute("DELETE FROM schema_version")
+    ledger.connection.close()
+
+    with pytest.raises(EvolutionLedgerError, match="invalid_ledger_database"):
+        EvolutionLedger(path)

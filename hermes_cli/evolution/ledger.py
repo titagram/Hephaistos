@@ -231,7 +231,9 @@ class EvolutionLedger:
         ).fetchone()
         if row is not None:
             version = self.connection.execute("SELECT version FROM schema_version").fetchone()
-            if version is not None and version[0] != SCHEMA_VERSION:
+            if version is None:
+                raise EvolutionLedgerError("invalid_ledger_database")
+            if version[0] != SCHEMA_VERSION:
                 raise EvolutionLedgerError("unsupported_schema_version")
             tables = {
                 item[0]
