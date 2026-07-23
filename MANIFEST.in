@@ -12,6 +12,6 @@ include third_party/qwen-code/NOTICE
 include third_party/qwen-code/UPSTREAM.json
 recursive-include third_party/qwen-code/packages/cli/src/commands/review *.ts
 recursive-include third_party/qwen-code/packages/cli/src/services review-worktree-lease*.ts
-recursive-include hermes_cli/engineering_dist *.mjs NOTICE.qwen-code
+recursive-include hermes_cli/engineering_dist *.mjs NOTICE.qwen-code UPSTREAM.qwen-code.json
 global-exclude __pycache__
 global-exclude *.py[cod]

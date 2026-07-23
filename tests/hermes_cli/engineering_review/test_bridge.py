@@ -383,6 +383,11 @@ def test_bridge_scrubs_credentials_and_runtime_injection_variables(
 
     child_env = json.loads(env_file.read_text(encoding="utf-8"))
     assert "PATH" in child_env
+    assert child_env["HERMES_ENGINE_PYTHON"] == sys.executable
+    assert (
+        Path(child_env["HERMES_ENGINE_PYTHON_ROOT"])
+        == Path(__file__).resolve().parents[3]
+    )
     for name in (
         "OPENAI_API_KEY",
         "GITHUB_TOKEN",
@@ -408,9 +413,10 @@ def test_distribution_configuration_includes_engine_bundle() -> None:
 
     assert '"engineering_dist/*.mjs"' in pyproject
     assert '"engineering_dist/NOTICE.qwen-code"' in pyproject
+    assert '"engineering_dist/UPSTREAM.qwen-code.json"' in pyproject
     assert (
-        "recursive-include hermes_cli/engineering_dist *.mjs NOTICE.qwen-code"
-        in manifest
+        "recursive-include hermes_cli/engineering_dist "
+        "*.mjs NOTICE.qwen-code UPSTREAM.qwen-code.json" in manifest
     )
 
 

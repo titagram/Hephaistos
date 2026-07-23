@@ -8,6 +8,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -275,6 +276,14 @@ def sanitized_engine_env(source: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _engine_process_env() -> dict[str, str]:
+    """Add authority-selected Python probe paths after scrubbing caller env."""
+    environment = sanitized_engine_env(with_hermes_node_path())
+    environment["HERMES_ENGINE_PYTHON"] = sys.executable
+    environment["HERMES_ENGINE_PYTHON_ROOT"] = str(Path(__file__).resolve().parents[2])
+    return environment
+
+
 def _canonical_request_bytes(
     request: EngineRequest,
     authenticated_reviewer_records: list[dict[str, object]] | None = None,
@@ -534,7 +543,7 @@ class EngineeringReviewBridge:
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=request.workspace,
-                    env=sanitized_engine_env(with_hermes_node_path()),
+                    env=_engine_process_env(),
                     start_new_session=(os.name != "nt"),
                     creationflags=windows_process_group_flags(),
                     shell=False,

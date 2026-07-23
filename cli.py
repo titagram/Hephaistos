@@ -3449,6 +3449,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         pass_session_id: bool = False,
         ignore_rules: bool = False,
         session_ready_callback: Optional[Callable[[str], None]] = None,
+        initial_query: str = None,
+        exit_after_initial_query: bool = False,
     ):
         """
         Initialize the Hermes CLI.
@@ -3465,6 +3467,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
             session_ready_callback: Private post-AIAgent lifecycle callback
+            initial_query: Private prompt seed submitted after the interactive
+                application is running.
+            exit_after_initial_query: Exit after the private prompt seed's
+                first turn completes.
         """
         # Initialize Rich console
         self.console = Console()
@@ -3657,6 +3663,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # context and before the first conversation turn is served.
         self._session_ready_callback = session_ready_callback
         self._session_ready_callback_fired = False
+        self._initial_query = initial_query
+        self._exit_after_initial_query = bool(exit_after_initial_query)
         # --ignore-rules: honor either the constructor flag or the env var set
         # by `hermes chat --ignore-rules` in hermes_cli/main.py. When true we
         # pass skip_context_files=True and skip_memory=True to AIAgent so
@@ -3718,6 +3726,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Agent will be initialized on first use
         self.agent: Optional[Any] = None
+        # terminal_tool keeps approval/sudo callbacks in threading.local().
+        # Track installation per thread while retaining the existing
+        # process-wide guard for the callbacks whose implementations are
+        # genuinely global (secret capture and computer use).
+        self._tool_callbacks_tls = threading.local()
         self._tool_callbacks_installed = False
         self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
@@ -5824,10 +5837,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
     def _install_tool_callbacks(self) -> None:
         """Install tool callbacks that need the live prompt UI."""
+        callback_tls = getattr(self, "_tool_callbacks_tls", None)
+        if callback_tls is None:
+            # Some focused tests construct HermesCLI with __new__. Production
+            # instances create this in __init__ before any worker starts.
+            callback_tls = threading.local()
+            self._tool_callbacks_tls = callback_tls
+        if not getattr(callback_tls, "installed", False):
+            set_sudo_password_callback(self._sudo_password_callback)
+            set_approval_callback(self._approval_callback)
+            callback_tls.installed = True
+
         if getattr(self, "_tool_callbacks_installed", False):
             return
-        set_sudo_password_callback(self._sudo_password_callback)
-        set_approval_callback(self._approval_callback)
         set_secret_capture_callback(self._secret_capture_callback)
         try:
             from tools.computer_use_tool import set_approval_callback as _set_cu_cb
@@ -5836,6 +5858,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         except ImportError:
             pass
         self._tool_callbacks_installed = True
+
+    def _clear_thread_tool_callbacks(self) -> None:
+        """Clear callbacks installed in the current thread's TLS slots."""
+        callback_tls = getattr(self, "_tool_callbacks_tls", None)
+        if callback_tls is None or not getattr(
+            callback_tls, "installed", False
+        ):
+            return
+        try:
+            set_sudo_password_callback(None)
+        finally:
+            try:
+                set_approval_callback(None)
+            finally:
+                callback_tls.installed = False
+
+    def _run_process_loop_thread(self, process_loop: Callable[[], None]) -> None:
+        """Run the CLI input loop with callbacks scoped to its own thread."""
+        try:
+            self._install_tool_callbacks()
+            process_loop()
+        finally:
+            self._clear_thread_tool_callbacks()
 
     def _ensure_tirith_security(self) -> None:
         """Check tirith availability once before tools can run terminal commands."""
@@ -12646,6 +12691,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ] if item is not None
         ]
 
+    def _submit_initial_query_after_app_start(self) -> None:
+        """Queue a private one-shot seed only from Application.run(pre_run=)."""
+        initial_query = getattr(self, "_initial_query", None)
+        if not initial_query:
+            return
+        app = getattr(self, "_app", None)
+        if app is None or not app.is_running:
+            raise RuntimeError(
+                "private initial query requires a running prompt application"
+            )
+        self._initial_query_pending = True
+        self._pending_input.put(initial_query)
+
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         if not self._claim_active_session("cli"):
@@ -14703,6 +14761,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     if not user_input:
                         continue
 
+                    is_initial_query = bool(
+                        getattr(self, "_initial_query_pending", False)
+                    )
+                    if is_initial_query:
+                        self._initial_query_pending = False
+
                     # The user has typed and submitted something, so any
                     # post-resize transient suppression should end here.
                     self._status_bar_suppressed_after_resize = False
@@ -14852,11 +14916,32 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 
+                        if (
+                            is_initial_query
+                            and self._exit_after_initial_query
+                        ):
+                            self._should_exit = True
+                            try:
+                                loop = getattr(app, "loop", None)
+                                if loop is not None:
+                                    loop.call_soon_threadsafe(app.exit)
+                                elif app.is_running:
+                                    app.exit()
+                            except Exception:
+                                logger.debug(
+                                    "Could not exit after private initial query",
+                                    exc_info=True,
+                                )
+
                 except Exception as e:
                     logger.warning("process_loop unhandled error (msg may be lost): %s", e)
         
         # Start processing thread
-        process_thread = threading.Thread(target=process_loop, daemon=True)
+        process_thread = threading.Thread(
+            target=self._run_process_loop_thread,
+            args=(process_loop,),
+            daemon=True,
+        )
         process_thread.start()
         
         # Register atexit cleanup so resources are freed even on unexpected exit
@@ -15047,7 +15132,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 _mark_tui_input_modes_active()
                 # Drive the petdex mascot animation (no-op when no pet enabled).
                 self._pet_start_anim()
-                app.run()
+                app.run(
+                    pre_run=(
+                        self._submit_initial_query_after_app_start
+                        if getattr(self, "_initial_query", None)
+                        else None
+                    )
+                )
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
         except (KeyError, OSError) as _stdin_err:
@@ -15097,8 +15188,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             except Exception:
                 pass
             # Unregister callbacks to avoid dangling references
-            set_sudo_password_callback(None)
-            set_approval_callback(None)
+            self._clear_thread_tool_callbacks()
             set_secret_capture_callback(None)
             # Flush any in-memory turn transcript before marking the session
             # closed.  On SIGHUP/SIGTERM/window close the agent thread may not
@@ -15285,6 +15375,8 @@ def main(
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
     session_ready_callback: Optional[Callable[[str], None]] = None,
+    initial_query: str = None,
+    exit_after_initial_query: bool = False,
 ):
     """
     Hades Agent CLI - Interactive AI Assistant
@@ -15421,6 +15513,8 @@ def main(
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
         session_ready_callback=session_ready_callback,
+        initial_query=initial_query,
+        exit_after_initial_query=exit_after_initial_query,
     )
 
     if parsed_skills:

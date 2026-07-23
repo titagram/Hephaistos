@@ -1,0 +1,9 @@
+import os
+
+from feature import answer
+
+
+def test_effective_regression_gate() -> None:
+    assert os.environ.get("OPENAI_API_KEY") is None
+    assert os.environ.get("REVIEW_E2E_SENTINEL") is None
+    assert answer() == 2

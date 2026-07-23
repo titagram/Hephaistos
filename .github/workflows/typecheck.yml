@@ -11,7 +11,14 @@ jobs:
     strategy:
       matrix:
         package:
-          [ui-tui, web, apps/bootstrap-installer, apps/desktop, apps/shared]
+          [
+            ui-tui,
+            web,
+            apps/bootstrap-installer,
+            apps/desktop,
+            apps/shared,
+            packages/hermes-engineering,
+          ]
       fail-fast: false # report all failures, not just the first one
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

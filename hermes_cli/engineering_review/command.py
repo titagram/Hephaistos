@@ -9,6 +9,7 @@ this public process until the chat lifecycle returns.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from argparse import Namespace
 from pathlib import Path
@@ -20,6 +21,7 @@ from .runs import Effort
 
 
 ReviewEffort = Literal["low", "medium", "high"]
+_LOGGER = logging.getLogger(__name__)
 
 
 def _load_chat_command() -> Callable[[Namespace], object]:
@@ -34,6 +36,22 @@ def _review_query(target: str, effort: ReviewEffort) -> str:
     return (
         "Execute the preloaded requesting-code-review skill exactly as written "
         f"for target {json.dumps(target)} with effort {json.dumps(effort)}."
+    )
+
+
+def _prune_completed_review_runs() -> None:
+    """Apply the configured retention bound after an authority is closed."""
+    from hermes_cli.config import load_config
+    from hermes_constants import get_hermes_home
+
+    from .runs import normalize_retention_runs, prune_completed_runs
+
+    config = load_config()
+    review = config.get("review")
+    raw_keep = review.get("retention_runs") if isinstance(review, dict) else None
+    prune_completed_runs(
+        get_hermes_home(),
+        keep=normalize_retention_runs(raw_keep),
     )
 
 
@@ -97,7 +115,16 @@ def launch_review_chat(
             raise
         authority = candidate
 
-    args.query = query
+    # A remote PR reviewed through the local backend may need explicit user
+    # consent before repository-controlled build/test commands can execute.
+    # Seed the review through the normal interactive prompt lifecycle instead
+    # of ``-q`` single-query mode: the prompt_toolkit app is then live when
+    # ``session_ready`` asks the existing terminal approval callback.  The
+    # private one-shot flag returns after the seeded turn, preserving the
+    # public command's non-REPL behavior.
+    args.query = None
+    args.initial_query = query
+    args.exit_after_initial_query = True
     args.skills = list(skills)
     args.pass_session_id = pass_session_id
     args.yolo = auto_approve
@@ -112,6 +139,13 @@ def launch_review_chat(
         try:
             if authority is not None:
                 authority.close()
+                try:
+                    _prune_completed_review_runs()
+                except Exception:
+                    _LOGGER.warning(
+                        "Could not prune completed engineering review runs",
+                        exc_info=True,
+                    )
         finally:
             if inherited_yolo is None:
                 os.environ.pop("HERMES_YOLO_MODE", None)

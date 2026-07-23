@@ -521,7 +521,15 @@ class ReviewAuthorityClient:
                 connection.settimeout(660)
                 connection.connect(str(self.socket_path))
                 _send_message(connection, message)
-                connection.shutdown(socket.SHUT_WR)
+                try:
+                    connection.shutdown(socket.SHUT_WR)
+                except OSError:
+                    # A pre-dispatch rejection (for example, failed kernel
+                    # peer authentication) can send its structured response
+                    # and close before this half-close reaches the kernel.
+                    # Read that response instead of replacing its diagnostic
+                    # with a transport-level "unavailable" error.
+                    pass
                 response = _read_message(connection)
         except (OSError, ReviewAuthorityUnavailable) as exc:
             if isinstance(exc, ReviewAuthorityUnavailable):
