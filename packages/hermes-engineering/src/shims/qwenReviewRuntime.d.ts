@@ -129,3 +129,138 @@ export function buildSetFor(
 export function hasUnmodeledWorkspaceGlob(globs: string[]): boolean;
 export function readRootPackage(root: string): WorkspacePackage | null;
 export function readWorkspacePackages(root: string): WorkspacePackage[];
+
+export type RoleId =
+  | "0"
+  | "1a"
+  | "1b"
+  | "1c"
+  | "2"
+  | "3"
+  | "4"
+  | "5"
+  | "6a"
+  | "6b"
+  | "6c"
+  | "7"
+  | "test-matrix"
+  | "invariant-a"
+  | "invariant-b"
+  | "invariant-c"
+  | "verify"
+  | "reverse-audit";
+
+export interface BriefDefinition {
+  label: string;
+  readsDiff: boolean;
+  brief: string;
+}
+
+export const BRIEFS: Record<RoleId, BriefDefinition>;
+
+export interface RosterPlan {
+  ownerRepo?: unknown;
+  chunks?: Array<{ id?: unknown }>;
+  files?: Array<{
+    path?: unknown;
+    kind?: unknown;
+    heavy?: unknown;
+    removedLines?: unknown;
+  }>;
+  srcDiffLines?: unknown;
+  diffLines?: unknown;
+  worktreePath?: unknown;
+  prNumber?: unknown;
+  untrackedFiles?: unknown;
+}
+
+export interface RequiredAgent {
+  key: string;
+  role: RoleId | "chunk";
+  chunk?: number;
+  file?: string;
+}
+
+export function isTerritoryFanOut(plan: RosterPlan): boolean;
+export function requiredAgents(plan: RosterPlan): RequiredAgent[];
+export function shellQuotePath(path: string): string;
+
+export function buildChunkAgentPrompt(
+  report: object,
+  id: number,
+  rules?: string,
+): string;
+export function buildChunkLaunchPrompt(
+  report: object,
+  id: number,
+  briefFile: string,
+): string;
+export function buildRoleBrief(
+  report: object,
+  role: RoleId,
+  options?: {
+    rules?: string;
+    file?: string;
+    planPath?: string;
+    chunk?: number;
+  },
+): string;
+export function buildRoleLaunchPrompt(
+  report: object,
+  role: RoleId,
+  briefFile: string,
+  options?: { file?: string; chunk?: number; round?: number },
+): string;
+export function promptRecordDir(planPath: string): string;
+export function briefPath(planPath: string, key: string): string;
+export function readRecordedPrompts(planPath: string): Map<string, string>;
+export function writeBrief(
+  planPath: string,
+  key: string,
+  brief: string,
+): string;
+export function recordPrompt(
+  planPath: string,
+  key: string,
+  prompt: string,
+): void;
+
+export interface CoverageFromTranscripts {
+  ok: boolean;
+  agents: number;
+  blindAgents: string[];
+  idleAgents: string[];
+  unopenedAgents: string[];
+  rewrittenPrompts: string[];
+  missingRoles: string[];
+  missingRoleSelectors: string[];
+  unreadBriefs: string[];
+  missingChunks: number[];
+  uncoverableChunks: number[];
+  coveredChunks: number[];
+  disclosures: Array<{ subject: string; reason: string }>;
+}
+
+export class TranscriptsUnavailableError extends Error {}
+export function coverageFromTranscripts(
+  planPath: string,
+  env?: NodeJS.ProcessEnv,
+): CoverageFromTranscripts;
+
+export interface AgentRecord {
+  agentId: string;
+  agentName: string;
+  launchPrompt: string;
+  successfulToolCalls: number;
+  diffToolCalls: number;
+  diffReads: Array<[number, number]>;
+  successfulCallArgs: string[];
+  finalText: string;
+  mtimeMs: number;
+}
+
+export function readTranscripts(
+  since?: number,
+  env?: NodeJS.ProcessEnv,
+  diffPath?: string,
+): AgentRecord[];

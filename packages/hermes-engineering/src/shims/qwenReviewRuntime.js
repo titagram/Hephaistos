@@ -23,3 +23,27 @@ export {
   readWorkspaceGlobs,
   readWorkspacePackages,
 } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/workspaces.js";
+export {
+  buildChunkAgentPrompt,
+  buildChunkLaunchPrompt,
+  buildRoleBrief,
+  buildRoleLaunchPrompt,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/agent-prompt.js";
+export { BRIEFS } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/agent-briefs.js";
+export {
+  briefPath,
+  promptRecordDir,
+  readRecordedPrompts,
+  recordPrompt,
+  writeBrief,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/prompt-record.js";
+export {
+  isTerritoryFanOut,
+  requiredAgents,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/roster.js";
+export { shellQuotePath } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/shell-quote.js";
+export {
+  coverageFromTranscripts,
+  TranscriptsUnavailableError,
+} from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/coverage.js";
+export { readTranscripts } from "../../../../third_party/qwen-code/packages/cli/src/commands/review/lib/transcripts.js";

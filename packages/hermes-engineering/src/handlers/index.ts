@@ -1,11 +1,63 @@
 import type { EngineRequest, EngineResponse } from "../protocol.js";
+import { buildPrompts } from "./build-prompts.js";
 import { runBuildTest } from "./build-test.js";
 import { CaptureTargetError, captureTarget } from "./capture-target.js";
+import { checkCoverage } from "./check-coverage.js";
 import { runTestEfficacy } from "./test-efficacy.js";
 
 export async function dispatch(
   request: EngineRequest,
 ): Promise<EngineResponse> {
+  if (request.command === "build-prompts") {
+    try {
+      const output = await buildPrompts(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: "passed",
+        output: { ...output },
+        diagnostics: [],
+      };
+    } catch (cause) {
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "invalid_build_prompts_input", message: cause.message },
+          ],
+        };
+      }
+      throw cause;
+    }
+  }
+  if (request.command === "check-coverage") {
+    try {
+      const result = await checkCoverage(request);
+      return {
+        protocolVersion: 1,
+        requestId: request.requestId,
+        status: result.status,
+        output: { ...result.output },
+        diagnostics: result.diagnostics,
+      };
+    } catch (cause) {
+      if (cause instanceof TypeError) {
+        return {
+          protocolVersion: 1,
+          requestId: request.requestId,
+          status: "inconclusive",
+          output: {},
+          diagnostics: [
+            { code: "invalid_check_coverage_input", message: cause.message },
+          ],
+        };
+      }
+      throw cause;
+    }
+  }
   if (request.command === "build-test") {
     try {
       const result = await runBuildTest(request);
