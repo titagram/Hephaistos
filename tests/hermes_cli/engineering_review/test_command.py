@@ -160,7 +160,7 @@ def test_cmd_chat_forwards_private_session_ready_callback(
     assert seen["query"] == "review"
 
 
-def test_classic_cli_opens_session_authority_before_skill_preprocessing(
+def test_classic_cli_list_path_does_not_open_session_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import cli as classic_cli
@@ -172,8 +172,9 @@ def test_classic_cli_opens_session_authority_before_skill_preprocessing(
         system_prompt = ""
         preloaded_skills: list[str] = []
 
-        def __init__(self, **_kwargs: object) -> None:
+        def __init__(self, **kwargs: object) -> None:
             events.append("session")
+            self.session_ready_callback = kwargs.get("session_ready_callback")
 
         def show_banner(self) -> None:
             events.append("banner")
@@ -204,9 +205,62 @@ def test_classic_cli_opens_session_authority_before_skill_preprocessing(
     assert exc_info.value.code == 0
     assert events[:3] == [
         "session",
-        ("authority", "session-1"),
         ("skills", ["requesting-code-review"], "session-1"),
+        "banner",
     ]
+    assert not any(
+        isinstance(event, tuple) and event[0] == "authority" for event in events
+    )
+
+
+def test_classic_cli_opens_authority_only_after_agent_session_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli as classic_cli
+    from gateway.session_context import get_session_env, set_current_session_id
+    from hermes_cli import mcp_startup
+
+    events: list[object] = []
+    shell: object | None = None
+
+    def authority_ready(session_id: str) -> None:
+        assert shell is not None
+        assert shell.agent is agent
+        assert shell.session_id == session_id
+        assert agent.session_id == session_id
+        assert get_session_env("HERMES_SESSION_ID", "") == session_id
+        assert os.environ["HERMES_SESSION_ID"] == session_id
+        events.append(("authority-serving", session_id))
+
+    shell = classic_cli.HermesCLI(
+        compact=True,
+        session_ready_callback=authority_ready,
+    )
+    shell._session_db = object()
+    shell._resumed = False
+    shell.conversation_history = []
+    shell._install_tool_callbacks = lambda: None
+    shell._ensure_tirith_security = lambda: None
+    shell._ensure_runtime_credentials = lambda: True
+    monkeypatch.setattr(mcp_startup, "wait_for_mcp_discovery", lambda: None)
+
+    agent = SimpleNamespace()
+
+    def build_agent(*_args: object, **kwargs: object) -> object:
+        agent.session_id = kwargs["session_id"]
+        set_current_session_id(agent.session_id)
+        events.append(("agent", agent.session_id))
+        return agent
+
+    monkeypatch.setattr(classic_cli, "AIAgent", build_agent)
+
+    assert shell._init_agent() is True
+    assert events == [
+        ("agent", shell.session_id),
+        ("authority-serving", shell.session_id),
+    ]
+    assert shell._init_agent() is True
+    assert events.count(("authority-serving", shell.session_id)) == 1
 
 
 def test_internal_start_requires_current_session_and_live_authority(

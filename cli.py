@@ -3448,6 +3448,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        session_ready_callback: Optional[Callable[[str], None]] = None,
     ):
         """
         Initialize the Hermes CLI.
@@ -3463,6 +3464,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             compact: Use compact display mode
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
+            session_ready_callback: Private post-AIAgent lifecycle callback
         """
         # Initialize Rich console
         self.console = Console()
@@ -3649,6 +3651,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self.checkpoint_max_total_size_mb = cp_cfg.get("max_total_size_mb", 500)
         self.checkpoint_max_file_size_mb = cp_cfg.get("max_file_size_mb", 10)
         self.pass_session_id = pass_session_id
+        # Private integration point for workflows that must bind process-local
+        # authority to the exact AIAgent session. It is fired once by
+        # _init_agent(), after AIAgent has synchronized the process session
+        # context and before the first conversation turn is served.
+        self._session_ready_callback = session_ready_callback
+        self._session_ready_callback_fired = False
         # --ignore-rules: honor either the constructor flag or the env var set
         # by `hermes chat --ignore-rules` in hermes_cli/main.py. When true we
         # pass skip_context_files=True and skip_memory=True to AIAgent so
@@ -15412,14 +15420,8 @@ def main(
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
+        session_ready_callback=session_ready_callback,
     )
-
-    # Specialized long-lived workflows may register process-local authority
-    # only after AIAgent has assigned a session ID. This hook is deliberately
-    # not a CLI flag and runs before skill preprocessing, so session-templated
-    # skills see the same live owner for their entire lifecycle.
-    if session_ready_callback is not None:
-        session_ready_callback(cli.session_id)
 
     if parsed_skills:
         skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(

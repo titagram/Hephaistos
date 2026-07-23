@@ -225,6 +225,13 @@ class CLIAgentSetupMixin:
         """
         from cli import AIAgent, ChatConsole, _DIM, _RST, _accent_hex, _cprint, _prepare_deferred_agent_startup, logger
         if self.agent is not None:
+            try:
+                self._fire_session_ready_callback()
+            except Exception as exc:
+                ChatConsole().print(
+                    f"[bold red]Failed to initialize session authority: {exc}[/]"
+                )
+                return False
             return True
 
         _prepare_deferred_agent_startup()
@@ -424,6 +431,12 @@ class CLIAgentSetupMixin:
                 tuple(runtime.get("args") or ()),
             )
 
+            # The callback is deliberately post-AIAgent: AIAgent's
+            # constructor is what synchronizes HERMES_SESSION_ID in both the
+            # ContextVar and environment fallback. Authority must never be
+            # served from the earlier, merely allocated HermesCLI session ID.
+            self._fire_session_ready_callback()
+
             # Force-create DB row on /title intent, then apply title.
             if self._pending_title and self._session_db and self.agent:
                 try:
@@ -440,6 +453,33 @@ class CLIAgentSetupMixin:
         except Exception as e:
             ChatConsole().print(f"[bold red]Failed to initialize agent: {e}[/]")
             return False
+
+    def _fire_session_ready_callback(self) -> None:
+        """Fire the private authority hook once the agent session is coherent."""
+        callback = getattr(self, "_session_ready_callback", None)
+        if callback is None or getattr(
+            self, "_session_ready_callback_fired", False
+        ):
+            return
+
+        agent = getattr(self, "agent", None)
+        cli_session_id = str(getattr(self, "session_id", "") or "")
+        agent_session_id = str(getattr(agent, "session_id", "") or "")
+        if not agent_session_id or agent_session_id != cli_session_id:
+            raise RuntimeError(
+                "AIAgent session does not match the active HermesCLI session"
+            )
+
+        from gateway.session_context import get_session_env
+
+        process_session_id = get_session_env("HERMES_SESSION_ID", "")
+        if process_session_id != agent_session_id:
+            raise RuntimeError(
+                "process session context does not match the active AIAgent session"
+            )
+
+        callback(agent_session_id)
+        self._session_ready_callback_fired = True
 
     def _preload_resumed_session(self) -> bool:
         """Load a resumed session's history from the DB early (before first chat).

@@ -2,8 +2,8 @@
 
 This module only prepares the normal interactive Hermes chat. The trusted
 ``ReviewAuthority`` is created by a session-ready callback after ``AIAgent``
-has assigned a session ID and remains owned by this public process until the
-chat lifecycle returns.
+has synchronized its session with the process context and remains owned by
+this public process until the chat lifecycle returns.
 """
 
 from __future__ import annotations
