@@ -419,6 +419,7 @@ class ReviewAuthority:
             self.run.revoke_authority_capability()
             return
         cleanup_failures: list[str] = []
+        sandbox_cleanup_pending = False
         try:
             self._closed = True
             listener = self._listener
@@ -426,6 +427,7 @@ class ReviewAuthority:
             sandbox_executor = self._sandbox_executor
             if sandbox_executor is not None:
                 sandbox_cleanup_failure = sandbox_executor.shutdown()
+                sandbox_cleanup_pending = sandbox_executor.cleanup_pending
                 self._sandbox_executor = None
                 if sandbox_cleanup_failure is not None:
                     self._engine_cleanup_failed = True
@@ -449,7 +451,11 @@ class ReviewAuthority:
                 except RuntimeError as exc:
                     cleanup_failures.append(f"authority thread cleanup failed: {exc}")
                 self._thread = None
-            if self._capture_completed and not self._cleanup_completed:
+            if (
+                self._capture_completed
+                and not self._cleanup_completed
+                and not sandbox_cleanup_pending
+            ):
                 request = EngineRequest(
                     request_id=f"cleanup-{secrets.token_hex(12)}",
                     command="cleanup",
@@ -479,6 +485,9 @@ class ReviewAuthority:
                         "hermes review cleanup --run %s",
                         self.run.run_id,
                     )
+            elif sandbox_cleanup_pending:
+                self._engine_cleanup_failed = True
+                cleanup_failures.append("sandbox creation is still in flight")
             if not self._remove_owned_socket():
                 cleanup_failures.append("authority socket cleanup failed")
         except BaseException as exc:

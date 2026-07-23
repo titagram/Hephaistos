@@ -41,6 +41,7 @@ _ENGINE_RELATIVE = Path("hermes_cli/engineering_review/hermes-engineering.mjs")
 _PYTEST_PROBE_RELATIVE = Path("hermes_cli/engineering_review/pytest_probe.py")
 _MAX_TIMEOUT_SECONDS = 660
 _MIN_NODE_MAJOR = 22
+_SHUTDOWN_WAIT_SECONDS = 70
 _NODE_VERSION = re.compile(r"^v?(?P<major>[0-9]+)(?:\.[0-9]+){1,2}\s*$")
 
 
@@ -345,11 +346,16 @@ class SandboxTerminalExecutor:
             identity = self._active_identity
         if environment is not None:
             self._teardown_environment(environment, identity)
-        if not self._idle.wait(timeout=70):
+        if not self._idle.wait(timeout=_SHUTDOWN_WAIT_SECONDS):
             self._cleanup_failure = (
                 self._cleanup_failure or "sandbox execution did not stop"
             )
         return self._cleanup_failure
+
+    @property
+    def cleanup_pending(self) -> bool:
+        """Whether an invocation still owns unfinalized sandbox state."""
+        return not self._idle.is_set()
 
     def shutdown(self) -> str | None:
         """Cancel active work and release teardown identities once it is idle."""
@@ -413,6 +419,48 @@ class SandboxTerminalExecutor:
             self._cleanup_failure = (
                 f"{failure}; sandbox recovery identity could not be recorded"
             )
+
+    def _record_factory_pending(self) -> None:
+        """Make public recovery refuse worktree cleanup before factory entry."""
+        self._run.atomic_artifact(
+            "sandbox-recovery.json",
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "runId": self._run.run_id,
+                    "backend": "docker",
+                    "taskId": f"review-{self._run.run_id}",
+                    "state": "creating",
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
+        )
+
+    def _record_factory_clean(self) -> str | None:
+        """Finalize the factory lease after proving no sandbox needs recovery."""
+        try:
+            self._run.atomic_artifact(
+                "sandbox-recovery.json",
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "runId": self._run.run_id,
+                        "backend": "docker",
+                        "taskId": f"review-{self._run.run_id}",
+                        "state": "clean",
+                    },
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8"),
+            )
+        except Exception:
+            failure = "sandbox recovery state could not be finalized"
+            self._cleanup_failure = self._cleanup_failure or failure
+            return failure
+        return None
 
     def _teardown_environment(
         self,
@@ -644,6 +692,7 @@ class SandboxTerminalExecutor:
         environment: _TerminalEnvironment | None = None
         environment_identity: dict[str, str] | None = None
         response: EngineResponse | None = None
+        factory_pending = False
         try:
             container_config = dict(config)
             container_config.update({
@@ -658,6 +707,8 @@ class SandboxTerminalExecutor:
                 # User extra args can override network/mount/security flags.
                 "docker_extra_args": [],
             })
+            self._record_factory_pending()
+            factory_pending = True
             environment = self._environment_factory(
                 env_type="docker",
                 image=str(config.get("docker_image", "")),
@@ -789,6 +840,8 @@ class SandboxTerminalExecutor:
                 cleanup_failure = self._teardown_environment(
                     environment, environment_identity
                 )
+            if factory_pending and cleanup_failure is None:
+                cleanup_failure = self._record_factory_clean()
             with self._environment_lock:
                 if self._active_environment is environment:
                     self._active_environment = None

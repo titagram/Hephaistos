@@ -15,7 +15,7 @@ import hermes_cli.engineering_review.terminal_execution as terminal_execution
 from hermes_cli.engineering_review import recovery
 from hermes_cli.engineering_review.execution_policy import decide_execution
 from hermes_cli.engineering_review.protocol import EngineRequest
-from hermes_cli.engineering_review.runs import ReviewRun
+from hermes_cli.engineering_review.runs import ReviewRun, ReviewRunError
 from hermes_cli.engineering_review.terminal_execution import (
     SandboxSource,
     SandboxTerminalExecutor,
@@ -833,7 +833,7 @@ def test_shutdown_waits_for_inflight_teardown_before_releasing_environment(
     assert references[0]() is None
 
 
-def test_shutdown_during_factory_records_identity_for_public_recovery(
+def test_shutdown_timeout_blocks_recovery_until_factory_finalizes_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run, _ = _run(tmp_path, monkeypatch)
@@ -845,8 +845,8 @@ def test_shutdown_during_factory_records_identity_for_public_recovery(
     )
     factory_entered = threading.Event()
     release_factory = threading.Event()
-    shutdown_returned = threading.Event()
     container_id = "d" * 64
+    monkeypatch.setattr(terminal_execution, "_SHUTDOWN_WAIT_SECONDS", 0.05)
 
     class Environment:
         cleanup_error = "forced cleanup failure"
@@ -892,21 +892,51 @@ def test_shutdown_during_factory_records_identity_for_public_recovery(
     invoke_thread.start()
     assert factory_entered.wait(timeout=5)
 
-    def shutdown() -> None:
-        executor.shutdown()
-        shutdown_returned.set()
+    assert executor.shutdown() == "sandbox execution did not stop"
+    assert executor.cleanup_pending is True
+    pending = json.loads(
+        (run.root / "sandbox-recovery.json").read_text("utf-8")
+    )
+    assert pending == {
+        "backend": "docker",
+        "runId": run.run_id,
+        "schemaVersion": 1,
+        "state": "creating",
+        "taskId": f"review-{run.run_id}",
+    }
 
-    shutdown_thread = threading.Thread(target=shutdown)
-    shutdown_thread.start()
-    assert executor._cancelled.wait(timeout=5)
-    assert not shutdown_returned.is_set()
+    failed_run = run.mark_cleanup_failed()
+    recovered: list[dict[str, str]] = []
+    removed_worktrees: list[Path] = []
+    monkeypatch.setattr(
+        recovery, "_repository_root", lambda _workspace: failed_run.workspace
+    )
+
+    def remove_worktree(_repo: Path, tree: Path) -> bool:
+        removed_worktrees.append(tree)
+        return False
+
+    monkeypatch.setattr(recovery, "_remove_registered_worktree", remove_worktree)
+
+    def recover_container(identity: dict[str, str]) -> bool:
+        recovered.append(identity)
+        return True
+
+    monkeypatch.setattr(recovery, "_recover_container", recover_container)
+
+    with pytest.raises(ReviewRunError, match="still in flight"):
+        recovery.recover_review_run(failed_run.run_id)
+
+    assert removed_worktrees == []
+    assert recovered == []
+    assert ReviewRun.load(failed_run.run_id, failed_run.session_id).status == (
+        "cleanup_failed"
+    )
+
     release_factory.set()
-
     invoke_thread.join(timeout=5)
-    shutdown_thread.join(timeout=5)
     assert not invoke_thread.is_alive()
-    assert not shutdown_thread.is_alive()
-    assert shutdown_returned.is_set()
+    assert executor.cleanup_pending is False
     assert getattr(responses[0], "diagnostics")[0].code == "cleanup_failed"
     recorded = json.loads(
         (run.root / "sandbox-recovery.json").read_text("utf-8")
@@ -919,21 +949,6 @@ def test_shutdown_during_factory_records_identity_for_public_recovery(
         "schemaVersion": 1,
         "taskId": f"review-{run.run_id}",
     }
-
-    failed_run = run.mark_cleanup_failed()
-    recovered: list[dict[str, str]] = []
-    monkeypatch.setattr(
-        recovery, "_repository_root", lambda _workspace: failed_run.workspace
-    )
-    monkeypatch.setattr(
-        recovery, "_remove_registered_worktree", lambda _repo, _tree: False
-    )
-
-    def recover_container(identity: dict[str, str]) -> bool:
-        recovered.append(identity)
-        return True
-
-    monkeypatch.setattr(recovery, "_recover_container", recover_container)
 
     result = recovery.recover_review_run(failed_run.run_id)
 

@@ -148,6 +148,37 @@ def test_public_recovery_verifies_recorded_container_labels_before_removal(
     assert calls[2] == ["/docker", "inspect", container_id]
 
 
+def test_public_recovery_accepts_finalized_clean_sandbox_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _failed_run(tmp_path, monkeypatch, target="local")
+    run.atomic_artifact(
+        "sandbox-recovery.json",
+        json.dumps({
+            "schemaVersion": 1,
+            "runId": run.run_id,
+            "backend": "docker",
+            "taskId": f"review-{run.run_id}",
+            "state": "clean",
+        }).encode(),
+    )
+    monkeypatch.setattr(recovery, "_repository_root", lambda _workspace: run.workspace)
+    monkeypatch.setattr(
+        recovery, "_remove_registered_worktree", lambda _repo, _tree: False
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_recover_container",
+        lambda _identity: (_ for _ in ()).throw(
+            AssertionError("clean sandbox has no container to recover")
+        ),
+    )
+
+    result = recovery.recover_review_run(run.run_id)
+
+    assert result == {"runId": run.run_id, "status": "complete", "removed": []}
+
+
 def test_public_recovery_rejects_non_failed_or_unknown_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

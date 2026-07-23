@@ -124,6 +124,20 @@ def _load_sandbox_identity(run: ReviewRun) -> dict[str, str] | None:
     if not isinstance(value, Mapping):
         raise ReviewRunError("sandbox recovery record must be an object")
     expected_task = f"review-{run.run_id}"
+    state = value.get("state")
+    if state in {"creating", "clean"}:
+        if (
+            set(value)
+            != {"schemaVersion", "runId", "backend", "taskId", "state"}
+            or value.get("schemaVersion") != 1
+            or value.get("runId") != run.run_id
+            or value.get("backend") != "docker"
+            or value.get("taskId") != expected_task
+        ):
+            raise ReviewRunError("sandbox recovery state is invalid")
+        if state == "creating":
+            raise ReviewRunError("sandbox creation is still in flight")
+        return None
     container_id = value.get("containerId")
     container_name = value.get("containerName")
     if (
@@ -207,6 +221,10 @@ def recover_review_run(run_id: str) -> dict[str, object]:
     """Recover one registered cleanup_failed run by ID and mark it complete."""
     run = ReviewRun.load_cleanup_failed(run_id)
     removed: list[str] = []
+    # Read this first.  A factory may still be creating a container while the
+    # closing authority has already made the run publicly recoverable.  In
+    # that state neither Git worktrees nor run metadata may be finalized.
+    sandbox = _load_sandbox_identity(run)
     target = canonical_capture_input(run.target)
     repo_root = _repository_root(run.workspace)
     if target["kind"] in {"range", "pr"}:
@@ -216,7 +234,6 @@ def recover_review_run(run_id: str) -> dict[str, object]:
     probe = _probe_worktree(run.workspace, run.run_id)
     if _remove_registered_worktree(repo_root, probe):
         removed.append(str(probe))
-    sandbox = _load_sandbox_identity(run)
     if sandbox is not None and _recover_container(sandbox):
         removed.append(f"docker:{sandbox['containerId']}")
     run.mark_recovered()
