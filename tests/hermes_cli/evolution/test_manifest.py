@@ -248,6 +248,20 @@ def test_arbitrary_digest_named_fields_do_not_exempt_opaque_material(
         "check --path=//",
         "check --path=C:\\",
         "check --path=C:/",
+        "./",
+        "../",
+        "///",
+        ".\\",
+        "..\\",
+        "~\\",
+        "\\\\",
+        "check --path=./",
+        "check --path=../",
+        "check --path=///",
+        "check --path=.\\",
+        "check --path=..\\",
+        "check --path=~\\",
+        "check --path=\\\\",
     ],
 )
 def test_verification_commands_reject_embedded_local_paths(
@@ -302,9 +316,54 @@ def test_manifest_accepts_normal_commands() -> None:
         "check --path-mode safe --output=json",
         "verify --timeout 30 --memory 512 --retries 3 --jobs 4 --limit 10",
         "check --range=1.0..2.0 --version=3.12.1",
+        "probe --endpoint=https://example.test/a/b",
+        "install --package=owner/package@1.2.3",
+        "check --module=package.submodule --release=2.4.0",
     ]
 
     validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("separator_count", [1, 2, 3, 4, 8])
+def test_verification_commands_reject_repeated_posix_root_separators(
+    separator_count: int,
+) -> None:
+    root = "/" * separator_count
+    for command in (root, f"check --path='{root}'", f"{root}private"):
+        manifest = _manifest()
+        manifest["verification_commands"] = [command]
+        with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+            validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("root", [".", "..", "~"])
+@pytest.mark.parametrize("separator", ["/", "//", "\\", "\\\\"])
+def test_verification_commands_reject_relative_roots_with_repeated_separators(
+    root: str, separator: str
+) -> None:
+    for token in (root + separator, root + separator + "private"):
+        manifest = _manifest()
+        manifest["verification_commands"] = [
+            f'check --path="{token}"'
+        ]
+        with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+            validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("separator", ["/", "//", "\\", "\\\\"])
+def test_verification_commands_reject_drive_and_unc_roots_and_descendants(
+    separator: str,
+) -> None:
+    tokens = (
+        "C:" + separator,
+        "C:" + separator + "private",
+        "\\\\" + separator + "server" + separator + "share",
+    )
+    for token in tokens:
+        manifest = _manifest()
+        manifest["verification_commands"] = [f"--path={token}"]
+        with pytest.raises(EvolutionContractError, match="invalid_manifest"):
+            validate_manifest(manifest)
 
 
 def test_verification_command_rejects_opaque_credential_token() -> None:

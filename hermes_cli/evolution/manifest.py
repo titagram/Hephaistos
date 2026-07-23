@@ -38,28 +38,13 @@ _LOCKFILE_FIELDS = frozenset({"path", "digest"})
 _SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._+-]+)?\Z", re.ASCII)
 _SECRET = re.compile(r"(?:sk|pk)[_-](?:live|test|proj)[_-]|ghp[_-]|github[_-]pat[_-]|glpat[_-]|xox[bp][_-]|akia", re.I)
-_HTTPS_URL = re.compile(r"https://[^\s\"'`]+", re.I)
-_WINDOWS_PATH = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"'`]+|(?<![A-Za-z0-9_])\\\\[^\s\"'`]+"
-)
-_POSIX_PATH = re.compile(r"(?<![:/])/(?:[^/\s\"'`]+/)*[^/\s\"'`]+")
-_EXPLICIT_RELATIVE_PATH = re.compile(
-    r"(?:^|[\s\"'`])(?:~|\.{1,2})[/\\][^\s\"'`]+"
-)
-_BARE_RELATIVE_PATH = re.compile(
-    r"[^\s/\\\"'`]+(?:[/\\][^\s/\\\"'`]+)+\Z"
-)
-_LOCAL_ROOT_PATH = re.compile(
-    r"(?<![A-Za-z0-9_./\\:])"
-    r"(?:\.{1,2}|~|/{1,2}|[A-Za-z]:[\\/])"
-    r"(?=$|[\s\"'`,;)\]])"
-)
-_PACKAGE_COORDINATE = re.compile(
-    r"(?<![A-Za-z0-9._-])[a-z0-9][a-z0-9._-]*/"
-    r"[a-z0-9][a-z0-9._-]*@[a-z0-9._+-]+"
-    r"(?![A-Za-z0-9._+-])",
+_COMPOSITE_VALUE_TOKEN = re.compile(r"\S+")
+_OPTION_ASSIGNMENT = re.compile(
+    r"-{1,2}[A-Za-z0-9][A-Za-z0-9_-]*=(.*)\Z",
     re.ASCII,
 )
+_WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]+", re.ASCII)
+_TOKEN_EDGE_CHARACTERS = "\"'`()[]{};,"
 _RESOLVED_COORDINATE = re.compile(
     r"[A-Za-z][A-Za-z0-9._-]{0,63}"
     r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?\Z",
@@ -167,21 +152,68 @@ def _strings(value: object, *, symbolic: bool = False) -> list[str]:
     return values
 
 
+def _normalize_composite_token(raw: str) -> str:
+    token = raw.strip(_TOKEN_EDGE_CHARACTERS)
+    assignment = _OPTION_ASSIGNMENT.fullmatch(token)
+    if assignment is not None:
+        token = assignment.group(1).strip(_TOKEN_EDGE_CHARACTERS)
+    return token
+
+
+def _is_valid_https_url(token: str) -> bool:
+    try:
+        parsed = urlsplit(token)
+        parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
+
+
+def _is_valid_package_coordinate(token: str) -> bool:
+    return (
+        "/" in token
+        and "@" in token
+        and _PACKAGE.fullmatch(token) is not None
+    )
+
+
+def _is_local_path_token(token: str) -> bool:
+    if not token:
+        return False
+    if token.startswith("/") or token.startswith("\\\\"):
+        return True
+    if token in {".", "..", "~"}:
+        return True
+    if any(
+        token.startswith(root + separator)
+        for root in (".", "..", "~")
+        for separator in ("/", "\\")
+    ):
+        return True
+    if _WINDOWS_DRIVE_PATH.match(token) is not None:
+        return True
+    return "/" in token or "\\" in token
+
+
 def _looks_like_local_path(value: str, *, slot: str) -> bool:
     if slot in {"declared_path", "component_source"}:
         return False
-    without_urls = _HTTPS_URL.sub("", value)
-    without_urls_or_packages = _PACKAGE_COORDINATE.sub("", without_urls)
-    return any(
-        pattern.search(without_urls_or_packages) is not None
-        for pattern in (
-            _WINDOWS_PATH,
-            _POSIX_PATH,
-            _EXPLICIT_RELATIVE_PATH,
-            _BARE_RELATIVE_PATH,
-            _LOCAL_ROOT_PATH,
-        )
-    )
+    for raw in _COMPOSITE_VALUE_TOKEN.findall(value):
+        token = _normalize_composite_token(raw)
+        if (
+            _is_valid_https_url(token)
+            or _is_valid_package_coordinate(token)
+        ):
+            continue
+        if _is_local_path_token(token):
+            return True
+    return False
 
 
 def _is_sensitive_key(key: str) -> bool:
