@@ -15,7 +15,10 @@ import {
 } from "node:fs";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 
-import type { EngineRequest } from "../protocol.js";
+import type {
+  AuthenticatedReviewerRecord,
+  EngineRequest,
+} from "../protocol.js";
 import {
   readTranscripts,
   resolveAnchors as resolveQwenAnchors,
@@ -252,6 +255,10 @@ export const readPrivateFileNoFollow = (
   path: string,
   label: string,
 ): string => {
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new TypeError(`${label} must be a regular non-symlink file`);
+  }
   const flags =
     constants.O_RDONLY |
     (process.platform === "win32" ? 0 : constants.O_NOFOLLOW);
@@ -266,6 +273,12 @@ export const readPrivateFileNoFollow = (
   try {
     const stat = fstatSync(descriptor);
     if (!stat.isFile()) throw new TypeError(`${label} must be a regular file`);
+    // Windows exposes no O_NOFOLLOW through node:fs. Binding the lstat identity
+    // to the opened descriptor rejects a symlink/reparse-point substitution
+    // between inspection and open; after open all reads stay on this descriptor.
+    if (stat.dev !== before.dev || stat.ino !== before.ino) {
+      throw new TypeError(`${label} changed while it was being opened`);
+    }
     if (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600) {
       throw new TypeError(`${label} must be private to the current user`);
     }
@@ -315,7 +328,14 @@ export const validatePrivateDestination = (
   return destination;
 };
 
-const reviewerRecords = (artifacts: ReviewArtifacts): AgentRecord[] => {
+const reviewerRecords = (
+  artifacts: ReviewArtifacts,
+  authenticated?: readonly AuthenticatedReviewerRecord[],
+): AgentRecord[] => {
+  if (authenticated !== undefined) return [...authenticated];
+  // Direct handler calls remain useful for package-level tests and diagnostics,
+  // but Hermes never treats their output as authoritative. The Python bridge
+  // requires and injects authenticated records for every evidence command.
   const since = lstatSync(artifacts.planPath).mtimeMs;
   try {
     const records = readTranscripts(
@@ -444,17 +464,19 @@ const parseVerifiedFindings = (
 export const validateVerifiedFindings = (
   value: unknown,
   artifacts: ReviewArtifacts,
+  authenticated?: readonly AuthenticatedReviewerRecord[],
 ): VerifiedFinding[] => {
   const knownReviewers = new Set(
-    reviewerRecords(artifacts).map((record) => record.agentId),
+    reviewerRecords(artifacts, authenticated).map((record) => record.agentId),
   );
   return parseVerifiedFindings(value, knownReviewers);
 };
 
 export const verifiedFindingsFromEvidence = (
   artifacts: ReviewArtifacts,
+  authenticated?: readonly AuthenticatedReviewerRecord[],
 ): VerifiedFinding[] => {
-  const records = reviewerRecords(artifacts);
+  const records = reviewerRecords(artifacts, authenticated);
   const evidence = records.filter((record) =>
     record.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER),
   );
@@ -598,8 +620,15 @@ export async function resolveFindingAnchors(
   if (unknown !== undefined)
     throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
   const artifacts = validatedReviewArtifacts(request);
-  const findings = validateVerifiedFindings(input.findings, artifacts);
-  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const findings = validateVerifiedFindings(
+    input.findings,
+    artifacts,
+    request.authenticatedReviewerRecords,
+  );
+  const evidenced = verifiedFindingsFromEvidence(
+    artifacts,
+    request.authenticatedReviewerRecords,
+  );
   if (JSON.stringify(findings) !== JSON.stringify(evidenced)) {
     throw new TypeError(
       "findings do not match the current-run verifier transcript evidence",

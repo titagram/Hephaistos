@@ -10,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from agent.review_evidence import write_reviewer_transcript
+from hermes_cli.engineering_review.evidence import (
+    VERIFIED_FINDINGS_EVIDENCE_MARKER,
+    encode_verified_findings,
+)
 from hermes_cli.engineering_review.runs import ReviewRun
 
 
@@ -237,6 +241,58 @@ def test_only_active_registered_review_markers_create_private_evidence(
     assert records[-1]["message"]["parts"] == [
         {"text": "Review complete. password=[REDACTED]"}
     ]
+
+
+def test_verified_finding_envelope_preserves_allowlisted_json_semantics(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    run = _registered_run(fake_home, tmp_path)
+    prompt = (
+        f"Hermes-Review-Run: {run.run_id}\n"
+        f"Hermes-Review-Plan: {run.root / 'plan.json'}\n"
+        "Return the verified finding envelope."
+    )
+    findings = [
+        {
+            "id": "sensitive-code",
+            "severity": "high",
+            "title": "Authorization parsing is wrong",
+            "body": (
+                "Keep Cookie and api_key identifiers exactly as code evidence; "
+                "never leak argument-secret or result-secret."
+            ),
+            "path": "src/auth.py",
+            "quotedCode": 'headers["Authorization"] = config["api_key"]',
+            "sourceReviewerIds": ["sa-0-reviewer"],
+            "verification": "confirmed",
+        }
+    ]
+    result = _child_result()
+    result["final_response"] = encode_verified_findings(findings)
+    expected = [
+        {
+            **findings[0],
+            "body": findings[0]["body"]
+            .replace("argument-secret", "[REDACTED]")
+            .replace("result-secret", "[REDACTED]"),
+        }
+    ]
+
+    path = write_reviewer_transcript("parent", _reviewer(prompt), result)
+
+    assert path is not None
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[-1]["message"]["parts"] == [
+        {"text": VERIFIED_FINDINGS_EVIDENCE_MARKER + json.dumps(expected, separators=(",", ":"))}
+    ]
+    assert "Authorization" in path.read_text()
+    assert "api_key" in path.read_text()
+    assert "Cookie" in path.read_text()
+    assert "argument-secret" not in path.read_text()
+    assert "result-secret" not in path.read_text()
+    authenticated = path.with_suffix(".auth.json")
+    assert authenticated.is_file()
+    assert stat.S_IMODE(authenticated.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize(

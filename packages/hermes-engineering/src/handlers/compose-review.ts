@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { CheckStatus, EngineRequest } from "../protocol.js";
+import type {
+  AuthenticatedReviewerRecord,
+  CheckStatus,
+  EngineRequest,
+} from "../protocol.js";
 import {
   composeReview as composeQwenReview,
   type ReviewEvent,
@@ -277,6 +281,7 @@ const parseStats = (
 const readFindings = (
   artifacts: ReviewArtifacts,
   expected: ResolveFindingAnchorsOutput,
+  authenticated?: readonly AuthenticatedReviewerRecord[],
 ): ResolveFindingAnchorsOutput => {
   const findingsPath = join(artifacts.artifactRoot, "findings.json");
   const serialized = readPrivateFileNoFollow(findingsPath, "findings.json");
@@ -313,6 +318,7 @@ const readFindings = (
   const validated = validateVerifiedFindings(
     [...resolved, ...unresolved].map(verifiedFields),
     artifacts,
+    authenticated,
   );
   const storedVerified = [...resolved, ...unresolved].map(verifiedFields);
   if (JSON.stringify(validated) !== JSON.stringify(storedVerified)) {
@@ -427,10 +433,14 @@ export async function composeReview(
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const evidenced = verifiedFindingsFromEvidence(
+    artifacts,
+    request.authenticatedReviewerRecords,
+  );
   const findings = readFindings(
     artifacts,
     deriveResolvedFindings(artifacts, evidenced),
+    request.authenticatedReviewerRecords,
   );
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(

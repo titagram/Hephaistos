@@ -2,6 +2,7 @@
 
 from .bridge import (
     EngineCancelledError,
+    EngineEvidenceError,
     EngineExecutionError,
     EngineOutputLimitError,
     EngineProcessError,
@@ -17,12 +18,21 @@ from .protocol import (
     EngineRequest,
     EngineResponse,
 )
+from .evidence import (
+    REVIEW_PLAN_MARKER,
+    REVIEW_RUN_MARKER,
+    VERIFIED_FINDINGS_EVIDENCE_MARKER,
+    VERIFIER_HANDOFF_INSTRUCTION,
+    encode_verified_findings,
+    parse_verified_findings,
+)
 
 __all__ = [
     "CheckStatus",
     "EngineCancelledError",
     "EngineCommand",
     "EngineDiagnostic",
+    "EngineEvidenceError",
     "EngineExecutionError",
     "EngineOutputLimitError",
     "EngineProcessError",
@@ -31,5 +41,11 @@ __all__ = [
     "EngineResponse",
     "EngineTimeoutError",
     "EngineeringReviewBridge",
+    "REVIEW_PLAN_MARKER",
+    "REVIEW_RUN_MARKER",
+    "VERIFIED_FINDINGS_EVIDENCE_MARKER",
+    "VERIFIER_HANDOFF_INSTRUCTION",
     "bundle_path",
+    "encode_verified_findings",
+    "parse_verified_findings",
 ]

@@ -67,6 +67,56 @@ describe("parseRequest", () => {
     });
     expect(() => parseRequest(request)).toThrow(/1 MiB/);
   });
+
+  it("accepts exact bridge-authenticated reviewer records", () => {
+    const authenticatedReviewerRecords = [
+      {
+        schemaVersion: 1 as const,
+        agentId: "reviewer-a",
+        agentName: "reviewer",
+        launchPrompt: "Review the captured diff.",
+        successfulToolCalls: 1,
+        diffToolCalls: 1,
+        diffReads: [[1, 5] as [number, number]],
+        successfulCallArgs: ['{"file_path":"/tmp/target.diff"}'],
+        finalText: "No findings.",
+        mtimeMs: 1,
+      },
+    ];
+
+    expect(
+      parseRequest(validRequest({ authenticatedReviewerRecords }))
+        .authenticatedReviewerRecords,
+    ).toEqual(authenticatedReviewerRecords);
+  });
+
+  it.each([
+    [[]],
+    [[{ schemaVersion: 1, agentId: "../escape" }]],
+    [
+      [
+        {
+          schemaVersion: 1,
+          agentId: "reviewer-a",
+          agentName: "reviewer",
+          launchPrompt: "prompt",
+          successfulToolCalls: 0,
+          diffToolCalls: 1,
+          diffReads: [],
+          successfulCallArgs: [],
+          finalText: "done",
+          mtimeMs: 1,
+        },
+      ],
+    ],
+  ])("rejects invalid authenticated reviewer records %#", (records) => {
+    expect(() =>
+      parseRequest({
+        ...validRequest(),
+        authenticatedReviewerRecords: records,
+      }),
+    ).toThrow(/authenticatedReviewerRecords|authenticated reviewer/);
+  });
 });
 
 describe("parseCaptureInput", () => {

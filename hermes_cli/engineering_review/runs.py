@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import shutil
 import stat
+import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,9 +28,22 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _EFFORTS = frozenset({"low", "medium", "high"})
 _STATUSES = frozenset({"active", "complete", "cleanup_failed"})
 _METADATA_NAME = "run.json"
+_EVIDENCE_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_EVIDENCE_DOMAIN = b"Hermes engineering reviewer evidence v1\0"
 
 RunStatus = Literal["active", "complete", "cleanup_failed"]
 Effort = Literal["low", "medium", "high"]
+
+
+@dataclass(slots=True)
+class _RunCapability:
+    secret: bytes
+    bundle_hash: str | None
+    expected_evidence: dict[str, str]
+
+
+_CAPABILITIES: dict[Path, _RunCapability] = {}
+_CAPABILITY_LOCK = threading.RLock()
 
 
 class ReviewRunError(ValueError):
@@ -166,6 +181,35 @@ def _sha256_file(path: Path) -> str | None:
         return None
 
 
+def _register_capability(root: Path, bundle_hash: str | None) -> None:
+    with _CAPABILITY_LOCK:
+        _CAPABILITIES[root] = _RunCapability(
+            secret=secrets.token_bytes(32),
+            bundle_hash=bundle_hash,
+            expected_evidence={},
+        )
+
+
+def _drop_capability(root: Path) -> None:
+    with _CAPABILITY_LOCK:
+        capability = _CAPABILITIES.pop(root, None)
+        if capability is not None:
+            capability.secret = b"\0" * len(capability.secret)
+            capability.expected_evidence.clear()
+
+
+def _evidence_mac(secret: bytes, run_id: str, agent_id: str, data: bytes) -> str:
+    message = (
+        _EVIDENCE_DOMAIN
+        + run_id.encode("ascii")
+        + b"\0"
+        + agent_id.encode("ascii")
+        + b"\0"
+        + data
+    )
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
 def _provenance_hash(workspace: Path, target: str, effort: str) -> str:
     value = json.dumps(
         {"effort": effort, "target": target, "workspace": str(workspace)},
@@ -243,7 +287,12 @@ class ReviewRun:
                 "provenance_hash": _provenance_hash(canonical_workspace, target, effort),
             }
             run = cls(run_id, root, canonical_workspace, target, effort, session_id)
-            run._write_metadata(metadata)
+            try:
+                run._write_metadata(metadata)
+                _register_capability(root, metadata["bundle_hash"])
+            except BaseException:
+                _drop_capability(root)
+                raise
             return run
         raise ReviewRunError("could not allocate a unique review run id")
 
@@ -361,12 +410,14 @@ class ReviewRun:
                     if written <= 0:
                         raise OSError("short artifact write")
                     view = view[written:]
+                if hasattr(os, "fchmod"):
+                    os.fchmod(descriptor, 0o600)
+                else:
+                    os.chmod(temporary, 0o600)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            os.chmod(temporary, 0o600)
             os.replace(temporary, destination)
-            os.chmod(destination, 0o600)
             directory_descriptor = os.open(root, os.O_RDONLY)
             try:
                 os.fsync(directory_descriptor)
@@ -387,10 +438,96 @@ class ReviewRun:
         loaded = self._validated_loaded()
         return loaded._atomic_write(_artifact_name(name), data)
 
+    def commit_reviewer_evidence(self, agent_id: str, data: bytes) -> str:
+        """Commit an expected HMAC before harness evidence becomes authoritative.
+
+        The secret and expected set exist only in the creating Hermes process.
+        Loading the run in another process intentionally cannot recreate them.
+        """
+        if not isinstance(agent_id, str) or not _EVIDENCE_AGENT_ID_RE.fullmatch(
+            agent_id
+        ):
+            raise ReviewRunError("reviewer evidence agent id is invalid")
+        if not isinstance(data, bytes):
+            raise TypeError("reviewer evidence must be bytes")
+        loaded = self._validated_loaded()
+        if loaded.status != "active":
+            raise ReviewRunError("reviewer evidence requires an active run")
+        with _CAPABILITY_LOCK:
+            capability = _CAPABILITIES.get(loaded.root)
+            if capability is None:
+                raise ReviewRunError(
+                    "review capability is unavailable; active runs cannot resume after restart"
+                )
+            digest = _evidence_mac(
+                capability.secret, loaded.run_id, agent_id, data
+            )
+            capability.expected_evidence[agent_id] = digest
+            return digest
+
+    def authenticated_reviewer_records(self, engine_bundle: Path) -> list[dict[str, Any]]:
+        """Return an exact verified snapshot for the trusted engine bridge."""
+        loaded = self._validated_loaded()
+        if loaded.status != "active":
+            raise ReviewRunError("authoritative evidence requires an active run")
+        with _CAPABILITY_LOCK:
+            capability = _CAPABILITIES.get(loaded.root)
+            if capability is None:
+                raise ReviewRunError(
+                    "review capability is unavailable; active runs cannot resume after restart"
+                )
+            actual_bundle_hash = _sha256_file(Path(engine_bundle))
+            if (
+                capability.bundle_hash is None
+                or actual_bundle_hash is None
+                or not hmac.compare_digest(
+                    capability.bundle_hash, actual_bundle_hash
+                )
+            ):
+                raise ReviewRunError("engineering bundle does not match the run capability")
+            expected = dict(capability.expected_evidence)
+            secret = capability.secret
+
+        reviewers = loaded.root / "subagents" / "reviewers"
+        try:
+            _secure_directory(reviewers)
+            names = {entry.name for entry in reviewers.iterdir()}
+        except (OSError, ReviewRunError) as exc:
+            raise ReviewRunError("reviewer evidence directory is unavailable") from exc
+        expected_jsonl = {f"agent-{agent_id}.jsonl" for agent_id in expected}
+        expected_auth = {f"agent-{agent_id}.auth.json" for agent_id in expected}
+        actual_jsonl = {name for name in names if name.endswith(".jsonl")}
+        actual_auth = {name for name in names if name.endswith(".auth.json")}
+        if not expected or actual_jsonl != expected_jsonl or actual_auth != expected_auth:
+            raise ReviewRunError("reviewer evidence set is missing or contains extras")
+
+        records: list[dict[str, Any]] = []
+        for agent_id in sorted(expected):
+            # The JSONL remains for Qwen compatibility and operator inspection,
+            # but its presence—not its mutable contents—is all authority uses.
+            _secure_file(reviewers / f"agent-{agent_id}.jsonl")
+            data = _read_private_file(reviewers / f"agent-{agent_id}.auth.json")
+            actual_mac = _evidence_mac(secret, loaded.run_id, agent_id, data)
+            if not hmac.compare_digest(expected[agent_id], actual_mac):
+                raise ReviewRunError("reviewer evidence authentication failed")
+            try:
+                value = json.loads(data)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ReviewRunError("authenticated reviewer evidence is invalid JSON") from exc
+            if not isinstance(value, dict) or value.get("agentId") != agent_id:
+                raise ReviewRunError("authenticated reviewer evidence identity is invalid")
+            records.append(value)
+        with _CAPABILITY_LOCK:
+            current = _CAPABILITIES.get(loaded.root)
+            if current is not capability or current.expected_evidence != expected:
+                raise ReviewRunError("review capability changed during evidence snapshot")
+        return records
+
     def mark_complete(self) -> ReviewRun:
         """Transition an active run to its terminal complete state."""
         loaded = self._validated_loaded()
         if loaded.status == "complete":
+            _drop_capability(loaded.root)
             return loaded
         if loaded.status != "active":
             raise ReviewRunError("only active review runs can complete")
@@ -400,6 +537,7 @@ class ReviewRun:
         metadata["updated_at"] = now
         metadata["completed_at"] = now
         loaded._write_metadata(metadata)
+        _drop_capability(loaded.root)
         return replace(loaded, status="complete")
 
     def _metadata(self) -> dict[str, Any]:
@@ -459,6 +597,7 @@ def prune_completed_runs(home: Path, keep: int) -> list[Path]:
             # atomic on the shared parent filesystem, so concurrent pruners can
             # never both remove (or report removal of) the same run.
             os.replace(root, tombstone)
+            _drop_capability(root)
             shutil.rmtree(tombstone)
         except FileNotFoundError:
             continue

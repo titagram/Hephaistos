@@ -7,15 +7,21 @@ import os
 import re
 import secrets
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 from hermes_cli.engineering_review.runs import ReviewRun, ReviewRunError
+from hermes_cli.engineering_review.evidence import (
+    REVIEW_PLAN_MARKER,
+    REVIEW_RUN_MARKER,
+    canonical_verified_findings_response,
+)
 
 
-_RUN_MARKER = re.compile(r"Hermes-Review-Run: ([A-Za-z0-9_-]+)")
-_PLAN_MARKER = re.compile(r"Hermes-Review-Plan: ([^\r\n]+)")
+_RUN_MARKER = re.compile(rf"{re.escape(REVIEW_RUN_MARKER)} ([A-Za-z0-9_-]+)")
+_PLAN_MARKER = re.compile(rf"{re.escape(REVIEW_PLAN_MARKER)} ([^\r\n]+)")
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|auth(?:orization)?|bearer|cookie|credential|env(?:ironment)?|password|"
@@ -76,6 +82,51 @@ def _sanitized(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_sanitized(item) for item in value]
     return _redact_text(str(value))
+
+
+def _known_sensitive_values(value: Any, *, sensitive: bool = False) -> set[str]:
+    """Collect actual credential literals without treating code keywords as secrets."""
+    found: set[str] = set()
+    if isinstance(value, str):
+        for match in _SENSITIVE_ASSIGNMENT.finditer(value):
+            literal = match.group(0)[len(match.group(1)) + len(match.group(2)) :]
+            literal = re.sub(r"(?i)^bearer\s+", "", literal).strip("\"'")
+            if len(literal) >= 4:
+                found.add(literal)
+        for match in _BEARER.finditer(value):
+            literal = match.group(0).split(None, 1)[-1]
+            if len(literal) >= 4:
+                found.add(literal)
+        for match in _COOKIE_HEADER.finditer(value):
+            literal = match.group(0)[len(match.group(1)) :].strip()
+            if len(literal) >= 4:
+                found.add(literal)
+        stripped = value.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (Mapping, list)):
+                found.update(_known_sensitive_values(parsed, sensitive=sensitive))
+        if sensitive and len(value) >= 4:
+            found.add(value)
+        return found
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key == "final_response":
+                continue
+            found.update(
+                _known_sensitive_values(
+                    item,
+                    sensitive=sensitive or _SENSITIVE_KEY.search(str(key)) is not None,
+                )
+            )
+        return found
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found.update(_known_sensitive_values(item, sensitive=sensitive))
+    return found
 
 
 def _content_text(content: Any) -> str:
@@ -160,7 +211,7 @@ def _validated_run(parent_session_id: str, prompt: str) -> ReviewRun | None:
     marker_lines = [
         line
         for line in prompt.splitlines()
-        if line.startswith(("Hermes-Review-Run:", "Hermes-Review-Plan:"))
+        if line.startswith((REVIEW_RUN_MARKER, REVIEW_PLAN_MARKER))
     ]
     if len(marker_lines) != 2:
         return None
@@ -267,12 +318,7 @@ def _record(
     }
 
 
-def _atomic_jsonl(destination: Path, records: list[dict[str, Any]]) -> None:
-    data = "".join(
-        json.dumps(record, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
-        + "\n"
-        for record in records
-    ).encode("utf-8")
+def _atomic_private(destination: Path, data: bytes) -> None:
     if destination.exists() or destination.is_symlink():
         info = destination.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -295,12 +341,14 @@ def _atomic_jsonl(destination: Path, records: list[dict[str, Any]]) -> None:
             if written <= 0:
                 raise OSError("short reviewer evidence write")
             view = view[written:]
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:
+            os.chmod(temporary, 0o600)
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        os.chmod(temporary, 0o600)
         os.replace(temporary, destination)
-        os.chmod(destination, 0o600)
         directory_descriptor = os.open(destination.parent, os.O_RDONLY)
         try:
             os.fsync(directory_descriptor)
@@ -313,6 +361,81 @@ def _atomic_jsonl(destination: Path, records: list[dict[str, Any]]) -> None:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _atomic_jsonl(destination: Path, records: list[dict[str, Any]]) -> None:
+    data = b"".join(_json_bytes(record) + b"\n" for record in records)
+    _atomic_private(destination, data)
+
+
+def _diff_path(run: ReviewRun) -> str:
+    try:
+        plan = json.loads((run.root / "plan.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("could not read reviewer plan") from exc
+    value = plan.get("diffPathAbsolute") if isinstance(plan, Mapping) else None
+    if not isinstance(value, str) or not value:
+        raise OSError("reviewer plan has no diffPathAbsolute")
+    return value
+
+
+def _authenticated_record(
+    run: ReviewRun,
+    agent_id: str,
+    prompt: str,
+    successful: list[tuple[str, str, Any, Any]],
+    final_text: str,
+) -> dict[str, Any]:
+    diff_path = _diff_path(run)
+    successful_call_args: list[str] = []
+    diff_reads: list[list[int]] = []
+    diff_tool_calls = 0
+    for _call_id, _name, raw_arguments, _content in successful:
+        arguments = _sanitized(_parse_arguments(raw_arguments))
+        serialized = json.dumps(
+            arguments,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        successful_call_args.append(serialized)
+        if json.dumps(diff_path, ensure_ascii=False) not in serialized:
+            continue
+        diff_tool_calls += 1
+        if not isinstance(arguments, Mapping):
+            continue
+        limit = arguments.get("limit")
+        offset = arguments.get("offset", 0)
+        if (
+            isinstance(limit, int)
+            and not isinstance(limit, bool)
+            and limit > 0
+            and isinstance(offset, int)
+            and not isinstance(offset, bool)
+            and offset >= 0
+        ):
+            diff_reads.append([offset + 1, offset + limit])
+    return {
+        "schemaVersion": 1,
+        "agentId": agent_id,
+        "agentName": "reviewer",
+        "launchPrompt": _redact_text(prompt),
+        "successfulToolCalls": len(successful),
+        "diffToolCalls": diff_tool_calls,
+        "diffReads": diff_reads,
+        "successfulCallArgs": successful_call_args,
+        "finalText": final_text,
+        "mtimeMs": time.time_ns() / 1_000_000,
+    }
 
 
 def write_reviewer_transcript(
@@ -335,10 +458,9 @@ def write_reviewer_transcript(
     if run is None:
         return None
 
+    successful = _successful_calls(result.get("messages"))
     records = [_record(agent_id, "user", "user", [{"text": _redact_text(prompt)}])]
-    for call_id, name, raw_arguments, content in _successful_calls(
-        result.get("messages")
-    ):
+    for call_id, name, raw_arguments, content in successful:
         records.append(
             _record(
                 agent_id,
@@ -373,13 +495,19 @@ def write_reviewer_transcript(
         )
 
     final_text = result.get("final_response")
+    safe_final_text = ""
     if isinstance(final_text, str) and final_text:
+        envelope = canonical_verified_findings_response(
+            final_text,
+            sensitive_values=tuple(_known_sensitive_values(result)),
+        )
+        safe_final_text = envelope if envelope is not None else _redact_text(final_text)
         records.append(
             _record(
                 agent_id,
                 "assistant",
                 "model",
-                [{"text": _redact_text(final_text)}],
+                [{"text": safe_final_text}],
             )
         )
 
@@ -388,5 +516,13 @@ def write_reviewer_transcript(
     _private_directory(subagents)
     _private_directory(reviewers)
     destination = reviewers / f"agent-{agent_id}.jsonl"
+    authenticated = _authenticated_record(
+        run, agent_id, prompt, successful, safe_final_text
+    )
+    authenticated_data = _json_bytes(authenticated)
+    # Commit the expected MAC in the harness process before either mutable
+    # compatibility artifact can become visible to a terminal caller.
+    run.commit_reviewer_evidence(agent_id, authenticated_data)
+    _atomic_private(destination.with_suffix(".auth.json"), authenticated_data)
     _atomic_jsonl(destination, records)
     return destination

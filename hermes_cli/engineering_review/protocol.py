@@ -12,6 +12,7 @@ from hermes_constants import get_hermes_home
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 1024 * 1024
+MAX_TRANSPORT_BYTES = 4 * MAX_REQUEST_BYTES
 MAX_DIAGNOSTICS = 200
 
 EngineCommand = Literal[

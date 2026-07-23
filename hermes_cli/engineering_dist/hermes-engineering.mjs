@@ -3874,13 +3874,15 @@ import {
 // packages/hermes-engineering/src/protocol.ts
 import { resolve as resolve7 } from "node:path";
 var MAX_REQUEST_BYTES = 1024 * 1024;
+var MAX_TRANSPORT_BYTES = 4 * MAX_REQUEST_BYTES;
 var REQUEST_KEYS = /* @__PURE__ */ new Set([
   "protocolVersion",
   "requestId",
   "command",
   "workspace",
   "artifactRoot",
-  "input"
+  "input",
+  "authenticatedReviewerRecords"
 ]);
 var ENGINE_COMMANDS = /* @__PURE__ */ new Set([
   "capture-target",
@@ -3946,11 +3948,16 @@ function parseRequest(value) {
   } catch {
     throw new TypeError("request must be JSON-serializable");
   }
-  if (encoded === void 0 || Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES) {
-    throw new TypeError("request must not exceed 1 MiB");
+  if (encoded === void 0 || Buffer.byteLength(encoded, "utf8") > MAX_TRANSPORT_BYTES) {
+    throw new TypeError("request transport must not exceed 4 MiB");
   }
   if (!isRecord(value)) {
     throw new TypeError("request must be an object");
+  }
+  const callerValue = { ...value };
+  delete callerValue.authenticatedReviewerRecords;
+  if (Buffer.byteLength(JSON.stringify(callerValue), "utf8") > MAX_REQUEST_BYTES) {
+    throw new TypeError("caller request must not exceed 1 MiB");
   }
   if (value.protocolVersion !== 1) {
     throw new TypeError("request requires protocolVersion 1");
@@ -3968,15 +3975,63 @@ function parseRequest(value) {
   if (!isRecord(value.input)) {
     throw new TypeError("input must be an object");
   }
+  const authenticatedReviewerRecords = value.authenticatedReviewerRecords === void 0 ? void 0 : parseAuthenticatedReviewerRecords(value.authenticatedReviewerRecords);
   return {
     protocolVersion: 1,
     requestId: requiredString(value, "requestId"),
     command,
     workspace: resolve7(requiredString(value, "workspace")),
     artifactRoot: resolve7(requiredString(value, "artifactRoot")),
-    input: value.input
+    input: value.input,
+    ...authenticatedReviewerRecords === void 0 ? {} : { authenticatedReviewerRecords }
   };
 }
+var AUTHENTICATED_RECORD_KEYS = /* @__PURE__ */ new Set([
+  "schemaVersion",
+  "agentId",
+  "agentName",
+  "launchPrompt",
+  "successfulToolCalls",
+  "diffToolCalls",
+  "diffReads",
+  "successfulCallArgs",
+  "finalText",
+  "mtimeMs"
+]);
+var parseAuthenticatedReviewerRecords = (value) => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 1024) {
+    throw new TypeError(
+      "authenticatedReviewerRecords must contain 1-1024 records"
+    );
+  }
+  const seen = /* @__PURE__ */ new Set();
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new TypeError(`authenticatedReviewerRecords[${index}] is invalid`);
+    }
+    const unknown = Object.keys(entry).find(
+      (key) => !AUTHENTICATED_RECORD_KEYS.has(key)
+    );
+    if (unknown !== void 0) {
+      throw new TypeError(`unknown authenticated reviewer field: ${unknown}`);
+    }
+    const agentId = entry.agentId;
+    if (entry.schemaVersion !== 1 || typeof agentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(agentId) || seen.has(agentId) || typeof entry.agentName !== "string" || typeof entry.launchPrompt !== "string" || typeof entry.finalText !== "string" || !Number.isSafeInteger(entry.successfulToolCalls) || entry.successfulToolCalls < 0 || !Number.isSafeInteger(entry.diffToolCalls) || entry.diffToolCalls < 0 || entry.diffToolCalls > entry.successfulToolCalls || !Number.isFinite(entry.mtimeMs)) {
+      throw new TypeError(`authenticatedReviewerRecords[${index}] is invalid`);
+    }
+    if (!Array.isArray(entry.successfulCallArgs) || entry.successfulCallArgs.length !== entry.successfulToolCalls || entry.successfulCallArgs.some(
+      (argument) => typeof argument !== "string"
+    ) || !Array.isArray(entry.diffReads) || entry.diffReads.some(
+      (range) => !Array.isArray(range) || range.length !== 2 || !Number.isSafeInteger(range[0]) || !Number.isSafeInteger(range[1]) || range[0] < 1 || range[1] < range[0]
+    )) {
+      throw new TypeError(
+        `authenticatedReviewerRecords[${index}] has invalid call evidence`
+      );
+    }
+    seen.add(agentId);
+    return entry;
+  });
+};
 
 // packages/hermes-engineering/src/handlers/capture-target.ts
 var GIT_TIMEOUT_MS2 = 12e4;
@@ -4624,8 +4679,19 @@ var removeWorktree = (worktreePath) => {
 };
 
 // packages/hermes-engineering/src/handlers/check-coverage.ts
-import { lstatSync as lstatSync6, readFileSync as readFileSync9, realpathSync as realpathSync5, statSync as statSync4 } from "node:fs";
-import { resolve as resolve9 } from "node:path";
+import {
+  chmodSync as chmodSync3,
+  lstatSync as lstatSync6,
+  mkdirSync as mkdirSync4,
+  mkdtempSync,
+  readFileSync as readFileSync9,
+  realpathSync as realpathSync5,
+  rmSync as rmSync2,
+  statSync as statSync4,
+  writeFileSync as writeFileSync5
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join10, resolve as resolve9 } from "node:path";
 var asRecord3 = (value, label2) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${label2} must be an object`);
@@ -4752,32 +4818,119 @@ var exactPromptMismatches = (promptPlan, planPath, env) => {
   }
   return mismatches;
 };
+var authenticatedTranscript = (record) => {
+  const records = [
+    {
+      agentId: record.agentId,
+      agentName: record.agentName,
+      type: "user",
+      message: { role: "user", parts: [{ text: record.launchPrompt }] }
+    }
+  ];
+  record.successfulCallArgs.forEach((serialized, index) => {
+    let args;
+    try {
+      args = JSON.parse(serialized);
+    } catch (cause) {
+      throw new TypeError(
+        `authenticated reviewer ${record.agentId} has invalid call arguments: ${cause.message}`
+      );
+    }
+    const id = `authenticated-${index}`;
+    records.push(
+      {
+        agentId: record.agentId,
+        agentName: record.agentName,
+        type: "assistant",
+        message: {
+          role: "model",
+          parts: [{ functionCall: { id, name: "read_file", args } }]
+        }
+      },
+      {
+        agentId: record.agentId,
+        agentName: record.agentName,
+        type: "tool_result",
+        message: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id,
+                name: "read_file",
+                response: { output: "authenticated" }
+              }
+            }
+          ]
+        }
+      }
+    );
+  });
+  if (record.finalText.length > 0) {
+    records.push({
+      agentId: record.agentId,
+      agentName: record.agentName,
+      type: "assistant",
+      message: { role: "model", parts: [{ text: record.finalText }] }
+    });
+  }
+  return `${records.map((entry) => JSON.stringify(entry)).join("\n")}
+`;
+};
+var withReviewerEnvironment = (request, artifactRoot, callback) => {
+  if (request.authenticatedReviewerRecords === void 0) {
+    return callback({
+      ...process.env,
+      QWEN_CODE_PROJECT_DIR: artifactRoot,
+      QWEN_CODE_SESSION_ID: "reviewers"
+    });
+  }
+  const root = mkdtempSync(join10(tmpdir(), "hermes-auth-reviewers-"));
+  chmodSync3(root, 448);
+  const reviewers = join10(root, "subagents", "reviewers");
+  mkdirSync4(reviewers, { recursive: true, mode: 448 });
+  chmodSync3(join10(root, "subagents"), 448);
+  chmodSync3(reviewers, 448);
+  try {
+    for (const record of request.authenticatedReviewerRecords) {
+      writeFileSync5(
+        join10(reviewers, `agent-${record.agentId}.jsonl`),
+        authenticatedTranscript(record),
+        { mode: 384 }
+      );
+    }
+    return callback({
+      ...process.env,
+      QWEN_CODE_PROJECT_DIR: root,
+      QWEN_CODE_SESSION_ID: "reviewers"
+    });
+  } finally {
+    rmSync2(root, { force: true, recursive: true });
+  }
+};
 async function checkCoverage(request) {
   const planPath = validatedPlanPath(request);
   const artifactRoot = realpathSync5(request.artifactRoot);
   const promptPlan = validatedPromptPlan(artifactRoot, planPath);
-  const env = {
-    ...process.env,
-    QWEN_CODE_PROJECT_DIR: artifactRoot,
-    QWEN_CODE_SESSION_ID: "reviewers"
-  };
   try {
-    const exactMismatches = exactPromptMismatches(promptPlan, planPath, env);
-    const coverage = effectiveCoverage(
-      coverageFromTranscripts(planPath, env),
-      promptPlan.omittedSpecialists,
-      exactMismatches
-    );
-    return {
-      status: coverage.ok ? "passed" : "failed",
-      output: { coverage, omittedSpecialists: promptPlan.omittedSpecialists },
-      diagnostics: coverage.ok ? [] : [
-        {
-          code: "coverage_failed",
-          message: "required reviewer evidence is absent or unverifiable"
-        }
-      ]
-    };
+    return withReviewerEnvironment(request, artifactRoot, (env) => {
+      const exactMismatches = exactPromptMismatches(promptPlan, planPath, env);
+      const coverage = effectiveCoverage(
+        coverageFromTranscripts(planPath, env),
+        promptPlan.omittedSpecialists,
+        exactMismatches
+      );
+      return {
+        status: coverage.ok ? "passed" : "failed",
+        output: { coverage, omittedSpecialists: promptPlan.omittedSpecialists },
+        diagnostics: coverage.ok ? [] : [
+          {
+            code: "coverage_failed",
+            message: "required reviewer evidence is absent or unverifiable"
+          }
+        ]
+      };
+    });
   } catch (cause) {
     if (cause instanceof TranscriptsUnavailableError) {
       return {
@@ -4794,7 +4947,7 @@ async function checkCoverage(request) {
 
 // packages/hermes-engineering/src/handlers/compose-review.ts
 import { readFileSync as readFileSync11 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // packages/hermes-engineering/src/reverse-audit.ts
 var validateReverseAuditState = (value) => {
@@ -4848,9 +5001,9 @@ import {
   realpathSync as realpathSync6,
   renameSync as renameSync3,
   unlinkSync as unlinkSync3,
-  writeFileSync as writeFileSync5
+  writeFileSync as writeFileSync6
 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join10, posix, resolve as resolve10, win32 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join11, posix, resolve as resolve10, win32 } from "node:path";
 var ReviewerEvidenceUnavailableError = class extends Error {
   constructor(message) {
     super(message);
@@ -4935,8 +5088,8 @@ var validatedReviewArtifacts = (request) => {
   if (process.platform !== "win32" && (rootStat.mode & 63) !== 0) {
     throw new TypeError("artifactRoot must be private to the current user");
   }
-  const planPath = realFile(join10(artifactRoot, "plan.json"), "plan.json");
-  if (planPath !== join10(artifactRoot, "plan.json")) {
+  const planPath = realFile(join11(artifactRoot, "plan.json"), "plan.json");
+  if (planPath !== join11(artifactRoot, "plan.json")) {
     throw new TypeError("plan.json must be the canonical run plan");
   }
   const plan = asRecord4(
@@ -4947,7 +5100,7 @@ var validatedReviewArtifacts = (request) => {
     throw new TypeError("plan.diffPathAbsolute must be a string");
   }
   const diffPath = realFile(resolve10(plan.diffPathAbsolute), "target.diff");
-  if (diffPath !== join10(artifactRoot, "target.diff")) {
+  if (diffPath !== join11(artifactRoot, "target.diff")) {
     throw new TypeError(
       "plan.diffPathAbsolute must name the run's canonical target.diff"
     );
@@ -4964,15 +5117,15 @@ var validatedReviewArtifacts = (request) => {
   return { artifactRoot, planPath, diffPath, plan, diff, diffSha256 };
 };
 var atomicWrite2 = (artifactRoot, name, content) => {
-  const destination = join10(artifactRoot, name);
+  const destination = join11(artifactRoot, name);
   validatePrivateDestination(artifactRoot, name);
-  const temporary = join10(
+  const temporary = join11(
     artifactRoot,
     `.${name}.${randomBytes3(12).toString("hex")}.tmp`
   );
   const descriptor = openSync3(temporary, "wx", 384);
   try {
-    writeFileSync5(descriptor, content, "utf8");
+    writeFileSync6(descriptor, content, "utf8");
     fchmodSync(descriptor, 384);
     fsyncSync3(descriptor);
   } finally {
@@ -4997,6 +5150,10 @@ var atomicWrite2 = (artifactRoot, name, content) => {
   return destination;
 };
 var readPrivateFileNoFollow = (path, label2) => {
+  const before = lstatSync7(path);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new TypeError(`${label2} must be a regular non-symlink file`);
+  }
   const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW);
   let descriptor;
   try {
@@ -5009,6 +5166,9 @@ var readPrivateFileNoFollow = (path, label2) => {
   try {
     const stat = fstatSync(descriptor);
     if (!stat.isFile()) throw new TypeError(`${label2} must be a regular file`);
+    if (stat.dev !== before.dev || stat.ino !== before.ino) {
+      throw new TypeError(`${label2} changed while it was being opened`);
+    }
     if (process.platform !== "win32" && (stat.mode & 511) !== 384) {
       throw new TypeError(`${label2} must be private to the current user`);
     }
@@ -5032,7 +5192,7 @@ var lstatExists = (path) => {
   }
 };
 var validatePrivateDestination = (artifactRoot, name) => {
-  const destination = join10(artifactRoot, name);
+  const destination = join11(artifactRoot, name);
   if (lstatExists(destination)) {
     const stat = lstatSync7(destination);
     if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -5043,7 +5203,8 @@ var validatePrivateDestination = (artifactRoot, name) => {
   }
   return destination;
 };
-var reviewerRecords = (artifacts) => {
+var reviewerRecords = (artifacts, authenticated) => {
+  if (authenticated !== void 0) return [...authenticated];
   const since = lstatSync7(artifacts.planPath).mtimeMs;
   try {
     const records = readTranscripts(
@@ -5145,14 +5306,14 @@ var parseVerifiedFindings = (value, knownReviewers) => {
     };
   });
 };
-var validateVerifiedFindings = (value, artifacts) => {
+var validateVerifiedFindings = (value, artifacts, authenticated) => {
   const knownReviewers = new Set(
-    reviewerRecords(artifacts).map((record) => record.agentId)
+    reviewerRecords(artifacts, authenticated).map((record) => record.agentId)
   );
   return parseVerifiedFindings(value, knownReviewers);
 };
-var verifiedFindingsFromEvidence = (artifacts) => {
-  const records = reviewerRecords(artifacts);
+var verifiedFindingsFromEvidence = (artifacts, authenticated) => {
+  const records = reviewerRecords(artifacts, authenticated);
   const evidence = records.filter(
     (record2) => record2.finalText.startsWith(VERIFIED_FINDINGS_EVIDENCE_MARKER)
   );
@@ -5251,7 +5412,7 @@ var deriveResolvedFindings = (artifacts, findings) => {
     }
   }
   const deduplicated = deduplicate(resolved);
-  const findingsPath = join10(artifacts.artifactRoot, FINDINGS_NAME);
+  const findingsPath = join11(artifacts.artifactRoot, FINDINGS_NAME);
   return {
     schemaVersion: 1,
     findingsPath,
@@ -5274,8 +5435,15 @@ async function resolveFindingAnchors(request) {
   if (unknown !== void 0)
     throw new TypeError(`unknown resolve-anchors input field: ${unknown}`);
   const artifacts = validatedReviewArtifacts(request);
-  const findings = validateVerifiedFindings(input.findings, artifacts);
-  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const findings = validateVerifiedFindings(
+    input.findings,
+    artifacts,
+    request.authenticatedReviewerRecords
+  );
+  const evidenced = verifiedFindingsFromEvidence(
+    artifacts,
+    request.authenticatedReviewerRecords
+  );
   if (JSON.stringify(findings) !== JSON.stringify(evidenced)) {
     throw new TypeError(
       "findings do not match the current-run verifier transcript evidence"
@@ -5434,8 +5602,8 @@ var parseStats = (value, resolved, unresolved) => {
   }
   return stats;
 };
-var readFindings = (artifacts, expected) => {
-  const findingsPath = join11(artifacts.artifactRoot, "findings.json");
+var readFindings = (artifacts, expected, authenticated) => {
+  const findingsPath = join12(artifacts.artifactRoot, "findings.json");
   const serialized = readPrivateFileNoFollow(findingsPath, "findings.json");
   let parsed;
   try {
@@ -5463,7 +5631,8 @@ var readFindings = (artifacts, expected) => {
   );
   const validated = validateVerifiedFindings(
     [...resolved, ...unresolved].map(verifiedFields),
-    artifacts
+    artifacts,
+    authenticated
   );
   const storedVerified = [...resolved, ...unresolved].map(verifiedFields);
   if (JSON.stringify(validated) !== JSON.stringify(storedVerified)) {
@@ -5541,7 +5710,7 @@ async function composeReview2(request) {
   try {
     const promptPlan = asRecord5(
       JSON.parse(
-        readFileSync11(join11(artifacts.artifactRoot, "prompts.json"), "utf8")
+        readFileSync11(join12(artifacts.artifactRoot, "prompts.json"), "utf8")
       ),
       "prompts.json"
     );
@@ -5560,10 +5729,14 @@ async function composeReview2(request) {
     coverageStatus = "inconclusive";
     coverageFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  const evidenced = verifiedFindingsFromEvidence(artifacts);
+  const evidenced = verifiedFindingsFromEvidence(
+    artifacts,
+    request.authenticatedReviewerRecords
+  );
   const findings = readFindings(
     artifacts,
-    deriveResolvedFindings(artifacts, evidenced)
+    deriveResolvedFindings(artifacts, evidenced),
+    request.authenticatedReviewerRecords
   );
   const allFindings = [...findings.findings, ...findings.unresolvedFindings];
   const relevantUnresolved = findings.unresolvedFindings.filter(
@@ -5673,9 +5846,9 @@ import {
   lstatSync as lstatSync8,
   readFileSync as readFileSync14,
   realpathSync as realpathSync9,
-  rmSync as rmSync2
+  rmSync as rmSync3
 } from "node:fs";
-import { isAbsolute as isAbsolute9, join as join12, relative as relative7, resolve as resolve13, sep as sep8 } from "node:path";
+import { isAbsolute as isAbsolute9, join as join13, relative as relative7, resolve as resolve13, sep as sep8 } from "node:path";
 
 // packages/hermes-engineering/src/runners/pytest.ts
 import { existsSync as existsSync6, readFileSync as readFileSync12, realpathSync as realpathSync7 } from "node:fs";
@@ -6254,7 +6427,7 @@ var safeRelativePath = (workspace, path) => {
 };
 var probeTreePath = (workspace, requestId) => {
   const suffix = createHash3("sha256").update(`${requestId}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 16);
-  return join12(workspace, `.hermes-efficacy-${suffix}`);
+  return join13(workspace, `.hermes-efficacy-${suffix}`);
 };
 var createProbeTree = (workspace, probeTree) => {
   const head = git2(workspace, ["rev-parse", "HEAD"]);
@@ -6287,7 +6460,7 @@ var cleanupProbeTree = (workspace, probeTree) => {
   }
   try {
     if (existsSync8(probeTree))
-      rmSync2(probeTree, { recursive: true, force: true });
+      rmSync3(probeTree, { recursive: true, force: true });
     git2(workspace, ["worktree", "prune"]);
   } catch (cause) {
     failure ??= cause instanceof Error ? cause.message : String(cause);
@@ -6756,8 +6929,8 @@ var serializeResponse = (response) => {
 async function processRequest(raw, dispatchRequest = dispatch) {
   let value;
   try {
-    if (Buffer.byteLength(raw, "utf8") > MAX_REQUEST_BYTES) {
-      throw new TypeError("request must not exceed 1 MiB");
+    if (Buffer.byteLength(raw, "utf8") > MAX_TRANSPORT_BYTES) {
+      throw new TypeError("request transport must not exceed 4 MiB");
     }
     value = JSON.parse(raw);
     const request = parseRequest(value);
@@ -6787,10 +6960,10 @@ var readStdin = async (input) => {
   for await (const chunk of input) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes <= MAX_REQUEST_BYTES) chunks.push(buffer);
+    if (bytes <= MAX_TRANSPORT_BYTES) chunks.push(buffer);
   }
-  if (bytes > MAX_REQUEST_BYTES) {
-    throw new InvalidInputError("request must not exceed 1 MiB");
+  if (bytes > MAX_TRANSPORT_BYTES) {
+    throw new InvalidInputError("request transport must not exceed 4 MiB");
   }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(

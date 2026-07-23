@@ -17,7 +17,12 @@ from typing import BinaryIO, Mapping, Protocol
 
 from hermes_constants import find_node_executable, with_hermes_node_path
 
-from .protocol import EngineProtocolError, EngineRequest, EngineResponse
+from .protocol import (
+    MAX_TRANSPORT_BYTES,
+    EngineProtocolError,
+    EngineRequest,
+    EngineResponse,
+)
 
 
 DEFAULT_STDOUT_LIMIT = 4 * 1024 * 1024
@@ -42,6 +47,10 @@ class EngineCancelledError(EngineExecutionError):
 
 class EngineOutputLimitError(EngineExecutionError):
     """The engine exceeded a bounded output channel."""
+
+
+class EngineEvidenceError(EngineExecutionError):
+    """Authoritative reviewer evidence is absent, forged, or unauthenticated."""
 
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -265,14 +274,23 @@ def sanitized_engine_env(source: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _canonical_request_bytes(request: EngineRequest) -> bytes:
-    return json.dumps(
-        request.to_wire(),
+def _canonical_request_bytes(
+    request: EngineRequest,
+    authenticated_reviewer_records: list[dict[str, object]] | None = None,
+) -> bytes:
+    wire = request.to_wire()
+    if authenticated_reviewer_records is not None:
+        wire["authenticatedReviewerRecords"] = authenticated_reviewer_records
+    payload = json.dumps(
+        wire,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+    if len(payload) > MAX_TRANSPORT_BYTES:
+        raise EngineProtocolError("authenticated engine transport exceeds 4 MiB")
+    return payload
 
 
 def _file_size(stream: BinaryIO) -> int:
@@ -451,7 +469,21 @@ class EngineeringReviewBridge:
         if timeout <= 0 or not math.isfinite(timeout):
             raise ValueError("timeout must be a positive finite number")
 
-        payload = _canonical_request_bytes(request)
+        authenticated_records: list[dict[str, object]] | None = None
+        if request.command in {"check-coverage", "resolve-anchors", "compose-review"}:
+            try:
+                # Lazy import avoids the run module's bundle-provenance import
+                # forming a module initialization cycle.
+                from .runs import ReviewRun, ReviewRunError
+
+                root = Path(request.artifact_root)
+                run = ReviewRun.load(root.name, session_id=root.parent.name)
+                authenticated_records = run.authenticated_reviewer_records(self.bundle)
+            except (OSError, ReviewRunError, ValueError) as exc:
+                raise EngineEvidenceError(
+                    f"authoritative reviewer evidence is unavailable: {exc}"
+                ) from exc
+        payload = _canonical_request_bytes(request, authenticated_records)
         node = find_node_executable("node")
         if not node:
             raise EngineProcessError("a usable managed Node executable was not found")

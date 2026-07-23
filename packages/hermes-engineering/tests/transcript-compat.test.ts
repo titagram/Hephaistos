@@ -42,6 +42,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.review_evidence import write_reviewer_transcript
+from hermes_cli.engineering_review.evidence import encode_verified_findings
 from hermes_cli.engineering_review.runs import ReviewRun
 
 root = Path(sys.argv[1])
@@ -56,7 +57,16 @@ run.atomic_artifact("plan.json", json.dumps({"diffPathAbsolute": str(diff)}).enc
 prompt = f"Hermes-Review-Run: {run.run_id}\nHermes-Review-Plan: {run.root / 'plan.json'}\nRead {brief} and {diff}."
 child = SimpleNamespace(_delegate_role="reviewer", _subagent_goal=prompt, _subagent_id="compat")
 result = {
-    "final_response": "No findings.",
+    "final_response": encode_verified_findings([{
+        "id": "auth-code",
+        "severity": "medium",
+        "title": "Authorization and Cookie parsing",
+        "body": "Keep the api_key identifier exactly as reviewed.",
+        "path": "src/auth.py",
+        "quotedCode": 'headers["Authorization"] = config["api_key"]',
+        "sourceReviewerIds": ["compat"],
+        "verification": "confirmed",
+    }]),
     "messages": [
         {"role": "assistant", "tool_calls": [
             {"id": "diff", "function": {"name": "read_file", "arguments": json.dumps({"file_path": str(diff), "offset": 1, "limit": 3})}},
@@ -77,7 +87,7 @@ result = {
 path = write_reviewer_transcript("parent", child, result)
 if path is None:
     raise SystemExit("transcript was not written")
-print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brief), "prompt": prompt, "transcript": str(path)}))
+print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brief), "prompt": prompt, "transcript": str(path), "final": result["final_response"]}))
 `;
     const proc = spawnSync(pythonExecutable(), ["-c", script, testRoot], {
       cwd: repositoryRoot,
@@ -91,6 +101,7 @@ print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brie
       brief: string;
       prompt: string;
       transcript: string;
+      final: string;
     };
     const transcript = readFileSync(fixture.transcript, "utf8");
     expect(transcript).not.toContain("json-secret");
@@ -116,6 +127,9 @@ print(json.dumps({"runRoot": str(run.root), "diff": str(diff), "brief": str(brie
     expect(record.successfulCallArgs).toContain(
       JSON.stringify({ file_path: fixture.brief }),
     );
-    expect(record.finalText).toBe("No findings.");
+    expect(record.finalText).toBe(fixture.final);
+    expect(record.finalText).toContain("Authorization");
+    expect(record.finalText).toContain("Cookie");
+    expect(record.finalText).toContain("api_key");
   });
 });

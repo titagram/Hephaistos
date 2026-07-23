@@ -1,5 +1,16 @@
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import type { CheckStatus, EngineRequest } from "../protocol.js";
 import {
@@ -201,36 +212,130 @@ const exactPromptMismatches = (
   return mismatches;
 };
 
+const authenticatedTranscript = (
+  record: NonNullable<EngineRequest["authenticatedReviewerRecords"]>[number],
+): string => {
+  const records: Array<Record<string, unknown>> = [
+    {
+      agentId: record.agentId,
+      agentName: record.agentName,
+      type: "user",
+      message: { role: "user", parts: [{ text: record.launchPrompt }] },
+    },
+  ];
+  record.successfulCallArgs.forEach((serialized, index) => {
+    let args: unknown;
+    try {
+      args = JSON.parse(serialized) as unknown;
+    } catch (cause) {
+      throw new TypeError(
+        `authenticated reviewer ${record.agentId} has invalid call arguments: ${(cause as Error).message}`,
+      );
+    }
+    const id = `authenticated-${index}`;
+    records.push(
+      {
+        agentId: record.agentId,
+        agentName: record.agentName,
+        type: "assistant",
+        message: {
+          role: "model",
+          parts: [{ functionCall: { id, name: "read_file", args } }],
+        },
+      },
+      {
+        agentId: record.agentId,
+        agentName: record.agentName,
+        type: "tool_result",
+        message: {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id,
+                name: "read_file",
+                response: { output: "authenticated" },
+              },
+            },
+          ],
+        },
+      },
+    );
+  });
+  if (record.finalText.length > 0) {
+    records.push({
+      agentId: record.agentId,
+      agentName: record.agentName,
+      type: "assistant",
+      message: { role: "model", parts: [{ text: record.finalText }] },
+    });
+  }
+  return `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+};
+
+const withReviewerEnvironment = <T>(
+  request: EngineRequest,
+  artifactRoot: string,
+  callback: (env: NodeJS.ProcessEnv) => T,
+): T => {
+  if (request.authenticatedReviewerRecords === undefined) {
+    return callback({
+      ...process.env,
+      QWEN_CODE_PROJECT_DIR: artifactRoot,
+      QWEN_CODE_SESSION_ID: "reviewers",
+    });
+  }
+  const root = mkdtempSync(join(tmpdir(), "hermes-auth-reviewers-"));
+  chmodSync(root, 0o700);
+  const reviewers = join(root, "subagents", "reviewers");
+  mkdirSync(reviewers, { recursive: true, mode: 0o700 });
+  chmodSync(join(root, "subagents"), 0o700);
+  chmodSync(reviewers, 0o700);
+  try {
+    for (const record of request.authenticatedReviewerRecords) {
+      writeFileSync(
+        join(reviewers, `agent-${record.agentId}.jsonl`),
+        authenticatedTranscript(record),
+        { mode: 0o600 },
+      );
+    }
+    return callback({
+      ...process.env,
+      QWEN_CODE_PROJECT_DIR: root,
+      QWEN_CODE_SESSION_ID: "reviewers",
+    });
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+};
+
 export async function checkCoverage(
   request: EngineRequest,
 ): Promise<CheckCoverageResult> {
   const planPath = validatedPlanPath(request);
   const artifactRoot = realpathSync(request.artifactRoot);
   const promptPlan = validatedPromptPlan(artifactRoot, planPath);
-  const env = {
-    ...process.env,
-    QWEN_CODE_PROJECT_DIR: artifactRoot,
-    QWEN_CODE_SESSION_ID: "reviewers",
-  };
   try {
-    const exactMismatches = exactPromptMismatches(promptPlan, planPath, env);
-    const coverage = effectiveCoverage(
-      coverageFromTranscripts(planPath, env),
-      promptPlan.omittedSpecialists,
-      exactMismatches,
-    );
-    return {
-      status: coverage.ok ? "passed" : "failed",
-      output: { coverage, omittedSpecialists: promptPlan.omittedSpecialists },
-      diagnostics: coverage.ok
-        ? []
-        : [
-            {
-              code: "coverage_failed",
-              message: "required reviewer evidence is absent or unverifiable",
-            },
-          ],
-    };
+    return withReviewerEnvironment(request, artifactRoot, (env) => {
+      const exactMismatches = exactPromptMismatches(promptPlan, planPath, env);
+      const coverage = effectiveCoverage(
+        coverageFromTranscripts(planPath, env),
+        promptPlan.omittedSpecialists,
+        exactMismatches,
+      );
+      return {
+        status: coverage.ok ? "passed" : "failed",
+        output: { coverage, omittedSpecialists: promptPlan.omittedSpecialists },
+        diagnostics: coverage.ok
+          ? []
+          : [
+              {
+                code: "coverage_failed",
+                message: "required reviewer evidence is absent or unverifiable",
+              },
+            ],
+      };
+    });
   } catch (cause) {
     if (cause instanceof TranscriptsUnavailableError) {
       return {

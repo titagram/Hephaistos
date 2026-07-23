@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { dispatch } from "./handlers/index.js";
 import {
-  MAX_REQUEST_BYTES,
+  MAX_TRANSPORT_BYTES,
   parseRequest,
   type EngineRequest,
   type EngineResponse,
@@ -82,8 +82,8 @@ export async function processRequest(
 ): Promise<ProcessResult> {
   let value: unknown;
   try {
-    if (Buffer.byteLength(raw, "utf8") > MAX_REQUEST_BYTES) {
-      throw new TypeError("request must not exceed 1 MiB");
+    if (Buffer.byteLength(raw, "utf8") > MAX_TRANSPORT_BYTES) {
+      throw new TypeError("request transport must not exceed 4 MiB");
     }
     value = JSON.parse(raw) as unknown;
     const request = parseRequest(value);
@@ -114,10 +114,10 @@ const readStdin = async (input: InputStream): Promise<string> => {
   for await (const chunk of input) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes <= MAX_REQUEST_BYTES) chunks.push(buffer);
+    if (bytes <= MAX_TRANSPORT_BYTES) chunks.push(buffer);
   }
-  if (bytes > MAX_REQUEST_BYTES) {
-    throw new InvalidInputError("request must not exceed 1 MiB");
+  if (bytes > MAX_TRANSPORT_BYTES) {
+    throw new InvalidInputError("request transport must not exceed 4 MiB");
   }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(

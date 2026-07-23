@@ -160,7 +160,10 @@ def test_load_rejects_unknown_state_and_root_escape(fake_home: Path, tmp_path: P
 
 
 def test_mark_complete_persists_lifecycle_state(fake_home: Path, tmp_path: Path) -> None:
+    import hermes_cli.engineering_review.runs as runs_module
+
     run = ReviewRun.create(tmp_path, target="local", effort="medium", session_id="s1")
+    assert run.root in runs_module._CAPABILITIES
 
     complete = run.mark_complete()
     metadata = json.loads((run.root / "run.json").read_text(encoding="utf-8"))
@@ -169,6 +172,7 @@ def test_mark_complete_persists_lifecycle_state(fake_home: Path, tmp_path: Path)
     assert metadata["status"] == "complete"
     assert metadata["completed_at"] is not None
     assert ReviewRun.load(run.run_id, session_id="s1").status == "complete"
+    assert run.root not in runs_module._CAPABILITIES
 
 
 def test_prune_keeps_30_completed_and_every_active(fake_home: Path, tmp_path: Path) -> None:
@@ -189,6 +193,8 @@ def test_prune_keeps_30_completed_and_every_active(fake_home: Path, tmp_path: Pa
 
 
 def test_zero_retention_never_deletes_active_runs(fake_home: Path, tmp_path: Path) -> None:
+    import hermes_cli.engineering_review.runs as runs_module
+
     completed = ReviewRun.create(tmp_path, target="local", effort="medium", session_id="s1").mark_complete()
     active = ReviewRun.create(tmp_path, target="local", effort="medium", session_id="s1")
 
@@ -197,6 +203,8 @@ def test_zero_retention_never_deletes_active_runs(fake_home: Path, tmp_path: Pat
     assert removed == [completed.root]
     assert not completed.root.exists()
     assert active.root.exists()
+    assert completed.root not in runs_module._CAPABILITIES
+    assert active.root in runs_module._CAPABILITIES
 
 
 def test_concurrent_pruners_do_not_delete_active_runs(fake_home: Path, tmp_path: Path) -> None:

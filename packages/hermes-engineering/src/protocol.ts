@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 export const MAX_REQUEST_BYTES = 1024 * 1024;
+export const MAX_TRANSPORT_BYTES = 4 * MAX_REQUEST_BYTES;
 
 export type CheckStatus = "passed" | "failed" | "inconclusive";
 
@@ -21,6 +22,20 @@ export interface EngineRequest {
   workspace: string;
   artifactRoot: string;
   input: Record<string, unknown>;
+  authenticatedReviewerRecords?: AuthenticatedReviewerRecord[];
+}
+
+export interface AuthenticatedReviewerRecord {
+  schemaVersion: 1;
+  agentId: string;
+  agentName: string;
+  launchPrompt: string;
+  successfulToolCalls: number;
+  diffToolCalls: number;
+  diffReads: Array<[number, number]>;
+  successfulCallArgs: string[];
+  finalText: string;
+  mtimeMs: number;
 }
 
 export interface EngineResponse {
@@ -85,6 +100,7 @@ const REQUEST_KEYS = new Set([
   "workspace",
   "artifactRoot",
   "input",
+  "authenticatedReviewerRecords",
 ]);
 
 const ENGINE_COMMANDS = new Set<EngineCommand>([
@@ -165,12 +181,19 @@ export function parseRequest(value: unknown): EngineRequest {
   }
   if (
     encoded === undefined ||
-    Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES
+    Buffer.byteLength(encoded, "utf8") > MAX_TRANSPORT_BYTES
   ) {
-    throw new TypeError("request must not exceed 1 MiB");
+    throw new TypeError("request transport must not exceed 4 MiB");
   }
   if (!isRecord(value)) {
     throw new TypeError("request must be an object");
+  }
+  const callerValue = { ...value };
+  delete callerValue.authenticatedReviewerRecords;
+  if (
+    Buffer.byteLength(JSON.stringify(callerValue), "utf8") > MAX_REQUEST_BYTES
+  ) {
+    throw new TypeError("caller request must not exceed 1 MiB");
   }
   if (value.protocolVersion !== 1) {
     throw new TypeError("request requires protocolVersion 1");
@@ -193,6 +216,11 @@ export function parseRequest(value: unknown): EngineRequest {
     throw new TypeError("input must be an object");
   }
 
+  const authenticatedReviewerRecords =
+    value.authenticatedReviewerRecords === undefined
+      ? undefined
+      : parseAuthenticatedReviewerRecords(value.authenticatedReviewerRecords);
+
   return {
     protocolVersion: 1,
     requestId: requiredString(value, "requestId"),
@@ -200,5 +228,84 @@ export function parseRequest(value: unknown): EngineRequest {
     workspace: resolve(requiredString(value, "workspace")),
     artifactRoot: resolve(requiredString(value, "artifactRoot")),
     input: value.input,
+    ...(authenticatedReviewerRecords === undefined
+      ? {}
+      : { authenticatedReviewerRecords }),
   };
 }
+
+const AUTHENTICATED_RECORD_KEYS = new Set([
+  "schemaVersion",
+  "agentId",
+  "agentName",
+  "launchPrompt",
+  "successfulToolCalls",
+  "diffToolCalls",
+  "diffReads",
+  "successfulCallArgs",
+  "finalText",
+  "mtimeMs",
+]);
+
+const parseAuthenticatedReviewerRecords = (
+  value: unknown,
+): AuthenticatedReviewerRecord[] => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 1_024) {
+    throw new TypeError(
+      "authenticatedReviewerRecords must contain 1-1024 records",
+    );
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new TypeError(`authenticatedReviewerRecords[${index}] is invalid`);
+    }
+    const unknown = Object.keys(entry).find(
+      (key) => !AUTHENTICATED_RECORD_KEYS.has(key),
+    );
+    if (unknown !== undefined) {
+      throw new TypeError(`unknown authenticated reviewer field: ${unknown}`);
+    }
+    const agentId = entry.agentId;
+    if (
+      entry.schemaVersion !== 1 ||
+      typeof agentId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(agentId) ||
+      seen.has(agentId) ||
+      typeof entry.agentName !== "string" ||
+      typeof entry.launchPrompt !== "string" ||
+      typeof entry.finalText !== "string" ||
+      !Number.isSafeInteger(entry.successfulToolCalls) ||
+      (entry.successfulToolCalls as number) < 0 ||
+      !Number.isSafeInteger(entry.diffToolCalls) ||
+      (entry.diffToolCalls as number) < 0 ||
+      (entry.diffToolCalls as number) > (entry.successfulToolCalls as number) ||
+      !Number.isFinite(entry.mtimeMs)
+    ) {
+      throw new TypeError(`authenticatedReviewerRecords[${index}] is invalid`);
+    }
+    if (
+      !Array.isArray(entry.successfulCallArgs) ||
+      entry.successfulCallArgs.length !== entry.successfulToolCalls ||
+      entry.successfulCallArgs.some(
+        (argument) => typeof argument !== "string",
+      ) ||
+      !Array.isArray(entry.diffReads) ||
+      entry.diffReads.some(
+        (range) =>
+          !Array.isArray(range) ||
+          range.length !== 2 ||
+          !Number.isSafeInteger(range[0]) ||
+          !Number.isSafeInteger(range[1]) ||
+          (range[0] as number) < 1 ||
+          (range[1] as number) < (range[0] as number),
+      )
+    ) {
+      throw new TypeError(
+        `authenticatedReviewerRecords[${index}] has invalid call evidence`,
+      );
+    }
+    seen.add(agentId);
+    return entry as unknown as AuthenticatedReviewerRecord;
+  });
+};
