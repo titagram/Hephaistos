@@ -99,6 +99,25 @@ def test_publication_retries_short_writes_before_fsync(tmp_path: Path, monkeypat
     assert (published.root / "bin/hello.sh").read_bytes() == b"echo safe\n"
 
 
+def test_rename_failure_removes_only_the_operation_temporary_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+
+    def fail_rename(source: Path, destination: Path) -> None:
+        raise OSError("injected rename failure")
+
+    monkeypatch.setattr(os, "rename", fail_rename)
+
+    with pytest.raises(OSError, match="injected rename failure"):
+        store.publish_staged(stage, _manifest())
+
+    assert not (tmp_path / "generations" / generation_id_for(_manifest())).exists()
+    assert not list((tmp_path / "generations").glob(".generation-*"))
+
+
 def test_empty_overlay_baseline_uses_normal_publication(tmp_path: Path) -> None:
     store = GenerationStore(tmp_path / "generations")
     baseline = store.initialize_baseline(
