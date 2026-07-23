@@ -85,11 +85,55 @@ def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
     attempt_id = ledger.create_attempt("manual", "ticket-1")
     ledger.connection.execute(
         """
-        INSERT INTO authorization_grants(
-            authorization_id, attempt_id, grant_kind, scope_digest, created_at
-        ) VALUES (?, ?, 'research', ?, '2026-07-23T00:00:00Z')
+        INSERT INTO authorization_requests(
+            request_id, attempt_id, grant_kind, subject_digest, scope_json,
+            ttl_seconds, expires_at, created_at
+        ) VALUES (
+            'request-1', ?, 'research', ?, ?, 60,
+            '2026-07-23T00:01:00.000000Z',
+            '2026-07-23T00:00:00.000000Z'
+        )
         """,
-        ("grant-1", attempt_id, DIGEST),
+        (
+            attempt_id,
+            DIGEST,
+            '{"domains":[],"duration":60,"operations":["search","retrieve"],'
+            '"source_classes":["documentation"]}',
+        ),
+    )
+    ledger.connection.execute(
+        """
+        INSERT INTO authorization_decisions(
+            decision_id, request_id, decision, decided_by,
+            confirmation_digest, created_at
+        ) VALUES (
+            'decision-1', 'request-1', 'approved', 'operator', ?,
+            '2026-07-23T00:00:00.000000Z'
+        )
+        """,
+        (DIGEST,),
+    )
+    ledger.connection.execute(
+        """
+        INSERT INTO authorization_grants(
+            grant_id, authorization_id, request_id, attempt_id, grant_kind,
+            subject_digest, scope_json, expires_at, approved_by,
+            confirmation_digest, created_at
+        ) VALUES (
+            ?, ?, 'request-1', ?, 'research', ?, ?,
+            '2026-07-23T00:01:00.000000Z', 'operator', ?,
+            '2026-07-23T00:00:00.000000Z'
+        )
+        """,
+        (
+            "grant-1",
+            "grant-1",
+            attempt_id,
+            DIGEST,
+            '{"domains":[],"duration":60,"operations":["search","retrieve"],'
+            '"source_classes":["documentation"]}',
+            DIGEST,
+        ),
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="immutable_authorization_grant"):

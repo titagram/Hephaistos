@@ -26,7 +26,7 @@
 |---|---|
 | `hermes_cli/evolution/contract.py` | IDs, canonical JSON, digests, bounded text, shared records |
 | `hermes_cli/evolution/state_machine.py` | Allowed attempt transitions and actor/authorization requirements |
-| `hermes_cli/evolution/ledger.py` | Schema v1, transactions, append-only events, typed repository reads |
+| `hermes_cli/evolution/ledger.py` | Schema v2, atomic v1 migration, transactions, append-only events, typed repository reads |
 | `hermes_cli/evolution/authorization.py` | Grant requests, issue/consume/expire/deny checks |
 | `hermes_cli/evolution/manifest.py` | Stable-base and generation manifest validation and identity |
 | `hermes_cli/evolution/store.py` | Private roots, immutable publication, baseline generation |
@@ -256,6 +256,9 @@ promotion grants bound to immutable subjects and closed scopes.
 - Create: `hermes_cli/evolution/authorization.py`
 - Modify: `hermes_cli/evolution/ledger.py`
 - Create: `tests/hermes_cli/evolution/test_authorization.py`
+- Modify: `tests/hermes_cli/evolution/test_ledger_migrations.py`
+- Modify: `tests/hermes_cli/evolution/test_ledger.py` only to update its
+  direct-SQL immutability fixture to a valid schema-v2 grant
 
 **Context pack:** Tasks 1–2; design “Authorization Model”; relevant
 `tools/approval.py` elicitation API only.
@@ -314,9 +317,17 @@ expected lifecycle sequence, and operation `switch_active`.
 
 - [ ] **Step 4: Implement issue and consumption transactions**
 
-Use compare-and-set SQL predicates (`consumed_at IS NULL`, `denied_at IS NULL`,
-`expires_at > now`). The row count must be exactly one. Append the matching
-lifecycle authorization event in the same transaction.
+Migrate a valid schema-v1 ledger atomically to schema v2 before writable use.
+Preserve every legitimate A2 row, but fail closed if a placeholder
+authorization row cannot be migrated without inventing authority. Update the
+semantic schema fingerprint and continue rejecting future versions.
+
+Keep request, decision, grant, and consumption facts immutable. Represent
+single-use consumption as a unique append-only fact keyed by `grant_id`; never
+update the issued grant row. Use compare-and-set SQL predicates
+(`consumption IS NULL`, no denial, `expires_at > now`) whose insert row count is
+exactly one. Append each matching lifecycle authorization event in the same
+transaction.
 
 - [ ] **Step 5: Prove concurrency behavior**
 

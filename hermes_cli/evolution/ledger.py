@@ -23,7 +23,7 @@ from .contract import canonical_json_bytes, content_digest, require_digest
 from .state_machine import TransitionRequest, validate_transition
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _MAX_DIGESTS = 64
 _VERIFY_BATCH_SIZE = 256
 _PATH_SCHEME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -116,7 +116,7 @@ def _id_check(column: str, limit: int = 256) -> str:
     return f"CHECK(length({column}) BETWEEN 1 AND {limit})"
 
 
-_SCHEMA_STATEMENTS = (
+_SCHEMA_V1_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
@@ -338,7 +338,7 @@ _SCHEMA_STATEMENTS = (
     """,
 )
 
-_TABLES = (
+_TABLES_V1 = (
     "schema_version",
     "attempts",
     "suggestions",
@@ -354,11 +354,192 @@ _TABLES = (
     "lifecycle_events",
 )
 
+_V2_AUTH_SCHEMA_STATEMENTS = (
+    f"""
+    CREATE TABLE authorization_requests (
+        request_id TEXT NOT NULL PRIMARY KEY {_id_check("request_id")},
+        attempt_id TEXT NOT NULL {_id_check("attempt_id")},
+        grant_kind TEXT NOT NULL
+            CHECK(grant_kind IN ('research', 'build', 'promotion')),
+        subject_digest TEXT NOT NULL CHECK(length(subject_digest) = 64),
+        scope_json TEXT NOT NULL CHECK(length(scope_json) BETWEEN 2 AND 16384),
+        ttl_seconds INTEGER NOT NULL
+            CHECK(typeof(ttl_seconds) = 'integer' AND ttl_seconds BETWEEN 1 AND 86400),
+        expires_at TEXT NOT NULL {_id_check("expires_at", 64)},
+        created_at TEXT NOT NULL {_id_check("created_at", 64)},
+        FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id)
+    )
+    """,
+    f"""
+    CREATE TABLE authorization_decisions (
+        decision_id TEXT NOT NULL PRIMARY KEY {_id_check("decision_id")},
+        request_id TEXT NOT NULL UNIQUE {_id_check("request_id")},
+        decision TEXT NOT NULL CHECK(decision IN ('approved', 'denied')),
+        decided_by TEXT NOT NULL {_id_check("decided_by", 128)},
+        confirmation_digest TEXT
+            CHECK(confirmation_digest IS NULL OR length(confirmation_digest) = 64),
+        created_at TEXT NOT NULL {_id_check("created_at", 64)},
+        FOREIGN KEY(request_id) REFERENCES authorization_requests(request_id)
+    )
+    """,
+    f"""
+    CREATE TABLE authorization_grants (
+        grant_id TEXT NOT NULL PRIMARY KEY {_id_check("grant_id")},
+        authorization_id TEXT NOT NULL UNIQUE {_id_check("authorization_id")}
+            CHECK(authorization_id = grant_id),
+        request_id TEXT NOT NULL UNIQUE {_id_check("request_id")},
+        attempt_id TEXT NOT NULL {_id_check("attempt_id")},
+        grant_kind TEXT NOT NULL
+            CHECK(grant_kind IN ('research', 'build', 'promotion')),
+        subject_digest TEXT NOT NULL CHECK(length(subject_digest) = 64),
+        scope_json TEXT NOT NULL CHECK(length(scope_json) BETWEEN 2 AND 16384),
+        expires_at TEXT NOT NULL {_id_check("expires_at", 64)},
+        approved_by TEXT NOT NULL {_id_check("approved_by", 128)},
+        confirmation_digest TEXT NOT NULL CHECK(length(confirmation_digest) = 64),
+        consumed_at TEXT CHECK(consumed_at IS NULL),
+        created_at TEXT NOT NULL {_id_check("created_at", 64)},
+        FOREIGN KEY(request_id) REFERENCES authorization_requests(request_id),
+        FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id)
+    )
+    """,
+    f"""
+    CREATE TABLE authorization_consumptions (
+        consumption_id TEXT NOT NULL PRIMARY KEY {_id_check("consumption_id")},
+        grant_id TEXT NOT NULL UNIQUE {_id_check("grant_id")},
+        consumed_at TEXT NOT NULL {_id_check("consumed_at", 64)},
+        FOREIGN KEY(grant_id) REFERENCES authorization_grants(grant_id)
+    )
+    """,
+    """
+    CREATE INDEX authorization_requests_attempt_idx
+    ON authorization_requests(attempt_id)
+    """,
+    """
+    CREATE INDEX authorization_grants_attempt_idx
+    ON authorization_grants(attempt_id)
+    """,
+    """
+    CREATE TRIGGER authorization_requests_no_update
+    BEFORE UPDATE ON authorization_requests
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_request');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_requests_no_delete
+    BEFORE DELETE ON authorization_requests
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_request');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_decisions_no_update
+    BEFORE UPDATE ON authorization_decisions
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_decision');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_decisions_no_delete
+    BEFORE DELETE ON authorization_decisions
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_decision');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_grants_no_update
+    BEFORE UPDATE ON authorization_grants
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_grant');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_grants_no_delete
+    BEFORE DELETE ON authorization_grants
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_grant');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_consumptions_no_update
+    BEFORE UPDATE ON authorization_consumptions
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_consumption');
+    END
+    """,
+    """
+    CREATE TRIGGER authorization_consumptions_no_delete
+    BEFORE DELETE ON authorization_consumptions
+    BEGIN
+        SELECT RAISE(ABORT, 'immutable_authorization_consumption');
+    END
+    """,
+)
+
+_V1_AUTH_OBJECT_PREFIXES = (
+    "CREATE TABLE authorization_requests ",
+    "CREATE TABLE authorization_grants ",
+    "CREATE INDEX authorization_requests_attempt_idx ",
+    "CREATE INDEX authorization_grants_attempt_idx ",
+    "CREATE TRIGGER authorization_grants_no_update ",
+    "CREATE TRIGGER authorization_grants_no_delete ",
+)
+
+
+def _statement_starts_with(statement: str, prefixes: tuple[str, ...]) -> bool:
+    normalized = " ".join(statement.split())
+    return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE schema_version (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+        version INTEGER NOT NULL CHECK(version = 2)
+    ) WITHOUT ROWID
+    """,
+    *(
+        statement
+        for statement in _SCHEMA_V1_STATEMENTS
+        if not _statement_starts_with(
+            statement,
+            ("CREATE TABLE schema_version ", *_V1_AUTH_OBJECT_PREFIXES),
+        )
+    ),
+    *_V2_AUTH_SCHEMA_STATEMENTS,
+)
+
+_TABLES = (
+    "schema_version",
+    "attempts",
+    "suggestions",
+    "suggestion_evidence",
+    "blueprints",
+    "authorization_requests",
+    "authorization_decisions",
+    "authorization_grants",
+    "authorization_consumptions",
+    "candidates",
+    "generations",
+    "generation_components",
+    "canary_runs",
+    "promotion_reports",
+    "lifecycle_events",
+)
+
 
 def _execute_schema_statement(
     connection: sqlite3.Connection, statement: str
 ) -> sqlite3.Cursor:
     """Execute one schema statement without sqlite3's implicit script commit."""
+
+    return connection.execute(statement)
+
+
+def _execute_migration_statement(
+    connection: sqlite3.Connection, statement: str
+) -> sqlite3.Cursor:
+    """Execute one migration statement inside the caller's transaction."""
 
     return connection.execute(statement)
 
@@ -603,9 +784,10 @@ def _object_snapshot(connection: sqlite3.Connection) -> list[tuple[object, ...]]
 
 def _table_metadata(
     connection: sqlite3.Connection,
+    tables: tuple[str, ...] = _TABLES,
 ) -> dict[str, tuple[list[tuple[object, ...]], ...]]:
     metadata: dict[str, tuple[list[tuple[object, ...]], ...]] = {}
-    for table in _TABLES:
+    for table in tables:
         quoted = table.replace('"', '""')
         metadata[table] = (
             [
@@ -626,16 +808,19 @@ def _table_metadata(
     return metadata
 
 
-def _expected_schema() -> tuple[
+def _expected_schema(
+    statements: tuple[str, ...] = _SCHEMA_STATEMENTS,
+    tables: tuple[str, ...] = _TABLES,
+) -> tuple[
     list[tuple[object, ...]],
     dict[str, tuple[list[tuple[object, ...]], ...]],
 ]:
     expected = sqlite3.connect(":memory:", isolation_level=None)
     try:
         expected.execute("PRAGMA foreign_keys=ON")
-        for statement in _SCHEMA_STATEMENTS:
+        for statement in statements:
             expected.execute(statement)
-        return _object_snapshot(expected), _table_metadata(expected)
+        return _object_snapshot(expected), _table_metadata(expected, tables)
     finally:
         expected.close()
 
@@ -662,14 +847,19 @@ def _declared_version(connection: sqlite3.Connection) -> int:
     return int(rows[0][0])
 
 
-def _validate_schema(connection: sqlite3.Connection) -> None:
-    version = _declared_version(connection)
-    if version != SCHEMA_VERSION:
-        raise EvolutionLedgerError("unsupported_schema_version")
-    expected_objects, expected_metadata = _expected_schema()
+def _validate_schema_version(
+    connection: sqlite3.Connection,
+    *,
+    version: int,
+    statements: tuple[str, ...],
+    tables: tuple[str, ...],
+) -> None:
+    if _declared_version(connection) != version:
+        raise EvolutionLedgerError("invalid_ledger_database")
+    expected_objects, expected_metadata = _expected_schema(statements, tables)
     try:
         actual_objects = _object_snapshot(connection)
-        actual_metadata = _table_metadata(connection)
+        actual_metadata = _table_metadata(connection, tables)
         version_rows = [
             tuple(row)
             for row in connection.execute(
@@ -681,14 +871,44 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
     if (
         actual_objects != expected_objects
         or actual_metadata != expected_metadata
-        or version_rows != [(1, SCHEMA_VERSION)]
+        or version_rows != [(1, version)]
     ):
         raise EvolutionLedgerError("invalid_ledger_database")
 
 
+def _validate_schema(connection: sqlite3.Connection) -> None:
+    version = _declared_version(connection)
+    if version != SCHEMA_VERSION:
+        raise EvolutionLedgerError("unsupported_schema_version")
+    _validate_schema_version(
+        connection,
+        version=SCHEMA_VERSION,
+        statements=_SCHEMA_STATEMENTS,
+        tables=_TABLES,
+    )
+
+
+def _validate_preflight_schema(connection: sqlite3.Connection) -> int:
+    version = _declared_version(connection)
+    if version == 1:
+        _validate_schema_version(
+            connection,
+            version=1,
+            statements=_SCHEMA_V1_STATEMENTS,
+            tables=_TABLES_V1,
+        )
+    elif version == SCHEMA_VERSION:
+        _validate_schema(connection)
+    elif version > SCHEMA_VERSION:
+        raise EvolutionLedgerError("unsupported_schema_version")
+    else:
+        raise EvolutionLedgerError("invalid_ledger_database")
+    return version
+
+
 def _preflight_existing(
     path: Path, guard: _PathGuard
-) -> None:
+) -> int:
     """Validate a non-empty database without locks, DDL, WAL, or sidecars."""
 
     connection: sqlite3.Connection | None = None
@@ -700,13 +920,14 @@ def _preflight_existing(
             connection,
             connection_fds,
         )
-        _validate_schema(connection)
+        version = _validate_preflight_schema(connection)
         _verify_retained_identity(
             path,
             guard,
             connection,
             connection_fds,
         )
+        return version
     except EvolutionLedgerError:
         raise
     except sqlite3.DatabaseError as exc:
@@ -762,12 +983,13 @@ class EvolutionLedger:
         self.journal_mode: str
         guard: _PathGuard | None = None
         connection: sqlite3.Connection | None = None
+        existing_version: int | None = None
         try:
             guard = _open_protected_path(self.path)
             _verify_retained_identity(self.path, guard)
             empty_target = os.fstat(guard.file_fd).st_size == 0
             if not empty_target:
-                _preflight_existing(self.path, guard)
+                existing_version = _preflight_existing(self.path, guard)
 
             connection, connection_fds = _connect(
                 self.path, read_only=False
@@ -782,6 +1004,8 @@ class EvolutionLedger:
             if empty_target:
                 self._initialize_empty(connection)
             else:
+                if existing_version == 1:
+                    self._migrate_v1_to_v2(connection)
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
@@ -828,6 +1052,58 @@ class EvolutionLedger:
                     """,
                     (SCHEMA_VERSION,),
                 )
+            _validate_schema(connection)
+            connection.commit()
+        except BaseException:
+            if began and connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException:
+                    connection.close()
+            raise
+
+    @staticmethod
+    def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+        began = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            began = True
+            _validate_schema_version(
+                connection,
+                version=1,
+                statements=_SCHEMA_V1_STATEMENTS,
+                tables=_TABLES_V1,
+            )
+            authorization_rows = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM authorization_requests)
+                    + (SELECT COUNT(*) FROM authorization_grants)
+                """
+            ).fetchone()[0]
+            if authorization_rows != 0:
+                raise EvolutionLedgerError(
+                    "unmigratable_authorization_records"
+                )
+            for statement in (
+                "DROP TRIGGER authorization_grants_no_update",
+                "DROP TRIGGER authorization_grants_no_delete",
+                "DROP INDEX authorization_requests_attempt_idx",
+                "DROP INDEX authorization_grants_attempt_idx",
+                "DROP TABLE authorization_grants",
+                "DROP TABLE authorization_requests",
+                "DROP TABLE schema_version",
+                _SCHEMA_STATEMENTS[0],
+                *_V2_AUTH_SCHEMA_STATEMENTS,
+            ):
+                _execute_migration_statement(connection, statement)
+            connection.execute(
+                """
+                INSERT INTO schema_version(singleton, version)
+                VALUES (1, ?)
+                """,
+                (SCHEMA_VERSION,),
+            )
             _validate_schema(connection)
             connection.commit()
         except BaseException:

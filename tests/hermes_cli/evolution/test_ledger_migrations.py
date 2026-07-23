@@ -18,7 +18,9 @@ REQUIRED_TABLES = {
     "suggestion_evidence",
     "blueprints",
     "authorization_requests",
+    "authorization_decisions",
     "authorization_grants",
+    "authorization_consumptions",
     "candidates",
     "generations",
     "generation_components",
@@ -28,11 +30,149 @@ REQUIRED_TABLES = {
 }
 
 
-def test_schema_v1_initializes_and_reopens_with_private_storage(tmp_path) -> None:
+def _create_valid_v1_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in ledger_module._SCHEMA_V1_STATEMENTS:
+        connection.execute(statement)
+    connection.execute(
+        "INSERT INTO schema_version(singleton, version) VALUES (1, 1)"
+    )
+    connection.execute(
+        """
+        INSERT INTO attempts(
+            attempt_id, source_kind, source_ref, state, created_at
+        ) VALUES (
+            'attempt-v1', 'manual', 'ticket-v1', 'draft',
+            '2026-07-23T10:00:00.000000Z'
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO suggestions(
+            suggestion_id, attempt_id, canonical_digest, state, created_at
+        ) VALUES (
+            'suggestion-v1', 'attempt-v1', ?, 'draft',
+            '2026-07-23T10:00:00.000000Z'
+        )
+        """,
+        ("a" * 64,),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+
+def test_valid_v1_database_migrates_atomically_and_preserves_a2_rows(
+    tmp_path,
+) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v1_database(path)
+
+    ledger = EvolutionLedger(path)
+
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION
+    assert ledger.connection.execute(
+        "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
+    ).fetchone()[0] == "ticket-v1"
+    assert ledger.connection.execute(
+        """
+        SELECT canonical_digest
+        FROM suggestions
+        WHERE suggestion_id = 'suggestion-v1'
+        """
+    ).fetchone()[0] == "a" * 64
+    assert {
+        row[0]
+        for row in ledger.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    } >= REQUIRED_TABLES
+
+
+def test_v1_placeholder_authorization_rows_fail_closed_without_inventing_authority(
+    tmp_path,
+) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v1_database(path)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute(
+        """
+        INSERT INTO authorization_requests(
+            authorization_id, attempt_id, grant_kind, state,
+            request_digest, created_at
+        ) VALUES (
+            'legacy-auth', 'attempt-v1', 'research', 'requested', ?,
+            '2026-07-23T10:00:00.000000Z'
+        )
+        """,
+        ("b" * 64,),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        EvolutionLedgerError, match="unmigratable_authorization_records"
+    ):
+        EvolutionLedger(path)
+
+    check = sqlite3.connect(path)
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+    assert check.execute(
+        "SELECT authorization_id FROM authorization_requests"
+    ).fetchall() == [("legacy-auth",)]
+    assert check.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'authorization_decisions'
+        """
+    ).fetchone() is None
+    check.close()
+
+
+def test_v1_migration_rolls_back_every_schema_change_on_failure(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "evolution.db"
+    _create_valid_v1_database(path)
+    original = ledger_module._execute_migration_statement
+    calls = 0
+
+    def fail_mid_migration(connection, statement):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise sqlite3.OperationalError("injected migration failure")
+        return original(connection, statement)
+
+    monkeypatch.setattr(
+        ledger_module, "_execute_migration_statement", fail_mid_migration
+    )
+
+    with pytest.raises(EvolutionLedgerError, match="invalid_ledger_database"):
+        EvolutionLedger(path)
+
+    check = sqlite3.connect(path)
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+    assert check.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'authorization_decisions'
+        """
+    ).fetchone() is None
+    assert check.execute(
+        "SELECT source_ref FROM attempts WHERE attempt_id = 'attempt-v1'"
+    ).fetchone()[0] == "ticket-v1"
+    check.close()
+
+
+def test_current_schema_initializes_and_reopens_with_private_storage(tmp_path) -> None:
     path = tmp_path / "private" / "evolution.db"
     ledger = EvolutionLedger(path)
 
-    assert ledger.schema_version == 1
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION
     assert ledger.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     tables = {
         row[0]
@@ -46,7 +186,7 @@ def test_schema_v1_initializes_and_reopens_with_private_storage(tmp_path) -> Non
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     reopened = EvolutionLedger(path)
-    assert reopened.schema_version == 1
+    assert reopened.schema_version == ledger_module.SCHEMA_VERSION
     assert reopened.journal_mode in {"wal", "delete"}
 
 
@@ -54,7 +194,10 @@ def test_future_schema_fails_closed_without_rewriting_database(tmp_path) -> None
     path = tmp_path / "evolution.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-    connection.execute("INSERT INTO schema_version VALUES (2)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (?)",
+        (ledger_module.SCHEMA_VERSION + 1,),
+    )
     connection.commit()
     connection.close()
     os.chmod(path, 0o600)
@@ -63,14 +206,19 @@ def test_future_schema_fails_closed_without_rewriting_database(tmp_path) -> None
         EvolutionLedger(path)
 
     check = sqlite3.connect(path)
-    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+    assert check.execute("SELECT version FROM schema_version").fetchone()[0] == (
+        ledger_module.SCHEMA_VERSION + 1
+    )
 
 
-def test_partial_v1_schema_is_rejected_without_being_completed(tmp_path) -> None:
+def test_partial_current_schema_is_rejected_without_being_completed(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-    connection.execute("INSERT INTO schema_version VALUES (1)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (?)",
+        (ledger_module.SCHEMA_VERSION,),
+    )
     connection.commit()
     connection.close()
     os.chmod(path, 0o600)
@@ -84,7 +232,7 @@ def test_partial_v1_schema_is_rejected_without_being_completed(tmp_path) -> None
     ).fetchall() == [("schema_version",)]
 
 
-def test_v1_database_missing_immutability_trigger_is_rejected(tmp_path) -> None:
+def test_current_database_missing_immutability_trigger_is_rejected(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     ledger = EvolutionLedger(path)
     ledger.connection.close()
@@ -137,7 +285,10 @@ def test_spoofed_tables_and_version_are_rejected(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE schema_version(version INTEGER)")
-    connection.execute("INSERT INTO schema_version VALUES (1)")
+    connection.execute(
+        "INSERT INTO schema_version VALUES (?)",
+        (ledger_module.SCHEMA_VERSION,),
+    )
     for name in REQUIRED_TABLES - {"schema_version"}:
         connection.execute(f'CREATE TABLE "{name}"(payload TEXT)')
     connection.commit()
@@ -192,7 +343,10 @@ def test_multiple_schema_version_rows_are_rejected(tmp_path) -> None:
     path = tmp_path / "evolution.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE schema_version(version INTEGER NOT NULL)")
-    connection.executemany("INSERT INTO schema_version VALUES (?)", [(1,), (1,)])
+    connection.executemany(
+        "INSERT INTO schema_version VALUES (?)",
+        [(ledger_module.SCHEMA_VERSION,), (ledger_module.SCHEMA_VERSION,)],
+    )
     connection.commit()
     connection.close()
     os.chmod(path, 0o600)
@@ -245,8 +399,10 @@ def test_schema_enforces_singleton_version_domain_keys_and_generation_digests(
         "suggestions": "suggestion_id",
         "suggestion_evidence": "evidence_id",
         "blueprints": "blueprint_id",
-        "authorization_requests": "authorization_id",
-        "authorization_grants": "authorization_id",
+        "authorization_requests": "request_id",
+        "authorization_decisions": "decision_id",
+        "authorization_grants": "grant_id",
+        "authorization_consumptions": "consumption_id",
         "candidates": "candidate_id",
         "generations": "generation_id",
         "generation_components": "component_id",
@@ -263,7 +419,11 @@ def test_schema_enforces_singleton_version_domain_keys_and_generation_digests(
 
     with pytest.raises(sqlite3.IntegrityError):
         ledger.connection.execute(
-            "INSERT INTO schema_version(singleton, version) VALUES (1, 1)"
+            """
+            INSERT INTO schema_version(singleton, version)
+            VALUES (1, ?)
+            """,
+            (ledger_module.SCHEMA_VERSION,),
         )
     attempt_id = ledger.create_attempt("manual", "ticket-1")
     with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
@@ -386,7 +546,7 @@ def test_portable_fallback_without_dir_fd_or_descriptor_introspection(
 
     ledger = EvolutionLedger(path)
 
-    assert ledger.schema_version == 1
+    assert ledger.schema_version == ledger_module.SCHEMA_VERSION
     assert ledger.verify_chain() == []
 
 
