@@ -170,14 +170,15 @@ def test_missing_root_is_created_private_under_hostile_umask(
     finally:
         os.umask(old_umask)
 
-    assert stat.S_IMODE(home.stat().st_mode) == 0o700
-    assert stat.S_IMODE((home / "evolution").stat().st_mode) == 0o700
-    assert (
-        stat.S_IMODE(
-            (home / "evolution" / ".lifecycle.lock").stat().st_mode
+    if os.name == "posix":
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "evolution").stat().st_mode) == 0o700
+        assert (
+            stat.S_IMODE(
+                (home / "evolution" / ".lifecycle.lock").stat().st_mode
+            )
+            == 0o600
         )
-        == 0o600
-    )
 
 
 @pytest.mark.parametrize("kind", ["mode", "file", "symlink"])
@@ -186,6 +187,8 @@ def test_hostile_existing_evolution_root_fails_without_repair(
     tmp_path: Path,
     kind: str,
 ) -> None:
+    if kind == "mode" and os.name != "posix":
+        pytest.skip("private mode validation is POSIX-only")
     root = evolution_home / "evolution"
     if kind == "mode":
         root.mkdir(mode=0o700)
@@ -210,6 +213,8 @@ def test_hostile_existing_lock_endpoint_fails_closed(
     tmp_path: Path,
     kind: str,
 ) -> None:
+    if kind == "mode" and os.name != "posix":
+        pytest.skip("private mode validation is POSIX-only")
     root = evolution_home / "evolution"
     root.mkdir(mode=0o700)
     path = root / ".lifecycle.lock"
@@ -239,6 +244,8 @@ def test_owner_mismatch_is_rejected(
     evolution_home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if not hasattr(os, "geteuid"):
+        pytest.skip("owner validation is unavailable")
     root = evolution_home / "evolution"
     root.mkdir(mode=0o700)
     actual_uid = os.geteuid()
@@ -285,6 +292,31 @@ def test_unsupported_native_lock_platform_fails_closed(
     ):
         with lifecycle_lock():
             pass
+
+
+def test_msvcrt_branch_locks_and_unlocks_one_byte(
+    evolution_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 11
+        LK_UNLCK = 12
+
+        @staticmethod
+        def locking(descriptor: int, operation: int, length: int) -> None:
+            calls.append((descriptor, operation, length))
+
+    monkeypatch.setattr(locking_module, "fcntl", None)
+    monkeypatch.setattr(locking_module, "msvcrt", FakeMsvcrt())
+
+    with lifecycle_lock() as lease:
+        assert lease.lock_path.exists()
+
+    assert [operation for _, operation, _ in calls] == [11, 12]
+    assert all(length == 1 for _, _, length in calls)
+    assert calls[0][0] == calls[1][0]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX rename semantics")

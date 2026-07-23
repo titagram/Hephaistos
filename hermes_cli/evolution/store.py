@@ -299,6 +299,39 @@ class GenerationStore:
             os.close(descriptor)
             raise
 
+    @staticmethod
+    def _open_existing_private_child(
+        parent_descriptor: int,
+        name: str,
+    ) -> int:
+        """Open one existing managed directory without creating or repairing it."""
+
+        try:
+            path_info = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            _validate_private_directory(path_info)
+            descriptor = os.open(
+                name,
+                _directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+        except ValueError:
+            raise
+        except (OSError, NotImplementedError, TypeError) as error:
+            raise _error("managed hierarchy is unsafe") from error
+        try:
+            descriptor_info = os.fstat(descriptor)
+            if not _same_inode(path_info, descriptor_info):
+                raise _error("managed hierarchy changed during validation")
+            _validate_private_directory(descriptor_info)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
     def _secure_root(self) -> None:
         self._require_posix()
         try:
@@ -318,6 +351,36 @@ class GenerationStore:
             _validate_private_directory(descriptor_info)
             for name in parts:
                 child = self._open_private_child(descriptor, name)
+                os.close(descriptor)
+                descriptor = child
+            if not _same_inode(self.root.lstat(), os.fstat(descriptor)):
+                raise _error("store root changed during validation")
+        finally:
+            os.close(descriptor)
+
+    def _secure_existing_root(self) -> None:
+        """Validate the full managed hierarchy without creating any component."""
+
+        self._require_posix()
+        try:
+            anchor, parts = self._hierarchy_anchor()
+            anchor_info = anchor.lstat()
+            _validate_private_directory(anchor_info)
+            descriptor = os.open(anchor, _directory_flags())
+        except ValueError:
+            raise
+        except (OSError, NotImplementedError, TypeError) as error:
+            raise _error("managed hierarchy is unsafe") from error
+        try:
+            descriptor_info = os.fstat(descriptor)
+            if not _same_inode(anchor_info, descriptor_info):
+                raise _error("managed hierarchy changed during validation")
+            _validate_private_directory(descriptor_info)
+            for name in parts:
+                child = self._open_existing_private_child(
+                    descriptor,
+                    name,
+                )
                 os.close(descriptor)
                 descriptor = child
             if not _same_inode(self.root.lstat(), os.fstat(descriptor)):
@@ -545,6 +608,16 @@ class GenerationStore:
         """Verify one generation and return its exact canonical manifest bytes."""
 
         self._secure_root()
+        require_digest(generation_id)
+        return self._verified_manifest_descriptor(generation_id)
+
+    def verified_manifest_descriptor_existing(
+        self,
+        generation_id: str,
+    ) -> VerifiedManifestDescriptor:
+        """Verify an existing generation without creating managed directories."""
+
+        self._secure_existing_root()
         require_digest(generation_id)
         return self._verified_manifest_descriptor(generation_id)
 

@@ -455,3 +455,15 @@ def test_posix_capability_gate_checks_descriptor_relative_primitives(
     monkeypatch.setattr(module.os, "supports_dir_fd", frozenset())
     with pytest.raises(ValueError, match="POSIX"):
         GenerationStore(tmp_path / "generations").verify("a" * 64)
+
+
+def test_verify_existing_never_creates_a_missing_store_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evolution" / "generations"
+    (tmp_path / "evolution").mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match="integrity"):
+        GenerationStore(root).verified_manifest_descriptor_existing("a" * 64)
+
+    assert not root.exists()
