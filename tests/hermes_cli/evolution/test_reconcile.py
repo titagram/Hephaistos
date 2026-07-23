@@ -18,6 +18,7 @@ import pytest
 
 from hermes_cli.evolution import pointers as pointer_module
 from hermes_cli.evolution import reconcile as reconcile_module
+from hermes_cli.evolution import store as store_module
 from hermes_cli.evolution.contract import canonical_json_bytes, content_digest
 from hermes_cli.evolution.ledger import (
     EvolutionLedger,
@@ -254,6 +255,148 @@ def test_read_only_reconciliation_preserves_complete_live_tree_without_wal(
     assert _tree_inventory(root) == before
 
 
+def test_wal_appearance_during_immutable_open_retries_same_call(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, ledger, _, _, _ = state
+    path = home / "evolution" / "evolution.db"
+    ledger.connection.close()
+    assert not Path(f"{path}-wal").exists()
+    original = reconcile_module._open_immutable_ledger
+    writers: list[EvolutionLedger] = []
+    opens = 0
+
+    def open_with_wal_race(candidate: Path):
+        nonlocal opens
+        opened = original(candidate)
+        opens += 1
+        if opens == 1:
+            writers.append(EvolutionLedger(path))
+        return opened
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_open_immutable_ledger",
+        open_with_wal_race,
+    )
+    try:
+        result = reconcile_evolution_state(repair=False)
+    finally:
+        for writer in writers:
+            writer.connection.close()
+
+    assert result.status == "coherent"
+    assert opens == 1
+    assert writers
+
+
+def test_wal_appearance_after_evaluation_retries_same_call(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, ledger, _, _, _ = state
+    path = home / "evolution" / "evolution.db"
+    ledger.connection.close()
+    assert not Path(f"{path}-wal").exists()
+    original = reconcile_module._evaluate_open_ledger
+    writers: list[EvolutionLedger] = []
+    evaluations = 0
+
+    def evaluate_then_open_wal(*args, **kwargs):
+        nonlocal evaluations
+        result = original(*args, **kwargs)
+        evaluations += 1
+        if evaluations == 1:
+            writers.append(EvolutionLedger(path))
+        return result
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_evaluate_open_ledger",
+        evaluate_then_open_wal,
+    )
+    try:
+        result = reconcile_evolution_state(repair=False)
+    finally:
+        for writer in writers:
+            writer.connection.close()
+
+    assert result.status == "coherent"
+    assert evaluations == 2
+    assert writers
+
+
+def test_real_writer_race_after_evaluation_retries_same_call(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, ledger, _, _, _ = state
+    path = home / "evolution" / "evolution.db"
+    ledger.connection.close()
+    start_writer = threading.Event()
+    writer_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def write_committed_event() -> None:
+        try:
+            assert start_writer.wait(timeout=5)
+            writer = EvolutionLedger(path)
+            try:
+                writer.append_event(
+                    LifecycleEvent(
+                        event_id="real-writer-race",
+                        attempt_id=None,
+                        generation_id=None,
+                        event_type="observation",
+                        prior_state=None,
+                        next_state=None,
+                        actor="system",
+                        input_digests=("c" * 64,),
+                        authorization_id=None,
+                        reason_code="writer_race",
+                        reason_summary="concurrent committed writer",
+                        created_at="2026-07-24T00:00:00.000000Z",
+                    )
+                )
+            finally:
+                writer.connection.close()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            writer_done.set()
+
+    worker = threading.Thread(target=write_committed_event)
+    worker.start()
+    original = reconcile_module._evaluate_open_ledger
+    evaluations = 0
+
+    def evaluate_during_real_write(*args, **kwargs):
+        nonlocal evaluations
+        result = original(*args, **kwargs)
+        evaluations += 1
+        if evaluations == 1:
+            start_writer.set()
+            assert writer_done.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_evaluate_open_ledger",
+        evaluate_during_real_write,
+    )
+    try:
+        result = reconcile_evolution_state(repair=False)
+    finally:
+        start_writer.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert result.status == "coherent"
+    assert evaluations == 2
+
+
 def test_read_only_reconciliation_copies_committed_live_wal_without_mutation(
     state,
 ) -> None:
@@ -284,6 +427,59 @@ def test_read_only_reconciliation_copies_committed_live_wal_without_mutation(
 
     assert result.status == "coherent"
     assert _tree_inventory(root) == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX unlink semantics")
+def test_stable_committed_wal_without_shm_is_coherent_and_read_only(
+    state,
+) -> None:
+    home, ledger, _, _, _ = state
+    root = home / "evolution"
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    shm = root / "evolution.db-shm"
+    assert (root / "evolution.db-wal").exists()
+    assert shm.exists()
+    shm.unlink()
+    assert not shm.exists()
+    before = _tree_inventory(root)
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result.status == "coherent"
+    assert _tree_inventory(root) == before
+    assert not shm.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX unlink semantics")
+def test_shm_disappearance_during_capture_retries_without_live_mutation(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, ledger, _, _, _ = state
+    root = home / "evolution"
+    ledger.connection.execute("PRAGMA wal_autocheckpoint=0")
+    shm = root / "evolution.db-shm"
+    original = reconcile_module._copy_descriptor
+    removed = False
+
+    def remove_shm_after_copy(descriptor, destination, *args, **kwargs):
+        nonlocal removed
+        original(descriptor, destination, *args, **kwargs)
+        if not removed and str(destination).endswith("-shm"):
+            shm.unlink()
+            removed = True
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_copy_descriptor",
+        remove_shm_after_copy,
+    )
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert removed
+    assert result.status == "coherent"
+    assert not shm.exists()
 
 
 def _redirect_snapshot_temp(
@@ -775,6 +971,45 @@ def test_unprovable_committed_evidence_disables_both_pointers(
     assert result.last_known_good is None
     assert not result.overlay_enabled
     assert _snapshot(home, ledger) == before
+
+
+@pytest.mark.parametrize("shape", ["deep", "wide"])
+def test_oversized_generation_proof_fails_closed_without_crashing(
+    state,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    _, _, store, active, _ = state
+    root = store.root / active.generation_id
+    root.chmod(0o755)
+    if shape == "deep":
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _ in range(1_100):
+                os.mkdir("d", 0o755, dir_fd=descriptor)
+                child = os.open(
+                    "d",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+                os.fchmod(descriptor, 0o555)
+                os.close(descriptor)
+                descriptor = child
+            os.fchmod(descriptor, 0o555)
+        finally:
+            os.close(descriptor)
+    else:
+        monkeypatch.setattr(store_module, "_MAX_PROOF_ENTRIES", 32)
+        for index in range(32):
+            path = root / f"extra-{index:05d}"
+            path.write_bytes(b"")
+            path.chmod(0o444)
+    root.chmod(0o555)
+
+    result = reconcile_evolution_state(repair=False)
+
+    assert result.status == "base_only"
+    assert result.diagnostics == ("evolution_state_unproven",)
 
 
 def test_corrupt_or_missing_ledger_is_base_only_without_attempted_append(

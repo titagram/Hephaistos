@@ -566,9 +566,10 @@ def _capture_wal_snapshot(
                     guard.directory_fd,
                 )
             except FileNotFoundError as error:
-                raise _RetryableSnapshotError(
-                    "snapshot_member_disappeared"
-                ) from error
+                if suffix == "-wal":
+                    raise _RetryableSnapshotError(
+                        "snapshot_member_disappeared"
+                    ) from error
         before = {
             name: _file_signature(info)
             for name, (_, info) in descriptors.items()
@@ -618,24 +619,69 @@ def _capture_wal_snapshot(
 
 
 @contextmanager
-def _read_only_ledger(path: Path) -> Iterator[EvolutionLedger]:
+def _read_only_ledger_attempt(
+    path: Path,
+    snapshot_root: Path,
+    budget: _SnapshotBudget,
+) -> Iterator[EvolutionLedger]:
+    """Open and validate one complete isolated reconciliation attempt."""
+
+    budget.check_time()
     wal_path = Path(f"{path}-wal")
     if not wal_path.exists() and not wal_path.is_symlink():
         before = _file_signature(path.lstat())
         ledger = _open_immutable_ledger(path)
         try:
             if wal_path.exists() or wal_path.is_symlink():
-                raise EvolutionLedgerError("unstable_ledger_snapshot")
+                raise _RetryableSnapshotError(
+                    "wal_appeared_during_immutable_open"
+                )
             yield ledger
+            budget.check_time()
             if (
                 wal_path.exists()
                 or wal_path.is_symlink()
                 or _file_signature(path.lstat()) != before
             ):
-                raise EvolutionLedgerError("unstable_ledger_snapshot")
+                raise _RetryableSnapshotError(
+                    "immutable_source_changed"
+                )
         finally:
             ledger.connection.close()
         return
+
+    snapshot_path = _capture_wal_snapshot(
+        path,
+        snapshot_root,
+        budget,
+    )
+    try:
+        ledger = _open_existing_ledger(
+            snapshot_path,
+            repair=False,
+        )
+    except EvolutionLedgerError as error:
+        if error.args == ("invalid_ledger_database",):
+            raise _RetryableSnapshotError(
+                "snapshot_database_changed"
+            ) from error
+        raise
+    except (sqlite3.DatabaseError, OSError) as error:
+        raise _RetryableSnapshotError(
+            "snapshot_database_changed"
+        ) from error
+    try:
+        yield ledger
+        budget.check_time()
+    finally:
+        ledger.connection.close()
+
+
+def _evaluate_read_only(
+    root: Path,
+    path: Path,
+) -> ReconciliationResult:
+    """Evaluate under one shared retry, byte, and deadline state machine."""
 
     budget = _SnapshotBudget.start()
     with tempfile.TemporaryDirectory(
@@ -646,36 +692,22 @@ def _read_only_ledger(path: Path) -> Iterator[EvolutionLedger]:
         for _ in range(_MAX_SNAPSHOT_ATTEMPTS):
             budget.check_time()
             _clean_snapshot_root(snapshot_root)
-            if not wal_path.exists() and not wal_path.is_symlink():
-                try:
-                    before = _file_signature(path.lstat())
-                    ledger = _open_immutable_ledger(path)
-                    if wal_path.exists() or wal_path.is_symlink():
-                        ledger.connection.close()
-                        raise _RetryableSnapshotError(
-                            "wal_appeared_during_immutable_open"
-                        )
-                except _RetryableSnapshotError:
-                    continue
-                try:
-                    yield ledger
-                    if (
-                        wal_path.exists()
-                        or wal_path.is_symlink()
-                        or _file_signature(path.lstat()) != before
-                    ):
-                        raise EvolutionLedgerError(
-                            "unstable_ledger_snapshot"
-                        )
-                finally:
-                    ledger.connection.close()
-                return
             try:
-                snapshot_path = _capture_wal_snapshot(
+                with _read_only_ledger_attempt(
                     path,
                     snapshot_root,
                     budget,
-                )
+                ) as ledger:
+                    result = _evaluate_open_ledger(
+                        root,
+                        ledger,
+                        repair=False,
+                    )
+                    if result == _base_only("ledger_unavailable"):
+                        raise _RetryableSnapshotError(
+                            "snapshot_database_changed"
+                        )
+                    budget.check_time()
             except EvolutionLedgerError:
                 raise
             except (
@@ -683,27 +715,10 @@ def _read_only_ledger(path: Path) -> Iterator[EvolutionLedger]:
                 FileNotFoundError,
                 OSError,
                 PointerError,
-            ):
-                continue
-            try:
-                ledger = _open_existing_ledger(
-                    snapshot_path,
-                    repair=False,
-                )
-            except EvolutionLedgerError as error:
-                if error.args == ("invalid_ledger_database",):
-                    continue
-                raise
-            except (
                 sqlite3.DatabaseError,
-                OSError,
             ):
                 continue
-            try:
-                yield ledger
-            finally:
-                ledger.connection.close()
-            return
+            return result
         raise EvolutionLedgerError("unstable_ledger_snapshot")
 
 
@@ -905,8 +920,7 @@ def _evaluate(*, repair: bool) -> ReconciliationResult:
             ledger.connection.close()
 
     try:
-        with _read_only_ledger(ledger_path) as ledger:
-            return _evaluate_open_ledger(root, ledger, repair=False)
+        return _evaluate_read_only(root, ledger_path)
     except (EvolutionLedgerError, sqlite3.Error, OSError, ValueError):
         return _base_only("ledger_unavailable")
 

@@ -556,3 +556,98 @@ def test_existing_generation_proof_enforces_manifest_and_entry_bounds(
         manifest_limited.evidence_digest
         != entry_limited.evidence_digest
     )
+
+
+def _add_generation_chain(root: Path, depth: int) -> None:
+    root.chmod(0o755)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(depth):
+            os.mkdir("d", 0o755, dir_fd=descriptor)
+            child = os.open(
+                "d",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.fchmod(descriptor, 0o555)
+            os.close(descriptor)
+            descriptor = child
+        os.fchmod(descriptor, 0o555)
+    finally:
+        os.close(descriptor)
+
+
+def _add_generation_files(root: Path, count: int) -> None:
+    root.chmod(0o755)
+    for index in range(count):
+        path = root / f"extra-{index:05d}"
+        path.write_bytes(b"")
+        path.chmod(0o444)
+    root.chmod(0o555)
+
+
+def test_existing_generation_proof_bounds_depth_without_recursion(
+    tmp_path: Path,
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+    _add_generation_chain(published.root, 1_100)
+
+    observation = store.observe_existing_generation(
+        published.generation_id
+    )
+
+    assert observation.descriptor is None
+    assert observation.failure_code == "proof_limit_exceeded"
+
+
+def test_existing_generation_proof_bounds_width_before_unbounded_sort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+    monkeypatch.setattr(store_module, "_MAX_PROOF_ENTRIES", 32)
+    _add_generation_files(published.root, 28)
+
+    def reject_unbounded_listdir(*_args, **_kwargs):
+        raise AssertionError("proof traversal must not use os.listdir")
+
+    monkeypatch.setattr(store_module.os, "listdir", reject_unbounded_listdir)
+    monkeypatch.setattr(
+        store_module.os,
+        "supports_fd",
+        {*os.supports_fd, reject_unbounded_listdir},
+    )
+
+    observation = store.observe_existing_generation(
+        published.generation_id
+    )
+
+    assert observation.descriptor is None
+    assert observation.failure_code == "proof_limit_exceeded"
+
+
+def test_existing_generation_proof_accepts_exact_depth_and_width_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = GenerationStore(tmp_path / "generations")
+    stage = tmp_path / "stage"
+    _stage(stage)
+    published = store.publish_staged(stage, _manifest())
+    monkeypatch.setattr(store_module, "_MAX_PROOF_DEPTH", 8)
+    monkeypatch.setattr(store_module, "_MAX_PROOF_ENTRIES", 16)
+    _add_generation_chain(published.root, 8)
+    _add_generation_files(published.root, 3)
+
+    observation = store.observe_existing_generation(
+        published.generation_id
+    )
+
+    assert observation.descriptor is None
+    assert observation.failure_code == "published_content_mismatch"

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Iterator, Literal
 
 from hermes_constants import get_hermes_home
 
@@ -78,6 +78,7 @@ class ExistingGenerationProof:
 
 _MAX_PROOF_MANIFEST_BYTES = 256 * 1024
 _MAX_PROOF_ENTRIES = 4_096
+_MAX_PROOF_DEPTH = 64
 _MAX_PROOF_FILE_BYTES = 64 * 1024 * 1024
 _MAX_PROOF_TOTAL_BYTES = 256 * 1024 * 1024
 
@@ -294,17 +295,57 @@ def _bounded_tree_evidence(
 ) -> tuple[str, int] | ExistingGenerationProof:
     entries: list[dict[str, object]] = []
     total_bytes = initial_bytes
+    discovered_entries = 0
 
-    def visit(directory: int, prefix: str = "") -> ExistingGenerationProof | None:
-        nonlocal total_bytes
+    def scan_names(
+        directory: int,
+    ) -> list[str] | ExistingGenerationProof:
+        nonlocal discovered_entries
+        names: list[str] = []
         try:
-            names = sorted(os.listdir(directory))
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    names.append(entry.name)
+                    discovered_entries += 1
+                    if discovered_entries > _MAX_PROOF_ENTRIES:
+                        return _failed_proof(
+                            "proof_limit_exceeded",
+                            {
+                                "limit": "entries",
+                                "observed_at_least": (
+                                    _MAX_PROOF_ENTRIES + 1
+                                ),
+                            },
+                        )
         except OSError:
             return _failed_proof(
                 "published_tree_unsafe",
                 {"tree": "unreadable"},
             )
-        for name in names:
+        names.sort()
+        return names
+
+    root = os.dup(root_descriptor)
+    try:
+        root_names = scan_names(root)
+    except BaseException:
+        os.close(root)
+        raise
+    if isinstance(root_names, ExistingGenerationProof):
+        os.close(root)
+        return root_names
+    stack: list[tuple[int, str, int, Iterator[str]]] = [
+        (root, "", 0, iter(root_names))
+    ]
+    try:
+        while stack:
+            directory, prefix, depth, names = stack[-1]
+            try:
+                name = next(names)
+            except StopIteration:
+                stack.pop()
+                os.close(directory)
+                continue
             relative = f"{prefix}/{name}" if prefix else name
             try:
                 info = os.stat(
@@ -328,15 +369,16 @@ def _bounded_tree_evidence(
                     "links": info.st_nlink,
                 }
             )
-            if len(entries) > _MAX_PROOF_ENTRIES:
-                return _failed_proof(
-                    "proof_limit_exceeded",
-                    {
-                        "limit": "entries",
-                        "observed_at_least": len(entries),
-                    },
-                )
             if stat.S_ISDIR(info.st_mode):
+                child_depth = depth + 1
+                if child_depth > _MAX_PROOF_DEPTH:
+                    return _failed_proof(
+                        "proof_limit_exceeded",
+                        {
+                            "limit": "depth",
+                            "observed_at_least": child_depth,
+                        },
+                    )
                 try:
                     child = os.open(
                         name,
@@ -349,11 +391,34 @@ def _bounded_tree_evidence(
                         {"tree": "directory_unsafe"},
                     )
                 try:
-                    failure = visit(child, relative)
-                    if failure is not None:
-                        return failure
-                finally:
+                    if not _same_inode(info, os.fstat(child)):
+                        failure = _failed_proof(
+                            "proof_changed",
+                            {"tree": "directory_changed"},
+                        )
+                    else:
+                        failure = None
+                        child_names = scan_names(child)
+                except BaseException:
                     os.close(child)
+                    raise
+                if failure is not None:
+                    os.close(child)
+                    return failure
+                if isinstance(
+                    child_names,
+                    ExistingGenerationProof,
+                ):
+                    os.close(child)
+                    return child_names
+                stack.append(
+                    (
+                        child,
+                        relative,
+                        child_depth,
+                        iter(child_names),
+                    )
+                )
                 continue
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 return _failed_proof(
@@ -426,18 +491,20 @@ def _bounded_tree_evidence(
                 )
             finally:
                 os.close(child)
-        return None
-
-    failure = visit(root_descriptor)
-    if failure is not None:
-        return failure
-    return (
-        content_digest(
-            {"entries": entries, "total_bytes": total_bytes},
-            domain="hades-evolution-generation-tree-proof-v1",
-        ),
-        total_bytes,
-    )
+        return (
+            content_digest(
+                {"entries": entries, "total_bytes": total_bytes},
+                domain="hades-evolution-generation-tree-proof-v1",
+            ),
+            total_bytes,
+        )
+    finally:
+        while stack:
+            directory, _, _, _ = stack.pop()
+            try:
+                os.close(directory)
+            except OSError:
+                pass
 
 
 def _validate_readonly_tree_at(root_descriptor: int) -> None:
