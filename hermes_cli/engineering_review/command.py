@@ -115,7 +115,16 @@ def launch_review_chat(
             raise
         authority = candidate
 
-    args.query = query
+    # A remote PR reviewed through the local backend may need explicit user
+    # consent before repository-controlled build/test commands can execute.
+    # Seed the review through the normal interactive prompt lifecycle instead
+    # of ``-q`` single-query mode: the prompt_toolkit app is then live when
+    # ``session_ready`` asks the existing terminal approval callback.  The
+    # private one-shot flag returns after the seeded turn, preserving the
+    # public command's non-REPL behavior.
+    args.query = None
+    args.initial_query = query
+    args.exit_after_initial_query = True
     args.skills = list(skills)
     args.pass_session_id = pass_session_id
     args.yolo = auto_approve

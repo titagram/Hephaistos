@@ -2401,6 +2401,10 @@ def cmd_chat(args):
         "ignore_user_config": getattr(args, "ignore_user_config", False) or getattr(args, "safe_mode", False),
         "compact": getattr(args, "compact", False),
         "session_ready_callback": getattr(args, "session_ready_callback", None),
+        "initial_query": getattr(args, "initial_query", None),
+        "exit_after_initial_query": getattr(
+            args, "exit_after_initial_query", False
+        ),
     }
     # Filter out None values
     kwargs = {k: v for k, v in kwargs.items() if v is not None}

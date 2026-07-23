@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import sys
 from types import ModuleType
 from pathlib import Path
@@ -80,7 +81,7 @@ def test_public_review_cleanup_uses_post_session_recovery(
         "registered-run-1234",
     ])
 
-    assert command.review_command(args) == 0
+    assert main_module.cmd_review(args) == 0
     assert seen == ["registered-run-1234"]
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
 
@@ -119,6 +120,9 @@ def test_launch_review_chat_owns_authority_for_chat_lifecycle(
 
     def fake_chat(args: argparse.Namespace) -> None:
         events.append(("chat", args.skills, args.yolo, args.pass_session_id))
+        assert args.query is None
+        assert args.initial_query == "execute the skill"
+        assert args.exit_after_initial_query is True
         assert "HERMES_YOLO_MODE" not in os.environ
         assert events == [
             (
@@ -266,6 +270,87 @@ def test_pr_execution_uses_existing_backend_or_explicit_consent(
     assert len(approvals) == (1 if backend == "local" else 0)
 
 
+@pytest.mark.parametrize(
+    ("approval_result", "expected_allowed"),
+    [("once", True), ("deny", False)],
+)
+def test_public_pr_review_hands_approval_to_live_one_shot_chat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    approval_result: str,
+    expected_allowed: bool,
+) -> None:
+    """Exercise review_command -> real cmd_chat without replacing its loader."""
+    import cli as classic_cli
+    import tools.terminal_tool as terminal_tool
+
+    decisions: list[ExecutionDecision] = []
+    lifecycle: list[str] = []
+
+    class FakeAuthority:
+        def __init__(self, **kwargs: object) -> None:
+            decisions.append(kwargs["execution_decision"])  # type: ignore[arg-type]
+
+        def start_serving(self) -> None:
+            lifecycle.append("serving")
+
+        def close(self) -> None:
+            lifecycle.append("closed")
+
+    def approval(*_args: object, **_kwargs: object) -> str:
+        assert lifecycle == ["ui-running"]
+        lifecycle.append(f"approval:{approval_result}")
+        return approval_result
+
+    def live_cli_main(**kwargs: object) -> None:
+        # This is the contract classic cli.main presents only after selecting
+        # its interactive branch. A single-query handoff would pass ``query``
+        # and never have a prompt application capable of answering approval.
+        assert kwargs.get("query") is None
+        assert kwargs["initial_query"] == command._review_query(
+            "https://github.com/o/r/pull/42", "medium"
+        )
+        assert kwargs["exit_after_initial_query"] is True
+        assert kwargs["pass_session_id"] is True
+        assert kwargs.get("yolo") is None
+        lifecycle.append("ui-running")
+        terminal_tool.set_approval_callback(approval)
+        try:
+            callback = kwargs["session_ready_callback"]
+            assert callable(callback)
+            callback("public-review-session")
+        finally:
+            terminal_tool.set_approval_callback(None)
+
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setattr(command, "ReviewAuthority", FakeAuthority)
+    monkeypatch.setattr(command, "_prune_completed_review_runs", lambda: None)
+    monkeypatch.setattr(classic_cli, "main", live_cli_main)
+    monkeypatch.setattr(main_module, "_resolve_use_tui", lambda _args: False)
+    monkeypatch.setattr(main_module, "_has_any_provider_configured", lambda: True)
+    monkeypatch.setattr(
+        main_module, "_termux_should_prefetch_update_check", lambda: False
+    )
+    monkeypatch.setattr(main_module, "_sync_bundled_skills_for_startup", lambda: None)
+    monkeypatch.setattr(main_module, "_pin_kanban_board_env", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    args = _parser().parse_args([
+        "review",
+        "https://github.com/o/r/pull/42",
+    ])
+
+    assert main_module.cmd_review(args) == 0
+
+    assert decisions[0].allowed is expected_allowed
+    assert decisions[0].mode == ("local" if expected_allowed else "denied")
+    assert lifecycle == [
+        "ui-running",
+        f"approval:{approval_result}",
+        "serving",
+        "closed",
+    ]
+
+
 def test_cmd_chat_forwards_private_session_ready_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,7 +370,9 @@ def test_cmd_chat_forwards_private_session_ready_callback(
         model=None,
         provider=None,
         toolsets=None,
-        query="review",
+        query=None,
+        initial_query="review",
+        exit_after_initial_query=True,
         session_ready_callback=callback,
         cli=True,
         tui=False,
@@ -294,7 +381,9 @@ def test_cmd_chat_forwards_private_session_ready_callback(
     main_module.cmd_chat(args)
 
     assert seen["session_ready_callback"] is callback
-    assert seen["query"] == "review"
+    assert "query" not in seen
+    assert seen["initial_query"] == "review"
+    assert seen["exit_after_initial_query"] is True
 
 
 def test_classic_cli_list_path_does_not_open_session_authority(
@@ -398,6 +487,28 @@ def test_classic_cli_opens_authority_only_after_agent_session_is_ready(
     ]
     assert shell._init_agent() is True
     assert events.count(("authority-serving", shell.session_id)) == 1
+
+
+def test_private_initial_query_requires_live_prompt_application() -> None:
+    import cli as classic_cli
+
+    shell = classic_cli.HermesCLI.__new__(classic_cli.HermesCLI)
+    shell._initial_query = "review the pull request"
+    shell._pending_input = queue.Queue()
+    shell._app = SimpleNamespace(is_running=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="requires a running prompt application",
+    ):
+        shell._submit_initial_query_after_app_start()
+    assert shell._pending_input.empty()
+
+    shell._app.is_running = True
+    shell._submit_initial_query_after_app_start()
+
+    assert shell._initial_query_pending is True
+    assert shell._pending_input.get_nowait() == "review the pull request"
 
 
 def test_internal_start_requires_current_session_and_live_authority(
