@@ -971,6 +971,94 @@ privacy and provenance, and records acceptance evidence.
 Depends on Projects B through E. It may reveal defects in earlier projects but
 does not widen the feature scope.
 
+## Execution Model Routing
+
+This section governs how the implementation plan should assign work. It is a
+project-execution policy, not a runtime dependency of Autopoiesis and not a
+model-selection mechanism shipped to users.
+
+Two model profiles are used:
+
+- **Balanced implementer:** `gpt-5.6-terra` with `medium` reasoning by default.
+  It handles granular, bounded work whose interfaces and acceptance tests are
+  already explicit.
+- **Frontier architect/reviewer:** `gpt-5.6-sol` with `high` reasoning by
+  default. It owns irreversible contracts, security boundaries, concurrency,
+  recovery, and cross-system review.
+
+`xhigh` reasoning is reserved for the Project E activation/rollback protocol
+and the final cross-system audit. `max` and `ultra` are not planned for the MVP;
+they may be authorized only after a concrete blocking failure shows that
+`xhigh` is insufficient.
+
+The target allocation is at least 70 percent of implementation tasks to Terra.
+Sol is used at design gates and on the small set of changes where a subtle
+mistake could corrupt lifecycle authority, expose secrets, break prompt
+caching, or defeat rollback.
+
+### Project allocation
+
+| Project | Primary implementation | Sol-owned work | Independent gate |
+|---|---|---|---|
+| A — Contracts and ledger | Terra `medium` for repositories, migrations, deterministic serializers, CLI reads, and ordinary tests | Sol `high` implements and validates canonical identity, authorization/state invariants, append-only semantics, lifecycle locking, and reconciliation | Sol `high` reviews schema evolution, crash consistency, and recovery proofs |
+| B — Observer | Terra `medium` implements event normalization, aggregation, ranking, deduplication, notifications, and tests | Sol `high` reviews privacy boundaries, determinism, evidence sufficiency, and proposal suppression | Terra `high` runs real-path integration; Sol `high` signs off only on failed or ambiguous invariants |
+| C — Workshop and Blueprint | Terra `medium` implements command/skill UX, canonical serialization, approval requests, and fixtures | Sol `high` implements and validates consent boundaries, material-deviation rules, research scope, and Blueprint digest contracts | Sol `high` reviews every path that could broaden an authorization |
+| D — Builder and A3 adapters | Terra `high` implements each bounded adapter, quarantine plumbing, lockfiles, subprocess fixtures, and integration tests | Sol `high` implements and validates the Builder boundary, acquisition policy, sandbox contract, and common adapter interface | Sol `high` performs security and isolation review after all four adapters pass |
+| E — Supervisor and lifecycle | Terra `medium` may implement fixtures, report rendering, deterministic test matrices, and non-authoritative CLI views | Sol `xhigh` implements or directly supervises resolver pinning, compare-and-swap pointers, crash recovery, promotion, unsafe-session handling, and rollback | A fresh Sol `xhigh` review validates failure injection at every atomic boundary |
+| F — Authentic pilot | Terra `high` prepares reproducible evidence, fixtures, runbooks, and acceptance records | Sol `high` owns pilot selection validation, end-to-end diagnosis, privacy audit, and final architectural judgment | Sol `xhigh` performs the final MVP acceptance audit |
+
+### Task-level routing rules
+
+Every task in the implementation plan must carry:
+
+- exact model and reasoning level;
+- bounded objective and non-goals;
+- allowed files or modules;
+- prerequisite commits and contracts;
+- tests to run and expected evidence;
+- escalation triggers;
+- a token-conscious context pack containing only the relevant specification
+  sections, code paths, and prior task outputs.
+
+Sol-owned work must still be decomposed until a Terra `medium` model could
+follow the task, run its tests, and explain its acceptance evidence. Sol is
+selected because the consequences require stronger judgment, not because the
+task is vague or oversized.
+
+Terra remains the default even for important work when the task has a narrow
+interface and executable acceptance test. A task starts with Sol instead when
+it changes any of:
+
+- canonical hashing or version identity;
+- authorization scope or approval consumption;
+- ledger authority or lifecycle transitions;
+- pointer atomicity, locking, or crash recovery;
+- candidate isolation, credentials, network, or side-effect policy;
+- session generation pinning, system-prompt stability, or tool-schema
+  stability;
+- automatic rollback triggers or recovery control.
+
+An active Terra task escalates to Sol only if:
+
+1. the specification and current code imply conflicting contracts;
+2. the same test symptom survives two evidence-based repair attempts;
+3. the fix would cross an authorization, secret, network, or stable-state
+   boundary not named in the task;
+4. a concurrency or crash-recovery invariant cannot be demonstrated
+   deterministically;
+5. the necessary change expands beyond the task's declared modules or
+   acceptance contract.
+
+Escalation passes a compact evidence packet, not the complete conversation:
+task contract, relevant diff, failing command and bounded output, hypotheses
+already tested, and the invariant in doubt. Sol decides or repairs the critical
+point; bounded follow-up implementation returns to Terra when safe.
+
+Reviews use a fresh context and must not rely on the implementer's narrative.
+They inspect the diff, contracts, and test evidence directly. Model choice is
+recorded in planning metadata and commit/evidence notes for cost analysis, but
+never enters generation identity, product telemetry, or user data.
+
 ## Implementation Constraints
 
 - Extend existing approval, logging, skill, plugin, MCP, worktree, graph, and
