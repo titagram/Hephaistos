@@ -16,6 +16,7 @@
 - Do not add a universal core model tool. `/autopoiesis`, deterministic CLI operations, service-gated runtime adapters, and existing terminal/file/web surfaces are sufficient.
 - Do not mutate the system prompt, tool schemas, skill roots, plugin set, or MCP catalog of an existing session.
 - Do not allow candidate code to write the ledger, active pointers, last-known-good pointer, stable installation, authoritative memory, or production config.
+- Protect the evolution root from other OS users and statically hostile paths (symlink, owner, type, and mode violations), while treating malicious same-UID or in-process host code as outside the MVP filesystem threat model. Projects D/E must keep candidates outside the trusted host filesystem authority; descriptor and inode correlation is defense-in-depth, not an adversarial guarantee.
 - Do not store prompt bodies, transcripts, credentials, secret values, arbitrary tool output, unbounded traces, or machine-specific absolute paths in `evolution.db`.
 - Add behavioral tests and real-path integration tests; do not freeze enumeration counts or incidental snapshots.
 - Every mutating task uses test-first implementation, a focused commit, and the exact test commands named in that task.

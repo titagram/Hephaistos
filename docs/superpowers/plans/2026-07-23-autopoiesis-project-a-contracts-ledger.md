@@ -16,6 +16,7 @@
 - Store timestamps as UTC RFC 3339 with microseconds; never include timestamps in content identities unless the design explicitly lists them as identity fields.
 - Project A may create only the empty-overlay baseline and may set both pointers to it during first initialization.
 - No operation in this project can activate another generation.
+- The evolution root rejects static symlink, owner, type, and private-mode violations. Inode/descriptor checks are defense-in-depth; malicious same-UID or in-process host code is outside the user-approved MVP filesystem threat model, so later candidate execution must not inherit trusted host filesystem authority.
 
 ---
 
@@ -143,6 +144,12 @@ or candidate artifacts.
 - Create: `tests/hermes_cli/evolution/test_ledger.py`
 - Create: `tests/hermes_cli/evolution/test_ledger_migrations.py`
 
+**User-approved A2 review scope addition:** Task 2 may also modify
+`docs/superpowers/specs/2026-07-22-autopoiesis-mvp-design.md`,
+`docs/superpowers/plans/2026-07-23-autopoiesis-mvp-index.md`, and this Project A
+plan solely to record the local trust boundary and its Project D/E isolation
+obligation.
+
 **Context pack:** Task 1 files/commit; design “Evolution ledger”; `hermes_cli/engineering_review/runs.py` private-path patterns; SQLite initialization portions of `hermes_state.py`.
 
 **Schema v1:** create `schema_version`, `attempts`, `suggestions`,
@@ -196,8 +203,9 @@ private parent/file modes are `0700`/`0600` on POSIX.
 - [ ] **Step 2: Write failing append-only and hash-chain tests**
 
 Append two events and assert the second references the first digest. Direct
-`UPDATE` and `DELETE` must raise `sqlite3.IntegrityError`. A copied event with
-a changed reason must make `verify_chain()` report the exact sequence.
+`UPDATE` and `DELETE` must raise `sqlite3.IntegrityError`. Through controlled
+test-only SQLite setup, change a persisted event and assert the public
+zero-argument `verify_chain()` reports the exact sequence.
 
 - [ ] **Step 3: Run red tests**
 
@@ -207,7 +215,12 @@ Run: `scripts/run_tests.sh tests/hermes_cli/evolution/test_ledger.py tests/herme
 
 Resolve the root through `get_hermes_home() / "evolution"`; reject symlinked,
 wrong-owner, or non-private existing roots rather than chmodding an
-attacker-controlled path.
+attacker-controlled path. Retain and revalidate path identity around connect.
+Where descriptor introspection or `dir_fd` is unavailable, use a portable
+`lstat`/revalidation fallback that preserves static owner, type, mode, and
+symlink rejection and converts unsupported platform behavior into bounded
+`EvolutionLedgerError` codes. Descriptor correlation is defense-in-depth, not
+proof against malicious same-UID or in-process host code.
 
 - [ ] **Step 5: Implement explicit `BEGIN IMMEDIATE` transactions and event hash chaining**
 

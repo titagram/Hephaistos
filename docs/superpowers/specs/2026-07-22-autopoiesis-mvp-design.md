@@ -809,6 +809,17 @@ candidate components. It does not claim containment against an adversary with
 the same operating-system identity and arbitrary host execution; stronger
 host isolation is a later hardening layer.
 
+The `$HERMES_HOME/evolution` root and `evolution.db` reject statically hostile
+pre-existing paths: symlinks, wrong owners, wrong object types, and non-private
+modes. Path identity is revalidated around SQLite connection establishment;
+retained descriptors and descriptor correlation are additional
+defense-in-depth when the platform exposes them. These checks do not claim to
+defeat a malicious same-UID actor or arbitrary code already executing inside
+the trusted Hades host process. Candidate code must therefore run without the
+trusted host's filesystem authority; Projects D and E own that isolation, and
+crossing this candidate boundary is a critical failure rather than a condition
+the SQLite connection layer can repair.
+
 ## Failure and Recovery Semantics
 
 - A collector or Observer failure cannot block normal Hades operation.

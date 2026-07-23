@@ -370,6 +370,77 @@ def test_file_swap_and_restore_during_connect_fails_closed(
         EvolutionLedger(path)
 
 
+def test_portable_fallback_without_dir_fd_or_descriptor_introspection(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "evolution.db"
+    original_open = os.open
+
+    def open_without_dir_fd(name, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        return original_open(name, flags, mode)
+
+    monkeypatch.setattr(ledger_module.os, "open", open_without_dir_fd)
+    monkeypatch.setattr(ledger_module, "_open_file_descriptors", lambda: None)
+
+    ledger = EvolutionLedger(path)
+
+    assert ledger.schema_version == 1
+    assert ledger.verify_chain() == []
+
+
+def test_portable_fallback_still_rejects_static_symlink_without_nofollow(
+    tmp_path, monkeypatch
+) -> None:
+    target = tmp_path / "target.db"
+    target.write_bytes(b"not sqlite")
+    os.chmod(target, 0o600)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    path = private / "evolution.db"
+    path.symlink_to(target)
+    original_open = os.open
+    opened_static_symlink = False
+
+    def open_without_dir_fd(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal opened_static_symlink
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        if Path(name) == path:
+            opened_static_symlink = True
+        return original_open(name, flags, mode)
+
+    monkeypatch.setattr(ledger_module.os, "open", open_without_dir_fd)
+    monkeypatch.delattr(ledger_module.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(ledger_module, "_open_file_descriptors", lambda: None)
+
+    with pytest.raises(EvolutionLedgerError, match="unsafe_ledger_path"):
+        EvolutionLedger(path)
+
+    assert not opened_static_symlink
+    assert target.read_bytes() == b"not sqlite"
+    assert not Path(f"{target}-wal").exists()
+    assert not Path(f"{target}-shm").exists()
+
+
+def test_unavailable_platform_open_is_a_bounded_error(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "evolution.db"
+
+    def unavailable_open(*_args, **_kwargs):
+        raise NotImplementedError("platform open unavailable")
+
+    monkeypatch.setattr(ledger_module.os, "open", unavailable_open)
+    monkeypatch.setattr(ledger_module, "_open_file_descriptors", lambda: None)
+
+    with pytest.raises(EvolutionLedgerError, match="unsafe_ledger_path"):
+        EvolutionLedger(path)
+
+    assert not path.exists()
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
+
+
 def test_schema_initialization_is_atomic_on_failure(tmp_path, monkeypatch) -> None:
     path = tmp_path / "evolution.db"
     original_execute = ledger_module._execute_schema_statement

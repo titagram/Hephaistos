@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
 
 from hermes_constants import get_hermes_home
 from hermes_state import apply_wal_with_fallback
@@ -73,6 +73,21 @@ class StoredEvent(LifecycleEvent):
     event_sequence: int
     previous_event_digest: str | None
     event_digest: str
+
+
+@dataclass
+class _PathGuard:
+    """Retained path identity used for best-effort swap detection."""
+
+    directory_fd: int | None
+    file_fd: int
+    directory_info: os.stat_result
+    created: bool
+
+    def close(self) -> None:
+        os.close(self.file_fd)
+        if self.directory_fd is not None:
+            os.close(self.directory_fd)
 
 
 def _now() -> str:
@@ -345,8 +360,17 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _open_protected_path(path: Path) -> tuple[int, int, bool]:
-    """Open and retain no-follow directory/file handles for connection setup."""
+def _secure_lstat(path: Path, *, directory: bool) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise EvolutionLedgerError("unsafe_ledger_path") from exc
+    _check_owner_and_mode(info, directory=directory)
+    return info
+
+
+def _open_protected_path(path: Path) -> _PathGuard:
+    """Retain available handles while preserving a portable lstat fallback."""
 
     parent = path.parent
     if not path.name:
@@ -357,69 +381,112 @@ def _open_protected_path(path: Path) -> tuple[int, int, bool]:
         except OSError as exc:
             raise EvolutionLedgerError("unsafe_ledger_path") from exc
 
+    directory_info = _secure_lstat(parent, directory=True)
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         directory_flags |= os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
+    directory_fd: int | None = None
     try:
         directory_fd = os.open(parent, directory_flags)
+    except (TypeError, NotImplementedError):
+        directory_fd = None
     except OSError as exc:
         raise EvolutionLedgerError("unsafe_ledger_path") from exc
+    if directory_fd is not None:
+        try:
+            opened_directory_info = os.fstat(directory_fd)
+            _check_owner_and_mode(opened_directory_info, directory=True)
+        except (OSError, TypeError, NotImplementedError) as exc:
+            os.close(directory_fd)
+            raise EvolutionLedgerError("unsafe_ledger_path") from exc
+        if not _same_file(directory_info, opened_directory_info):
+            os.close(directory_fd)
+            raise EvolutionLedgerError("unsafe_ledger_path")
+        directory_info = opened_directory_info
+
+    def open_file(flags: int, mode: int = 0o777) -> int:
+        nonlocal directory_fd
+        if directory_fd is not None:
+            try:
+                return os.open(
+                    path.name, flags, mode, dir_fd=directory_fd
+                )
+            except (TypeError, NotImplementedError):
+                os.close(directory_fd)
+                directory_fd = None
+                current_directory = _secure_lstat(parent, directory=True)
+                if not _same_file(directory_info, current_directory):
+                    raise EvolutionLedgerError("unsafe_ledger_path")
+        return os.open(path, flags, mode)
+
     try:
-        directory_info = os.fstat(directory_fd)
-        _check_owner_and_mode(directory_info, directory=True)
         file_flags = os.O_RDWR
-        created = False
         if hasattr(os, "O_NOFOLLOW"):
             file_flags |= os.O_NOFOLLOW
         try:
-            file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+            initial_file_info = path.lstat()
         except FileNotFoundError:
+            initial_file_info = None
+        except (OSError, TypeError, NotImplementedError) as exc:
+            raise EvolutionLedgerError("unsafe_ledger_path") from exc
+        if initial_file_info is None:
             create_flags = file_flags | os.O_CREAT | os.O_EXCL
             try:
-                file_fd = os.open(
-                    path.name, create_flags, 0o600, dir_fd=directory_fd
-                )
+                file_fd = open_file(create_flags, 0o600)
                 created = True
-            except OSError as exc:
+            except (OSError, TypeError, NotImplementedError) as exc:
                 raise EvolutionLedgerError("unsafe_ledger_path") from exc
-        except OSError as exc:
-            raise EvolutionLedgerError("unsafe_ledger_path") from exc
+        else:
+            _check_owner_and_mode(initial_file_info, directory=False)
+            try:
+                file_fd = open_file(file_flags)
+                created = False
+            except (OSError, TypeError, NotImplementedError) as exc:
+                raise EvolutionLedgerError("unsafe_ledger_path") from exc
         try:
             file_info = os.fstat(file_fd)
             _check_owner_and_mode(file_info, directory=False)
-            linked_info = os.stat(
-                path.name, dir_fd=directory_fd, follow_symlinks=False
-            )
+            linked_info = _secure_lstat(path, directory=False)
             if not _same_file(file_info, linked_info):
                 raise EvolutionLedgerError("unsafe_ledger_path")
-            return directory_fd, file_fd, created
+            current_directory = _secure_lstat(parent, directory=True)
+            if not _same_file(directory_info, current_directory):
+                raise EvolutionLedgerError("unsafe_ledger_path")
+            return _PathGuard(
+                directory_fd=directory_fd,
+                file_fd=file_fd,
+                directory_info=directory_info,
+                created=created,
+            )
         except BaseException:
             os.close(file_fd)
             raise
     except BaseException:
-        os.close(directory_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
         raise
 
 
 def _verify_retained_identity(
     path: Path,
-    directory_fd: int,
-    file_fd: int,
+    guard: _PathGuard,
     connection: sqlite3.Connection | None = None,
     connection_fds: set[int] | None = None,
 ) -> None:
-    """Fail closed if either protected path component changed during open."""
+    """Detect path swaps; FD correlation is defense in depth, not proof."""
 
     try:
-        retained_directory = os.fstat(directory_fd)
-        retained_file = os.fstat(file_fd)
-        current_directory = os.stat(path.parent, follow_symlinks=False)
-        current_file = os.stat(path, follow_symlinks=False)
-        _check_owner_and_mode(current_directory, directory=True)
-        _check_owner_and_mode(current_file, directory=False)
-    except OSError as exc:
+        retained_directory = (
+            os.fstat(guard.directory_fd)
+            if guard.directory_fd is not None
+            else guard.directory_info
+        )
+        retained_file = os.fstat(guard.file_fd)
+        current_directory = _secure_lstat(path.parent, directory=True)
+        current_file = _secure_lstat(path, directory=False)
+    except (OSError, TypeError, NotImplementedError) as exc:
         raise EvolutionLedgerError("unsafe_ledger_path") from exc
     if not _same_file(retained_directory, current_directory) or not _same_file(
         retained_file, current_file
@@ -430,8 +497,10 @@ def _verify_retained_identity(
         if row is None or not row[2]:
             raise EvolutionLedgerError("unsafe_ledger_path")
         try:
-            connected_file = os.stat(row[2], follow_symlinks=False)
-        except OSError as exc:
+            connected_file = _secure_lstat(
+                Path(row[2]), directory=False
+            )
+        except (OSError, TypeError, NotImplementedError) as exc:
             raise EvolutionLedgerError("unsafe_ledger_path") from exc
         if not _same_file(retained_file, connected_file):
             raise EvolutionLedgerError("unsafe_ledger_path")
@@ -439,7 +508,7 @@ def _verify_retained_identity(
             for descriptor in connection_fds:
                 try:
                     connected_info = os.fstat(descriptor)
-                except OSError:
+                except (OSError, TypeError, NotImplementedError):
                     continue
                 if _same_file(retained_file, connected_info):
                     break
@@ -472,13 +541,13 @@ def _open_file_descriptors() -> set[int] | None:
             for name in os.listdir(descriptor_root)
             if name.isdigit()
         }
-    except OSError:
+    except (OSError, TypeError, NotImplementedError):
         return None
     opened: set[int] = set()
     for descriptor in candidates:
         try:
             os.fstat(descriptor)
-        except OSError:
+        except (OSError, TypeError, NotImplementedError):
             continue
         opened.add(descriptor)
     return opened
@@ -600,7 +669,7 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
 
 
 def _preflight_existing(
-    path: Path, directory_fd: int, file_fd: int
+    path: Path, guard: _PathGuard
 ) -> None:
     """Validate a non-empty database without locks, DDL, WAL, or sidecars."""
 
@@ -609,16 +678,14 @@ def _preflight_existing(
         connection, connection_fds = _connect(path, read_only=True)
         _verify_retained_identity(
             path,
-            directory_fd,
-            file_fd,
+            guard,
             connection,
             connection_fds,
         )
         _validate_schema(connection)
         _verify_retained_identity(
             path,
-            directory_fd,
-            file_fd,
+            guard,
             connection,
             connection_fds,
         )
@@ -675,22 +742,21 @@ class EvolutionLedger:
         self._lock = threading.RLock()
         self.connection: sqlite3.Connection
         self.journal_mode: str
-        directory_fd = file_fd = -1
+        guard: _PathGuard | None = None
         connection: sqlite3.Connection | None = None
         try:
-            directory_fd, file_fd, _created = _open_protected_path(self.path)
-            _verify_retained_identity(self.path, directory_fd, file_fd)
-            empty_target = os.fstat(file_fd).st_size == 0
+            guard = _open_protected_path(self.path)
+            _verify_retained_identity(self.path, guard)
+            empty_target = os.fstat(guard.file_fd).st_size == 0
             if not empty_target:
-                _preflight_existing(self.path, directory_fd, file_fd)
+                _preflight_existing(self.path, guard)
 
             connection, connection_fds = _connect(
                 self.path, read_only=False
             )
             _verify_retained_identity(
                 self.path,
-                directory_fd,
-                file_fd,
+                guard,
                 connection,
                 connection_fds,
             )
@@ -701,8 +767,7 @@ class EvolutionLedger:
                 _validate_schema(connection)
             _verify_retained_identity(
                 self.path,
-                directory_fd,
-                file_fd,
+                guard,
                 connection,
                 connection_fds,
             )
@@ -719,10 +784,8 @@ class EvolutionLedger:
                 connection.close()
             raise EvolutionLedgerError("invalid_ledger_database") from exc
         finally:
-            if file_fd >= 0:
-                os.close(file_fd)
-            if directory_fd >= 0:
-                os.close(directory_fd)
+            if guard is not None:
+                guard.close()
 
     @staticmethod
     def _initialize_empty(connection: sqlite3.Connection) -> None:
@@ -1044,14 +1107,9 @@ class EvolutionLedger:
             )
         return previous
 
-    def verify_chain(
-        self, events: Sequence[StoredEvent] | None = None
-    ) -> list[str]:
+    def verify_chain(self) -> list[str]:
         errors: list[str] = []
         previous: str | None = None
-        if events is not None:
-            self._verify_records(iter(events), previous=previous, errors=errors)
-            return errors
         with self._lock:
             cursor = self.connection.execute(
                 "SELECT * FROM lifecycle_events ORDER BY event_sequence"

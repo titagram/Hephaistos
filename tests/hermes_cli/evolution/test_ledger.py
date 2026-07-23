@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import threading
 from dataclasses import replace
@@ -58,9 +59,23 @@ def test_verify_chain_identifies_the_changed_sequence(tmp_path) -> None:
     attempt_id = ledger.create_attempt("manual", "ticket-1")
     first = ledger.append_event(event(event_id="event-1", attempt_id=attempt_id))
     ledger.append_event(event(event_id="event-2", attempt_id=attempt_id))
+    ledger.connection.execute("DROP TRIGGER lifecycle_events_no_update")
+    ledger.connection.execute(
+        """
+        UPDATE lifecycle_events
+        SET reason_summary = 'changed'
+        WHERE event_sequence = ?
+        """,
+        (first.event_sequence,),
+    )
 
-    copied = replace(first, reason_summary="changed")
-    assert ledger.verify_chain([copied]) == ["1"]
+    assert ledger.verify_chain() == ["1"]
+
+
+def test_verify_chain_has_the_exact_public_signature() -> None:
+    assert list(inspect.signature(EvolutionLedger.verify_chain).parameters) == [
+        "self"
+    ]
 
 
 def test_authorization_grants_are_immutable_in_real_sqlite(tmp_path) -> None:
